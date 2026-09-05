@@ -466,7 +466,6 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
-        rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
@@ -488,7 +487,15 @@ impl<'a> Scheduler<'a> {
             let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
             rodata.cpu_capacity[cpu.id] = normalized as c_ulong;
             rodata.cpu_llc[cpu.id] = cpu.llc_id as u64;
+            rodata.cpu_nodes[cpu.id] = cpu.node_id as u32;
             rodata.preferred_cpus[i] = cpu.id as u64;
+        }
+        // Core of each CPU and size of each core, for the SMT preference of the
+        // idle CPU scan. With SMT disabled every CPU is a core of its own.
+        for cpu in cpus.iter() {
+            let core = if smt_enabled { cpu.core_id } else { cpu.id };
+            rodata.cpu_core[cpu.id] = core as u32;
+            rodata.core_nr_cpus[core] += 1;
         }
         rodata.all_cpus_same_capacity = cpus.iter().all(|cpu| cpu.cpu_capacity == max_cap);
         if !rodata.all_cpus_same_capacity {
@@ -580,20 +587,6 @@ impl<'a> Scheduler<'a> {
             } else {
                 opts.perf_sticky_threshold
             };
-        }
-
-        // Configure CPU->node mapping (must be done after skeleton is loaded).
-        for node in topo.nodes.values() {
-            for cpu in node.all_cpus.values() {
-                if opts.verbose {
-                    info!("CPU{} -> node{}", cpu.id, node.id);
-                }
-                skel.maps.cpu_node_map.update(
-                    &(cpu.id as u32).to_ne_bytes(),
-                    &(node.id as u32).to_ne_bytes(),
-                    MapFlags::ANY,
-                )?;
-            }
         }
 
         // Setup performance events for all CPUs.

@@ -44,11 +44,6 @@ char _license[] SEC("license") = "GPL";
 #define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
 
 /*
- * CPUs in the system have SMT is enabled.
- */
-const volatile bool smt_enabled = true;
-
-/*
  * CPUs sorted by their capacity in descending order.
  *
  * On a system with CPUs of different capacity (e.g. P-cores and E-cores)
@@ -70,6 +65,18 @@ const volatile u64 cpu_capacity[MAX_CPUS];
  * LLC id of each CPU.
  */
 const volatile u64 cpu_llc[MAX_CPUS];
+
+/*
+ * NUMA node of each CPU.
+ */
+const volatile u32 cpu_nodes[MAX_CPUS];
+
+/*
+ * Core of each CPU and number of CPUs (SMT siblings) in each core. With
+ * SMT disabled every CPU is a core of its own.
+ */
+const volatile u32 cpu_core[MAX_CPUS];
+const volatile u32 core_nr_cpus[MAX_CPUS];
 
 /*
  * True when all CPUs have the same capacity (no capacity asymmetry).
@@ -224,28 +231,14 @@ struct node_ctx *try_lookup_node_ctx(int node)
 	return bpf_map_lookup_elem(&node_ctx_stor, &node);
 }
 
-/*
- * CPU -> NUMA node mapping.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, u32);	/* cpu_id */
-	__type(value, u32);	/* node_id */
-} cpu_node_map SEC(".maps");
-
 static int cpu_node(s32 cpu)
 {
-	u32 *id;
-
 	if (!numa_enabled)
 		return 0;
-
-	id = bpf_map_lookup_elem(&cpu_node_map, &cpu);
-	if (!id)
+	if (cpu < 0 || cpu >= MAX_CPUS)
 		return -ENOENT;
 
-	return *id;
+	return cpu_nodes[(u32)cpu & (MAX_CPUS - 1)];
 }
 
 /*
@@ -621,33 +614,6 @@ static inline bool is_cpu_busy(s32 cpu)
 }
 
 /*
- * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
- *
- * If NUMA support is disabled, @cpu is ignored.
- */
-static inline const struct cpumask *get_idle_cpumask(s32 cpu)
-{
-	if (!numa_enabled)
-		return scx_bpf_get_idle_cpumask();
-
-	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
-}
-
-/*
- * Return the cpumask of idle SMT cores within the NUMA node that contains
- * @cpu.
- *
- * If NUMA support is disabled, @cpu is ignored.
- */
-static inline const struct cpumask *get_idle_smtmask(s32 cpu)
-{
-	if (!numa_enabled)
-		return scx_bpf_get_idle_smtmask();
-
-	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
-}
-
-/*
  * Return the capacity of @cpu, 0 if @cpu is not a valid CPU. The bounds
  * check is kept in the caller's sight for the verifier.
  */
@@ -684,33 +650,145 @@ static inline bool is_cpu_idle(s32 cpu)
 }
 
 /*
- * Test if a CPU is idle, atomically claiming its idle state.
+ * Idle CPU tracking.
+ *
+ * The idle state of every CPU is kept here rather than in the kernel's
+ * idle masks. Implementing ops.update_idle() turns the built-in tracking
+ * off, and with it the kernel's own idle CPU selection, whose walk of the
+ * topology masks was the single most expensive step of a wakeup and knew
+ * nothing of the capacity ordering anyway. What the scan needs is one bit
+ * per CPU and, for the SMT preference, whether a whole core is idle, kept
+ * as a per-core count of idle CPUs against the size of the core. Both are
+ * cheap to keep and cheap to read.
+ *
+ * ops.update_idle() only fires on real idle transitions. A CPU that was
+ * claimed for a task and kicked, and then found nothing to run, goes back
+ * to idle without a transition and would keep its bit cleared for good:
+ * ops.dispatch() re-arms the bit whenever a CPU is about to idle.
  */
-static inline bool test_cpu_idle(s32 cpu)
+static u64 idle_cpus[MAX_CPUS / 64];
+static u32 core_idle_cnt[MAX_CPUS];
+
+/*
+ * Number of idle CPUs and of fully idle cores, so that a wakeup on a
+ * saturated system finds out without walking the CPUs, and the whole
+ * core pass is skipped when it cannot succeed.
+ */
+static s64 nr_idle_cpus;
+static s64 nr_idle_cores;
+
+static __always_inline u32 cpu_core_of(s32 cpu)
 {
-	return scx_bpf_test_and_clear_cpu_idle(cpu);
+	return cpu_core[(u32)cpu & (MAX_CPUS - 1)] & (MAX_CPUS - 1);
+}
+
+static __always_inline u64 *idle_word(s32 cpu)
+{
+	return &idle_cpus[((u32)cpu / 64) & (MAX_CPUS / 64 - 1)];
+}
+
+static __always_inline u64 idle_bit(s32 cpu)
+{
+	return 1ULL << ((u32)cpu & 63);
+}
+
+/*
+ * Return true if @cpu is idle. Nothing is claimed.
+ */
+static bool cpu_idle_test(s32 cpu)
+{
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return false;
+
+	return READ_ONCE(*idle_word(cpu)) & idle_bit(cpu);
+}
+
+/*
+ * Return true if the whole core of @cpu is idle, i.e. @cpu is idle and so
+ * are its SMT siblings, if any.
+ */
+static bool core_is_idle(s32 cpu)
+{
+	u32 core;
+
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return false;
+	core = cpu_core_of(cpu);
+
+	return READ_ONCE(core_idle_cnt[core]) >= core_nr_cpus[core];
+}
+
+/*
+ * Claim the idle state of @cpu, returning true if this caller is the one
+ * that took it out of the idle state. Claiming keeps concurrent wakeups
+ * from aiming at the same CPU.
+ */
+static bool cpu_idle_claim(s32 cpu)
+{
+	u64 old;
+	u32 core;
+
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return false;
+
+	old = __sync_fetch_and_and(idle_word(cpu), ~idle_bit(cpu));
+	if (!(old & idle_bit(cpu)))
+		return false;
+	__sync_fetch_and_sub(&nr_idle_cpus, 1);
+
+	core = cpu_core_of(cpu);
+	if (__sync_fetch_and_sub(&core_idle_cnt[core], 1) >= core_nr_cpus[core])
+		__sync_fetch_and_sub(&nr_idle_cores, 1);
+
+	return true;
+}
+
+/*
+ * Mark @cpu idle, unless it already is.
+ */
+static void cpu_idle_set(s32 cpu)
+{
+	u64 old;
+	u32 core;
+
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return;
+
+	old = __sync_fetch_and_or(idle_word(cpu), idle_bit(cpu));
+	if (old & idle_bit(cpu))
+		return;
+	__sync_fetch_and_add(&nr_idle_cpus, 1);
+
+	core = cpu_core_of(cpu);
+	if (__sync_fetch_and_add(&core_idle_cnt[core], 1) + 1 >= core_nr_cpus[core])
+		__sync_fetch_and_add(&nr_idle_cores, 1);
 }
 
 /*
  * Pick an idle CPU for @p in @preferred_cpus order (capacity descending),
  * ignoring the CPUs slower than @min_cap. Only fully idle cores are
- * considered if @smt is set, any idle CPU otherwise: the caller runs the
- * full core pass first, across every tier, since sharing a core costs
+ * considered if @whole_core is set, any idle CPU otherwise: the caller runs
+ * the whole core pass first, across every tier, since sharing a core costs
  * more than the step down to the next tier, the way select_idle_core()
  * looks for a whole core before select_idle_cpu() settles for a thread.
  *
  * Within a pass a faster idle CPU always wins. Among idle CPUs of the same
- * capacity a CPU in the same LLC as @prev_cpu beats one in another LLC,
- * and @prev_cpu itself beats an equivalent CPU, to keep the task where
- * its cache is: the same order select_idle_sibling() applies within one
- * domain.
+ * capacity a CPU on the node of @prev_cpu beats one on another node, a
+ * CPU in the same LLC as @prev_cpu beats one in another LLC, and @prev_cpu
+ * itself beats an equivalent CPU, to keep the task where its cache is:
+ * the order select_idle_sibling() applies within one domain, with the node
+ * on top since this scan covers them all.
+ *
+ * The idle state is claimed only for the CPU that is returned.
  */
 static __always_inline s32
 pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
-		     const struct cpumask *idle, const struct cpumask *smt, u64 min_cap)
+		     bool whole_core, u64 min_cap)
 {
 	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), best_cap = 0;
 	u64 prev_llc = cpu_llc_of(prev_cpu);
+	bool restricted = p->nr_cpus_allowed < nr_cpu_ids;
+	int prev_node = cpu_node(prev_cpu);
 	s32 best = -EBUSY;
 	int best_score = -1, i;
 
@@ -727,12 +805,21 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 		if (best >= 0 && cap < best_cap)
 			break;
 
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		/*
+		 * The idle bit first, it is a load and it rules out most of
+		 * the CPUs on a busy system; the cpumask test is a call, and
+		 * only needed for a task that cannot run everywhere.
+		 */
+		if (!cpu_idle_test(cpu))
 			continue;
-		if (!bpf_cpumask_test_cpu(cpu, smt ?: idle))
+		if (whole_core && !core_is_idle(cpu))
+			continue;
+		if (restricted && !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
 		score = 0;
+		if (!numa_enabled || cpu_node(cpu) == prev_node)
+			score += 4;
 		if (cpu_llc_of(cpu) == prev_llc)
 			score += 2;
 		if (cpu == prev_cpu && is_prev_allowed)
@@ -745,18 +832,12 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 			/*
 			 * Nothing in this tier can do better.
 			 */
-			if (score == 3)
+			if (score == 7)
 				break;
 		}
 	}
 
-	/*
-	 * Claim the idle state only for the CPU that is going to be used:
-	 * test_cpu_idle() is an atomic write to a shared mask, and doing it
-	 * for every candidate would bounce that mask across all the CPUs
-	 * on every wakeup.
-	 */
-	if (best >= 0 && !test_cpu_idle(best))
+	if (best >= 0 && !cpu_idle_claim(best))
 		best = -EBUSY;
 
 	return best;
@@ -770,87 +851,56 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
  */
 static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
 {
-	const struct cpumask *idle, *smt;
 	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
-	s32 cpu = -EBUSY;
+	s32 cpu;
 
 	/*
 	 * If the task can't migrate, there's no point looking for other
 	 * CPUs.
 	 */
 	if (is_pcpu_task(p))
-		return test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
+		return cpu_idle_claim(prev_cpu) ? prev_cpu : -EBUSY;
 
-	idle = get_idle_cpumask(prev_cpu);
-	if (bpf_cpumask_empty(idle))
-		goto out_idle;
+	/*
+	 * Nothing idle at all is the common case under load: say so without
+	 * walking the CPUs. The counters are only hints, the scan and the
+	 * claim decide.
+	 */
+	if (READ_ONCE(nr_idle_cpus) <= 0)
+		return -EBUSY;
 
-	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
-	if (smt) {
-		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, smt, min_cap);
+	if (READ_ONCE(nr_idle_cores) > 0) {
+		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true, min_cap);
 		if (cpu >= 0)
-			goto out_smt;
+			return cpu;
 	}
-	cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, NULL, min_cap);
-out_smt:
-	if (smt)
-		scx_bpf_put_cpumask(smt);
-out_idle:
-	scx_bpf_put_cpumask(idle);
 
-	return cpu;
+	return pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, false, min_cap);
 }
 
 /*
- * Pick an idle CPU for task @p, as close as possible to @prev_cpu, never
- * slower than @min_cap.
+ * Pick an idle CPU for task @p, never slower than @min_cap. @this_cpu is
+ * the waker's CPU on a wakeup, -1 otherwise.
+ *
+ * On a synchronous wakeup the waker is about to sleep: when nothing else
+ * is waiting for its CPU and the wakee shares the LLC with it, the wakee
+ * takes that CPU, where the data the two just exchanged is still hot,
+ * the same rule the kernel's default selection applies to WF_SYNC.
  *
  * Return the CPU id or a negative value if an idle CPU can't be found.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
-			 bool from_enqueue, u64 min_cap)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
+			 u64 wake_flags, u64 min_cap)
 {
-	/*
-	 * CPUs of different capacity are handed out in capacity order, which
-	 * the kernel's idle CPU selection knows nothing about. The scan is
-	 * confined to the node of @prev_cpu; the kernel's selection covers
-	 * the other nodes if nothing is found there.
-	 */
-	if (!all_cpus_same_capacity) {
-		s32 cpu = pick_idle_cpu_scan(p, prev_cpu, min_cap);
+	if (!no_wake_sync && (wake_flags & SCX_WAKE_SYNC) && this_cpu >= 0 &&
+	    !is_pcpu_task(p) && bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr) &&
+	    cpu_llc_of(this_cpu) == cpu_llc_of(prev_cpu) &&
+	    cpu_cap(this_cpu) >= min_cap &&
+	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) &&
+	    !scx_bpf_dsq_nr_queued(cpu_dsq(this_cpu)))
+		return this_cpu;
 
-		if (cpu >= 0 || !numa_enabled || min_cap ||
-		    !__COMPAT_HAS_scx_bpf_select_cpu_and)
-			return cpu;
-
-		return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
-	}
-
-	/*
-	 * Clear the wake sync bit if synchronous wakeups are disabled.
-	 */
-	if (no_wake_sync)
-		wake_flags &= ~SCX_WAKE_SYNC;
-
-	/*
-	 * Fallback to the old API if the kernel doesn't support
-	 * scx_bpf_select_cpu_and().
-	 *
-	 * This is required to support kernels <= 6.16.
-	 */
-	if (!__COMPAT_HAS_scx_bpf_select_cpu_and) {
-		bool is_idle = false;
-		s32 cpu;
-
-		if (from_enqueue)
-			return -EBUSY;
-
-		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-
-		return is_idle ? cpu : -EBUSY;
-	}
-
-	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
+	return pick_idle_cpu_scan(p, prev_cpu, min_cap);
 }
 
 /*
@@ -891,34 +941,13 @@ static s32 shallowest_queue_cpu(const struct task_struct *p, int node)
 }
 
 /*
- * Return true if the whole core of @cpu is idle, i.e. @cpu is idle and so
- * are its SMT siblings, if any.
- */
-static bool core_is_idle(s32 cpu)
-{
-	const struct cpumask *smt;
-	bool idle;
-
-	if (!smt_enabled)
-		return true;
-
-	smt = get_idle_smtmask(cpu);
-	idle = bpf_cpumask_test_cpu(cpu, smt);
-	scx_bpf_put_cpumask(smt);
-
-	return idle;
-}
-
-/*
  * Return an idle CPU faster than @cpu whose whole core is idle, or
  * -ENOENT. The idle state is not claimed: the caller is expected to kick
  * it.
  */
 static s32 idle_faster_cpu(s32 cpu)
 {
-	const struct cpumask *idle_mask;
 	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), cap;
-	s32 found = -ENOENT;
 	int i;
 
 	if (all_cpus_same_capacity)
@@ -931,20 +960,16 @@ static s32 idle_faster_cpu(s32 cpu)
 	 * refuses to do.
 	 */
 	cap = cpu_cap(cpu);
-	idle_mask = smt_enabled ? get_idle_smtmask(cpu) : get_idle_cpumask(cpu);
 	bpf_for(i, 0, max_cpus) {
 		s32 other = preferred_cpus[i];
 
 		if (cpu_cap(other) <= cap)
 			break;
-		if (bpf_cpumask_test_cpu(other, idle_mask)) {
-			found = other;
-			break;
-		}
+		if (core_is_idle(other))
+			return other;
 	}
-	scx_bpf_put_cpumask(idle_mask);
 
-	return found;
+	return -ENOENT;
 }
 
 /*
@@ -1240,7 +1265,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * task to ops.enqueue(). Dispatching directly from here, even if
 	 * we can't find an idle CPU, allows to save some locking overhead.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, false, 0);
+	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags, 0);
 	if (cpu >= 0 || !is_busy)
 		direct_dispatch_local(p, tctx, cpu >= 0 ? cpu : prev_cpu);
 
@@ -1369,9 +1394,9 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (task_should_migrate(p, enq_flags) ||
 	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice)))
-		cpu = pick_idle_cpu(p, prev_cpu, 0, true, 0);
+		cpu = pick_idle_cpu(p, prev_cpu, -1, 0, 0);
 	else if (!is_pcpu_task(p) && is_event_heavy(tctx))
-		cpu = pick_idle_cpu(p, prev_cpu, 0, true, cpu_cap(prev_cpu));
+		cpu = pick_idle_cpu(p, prev_cpu, -1, 0, cpu_cap(prev_cpu));
 	else
 		cpu = -EBUSY;
 	{
@@ -1607,8 +1632,25 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the previous task expired its time slice, but no other task
 	 * wants to run on this CPU, give it another time slot.
 	 */
-	if (prev && keep_running(prev, cpu))
+	if (prev && keep_running(prev, cpu)) {
 		scx_bpf_task_set_slice(prev, slice_ns);
+		return;
+	}
+
+	/*
+	 * Nothing to run: the CPU is going idle. ops.update_idle() will not
+	 * say so if the CPU was claimed and kicked for a task that never
+	 * came, since there is no transition then, so re-arm the bit here.
+	 */
+	cpu_idle_set(cpu);
+}
+
+void BPF_STRUCT_OPS(cosmos_update_idle, s32 cpu, bool idle)
+{
+	if (idle)
+		cpu_idle_set(cpu);
+	else
+		cpu_idle_claim(cpu);
 }
 
 void BPF_STRUCT_OPS(cosmos_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1977,6 +2019,7 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .quiescent		= (void *)cosmos_quiescent,
 	       .running			= (void *)cosmos_running,
 	       .stopping		= (void *)cosmos_stopping,
+	       .update_idle		= (void *)cosmos_update_idle,
 	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
 	       .exit_task		= (void *)cosmos_exit_task,
