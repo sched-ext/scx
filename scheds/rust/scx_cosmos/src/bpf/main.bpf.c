@@ -1636,7 +1636,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/*
-	 * Create the per-CPU DSQs.
+	 * Create the per-CPU DSQs and start with every CPU idle, the way
+	 * the kernel resets its own idle masks: a CPU that is busy clears
+	 * its bit as soon as a task runs there, while a CPU that sits idle
+	 * from the start never transitions, and left with its bit clear it
+	 * would never be picked, so never transition, for good.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		int node = numa_enabled ? cpu_node(cpu) : -1;
@@ -1646,6 +1650,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 			scx_bpf_error("failed to create DSQ for CPU %d: %d", cpu, err);
 			return err;
 		}
+		cpu_idle_set(cpu);
 	}
 
 	return 0;
