@@ -174,6 +174,9 @@ struct task_ctx {
 	u64 last_stop_at;		/* when the task last stopped running */
 	u64 vruntime;			/* total runtime, scaled by the weight */
 	s64 vlag;			/* lag carried across a sleep */
+	s32 vcid;			/* cid whose reference this task joined */
+	u64 vjoin_w;			/* weight contributed to that reference */
+	u64 vjoin_v;			/* scaled vruntime contributed to it */
 	struct scx_cmask allowed;	/* cids the task is allowed to run on */
 };
 
@@ -219,6 +222,8 @@ struct cid_ctx {
 	u32 node_nr;		/* number of cids in the node */
 	u64 vtime_rem;		/* service not yet folded into @vtime_now */
 	u64 last_balance_at;	/* when this cid last sampled the other queues */
+	u64 vsum_w;		/* \Sum w_i of the tasks queued here */
+	u64 vsum_wv;		/* \Sum (w_i * v_i), the vruntimes scaled down */
 	u32 steal_cursor;	/* where the last queue scan stopped */
 };
 
@@ -613,6 +618,144 @@ static s32 idle_faster_cid(s32 cid)
 }
 
 /*
+ * Per-cid vruntime reference.
+ *
+ * With one deadline queue per cid, each queue is a pack of tasks that advance
+ * in lockstep, and the packs drift apart from the system-wide V with their
+ * load: a cid running nine hogs accrues vruntime slower than one running six,
+ * and slower than V, which follows the average. A task placed at V minus its
+ * lag then lands behind the whole pack of a crowded cid and waits for the pack
+ * to climb past it, or ahead of everything on a lightly loaded one. EEVDF's
+ * reference is per runqueue for that reason: the weighted average of the tasks
+ * queued there, kept incrementally,
+ *
+ *	V = \Sum (w_i * v_i) / \Sum w_i
+ *
+ * and a task is placed against the runqueue it joins with the lag it took from
+ * the one it left, which is also how a migration keeps its fairness.
+ *
+ * Do the same per cid: a task joins the cid it is queued on or runs on, leaves
+ * it when it stops being runnable, and its contribution follows the vruntime
+ * it is charged in ops.stopping(). The vruntimes are scaled down in the sums
+ * to keep the weighted products from overflowing. A cid with no members, or
+ * whose sums are found inconsistent, falls back to the system-wide reference.
+ */
+#define VREF_SHIFT	10
+
+static u64 cid_vref(s32 cid)
+{
+	struct cid_ctx __arena *cctx;
+	u64 w, wv, v;
+
+	if (!cid_valid(cid))
+		return vtime_now;
+	cctx = cid_ctx(cid);
+
+	w = cctx->vsum_w;
+	wv = cctx->vsum_wv;
+	if (!w)
+		return vtime_now;
+
+	v = (wv / w) << VREF_SHIFT;
+	if (time_after(v, vtime_now + slice_lag * 100) ||
+	    time_before(v, vtime_now - slice_lag * 100))
+		return vtime_now;
+
+	return v;
+}
+
+static void vref_leave(struct task_ctx __arena *tctx)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!cid_valid(tctx->vcid))
+		return;
+
+	cctx = cid_ctx(tctx->vcid);
+	__sync_fetch_and_sub(&cctx->vsum_w, tctx->vjoin_w);
+	__sync_fetch_and_sub(&cctx->vsum_wv, tctx->vjoin_w * tctx->vjoin_v);
+	tctx->vcid = -1;
+}
+
+static void vref_join(s32 cid, const struct task_struct *p,
+		      struct task_ctx __arena *tctx)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (tctx->vcid == cid)
+		return;
+	vref_leave(tctx);
+
+	if (!cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+
+	tctx->vjoin_w = p->scx.weight;
+	tctx->vjoin_v = tctx->vruntime >> VREF_SHIFT;
+	tctx->vcid = cid;
+	__sync_fetch_and_add(&cctx->vsum_w, tctx->vjoin_w);
+	__sync_fetch_and_add(&cctx->vsum_wv, tctx->vjoin_w * tctx->vjoin_v);
+}
+
+/*
+ * Bring the contribution of @tctx up to date with its vruntime.
+ */
+static void vref_charge(struct task_ctx __arena *tctx)
+{
+	struct cid_ctx __arena *cctx;
+	u64 dv;
+
+	if (!cid_valid(tctx->vcid))
+		return;
+
+	dv = (tctx->vruntime >> VREF_SHIFT) - tctx->vjoin_v;
+	if (!dv)
+		return;
+	tctx->vjoin_v += dv;
+	cctx = cid_ctx(tctx->vcid);
+	__sync_fetch_and_add(&cctx->vsum_wv, tctx->vjoin_w * dv);
+}
+
+/*
+ * Place @p on @cid: a task that is not running is put at the cid's reference
+ * minus the lag it carries, the way place_entity() does, and either way it
+ * becomes a member of @cid's reference.
+ */
+static void place_task(s32 cid, const struct task_struct *p,
+		       struct task_ctx __arena *tctx)
+{
+	if (!scx_bpf_task_running(p))
+		tctx->vruntime = cid_vref(cid) - tctx->vlag;
+	vref_join(cid, p, tctx);
+}
+
+/*
+ * Direct dispatch @p to the local DSQ of @cid from ops.select_cid().
+ *
+ * Insert with SCX_ENQ_IMMED, so that the kernel bounces @p back through
+ * ops.enqueue() (and from there into a per-cid DSQ, where the deadline
+ * ordering applies) whenever @p can't run on @cid right away. This keeps the
+ * local DSQ a pure "run now" fast path instead of an unbounded queue that
+ * outranks the deadline-ordered DSQs.
+ *
+ * Claiming an idle cid is optimistic: the idle bitmap is only a hint and it
+ * can say idle for a cid that is already busy (for example when
+ * cidland_dispatch() re-arms the bit right after a task has been queued to
+ * that cid). Without SCX_ENQ_IMMED such a task would just stack on a busy
+ * local DSQ, and since the kernel skips ops.dispatch() entirely while a local
+ * DSQ is not empty, that cid would stop consuming its own queue: tasks that
+ * only it can run (per-CPU kthreads, migration-disabled tasks) have no other
+ * consumer, as the other cids walk past them in scx_bpf_dsq_move_to_local(),
+ * so they could stall indefinitely.
+ */
+static void direct_dispatch_local(struct task_struct *p,
+				  struct task_ctx __arena *tctx, s32 cid)
+{
+	place_task(cid, p, tctx);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
+}
+
+/*
  * Floor on the weight used to stretch the request and the lag bound.
  *
  * The scx weight of a nice 19 task is 1, so its request would be a hundred
@@ -699,26 +842,7 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
 		return prev_cid;
 	}
 
-	/*
-	 * An idle cid was claimed, dispatch @p directly to it: the local DSQ of
-	 * the cid returned from here.
-	 *
-	 * Insert with SCX_ENQ_IMMED, so that the kernel bounces @p back through
-	 * ops.enqueue() (and from there into the deadline-ordered shared queue)
-	 * whenever it can't run on the claimed cid right away.
-	 *
-	 * Claiming an idle cid is optimistic: the idle bitmap is only a hint and
-	 * it can say idle for a cid that is already busy (for example when
-	 * cidland_dispatch() re-arms the bit right after a task has been queued
-	 * to that cid). Without SCX_ENQ_IMMED such a task would just stack on a
-	 * busy local DSQ, and since the kernel skips ops.dispatch() entirely
-	 * while a local DSQ is not empty, that cid would stop consuming the
-	 * shared queue: tasks that only it can run (per-CPU kthreads,
-	 * migration-disabled tasks) have no other consumer, as the other cids
-	 * walk past them in scx_bpf_dsq_move_to_local(), so they could stall
-	 * indefinitely.
-	 */
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
+	direct_dispatch_local(p, lookup_task_ctx(p), cid);
 	__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 	return cid;
@@ -792,6 +916,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			 * fast path instead of a queue that outranks the shared
 			 * one, see cidland_select_cid().
 			 */
+			place_task(cid, p, lookup_task_ctx(p));
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice_ns,
 					   enq_flags | SCX_ENQ_IMMED);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
@@ -800,6 +925,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	tctx = lookup_task_ctx(p);
+	place_task(prev_cid, p, tctx);
 
 	/*
 	 * Queue the task on @prev_cid's DSQ, ordered by deadline.
@@ -1060,12 +1186,14 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 * enough the full credit, no matter whether it had earned it.
 	 */
 	limit = scale_by_dl_weight(p, slice_lag);
-	lag = (s64)(vtime_now - tctx->vruntime);
+	lag = (s64)(cid_vref(cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p)) -
+		    tctx->vruntime);
 	if (lag > limit)
 		lag = limit;
 	else if (lag < -limit)
 		lag = -limit;
 	tctx->vlag = lag;
+	vref_leave(tctx);
 }
 
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
@@ -1083,18 +1211,44 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	 *	se->vruntime = vruntime - lag;
 	 *
 	 * A task that had consumed its share before sleeping comes back with
-	 * no credit, while one that was still owed service keeps it.
+	 * no credit, while one that was still owed service keeps it. This is
+	 * against the system-wide reference; the task is placed again against
+	 * the cid it is queued on, see place_task().
 	 */
+	vref_leave(tctx);
 	tctx->vruntime = vtime_now - tctx->vlag;
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
 	struct task_ctx __arena *tctx;
+	s32 cid;
 
 	tctx = lookup_task_ctx(p);
 
 	tctx->last_run_at = bpf_ktime_get_ns();
+
+	/*
+	 * A task that was moved here from another cid's queue, by the
+	 * balancer or an idle pull, carries a vruntime that means nothing
+	 * against this cid's pack: taken from a pack that was far ahead it
+	 * would wait here until the pack climbs past it, seconds under load.
+	 * Carry the lag instead, the way a migration does in place_entity():
+	 * how far the task was from the pack it left is how far it is placed
+	 * from the pack it joins.
+	 */
+	cid = scx_bpf_task_cid(p);
+	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
+		s64 limit = scale_by_dl_weight(p, slice_lag);
+		s64 lag = (s64)(cid_vref(tctx->vcid) - tctx->vruntime);
+
+		if (lag > limit)
+			lag = limit;
+		else if (lag < -limit)
+			lag = -limit;
+		tctx->vruntime = cid_vref(cid) - lag;
+	}
+	vref_join(cid, p, tctx);
 }
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
@@ -1115,6 +1269,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 *	se->vruntime += calc_delta_fair(delta_exec, se);
 	 */
 	tctx->vruntime += scale_by_task_weight_inverse(p, slice);
+	vref_charge(tctx);
 
 	/*
 	 * Advance the system virtual time by the service just delivered.
@@ -1230,6 +1385,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 	struct task_ctx __arena *tctx = lookup_task_ctx(p);
 
 	tctx->vruntime = vtime_now;
+	tctx->vcid = -1;
 }
 
 /*
