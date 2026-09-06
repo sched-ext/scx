@@ -872,10 +872,26 @@ static u64 task_dl(const struct task_struct *p, const struct task_ctx *tctx)
  * task: %SCX_TASK_REENQ_CAP means the caps for that cid are gone and the
  * task has to move, and would re-enqueue without end if put back.
  */
-static bool bounced_immed(const struct task_struct *p, u64 enq_flags)
+static bool reenq_immed(const struct task_struct *p, u64 enq_flags)
 {
 	return (enq_flags & SCX_ENQ_REENQ) &&
 	       (p->scx.flags & SCX_TASK_REENQ_REASON_MASK) == SCX_TASK_REENQ_IMMED;
+}
+
+/*
+ * Return true if @p was pushed off its cid by a higher scheduling class.
+ *
+ * The kernel hands an IMMED task back with %SCX_TASK_REENQ_PREEMPTED when a
+ * higher class takes the CPU while the task still has slice left, which is
+ * the one re-enqueue that wants a different cid: the old one is taken for an
+ * unknown time. It is the reason, not %SCX_ENQ_REENQ on its own - a bounced
+ * direct dispatch is also a re-enqueue and wants the opposite, see
+ * reenq_immed().
+ */
+static bool reenq_preempted(const struct task_struct *p, u64 enq_flags)
+{
+	return (enq_flags & SCX_ENQ_REENQ) &&
+	       (p->scx.flags & SCX_TASK_REENQ_REASON_MASK) == SCX_TASK_REENQ_PREEMPTED;
 }
 
 /*
@@ -1164,8 +1180,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * core, and never by moving a running task: EEVDF does the same in
 	 * select_idle_core(), and leaves a running task where it is.
 	 */
-	if ((task_should_migrate(p, enq_flags) && !bounced_immed(p, enq_flags)) ||
-	    (p->scx.slice && scx_bpf_task_running(p) && !cid_idle_test(prev_cid))) {
+	if ((task_should_migrate(p, enq_flags) && !reenq_immed(p, enq_flags)) ||
+	    (reenq_preempted(p, enq_flags) && p->scx.slice && !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx);
