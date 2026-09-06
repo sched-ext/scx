@@ -559,6 +559,15 @@ scan_idle_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 	return -EBUSY;
 }
 
+/* Flags for pick_idle_cid_ranked() */
+enum pick_idle_flags {
+	/* @prev_cid is in @p's allowed set and can be returned as is */
+	PICK_IDLE_PREV_ALLOWED	= 1 << 0,
+
+	/* Only consider cids whose whole core is idle */
+	PICK_IDLE_WHOLE_CORE	= 1 << 1,
+};
+
 /*
  * Pick an idle cid for @p one capacity tier at a time from the fastest.
  * Only fully idle cores are considered if @whole_core is set, any idle
@@ -575,7 +584,7 @@ scan_idle_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
  *
  * The idle state is claimed only for the cid that is returned. -EAGAIN
  * means a candidate was found but claimed by someone else first. @flags
- * packs @is_prev_allowed (bit 0) and @whole_core (bit 1).
+ * is a mask of PICK_IDLE_*.
  *
  * A global function: verified once rather than at every call site, of
  * which the claim retries make eight.
@@ -583,7 +592,8 @@ scan_idle_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
 				    s32 prev_cid, u32 flags)
 {
-	bool is_prev_allowed = flags & 1, whole_core = flags & 2;
+	bool is_prev_allowed = flags & PICK_IDLE_PREV_ALLOWED;
+	bool whole_core = flags & PICK_IDLE_WHOLE_CORE;
 	struct cid_topo __arena *prev;
 	bool restricted;
 	s32 best = -EBUSY;
@@ -632,7 +642,8 @@ __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
  */
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 {
-	bool is_prev_allowed = !is_restricted(p) || cid_allowed(p, prev_cid);
+	u32 flags = !is_restricted(p) || cid_allowed(p, prev_cid) ?
+		    PICK_IDLE_PREV_ALLOWED : 0;
 	s32 cid = -EBUSY;
 	int i;
 
@@ -662,12 +673,11 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	 */
 	for (i = 0; i < CLAIM_RETRIES; i++) {
 		cid = pick_idle_cid_ranked((struct task_struct *)p, prev_cid,
-					   is_prev_allowed | (smt_enabled ? 2 : 0));
+					   flags | (smt_enabled ? PICK_IDLE_WHOLE_CORE : 0));
 		if (cid >= 0)
 			return cid;
 		if (cid != -EAGAIN && smt_enabled)
-			cid = pick_idle_cid_ranked((struct task_struct *)p, prev_cid,
-						   is_prev_allowed);
+			cid = pick_idle_cid_ranked((struct task_struct *)p, prev_cid, flags);
 		if (cid != -EAGAIN)
 			break;
 	}
