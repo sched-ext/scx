@@ -1566,7 +1566,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 		return err;
 
 	/*
-	 * Create the per-cid DSQs.
+	 * Create the per-cid DSQs and start with every cid idle, the way the
+	 * kernel resets its own idle masks: a cid that is busy clears its bit
+	 * as soon as a task runs there, while a cid that sits idle from the
+	 * start never transitions, and left with its bit clear it would never
+	 * be picked, so never transition, for good.
 	 */
 	bpf_for(i, 0, nr_cids) {
 		err = scx_bpf_create_dsq(cid_dsq(i), -1);
@@ -1574,6 +1578,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 			scx_bpf_error("failed to create DSQ for cid %u: %d", i, err);
 			return err;
 		}
+		cid_set_idle(i, true);
 	}
 
 	return 0;
