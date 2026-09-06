@@ -1218,21 +1218,6 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 /*
- * Return true if the task can keep running on its current cid from
- * ops.dispatch(), false if the task should migrate.
- */
-static bool keep_running(const struct task_struct *p, s32 cid)
-{
-	/*
-	 * Do not keep running if the task doesn't need to run.
-	 */
-	if (!is_task_queued(p))
-		return false;
-
-	return true;
-}
-
-/*
  * A task that ran within this long on its CPU is still cache hot there and
  * is not stolen, like task_hot() with sysctl_sched_migration_cost.
  */
@@ -1507,7 +1492,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * If the previous task expired its time slice, but no other task
 	 * wants to run on this CPU, give it another time slot.
 	 */
-	if (prev && keep_running(prev, cid)) {
+	if (prev && is_task_queued(prev)) {
 		scx_bpf_task_set_slice(prev, slice_ns);
 		return;
 	}
