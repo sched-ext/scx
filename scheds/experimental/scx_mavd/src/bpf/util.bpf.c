@@ -353,7 +353,8 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 }
 /* the core's first cid is its primary; without SMT every cid is its own core */
 __hidden
-u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
+u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu)
+{
 	struct cpu_ctx *cpuc;
 
 	if (!is_smt_active)
