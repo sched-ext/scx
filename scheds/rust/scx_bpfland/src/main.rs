@@ -14,6 +14,7 @@ mod stats;
 use std::ffi::{c_int, c_ulong};
 use std::fmt::Write;
 use std::mem::MaybeUninit;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -23,7 +24,8 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -87,7 +89,11 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
 ///
 /// The BPF part makes all the scheduling decisions (see src/bpf/main.bpf.c).
 #[derive(Debug, Parser)]
+#[command(args_conflicts_with_subcommands = true)]
 struct Opts {
+    #[clap(subcommand)]
+    command: Option<Commands>,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -270,6 +276,39 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Generate shell completions without starting the scheduler.
+    #[clap(hide = true)]
+    GenerateCompletions {
+        /// The shell type.
+        #[clap(short, long, default_value = "bash")]
+        shell: Shell,
+        /// Output file, stdout if not present.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+fn generate_completions(shell: Shell, output: Option<&std::path::Path>) -> Result<()> {
+    // clap_complete expects writes to succeed. Generate in memory so output errors
+    // can be returned normally instead of panicking.
+    let mut buffer = Vec::new();
+    generate(shell, &mut Opts::command(), SCHEDULER_NAME, &mut buffer);
+    match output {
+        Some(path) => std::fs::write(path, buffer)
+            .with_context(|| format!("Failed to write completions to {}", path.display()))?,
+        None => {
+            use std::io::Write;
+            std::io::stdout()
+                .lock()
+                .write_all(&buffer)
+                .context("Failed to write completions to stdout")?;
+        }
+    }
+    Ok(())
 }
 
 struct Scheduler<'a> {
@@ -699,6 +738,10 @@ impl Drop for Scheduler<'_> {
 fn main() -> Result<()> {
     let opts = Opts::parse();
 
+    if let Some(Commands::GenerateCompletions { shell, output }) = &opts.command {
+        return generate_completions(*shell, output.as_deref());
+    }
+
     if opts.version {
         println!(
             "{} {}",
@@ -769,4 +812,80 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_options_still_parse_without_a_subcommand() {
+        let defaults = Opts::try_parse_from([SCHEDULER_NAME]).unwrap();
+        assert!(defaults.command.is_none());
+        assert_eq!(defaults.slice_us, 1000);
+        let opts = Opts::try_parse_from([SCHEDULER_NAME, "--slice-us", "2000", "--debug"]).unwrap();
+        assert!(opts.command.is_none());
+        assert_eq!(opts.slice_us, 2000);
+        assert!(opts.debug);
+    }
+
+    #[test]
+    fn completion_options_parse() {
+        let opts = Opts::try_parse_from([SCHEDULER_NAME, "generate-completions"]).unwrap();
+        assert!(matches!(
+            opts.command,
+            Some(Commands::GenerateCompletions {
+                shell: Shell::Bash,
+                output: None
+            })
+        ));
+        let opts = Opts::try_parse_from([
+            SCHEDULER_NAME,
+            "generate-completions",
+            "--shell",
+            "fish",
+            "--output",
+            "completions.fish",
+        ])
+        .unwrap();
+        assert!(matches!(
+            opts.command,
+            Some(Commands::GenerateCompletions { shell: Shell::Fish, output: Some(path) })
+                if path == PathBuf::from("completions.fish")
+        ));
+        let err =
+            Opts::try_parse_from([SCHEDULER_NAME, "generate-completions", "--shell", "invalid"])
+                .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn scheduler_options_conflict_with_completion_subcommand() {
+        for args in [
+            vec![SCHEDULER_NAME, "--version", "generate-completions"],
+            vec![SCHEDULER_NAME, "--slice-us", "2000", "generate-completions"],
+        ] {
+            let err = Opts::try_parse_from(args).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn completions_include_scheduler_options() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut buffer = Vec::new();
+            generate(shell, &mut Opts::command(), SCHEDULER_NAME, &mut buffer);
+            let output = String::from_utf8(buffer).unwrap();
+            assert!(output.contains(SCHEDULER_NAME), "{shell}");
+            assert!(output.contains("slice-us"), "{shell}");
+            assert!(output.contains("primary-domain"), "{shell}");
+            assert!(output.contains("btf-custom-path"), "{shell}");
+        }
+    }
+
+    #[test]
+    fn output_errors_are_returned() {
+        // A directory cannot be used as an output file.
+        assert!(generate_completions(Shell::Bash, Some(std::path::Path::new("."))).is_err());
+    }
 }
