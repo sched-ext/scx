@@ -248,6 +248,8 @@ struct task_ctx {
 	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
 	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
+	u64	queued_svc_snapshot;	/* avg_runtime_invr snapshotted at enqueue time for the per-cpdom counter */
+	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
@@ -284,6 +286,7 @@ struct cpdom_ctx {
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
+	u64	qload_svc_invr;			    /* queued service time: sum of avg_runtime_invr for all queued tasks, tracked atomically */
 	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
@@ -571,6 +574,8 @@ struct cpu_ctx {
 	 * decremented likewise on dispatch/dequeue/exit.
 	 */
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
+	u64	qload_svc_invr;		/* queued service time: sum of avg_runtime_invr,
+					   same write pattern as qload_invr above */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
