@@ -727,10 +727,14 @@ static __always_inline void account_queued_load(task_ctx *taskc,
 	 * changes between enqueue and dequeue.
 	 */
 	u32 load = task_load_metric(taskc);
+	u64 svc = taskc->avg_runtime_invr;
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-	if (cpdomc)
+	if (cpdomc) {
 		__sync_fetch_and_add(&cpdomc->qload_invr, load);
+		__sync_fetch_and_add(&cpdomc->qload_svc_invr, svc);
+	}
 	taskc->queued_load_snapshot = load;
+	taskc->queued_svc_snapshot = svc;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, cpdom_id);
 }
 
@@ -743,9 +747,12 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 		return;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-	if (cpdomc)
+	if (cpdomc) {
 		__sync_fetch_and_sub(&cpdomc->qload_invr,
 				     taskc->queued_load_snapshot);
+		__sync_fetch_and_sub(&cpdomc->qload_svc_invr,
+				     taskc->queued_svc_snapshot);
+	}
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
@@ -754,6 +761,7 @@ static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 {
 	struct cpu_ctx *cpuc;
 	u32 load;
+	u64 svc;
 
 	if (primary_cpu < 0 || primary_cpu >= LAVD_CPU_ID_MAX)
 		return;
@@ -762,10 +770,14 @@ static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 		return;
 
 	load = task_load_metric(taskc);
+	svc = taskc->avg_runtime_invr;
 	cpuc = get_cpu_ctx_id(primary_cpu);
-	if (cpuc)
+	if (cpuc) {
 		__sync_fetch_and_add(&cpuc->qload_invr, load);
+		__sync_fetch_and_add(&cpuc->qload_svc_invr, svc);
+	}
 	taskc->queued_load_snapshot_cpu = load;
+	taskc->queued_svc_snapshot_cpu = svc;
 	WRITE_ONCE(taskc->queued_on_cpu_id, (s16)primary_cpu);
 }
 
@@ -778,9 +790,12 @@ static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
 		return;
 
 	cpuc = get_cpu_ctx_id(primary_cpu);
-	if (cpuc)
+	if (cpuc) {
 		__sync_fetch_and_sub(&cpuc->qload_invr,
 				     taskc->queued_load_snapshot_cpu);
+		__sync_fetch_and_sub(&cpuc->qload_svc_invr,
+				     taskc->queued_svc_snapshot_cpu);
+	}
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 }
 
@@ -2514,6 +2529,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->lat_cri = 0;
 		cpuc->running_clk = 0;
 		cpuc->qload_invr = 0;
+		cpuc->qload_svc_invr = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->max_capacity = cpu_capacity[cpu];
