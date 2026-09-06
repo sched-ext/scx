@@ -102,13 +102,6 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "2000")]
     slice_lag_us: u64,
 
-    /// Number of other cids' dispatch queues sampled at each dispatch while the cid has work
-    /// of its own, looking for an earlier deadline to steal.
-    ///
-    /// 0 = a busy cid never steals, only an idle cid pulls from the others.
-    #[clap(long, default_value = "0")]
-    steal_sample: u64,
-
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -195,7 +188,6 @@ impl<'a> Scheduler<'a> {
             .expect("rodata_data missing after skel open");
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
-        rodata.steal_sample = opts.steal_sample;
         rodata.numa_enabled = numa_enabled;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
