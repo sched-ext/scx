@@ -18,21 +18,22 @@ enum {
 
 /*
  * Arguments to cidland_arena_init(), which sizes everything that is indexed by
- * cid. The cid space is always num_possible_cpus() entries wide, so userspace
- * knows how wide it is before the scheduler is attached.
+ * cid: the width of the cid space, num_possible_cpus(), and the number of
+ * capacity tiers. Userspace knows both before the scheduler is attached.
  */
 struct cidland_arena_args {
 	unsigned long long	nr_cpus;
+	unsigned long long	nr_tiers;
 };
 
 /*
- * Arguments to cidland_set_primary_word(): one word of the primary domain, in
- * cpu space. Userspace feeds the mask a word at a time, so nothing here caps
- * the number of CPUs.
+ * Arguments to cidland_set_cpu(): the capacity and the tier of one CPU, in cpu
+ * space.
  */
-struct cidland_primary_args {
-	unsigned long long	idx;
-	unsigned long long	word;
+struct cidland_cpu_args {
+	unsigned long long	cpu;
+	unsigned long long	capacity;
+	unsigned long long	tier;
 };
 
 #endif /* __INTF_H */
