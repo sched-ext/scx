@@ -1593,16 +1593,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 */
 	tctx->last_run_at = bpf_ktime_get_ns();
 
-	/*
-	 * A cid that ops.dispatch() re-armed as idle and that found a task
-	 * before it got there never went idle, so no transition clears the
-	 * bit: clear it here, where the CPU is running for sure. Left set,
-	 * the bit has wakeups aim at a busy CPU and, worse, has the idle
-	 * scan take the sibling of a busy CPU for a whole idle core.
-	 */
 	cid = scx_bpf_task_cid(p);
-	if (cid_idle_test(cid))
-		cid_idle_claim(cid);
 
 	/*
 	 * A task that was moved here from another cid's queue, by the
