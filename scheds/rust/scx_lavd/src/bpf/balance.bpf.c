@@ -279,6 +279,89 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 	return ret;
 }
 
+/*
+ * Estimated completion time for a task, in wall-clock ns.
+ *
+ *   comp_time = wait + run
+ *   wait      = queued_svc_invr             * LAVD_SCALE / cap_sum
+ *   run       = task_svc_invr   * nr_cpus   * LAVD_SCALE / cap_sum
+ *
+ * Both inputs are invariant time -- time as it would elapse on a CPU of
+ * capacity LAVD_SCALE -- so multiplying by LAVD_SCALE and dividing by the
+ * summed capacity converts them to wall clock at the target's mean per-CPU
+ * capacity, cap_sum / nr_cpus. @nr_cpus scales the run term because the queue
+ * drains across every CPU while the task itself runs on one.
+ *
+ * The run term is optional. A caller passes @task_svc_invr as 0 for the wait
+ * alone, when the question is how soon the task starts rather than when it
+ * finishes, or when its service time is not known well enough to price.
+ *
+ * Two approximations, both over-estimates, so they largely cancel when the
+ * result is used as a difference between two candidate targets:
+ *   - the task is served last, ignoring its vtime position; that error grows
+ *     with queue depth, biasing away from deep queues as desired;
+ *   - it is not preempted once running.
+ *
+ * Returns LAVD_COMP_TIME_INF for a target with no capacity, so it never wins.
+ *
+ * Marked noinline so the verifier analyses it once as a subprogram instead of
+ * inlining into lavd_select_cpu(), the heaviest program in the object.
+ */
+u64 __attribute__((noinline))
+calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum, u64 nr_cpus)
+{
+	u64 svc_invr;
+
+	if (unlikely(!cap_sum))
+		return LAVD_COMP_TIME_INF;
+
+	svc_invr = queued_svc_invr + (task_svc_invr * nr_cpus);
+
+	return (svc_invr * LAVD_SCALE) / cap_sum;
+}
+
+/*
+ * Estimated completion time for a task placed in @cpdomc.
+ *
+ * Inclusive of every task queued anywhere in the domain -- local, per-CPU and
+ * cpdom DSQs alike -- because all of them compete for the domain's CPUs.
+ * account_queued_load() runs unconditionally at the end of the enqueue path, so
+ * qload_svc_invr already carries all three.
+ *
+ * No residual for tasks already running. A domain has many of them and no
+ * single one to read, so any residual would be a statistic. Hence, when
+ * comparing against a domain's completion time, the other side must not
+ * include its residual either, to be fair.
+ *
+ * The domain's two DSQs are collapsed into one logical queue, and the drain
+ * rate is the whole domain to match: qload_svc_invr counts the tasks queued in
+ * both, so charging only the steady CPUs would bill them for work the
+ * turbulent ones actually serve.
+ *
+ * Collapsing them is a fair approximation because the queues are not
+ * independent. Steady CPUs drain the turbulent DSQ, and
+ * can_consume_steady_dsq() lets a turbulent CPU reach into the steady one to
+ * prevent starvation, so the split is a routing preference rather than a
+ * partition. Accounting the two loads separately would not make the wait
+ * predictable, only the accounting more expensive.
+ */
+u64 __attribute__((noinline))
+calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc)
+{
+	u64 cap_sum, nr_cpus;
+
+	if (unlikely(!cpdomc))
+		return LAVD_COMP_TIME_INF;
+
+	cap_sum = (u64)cpdomc->cap_sum_active_cpus +
+		  cpdomc->cap_sum_overflow_cpus;
+	nr_cpus = (u64)cpdomc->nr_active_cpus +
+		  cpdomc->nr_overflow_cpus;
+
+	return calc_comp_time(task_svc_invr, cpdomc->qload_svc_invr,
+			      cap_sum, nr_cpus);
+}
+
 u64 __attribute__((noinline)) dsq_peek_task_load(u64 dsq_id)
 {
 	struct task_struct *peek_p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
