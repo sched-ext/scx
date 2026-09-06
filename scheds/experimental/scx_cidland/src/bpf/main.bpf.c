@@ -864,6 +864,21 @@ static u64 task_dl(const struct task_struct *p, const struct task_ctx *tctx)
 }
 
 /*
+ * Return true if @p is here because a direct dispatch of it was refused.
+ *
+ * A task inserted with %SCX_ENQ_IMMED is handed back when the CPU turns out
+ * not to be free for it, and the kernel records why in @p's flags. Only the
+ * %SCX_TASK_REENQ_IMMED case says the cid is still a fine place for the
+ * task: %SCX_TASK_REENQ_CAP means the caps for that cid are gone and the
+ * task has to move, and would re-enqueue without end if put back.
+ */
+static bool bounced_immed(const struct task_struct *p, u64 enq_flags)
+{
+	return (enq_flags & SCX_ENQ_REENQ) &&
+	       (p->scx.flags & SCX_TASK_REENQ_REASON_MASK) == SCX_TASK_REENQ_IMMED;
+}
+
+/*
  * Return true if the task should attempt a migration, false otherwise.
  */
 static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
@@ -1149,7 +1164,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * core, and never by moving a running task: EEVDF does the same in
 	 * select_idle_core(), and leaves a running task where it is.
 	 */
-	if (task_should_migrate(p, enq_flags) ||
+	if ((task_should_migrate(p, enq_flags) && !bounced_immed(p, enq_flags)) ||
 	    (p->scx.slice && scx_bpf_task_running(p) && !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid);
 		if (cid >= 0) {
