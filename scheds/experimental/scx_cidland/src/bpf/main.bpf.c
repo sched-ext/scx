@@ -71,6 +71,11 @@ struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
 UEI_DEFINE(uei);
 
 /*
+ * How many times the idle cid scan tries again after losing a claim.
+ */
+#define CLAIM_RETRIES	4
+
+/*
  * Slack pages added to the arena's static pool on top of what the cid keyed
  * arrays need, for the task context allocator's own bookkeeping. Same
  * granularity ArenaLib uses.
@@ -509,7 +514,8 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 {
 	const struct cid_ctx __arena *cctx;
 	const struct scx_cmask __arena *allowed = all_cids;
-	s32 cid;
+	s32 cid = -EBUSY;
+	int i;
 
 	/*
 	 * The core scheduler supplies a valid cid here. Keep the check so an
@@ -550,15 +556,29 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	 * thread, since sharing a core costs more than the step down to the
 	 * next tier, the way select_idle_core() looks for a whole core before
 	 * select_idle_cpu().
+	 *
+	 * A claim that fails lost a race with another wakeup for the same
+	 * cid. Scan again rather than give up: the bit is clear now, so the
+	 * next candidate is a different cid, the way scx_bpf_pick_idle_cpu()
+	 * keeps picking until a claim sticks. Giving up queued the loser on a
+	 * busy cid, and whichever idle cid dispatched next, the sibling of a
+	 * busy cid as often as not, took it from there while whole idle cores
+	 * sat unused: that is how a burst of forks or wakeups ended up with
+	 * both siblings of a P-core busy and E-cores idle.
 	 */
-	if (smt_enabled) {
-		cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, true);
-		if (cid >= 0)
-			goto found;
+	for (i = 0; i < CLAIM_RETRIES; i++) {
+		if (smt_enabled) {
+			cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, true);
+			if (cid >= 0)
+				goto found;
+		}
+		if (cid != -EAGAIN)
+			cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, false);
+		if (cid != -EAGAIN)
+			break;
 	}
-	cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, false);
 	if (cid < 0)
-		return cid;
+		return -EBUSY;
 
 found:
 	if (cid >= cctx->llc_base && cid < cctx->llc_base + cctx->llc_nr)
