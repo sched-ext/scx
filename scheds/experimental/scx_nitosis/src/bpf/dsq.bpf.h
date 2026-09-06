@@ -194,6 +194,5 @@ static __always_inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 		return DSQ_INVALID;
 	}
 
-	return (dsq_id_t){ .cell_llc_dsq = {
-				   .llc = llc, .cell = cell, .type = DSQ_TYPE_CELL_LLC } };
+	return (dsq_id_t){ .cell_llc_dsq = { .llc = llc, .cell = cell, .type = DSQ_TYPE_CELL_LLC } };
 }
