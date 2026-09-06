@@ -96,8 +96,20 @@ struct Opts {
     slice_us: u64,
 
     /// Maximum lag, in microseconds of virtual time, that a task can carry across a sleep.
-    #[clap(short = 'l', long, default_value = "20000")]
+    ///
+    /// This bounds both the credit a task can bring back from a sleep and the debt it can
+    /// carry after consuming more than its share: an over-served task waits for the system
+    /// vruntime to cover the debt before it runs again, and under heavy load that reference
+    /// moves slowly. EEVDF bounds the lag to twice the base slice (max(2 * slice, tick)).
+    #[clap(short = 'l', long, default_value = "2000")]
     slice_lag_us: u64,
+
+    /// Number of other cids' dispatch queues sampled at each dispatch while the cid has work
+    /// of its own, looking for an earlier deadline to steal.
+    ///
+    /// 0 = a busy cid never steals, only an idle cid pulls from the others.
+    #[clap(long, default_value = "0")]
+    steal_sample: u64,
 
     /// Specifies a group of CPUs to be preferred when looking for an idle CPU.
     ///
@@ -252,6 +264,7 @@ impl<'a> Scheduler<'a> {
             .expect("rodata_data missing after skel open");
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
+        rodata.steal_sample = opts.steal_sample;
 
         // Define the primary scheduling domain, in cpu space: the BPF side
         // translates it to cids once the kernel has built the cid layout. The
@@ -349,8 +362,8 @@ impl<'a> Scheduler<'a> {
             .expect("bss_data missing after skel load");
         Metrics {
             nr_direct_dispatches: bss_data.nr_direct_dispatches,
-            nr_shared_enqueues: bss_data.nr_shared_enqueues,
-            nr_idle_kicks: bss_data.nr_idle_kicks,
+            nr_queued: bss_data.nr_queued,
+            nr_steals: bss_data.nr_steals,
             nr_local_llc: bss_data.nr_local_llc,
             nr_remote_llc: bss_data.nr_remote_llc,
         }
