@@ -296,6 +296,20 @@ static __always_inline u64 tier_word(u32 t, u32 k)
 static struct scx_cmask __arena *idle_cids;
 
 /*
+ * Bitmap of the cids whose DSQ holds at least one task, kept next to the idle
+ * bitmap and scanned the same way, so that a cid looking for work to pull
+ * intersects a word with the range of its LLC, node or a tier instead of
+ * peeking at the DSQ of every other cid, a kfunc call and a hash lookup each.
+ *
+ * The bit is set after a task is queued and cleared by whoever finds the DSQ
+ * empty, with a second look after the clear in case a task was queued in
+ * between. It is a hint: the kernel can dequeue a task behind the scheduler's
+ * back, and a bit left set is cleared by the first cid that peeks and finds
+ * nothing.
+ */
+static struct scx_cmask __arena *queued_cids;
+
+/*
  * Return true if @cid is a cid this scheduler can address.
  *
  * The mask helpers below index the arena without a bounds check, so every cid
@@ -383,6 +397,44 @@ static bool cid_range_is_idle(u32 base, u32 nr)
 		return false;
 
 	return cmask_full_range(idle_cids, base, nr);
+}
+
+static bool cid_queued_test(s32 cid)
+{
+	TOUCH_ARENA();
+
+	return __cmask_test(cid, queued_cids);
+}
+
+static void cid_queued_set(s32 cid)
+{
+	TOUCH_ARENA();
+
+	cmask_set(cid, queued_cids);
+}
+
+/*
+ * Clear the queued bit of @cid if its DSQ is empty, looking again after the
+ * clear for a task queued in the meantime.
+ */
+static void cid_queued_check(s32 cid)
+{
+	TOUCH_ARENA();
+
+	if (scx_bpf_dsq_nr_queued(cid_dsq(cid)))
+		return;
+	cmask_clear(cid, queued_cids);
+	if (scx_bpf_dsq_nr_queued(cid_dsq(cid)))
+		cmask_set(cid, queued_cids);
+}
+
+/*
+ * Rotate @w right by @s bits, so that the bits from @s on come first.
+ */
+static __always_inline u64 rotr64(u64 w, u32 s)
+{
+	s &= 63;
+	return s ? (w >> s) | (w << (64 - s)) : w;
 }
 
 /*
@@ -673,7 +725,7 @@ static bool wake_affine_cid(const struct task_struct *p, s32 prev_cid,
 	       __cmask_test(this_cid, &lookup_task_ctx(p)->allowed) &&
 	       cid_ctx(this_cid)->llc_base == cid_ctx(prev_cid)->llc_base &&
 	       !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) &&
-	       !scx_bpf_dsq_nr_queued(cid_dsq(this_cid));
+	       !cid_queued_test(this_cid);
 }
 
 /*
@@ -691,9 +743,36 @@ static s32 shallowest_queue_cid(const struct task_struct *p,
 {
 	u32 base = numa_enabled ? prev->node_base : 0;
 	u32 nr = numa_enabled ? prev->node_nr : nr_cids;
+	bool restricted = p->nr_cpus_allowed < nr_cpu_ids;
 	s32 best = -EBUSY, best_nr = 0;
-	u32 best_tier = 0, cid;
+	u32 best_tier = 0, cid, t, k, last;
 
+	if (!nr)
+		return -EBUSY;
+	last = (base + nr - 1) / 64;
+
+	/*
+	 * A cid with nothing queued, the fastest one, is the usual answer and
+	 * the bitmaps give it without a lookup.
+	 */
+	bpf_arena_for(t, 0, nr_tiers) {
+		bpf_arena_for(k, base / 64, last + 1) {
+			u64 w = ~cmask_word(queued_cids, k) & tier_word(t, k) &
+				cmask_range_word(queued_cids, k, base, nr);
+			s32 c;
+
+			if (!w)
+				continue;
+			c = first_idle_cid(allowed, w, k, restricted, false);
+			if (c >= 0)
+				return c;
+		}
+	}
+
+	/*
+	 * Every queue has something: look for the shallowest, a lookup per
+	 * cid.
+	 */
 	bpf_for(cid, base, base + nr) {
 		const struct cid_ctx __arena *other;
 		s32 nr_queued;
@@ -1076,6 +1155,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns,
 				 task_dl(p, tctx), enq_flags);
+	cid_queued_set(prev_cid);
 	__sync_fetch_and_add(&nr_queued, 1);
 
 	scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
@@ -1127,7 +1207,107 @@ static bool task_hot(struct task_struct *p, u64 now)
 #define BALANCE_SAMPLE	2
 
 /*
- * Dispatch on @dst_cid a task from its own DSQ or from the DSQ of another cid.
+ * Look at the queued cids of @w, word @k rotated by @s (packed in @ks as
+ * k << 16 | s), and return the first one whose head @dst_cid can take, or -1,
+ * in the low 32 bits, with the number of queues still allowed in the high 32
+ * bits. @ctl packs, from the top, the depth of @dst_cid's own queue, the
+ * number of queues to look at and whether a head still hot on its CPU is
+ * skipped. A queue found empty has its bit cleared. A busy @dst_cid only takes
+ * from a queue more than twice as deep as its own and at least two tasks
+ * deeper.
+ *
+ * A global function: it is verified once, not once per call site and loop
+ * iteration, which keeps ops.dispatch() within the verifier's budget.
+ */
+__noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
+{
+	u32 k = ks >> 16, s = ks & 63, own_nr = ctl >> 16;
+	u32 limit = (ctl >> 8) & 0xff;
+	bool check_hot = ctl & 1;
+	s32 ret = -1;
+
+	TOUCH_ARENA();
+
+	w = rotr64(w, s);
+	while (w && limit && can_loop) {
+		const struct task_ctx __arena *tctx;
+		struct task_struct *p;
+		s32 cid;
+
+		cid = k * 64 + ((__builtin_ctzll(w) + s) & 63);
+		w &= w - 1;
+		if (cid == dst_cid || !cid_valid(cid))
+			continue;
+		limit--;
+
+		if (own_nr) {
+			u32 nr = scx_bpf_dsq_nr_queued(cid_dsq(cid));
+
+			if (nr < own_nr + 2 || nr <= 2 * own_nr)
+				continue;
+		}
+		p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
+		if (!p) {
+			cid_queued_check(cid);
+			continue;
+		}
+		tctx = lookup_task_ctx(p);
+		if (!__cmask_test(dst_cid, &tctx->allowed) ||
+		    (check_hot && task_hot(p, now)))
+			continue;
+
+		ret = cid;
+		break;
+	}
+
+	return ((u64)limit << 32) | (u32)ret;
+}
+
+/*
+ * Walk the queued cids of [@base, @base + @nr), restricted to tier @t if @t is
+ * not negative, starting after @start and wrapping around, and return the
+ * first one @dst_cid can steal from, or -1.
+ */
+static __always_inline s32
+steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
+		 bool check_hot, u32 own_nr, u32 limit)
+{
+	u32 first = base / 64, last, kstart, i, span;
+
+	if (!nr)
+		return -1;
+	last = (base + nr - 1) / 64;
+	span = last - first + 1;
+	if (start < base || start >= base + nr)
+		start = base;
+	kstart = start / 64;
+
+	bpf_arena_for(i, 0, span) {
+		u32 k = first + (kstart - first + i) % span;
+		u64 w, ret;
+		s32 cid;
+
+		w = cmask_word(queued_cids, k) & cmask_range_word(queued_cids, k, base, nr);
+		if (t >= 0)
+			w &= tier_word(t, k);
+		if (!w)
+			continue;
+		ret = steal_from_word(dst_cid, w, (k << 16) | (i ? 0 : start & 63),
+				      now, (own_nr << 16) | (limit << 8) | check_hot);
+		cid = (s32)(u32)ret;
+		limit = ret >> 32;
+		if (cid >= 0)
+			return cid;
+		if (!limit)
+			break;
+	}
+
+	return -1;
+}
+
+/*
+ * Dispatch on @dst_cid a task from its own DSQ or from the DSQ of another cid
+ * of the node.
  *
  * A cid with nothing queued pulls the first task it finds: from the slower
  * cids first, hot or not, since a task is better off on a faster core than
@@ -1160,12 +1340,13 @@ static bool task_hot(struct task_struct *p, u64 now)
  */
 static bool try_steal_task(s32 dst_cid)
 {
-	TOUCH_ARENA();
-
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
-	struct task_struct *own = __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
+	bool own = cid_queued_test(dst_cid) &&
+		   __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
+	u32 node_base = numa_enabled ? cctx->node_base : 0;
+	u32 node_nr = numa_enabled ? cctx->node_nr : nr_cids;
 	u64 now = bpf_ktime_get_ns();
-	u32 limit, start, cid, i, own_nr = 0;
+	u32 start, own_nr = 0;
 	s32 src = -1;
 
 	if (own) {
@@ -1173,83 +1354,49 @@ static bool try_steal_task(s32 dst_cid)
 			goto own;
 		cctx->last_balance_at = now;
 		own_nr = scx_bpf_dsq_nr_queued(cid_dsq(dst_cid));
+		if (!own_nr)
+			goto own;
 	}
 
 	start = cctx->steal_cursor;
 	if (start >= nr_cids)
 		start = 0;
 
-	if (!own && asym_capacity && core_is_idle(dst_cid)) {
-		u32 best_tier = cctx->tier;
+	if (!own && asym_capacity && (!smt_enabled || core_is_idle(dst_cid))) {
+		u32 t;
 
-		bpf_for(i, 0, nr_cids) {
-			const struct cid_ctx __arena *other = cid_ctx(i);
-			const struct task_ctx __arena *tctx;
-			struct task_struct *p;
-
-			if (other->tier <= best_tier)
-				continue;
-
-			p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(i));
-			if (!p)
-				continue;
-
-			tctx = lookup_task_ctx(p);
-			if (!__cmask_test(dst_cid, &tctx->allowed))
-				continue;
-
-			best_tier = other->tier;
-			src = i;
+		/*
+		 * Slower tiers first, from the slowest, hot or not.
+		 */
+		bpf_arena_for(t, 0, nr_tiers - cctx->tier - 1) {
+			src = steal_from_range(dst_cid, nr_tiers - 1 - t, node_base,
+					       node_nr, node_base, now, false, 0, 0xff);
+			if (src >= 0)
+				goto pick;
 		}
-		if (src >= 0)
-			goto pick;
 	}
 
-	/*
-	 * One extra slot covers @dst_cid itself falling in the sample. An idle
-	 * cid walks its own LLC before the rest of the node, so it does two
-	 * passes.
-	 */
-	limit = own ? BALANCE_SAMPLE + 1 : nr_cids;
-	bpf_for(i, 0, own ? limit : 2 * limit) {
-		const struct cid_ctx __arena *other;
-		const struct task_ctx __arena *tctx;
-		bool local_pass = !own && i < limit;
-		struct task_struct *p;
-
-		cid = start + 1 + (i < limit ? i : i - limit);
-		if (cid >= nr_cids)
-			cid -= nr_cids;
-		if (cid >= nr_cids || cid == dst_cid)
-			continue;
-		other = cid_ctx(cid);
-		if (numa_enabled && !own &&
-		    (cid < cctx->node_base || cid >= cctx->node_base + cctx->node_nr))
-			continue;
-		if (!own && (other->llc_base == cctx->llc_base) != local_pass)
-			continue;
-		if (own) {
-			u32 nr = scx_bpf_dsq_nr_queued(cid_dsq(cid));
-
-			if (nr < own_nr + 2 || nr <= 2 * own_nr)
-				continue;
-		}
-
-		p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
-		if (!p)
-			continue;
-
-		tctx = lookup_task_ctx(p);
-		if (!__cmask_test(dst_cid, &tctx->allowed) || task_hot(p, now))
-			continue;
-
-		src = cid;
-		break;
+	if (own) {
+		/*
+		 * A busy cid samples a few queues of its node, rotating
+		 * through them across dispatches.
+		 */
+		src = steal_from_range(dst_cid, -1, node_base, node_nr, start + 1,
+				       now, true, own_nr, BALANCE_SAMPLE);
+	} else {
+		/*
+		 * An idle cid walks its own LLC before the rest of the node,
+		 * or the rest of the machine when there is nothing to gain by
+		 * keeping to a node. A domain that is the whole of the next
+		 * one is not walked twice.
+		 */
+		src = steal_from_range(dst_cid, -1, cctx->llc_base, cctx->llc_nr,
+				       start + 1, now, true, 0, 0xff);
+		if (src < 0 && node_nr > cctx->llc_nr)
+			src = steal_from_range(dst_cid, -1, node_base, node_nr,
+					       start + 1, now, true, 0, 0xff);
 	}
-	start += limit;
-	if (start >= nr_cids)
-		start -= nr_cids;
-	cctx->steal_cursor = start;
+	cctx->steal_cursor = src >= 0 ? src : start + BALANCE_SAMPLE;
 
 own:
 	if (src < 0 && own)
@@ -1259,8 +1406,11 @@ pick:
 	if (src < 0)
 		return false;
 
-	if (!scx_bpf_dsq_move_to_local(cid_dsq(src), 0))
+	if (!scx_bpf_dsq_move_to_local(cid_dsq(src), 0)) {
+		cid_queued_check(src);
 		return false;
+	}
+	cid_queued_check(src);
 
 	if (src != dst_cid)
 		__sync_fetch_and_add(&nr_steals, 1);
@@ -1274,8 +1424,12 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * Take a task from this cid's queue or from a deeper one, then fall
 	 * back to this cid's own DSQ in case the pick raced with another cid.
 	 */
-	if (try_steal_task(cid) || scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))
+	if (try_steal_task(cid))
 		return;
+	if (scx_bpf_dsq_move_to_local(cid_dsq(cid), 0)) {
+		cid_queued_check(cid);
+		return;
+	}
 
 	/*
 	 * Nothing else wants to run here: refill @prev's time slice and let it
@@ -1648,6 +1802,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	 */
 	cmask_init(all_cids, 0, nr_cids);
 	cmask_init(idle_cids, 0, nr_cids);
+	cmask_init(queued_cids, 0, nr_cids);
 	bpf_for(i, 0, nr_tiers)
 		cmask_init(tier_mask(i), 0, nr_cids);
 
@@ -1717,7 +1872,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	 * allocator's own bookkeeping.
 	 */
 	bytes = nr_cpus * sizeof(struct cid_ctx) +
-		(2 + nr_tiers) * cmask_size(nr_cmask_words) +
+		(3 + nr_tiers) * cmask_size(nr_cmask_words) +
 		nr_cpus * (sizeof(u64) + sizeof(u32) +
 			   sizeof(struct bpf_arena_loop_ctr));
 	err = scx_static_init(div_round_up(bytes, PAGE_SIZE) + STATIC_ALLOC_PAGES);
@@ -1727,6 +1882,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	cid_ctxs = scx_static_alloc(nr_cpus * sizeof(struct cid_ctx), sizeof(u64));
 	all_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
 	idle_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
+	queued_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
 	cpu_cap_in = scx_static_alloc(nr_cpus * sizeof(u64), sizeof(u64));
 	cpu_tier_in = scx_static_alloc(nr_cpus * sizeof(u32), sizeof(u32));
 	tier_stride = (cmask_size(nr_cmask_words) + 63) & ~63ULL;
@@ -1734,8 +1890,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	bpf_arena_loop_ctrs = scx_static_alloc(nr_cpus * sizeof(struct bpf_arena_loop_ctr),
 					       SCX_CACHELINE_SIZE);
 
-	if (!cid_ctxs || !all_cids || !idle_cids || !cpu_cap_in || !cpu_tier_in ||
-	    !tier_cids || !bpf_arena_loop_ctrs)
+	if (!cid_ctxs || !all_cids || !idle_cids || !queued_cids || !cpu_cap_in ||
+	    !cpu_tier_in || !tier_cids || !bpf_arena_loop_ctrs)
 		return -ENOMEM;
 
 	/*
