@@ -18,6 +18,12 @@
  */
 #define U64_MAX		((u64)~0ULL)
 #define S64_MAX		((s64)(U64_MAX >> 1))
+/*
+ * "Never" for a completion-time estimate: far above any real value, so it
+ * never wins a comparison, yet far below U64_MAX, so a caller can add a
+ * residual to it without wrapping. Positive as s64 as well.
+ */
+#define LAVD_COMP_TIME_INF	(U64_MAX >> 2)
 #define U32_MAX		((u32)~0U)
 #define S32_MAX		((s32)(U32_MAX >> 1))
 
@@ -750,6 +756,10 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 		       scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdomc->id)) ||
 	       cpdomc->nr_steady_cpus == 0;
 }
+
+u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
+		   u64 nr_cpus);
+u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc);
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
 bool is_cpu_congested(struct cpu_ctx *cpuc);
