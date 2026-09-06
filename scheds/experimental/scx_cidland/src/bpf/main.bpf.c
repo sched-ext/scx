@@ -824,26 +824,99 @@ static s32 idle_faster_cid(s32 cid)
 }
 
 /*
+ * Weight of a nice 0 task on the kernel's own scale, NICE_0_LOAD after
+ * scale_load_down(), which is what calc_delta_fair() divides by.
+ */
+#define NICE_0_WEIGHT	1024
+
+/*
+ * The kernel's nice-to-weight table, sched_prio_to_weight[], indexed by
+ * @p->static_prio - MAX_RT_PRIO. Each step of nice is worth about 1.25x.
+ */
+#define MAX_RT_PRIO	100
+#define WEIGHT_IDLEPRIO	3
+#define SCHED_IDLE	5
+
+static const u32 prio_to_weight[40] = {
+ /* -20 */	88761,	71755,	56483,	46273,	36291,
+ /* -15 */	29154,	23254,	18705,	14949,	11916,
+ /* -10 */	 9548,	 7620,	 6100,	 4904,	 3906,
+ /*  -5 */	 3121,	 2501,	 1991,	 1586,	 1277,
+ /*   0 */	 1024,	  820,	  655,	  526,	  423,
+ /*   5 */	  335,	  272,	  215,	  172,	  137,
+ /*  10 */	  110,	   87,	   70,	   56,	   45,
+ /*  15 */	   36,	   29,	   23,	   18,	   15,
+};
+
+/*
+ * Return the weight the kernel gives @p, on the kernel's own scale.
+ *
+ * Not @p->scx.weight: that is this weight put through
+ * sched_weight_to_cgroup(),
+ *
+ *	clamp(DIV_ROUND_CLOSEST(weight * 100, 1024), 1, 10000)
+ *
+ * which is coarse at the light end. A nice 19 task weighs 15, that is 1.46
+ * on the cgroup scale, and comes out as 1. Charging the vruntime against
+ * that makes it pay 100x the service it used where calc_delta_fair()
+ * charges 1024/15 = 68x, so it waits half again as long as EEVDF asks
+ * before its pack catches up - long enough, under a deep backlog, to turn
+ * a fair-share wait into an ops.timeout_ms stall. SCHED_IDLE fares worse:
+ * its weight of 3 rounds to 0 and is clamped back up to 1, so it is
+ * charged the same as nice 19.
+ *
+ * @p->se.load.weight is not the answer either, even though set_load_weight()
+ * fills it from this same table: for a task in the sched_ext class the
+ * store goes through reweight_task_scx(), which derives @p->scx.weight from
+ * the new load weight and drops it, leaving @p->se.load holding whatever
+ * the fair class last left there. Go back to the table.
+ */
+static u64 task_weight(const struct task_struct *p)
+{
+	u32 idx;
+
+	if (p->policy == SCHED_IDLE)
+		return WEIGHT_IDLEPRIO;
+
+	idx = p->static_prio - MAX_RT_PRIO;
+	if (idx >= ARRAY_SIZE(prio_to_weight))
+		return NICE_0_WEIGHT;
+
+	return prio_to_weight[idx];
+}
+
+/*
+ * Charge @delta of service to a task of @p's weight, the way
+ * calc_delta_fair() does:
+ *
+ *	delta_fair = delta * NICE_0_LOAD / se->load.weight
+ */
+static u64 calc_delta_fair(const struct task_struct *p, u64 delta)
+{
+	return delta * NICE_0_WEIGHT / task_weight(p);
+}
+
+/*
  * Floor on the weight used to stretch the request and the lag bound.
  *
- * The scx weight of a nice 19 task is 1, so its request would be a hundred
- * times the base slice and the lag it can carry two hundred times: under
- * a deep backlog V takes many seconds to cover that, well past the
- * watchdog. The vruntime is still charged with the real weight, so the
- * share is what nice asks for; only how far ahead the deadline and the lag
- * can stretch is capped, which update_deadline() itself notes is "probably
- * good enough".
+ * A nice 19 task has a weight of 15, so its request would be sixty eight
+ * times the base slice and the lag it can carry a hundred and thirty six
+ * times: under a deep backlog V takes many seconds to cover that, well
+ * past the watchdog. The vruntime is still charged with the real weight,
+ * so the share is what nice asks for; only how far ahead the deadline and
+ * the lag can stretch is capped, which update_deadline() itself notes is
+ * "probably good enough".
  */
-#define MIN_DL_WEIGHT	25
+#define MIN_DL_WEIGHT	(NICE_0_WEIGHT / 4)
 
 static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
 {
-	u64 weight = p->scx.weight;
+	u64 weight = task_weight(p);
 
 	if (weight < MIN_DL_WEIGHT)
 		weight = MIN_DL_WEIGHT;
 
-	return value * 100 / weight;
+	return value * NICE_0_WEIGHT / weight;
 }
 
 /*
@@ -1002,7 +1075,7 @@ static void vref_join(s32 cid, const struct task_struct *p, struct task_ctx *tct
 		return;
 	cctx = cid_ctx(cid);
 
-	tctx->vjoin_w = p->scx.weight;
+	tctx->vjoin_w = task_weight(p);
 	tctx->vjoin_v = tctx->vruntime >> VREF_SHIFT;
 	tctx->vcid = cid;
 	__sync_fetch_and_add(&cctx->vsum_w, tctx->vjoin_w);
@@ -1533,7 +1606,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 
 	TOUCH_ARENA();
 
-	__sync_fetch_and_sub(&sum_weight, p->scx.weight);
+	__sync_fetch_and_sub(&sum_weight, task_weight(p));
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1568,7 +1641,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 	TOUCH_ARENA();
 
-	__sync_fetch_and_add(&sum_weight, p->scx.weight);
+	__sync_fetch_and_add(&sum_weight, task_weight(p));
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1669,7 +1742,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 *
 	 *	se->vruntime += calc_delta_fair(delta_exec, se);
 	 */
-	tctx->vruntime += scale_by_task_weight_inverse(p, slice);
+	tctx->vruntime += calc_delta_fair(p, slice);
 	vref_charge(tctx);
 
 	/*
@@ -1700,7 +1773,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	weight = sum_weight;
 	if (weight && cid_valid(cid)) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
-		u64 acc = slice * 100 + cctx->vtime_rem;
+		u64 acc = slice * NICE_0_WEIGHT + cctx->vtime_rem;
 		u64 delta = acc / weight;
 
 		cctx->vtime_rem = acc - delta * weight;
