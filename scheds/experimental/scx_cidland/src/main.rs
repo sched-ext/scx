@@ -129,7 +129,7 @@ struct Opts {
     disable_cpufreq: bool,
 
     /// Disable SMT.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
+    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
     /// Report every CPU at the same capacity, collapsing the capacity tiers.
@@ -139,7 +139,7 @@ struct Opts {
     /// tiers. The kernel's own cpu_capacity is uniform on those machines, so
     /// fair.c has no fast-core preference on the wakeup path. This makes cidland
     /// see what fair.c sees, for comparing the placement decisions of the two.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
+    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
     uniform_capacity: bool,
 
     /// Disable direct dispatch during synchronous wakeups.
