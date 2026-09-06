@@ -826,8 +826,13 @@ static __always_inline void account_queued_load(task_ctx *taskc,
 	 * changes between enqueue and dequeue.
 	 */
 	u32 load = task_load_metric(taskc);
-	__sync_fetch_and_add(&get_cpdom_ctx(cpdom_id)->qload_invr, load);
+	u64 svc = taskc->avg_runtime_invr;
+	struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
+
+	__sync_fetch_and_add(&cpdomc->qload_invr, load);
+	__sync_fetch_and_add(&cpdomc->qload_svc_invr, svc);
 	taskc->queued_load_snapshot = load;
+	taskc->queued_svc_snapshot = svc;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, cpdom_id);
 }
 
@@ -841,20 +846,27 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 
 	cpdomc = get_cpdom_ctx(cpdom_id);
 	__sync_fetch_and_sub(&cpdomc->qload_invr, taskc->queued_load_snapshot);
+	__sync_fetch_and_sub(&cpdomc->qload_svc_invr, taskc->queued_svc_snapshot);
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
 static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 						     s32 primary_cpu)
 {
+	struct cpu_ctx *cpuc;
 	u32 load;
+	u64 svc;
 
 	if (READ_ONCE(taskc->queued_on_cid) >= 0)
 		return;
 
 	load = task_load_metric(taskc);
-	__sync_fetch_and_add(&get_cpu_ctx_id(primary_cpu)->qload_invr, load);
+	svc = taskc->avg_runtime_invr;
+	cpuc = get_cpu_ctx_id(primary_cpu);
+	__sync_fetch_and_add(&cpuc->qload_invr, load);
+	__sync_fetch_and_add(&cpuc->qload_svc_invr, svc);
 	taskc->queued_load_snapshot_cpu = load;
+	taskc->queued_svc_snapshot_cpu = svc;
 	WRITE_ONCE(taskc->queued_on_cid, (s16)primary_cpu);
 }
 
@@ -868,6 +880,7 @@ static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
 
 	cpuc = get_cpu_ctx_id(primary_cpu);
 	__sync_fetch_and_sub(&cpuc->qload_invr, taskc->queued_load_snapshot_cpu);
+	__sync_fetch_and_sub(&cpuc->qload_svc_invr, taskc->queued_svc_snapshot_cpu);
 	WRITE_ONCE(taskc->queued_on_cid, -1);
 }
 
@@ -2587,6 +2600,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->lat_cri = 0;
 		cpuc->running_clk = 0;
 		cpuc->qload_invr = 0;
+		cpuc->qload_svc_invr = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->is_online = cmask_test(cpu, online);
 		kernel_cpu = cpuc->kernel_cpu;
