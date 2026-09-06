@@ -165,6 +165,7 @@ enum consts_flags {
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
 	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
 	LAVD_FLAG_WARM_CPU		= (0x1 << 17), /* wait on the previous CPU: enqueue on its per-CPU DSQ */
+	LAVD_FLAG_QUEUED_ON_LOCAL	= (0x1 << 18), /* this task is queued on a local DSQ, so its service time is in qload_svc_local_invr too */
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
@@ -251,7 +252,9 @@ struct task_ctx {
 	u32	cpu_id;			/* where a task is running now */
 	u32	prev_cpu_id;		/* where a task ran last time */
 	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
-	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
+	s16	queued_on_cpu_id;	/* logical CPU id this task was queued on; the per-core
+					   counters are charged to its primary sibling, the
+					   local-DSQ counter to the CPU itself; -1 = not queued */
 	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	u64	queued_svc_snapshot;	/* avg_runtime_invr snapshotted at enqueue time for the per-cpdom counter */
@@ -581,7 +584,17 @@ struct cpu_ctx {
 	 */
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
 	u64	qload_svc_invr;		/* queued service time: sum of avg_runtime_invr,
-					   same write pattern as qload_invr above */
+					   inclusive of this core's per-CPU DSQ and the
+					   local DSQs of both SMT siblings. Charged to the
+					   primary sibling, which is where the per-CPU DSQ
+					   lives; same write pattern as qload_invr */
+	u64	qload_svc_local_invr;	/* this logical CPU's own local DSQ, charged to the
+					   CPU itself rather than its primary sibling -- a
+					   local DSQ has exactly one drainer.
+					   Misses a task moved straight to the local
+					   DSQ by consume_dsq(), which has no taskc
+					   to charge; bounded by one task, for the
+					   dispatch-to-running window */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
@@ -761,6 +774,7 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
 		   u64 nr_cpus);
 u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc);
+u64 calc_comp_time_on_local(u64 task_svc_invr, struct cpu_ctx *cpuc);
 u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc);
 
 /*

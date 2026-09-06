@@ -765,14 +765,27 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
+/*
+ * @cpu is the logical CPU the task was queued on. The per-core counters are
+ * charged to its primary sibling, which is where the per-CPU DSQ lives and
+ * where calc_comp_time_on_cpu() reads them.
+ *
+ * @on_local says the task went to @cpu's local DSQ rather than the per-CPU
+ * DSQ. That charge goes to @cpu itself: a local DSQ is drained by one thread
+ * only, and calc_comp_time_on_local() prices it against that thread's
+ * capacity alone. qload_svc_invr stays inclusive of both, so every estimator
+ * can ask one field for "work queued at this level or below".
+ */
 static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
-						     s32 primary_cpu)
+						     s32 cpu,
+						     bool on_local)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx *cpuc, *primary_cpuc;
+	u32 primary_cpu;
 	u32 load;
 	u64 svc;
 
-	if (primary_cpu < 0 || primary_cpu >= LAVD_CPU_ID_MAX)
+	if (cpu < 0 || cpu >= LAVD_CPU_ID_MAX)
 		return;
 
 	if (READ_ONCE(taskc->queued_on_cpu_id) >= 0)
@@ -780,31 +793,54 @@ static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 
 	load = task_load_metric(taskc);
 	svc = taskc->avg_runtime_invr;
-	cpuc = get_cpu_ctx_id(primary_cpu);
-	if (cpuc) {
-		__sync_fetch_and_add(&cpuc->qload_invr, load);
-		__sync_fetch_and_add(&cpuc->qload_svc_invr, svc);
+
+	primary_cpu = get_primary_cpu(cpu);
+	primary_cpuc = get_cpu_ctx_id(primary_cpu);
+	if (primary_cpuc) {
+		__sync_fetch_and_add(&primary_cpuc->qload_invr, load);
+		__sync_fetch_and_add(&primary_cpuc->qload_svc_invr, svc);
 	}
+
+	if (on_local) {
+		cpuc = (primary_cpu == (u32)cpu) ?
+			primary_cpuc : get_cpu_ctx_id(cpu);
+		if (cpuc)
+			__sync_fetch_and_add(&cpuc->qload_svc_local_invr, svc);
+		set_task_flag(taskc, LAVD_FLAG_QUEUED_ON_LOCAL);
+	}
+
 	taskc->queued_load_snapshot_cpu = load;
 	taskc->queued_svc_snapshot_cpu = svc;
-	WRITE_ONCE(taskc->queued_on_cpu_id, (s16)primary_cpu);
+	WRITE_ONCE(taskc->queued_on_cpu_id, (s16)cpu);
 }
 
 static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
 {
-	struct cpu_ctx *cpuc;
-	s16 primary_cpu = READ_ONCE(taskc->queued_on_cpu_id);
+	struct cpu_ctx *cpuc, *primary_cpuc;
+	s16 cpu = READ_ONCE(taskc->queued_on_cpu_id);
+	u32 primary_cpu;
 
-	if (primary_cpu < 0)
+	if (cpu < 0)
 		return;
 
-	cpuc = get_cpu_ctx_id(primary_cpu);
-	if (cpuc) {
-		__sync_fetch_and_sub(&cpuc->qload_invr,
+	primary_cpu = get_primary_cpu(cpu);
+	primary_cpuc = get_cpu_ctx_id(primary_cpu);
+	if (primary_cpuc) {
+		__sync_fetch_and_sub(&primary_cpuc->qload_invr,
 				     taskc->queued_load_snapshot_cpu);
-		__sync_fetch_and_sub(&cpuc->qload_svc_invr,
+		__sync_fetch_and_sub(&primary_cpuc->qload_svc_invr,
 				     taskc->queued_svc_snapshot_cpu);
 	}
+
+	if (test_task_flag(taskc, LAVD_FLAG_QUEUED_ON_LOCAL)) {
+		cpuc = (primary_cpu == (u32)cpu) ?
+			primary_cpuc : get_cpu_ctx_id(cpu);
+		if (cpuc)
+			__sync_fetch_and_sub(&cpuc->qload_svc_local_invr,
+					     taskc->queued_svc_snapshot_cpu);
+		reset_task_flag(taskc, LAVD_FLAG_QUEUED_ON_LOCAL);
+	}
+
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 }
 
@@ -920,7 +956,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			scx_bpf_task_set_slice(p, sys_stat.slice_wall);
 			account_queued_load(ictx.taskc, cpuc->cpdom_id);
 			account_queued_load_pcpu(ictx.taskc,
-						 get_primary_cpu(cpuc->cpu_id));
+						 cpuc->cpu_id, true);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			goto out;
 		}
@@ -1121,7 +1157,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		reset_task_flag(taskc, LAVD_FLAG_WARM_CPU);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
-		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));
+		account_queued_load_pcpu(taskc, cpu, true);
 	} else if (test_task_flag(taskc, LAVD_FLAG_WARM_CPU)) {
 		/*
 		 * Only queue on per core DSQ to ensure task doesn't
@@ -1130,13 +1166,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		reset_task_flag(taskc, LAVD_FLAG_WARM_CPU);
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
-		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));
+		account_queued_load_pcpu(taskc, cpu, false);
 	} else {
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 		if (dsq_type(dsq_id) == LAVD_DSQ_TYPE_CPU)
-			account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
+			account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id),
+						 false);
 	}
 	account_queued_load(taskc, cpuc->cpdom_id);
 
@@ -1249,7 +1286,7 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 	account_queued_load(taskc, cpuc->cpdom_id);
 	if (dsq_type(dsq_id) == LAVD_DSQ_TYPE_CPU)
-		account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
+		account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id), false);
 
 	/*
 	 * Kick the target CPU if it is idle. Test-and-clear avoids
@@ -2538,6 +2575,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->running_clk = 0;
 		cpuc->qload_invr = 0;
 		cpuc->qload_svc_invr = 0;
+		cpuc->qload_svc_local_invr = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->max_capacity = cpu_capacity[cpu];
