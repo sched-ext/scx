@@ -215,7 +215,5 @@ static inline dsq_id_t get_subcell_llc_dsq_id(u32 cell, u32 subcell, u32 llc)
 	if (packed_subcell < 0)
 		return DSQ_INVALID;
 
-	return (dsq_id_t){ .subcell_llc_dsq = { .llc = llc,
-						.subcell = packed_subcell,
-						.type = DSQ_TYPE_SUBCELL_LLC } };
+	return (dsq_id_t){ .subcell_llc_dsq = { .llc = llc, .subcell = packed_subcell, .type = DSQ_TYPE_SUBCELL_LLC } };
 }

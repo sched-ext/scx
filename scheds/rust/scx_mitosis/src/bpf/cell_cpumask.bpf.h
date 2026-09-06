@@ -127,8 +127,7 @@ static inline int subcell_cpumask_idx(u32 cell_id, u32 subcell_id)
 	return (cell_id * MAX_SUBCELLS_PER_CELL) + subcell_id;
 }
 
-static inline struct cell_cpumask_wrapper *lookup_subcell_cpumask_wrapper(u32 cell_id,
-									  u32 subcell_id)
+static inline struct cell_cpumask_wrapper *lookup_subcell_cpumask_wrapper(u32 cell_id, u32 subcell_id)
 {
 	int idx;
 	u32 key;
@@ -136,16 +135,14 @@ static inline struct cell_cpumask_wrapper *lookup_subcell_cpumask_wrapper(u32 ce
 
 	idx = subcell_cpumask_idx(cell_id, subcell_id);
 	if (idx < 0) {
-		scx_bpf_error("invalid subcell cpumask index cell=%u subcell=%u", cell_id,
-			      subcell_id);
+		scx_bpf_error("invalid subcell cpumask index cell=%u subcell=%u", cell_id, subcell_id);
 		return NULL;
 	}
 
 	key = idx;
 	cpumaskw = bpf_map_lookup_elem(&subcell_cpumasks, &key);
 	if (!cpumaskw)
-		scx_bpf_error("no subcell cpumask wrapper for cell=%u subcell=%u", cell_id,
-			      subcell_id);
+		scx_bpf_error("no subcell cpumask wrapper for cell=%u subcell=%u", cell_id, subcell_id);
 
 	return cpumaskw;
 }
@@ -161,8 +158,7 @@ static inline const struct cpumask *lookup_subcell_cpumask(u32 cell_id, u32 subc
 
 	cpumask = (const struct cpumask *)cpumaskw->primary.cpumask;
 	if (!cpumask)
-		scx_bpf_error("subcell cpumask is NULL for cell=%u subcell=%u", cell_id,
-			      subcell_id);
+		scx_bpf_error("subcell cpumask is NULL for cell=%u subcell=%u", cell_id, subcell_id);
 
 	return cpumask;
 }
@@ -178,15 +174,13 @@ static inline const struct cpumask *lookup_subcell_borrowable_cpumask(u32 cell_i
 
 	cpumask = (const struct cpumask *)cpumaskw->borrowable.cpumask;
 	if (!cpumask)
-		scx_bpf_error("subcell borrowable cpumask is NULL for cell=%u subcell=%u", cell_id,
-			      subcell_id);
+		scx_bpf_error("subcell borrowable cpumask is NULL for cell=%u subcell=%u", cell_id, subcell_id);
 
 	return cpumask;
 }
 
 /* Return whether @cpu is set in serialized cell_cpumask_data. */
-static inline int cell_cpumask_data_test_cpu(const struct cell_cpumask_data *data, u32 cpu,
-					     bool *setp)
+static inline int cell_cpumask_data_test_cpu(const struct cell_cpumask_data *data, u32 cpu, bool *setp)
 {
 	u32 byte_idx = cpu / 8;
 	u32 bit_idx = cpu % 8;
@@ -201,8 +195,7 @@ static inline int cell_cpumask_data_test_cpu(const struct cell_cpumask_data *dat
 }
 
 /* Copy serialized cell_cpumask_data into the destination bpf_cpumask. */
-static inline int build_cpumask_from_data(struct bpf_cpumask *dst,
-					  const struct cell_cpumask_data *data)
+static inline int build_cpumask_from_data(struct bpf_cpumask *dst, const struct cell_cpumask_data *data)
 {
 	u32 cpu;
 
@@ -244,8 +237,7 @@ static inline struct bpf_cpumask *get_tmp_cpumask(struct cell_cpumask_pair *slot
  * no_free_ptr(*next_cpumaskp), so on return the caller's variable is NULL.
  * The previously published mask is recycled back into tmp_cpumask for reuse.
  */
-static inline int publish_prepared_cpumask(struct cell_cpumask_pair *slot,
-					   struct bpf_cpumask **next_cpumaskp)
+static inline int publish_prepared_cpumask(struct cell_cpumask_pair *slot, struct bpf_cpumask **next_cpumaskp)
 {
 	struct bpf_cpumask *prev_cpumask;
 	struct bpf_cpumask *stale __free(bpf_cpumask) = NULL;
@@ -267,8 +259,7 @@ static inline int publish_prepared_cpumask(struct cell_cpumask_pair *slot,
  * This is the common path used by userspace-managed reconfiguration code once
  * the caller has decided which pair to update.
  */
-static inline int set_cpumask_from_data(struct cell_cpumask_pair *slot,
-					const struct cell_cpumask_data *data)
+static inline int set_cpumask_from_data(struct cell_cpumask_pair *slot, const struct cell_cpumask_data *data)
 {
 	struct bpf_cpumask *next_cpumask __free(bpf_cpumask) = get_tmp_cpumask(slot);
 
