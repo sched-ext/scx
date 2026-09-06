@@ -43,6 +43,8 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u64 slice_ns;
 /* Debt a task may carry over its domain clock at enqueue, in slices. */
 #define VTIME_DEBT_CAP_SLICES 16
+/* Longest the per-CPU DSQ may go unserved while non-empty, in slices. */
+#define PINNED_MAX_WAIT_SLICES 8
 const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool reject_multicpu_pinning = false;
@@ -873,6 +875,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = basis_vtime - slice_ns;
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
+	if (!tctx->all_cell_cpus_allowed && !READ_ONCE(cctx->pinned_waiting_since))
+		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 
 	/*
 	 * Account after insertion: subcell reconfiguration can orphan the selected
@@ -896,6 +900,13 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Kick the CPU if needed */
 	if ((!__COMPAT_is_enq_cpu_selected(enq_flags) || (enq_flags & SCX_ENQ_LAST)) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+static __always_inline bool pinned_dsq_overdue(struct cpu_ctx *cctx)
+{
+	u64 since = READ_ONCE(cctx->pinned_waiting_since);
+
+	return since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
@@ -948,12 +959,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		found = true;
 	}
 
-	/* Peek at CPU DSQ head, prefer if lower vtime */
+	/*
+	 * Peek at CPU DSQ head, prefer if lower vtime. Under a deep subcell
+	 * backlog the pinned head can lose every comparison for a full round
+	 * of the queue, so also bound how long the per-CPU DSQ goes unserved.
+	 */
 	p = dsq_peek(cpu_dsq.raw);
-	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
-		min_vtime = p->scx.dsq_vtime;
-		min_vtime_dsq = cpu_dsq;
-		found = true;
+	if (p) {
+		bool overdue = pinned_dsq_overdue(cctx);
+
+		if (!found || overdue || time_before(p->scx.dsq_vtime, min_vtime)) {
+			min_vtime = p->scx.dsq_vtime;
+			min_vtime_dsq = cpu_dsq;
+			found = true;
+		}
+	} else {
+		WRITE_ONCE(cctx->pinned_waiting_since, 0);
 	}
 
 	/* If we failed to find an eligible task, try the sibling LLC DSQs. */
@@ -997,6 +1018,12 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* Try the winner first */
 	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		/*
+		 * Served the per-CPU DSQ: restart its wait clock. If it is now
+		 * empty the next dispatch's peek clears it.
+		 */
+		if (min_vtime_dsq.raw == cpu_dsq.raw)
+			WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 		if (enable_llc_awareness && min_vtime_dsq.raw == subcell_dsq.raw) {
 			struct subcell *subcell = lookup_subcell(cell, subcell_id);
 
