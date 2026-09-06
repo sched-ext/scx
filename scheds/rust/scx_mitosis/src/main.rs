@@ -67,6 +67,8 @@ const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const MAX_SUBCELLS_PER_CELL: usize = bpf_intf::consts_MAX_SUBCELLS_PER_CELL as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 const SHARE_SIBLING_SUBCELL_CPUS: bool = true;
+/// Fixed-point 1.0 of the per-task demand accumulated by BPF.
+const DEMAND_ONE: f64 = (1u64 << bpf_intf::consts_DEMAND_SHIFT) as f64;
 /// Epoll token for inotify events (cgroup creation/destruction)
 const INOTIFY_TOKEN: u64 = 1;
 /// Epoll token for stats request wakeups
@@ -321,6 +323,11 @@ struct Scheduler<'a> {
     prev_cell_running_ns: [u64; MAX_CELLS],
     prev_cell_own_ns: [u64; MAX_CELLS],
     prev_cell_lent_ns: [u64; MAX_CELLS],
+    prev_subcell_running_ns: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+    prev_subcell_own_ns: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+    prev_subcell_lent_ns: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+    prev_subcell_queued_ns: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+    prev_subcell_demand_sum: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
@@ -346,6 +353,12 @@ struct Scheduler<'a> {
     demand_smoothing: f64,
     /// EWMA-smoothed utilization per cell
     smoothed_util: [f64; MAX_CELLS],
+    /// EWMA-smoothed utilization per subcell
+    smoothed_subcell_util: [[f64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+    /// EWMA-smoothed load (average runnable tasks) per subcell
+    smoothed_subcell_load: [[f64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+    /// EWMA-smoothed demand (CPUs) per subcell
+    smoothed_subcell_demand: [[f64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
     /// Last time rebalancing was performed
     last_rebalance: Instant,
     /// Number of rebalancing events
@@ -565,6 +578,11 @@ impl<'a> Scheduler<'a> {
             prev_cell_running_ns: [0; MAX_CELLS],
             prev_cell_own_ns: [0; MAX_CELLS],
             prev_cell_lent_ns: [0; MAX_CELLS],
+            prev_subcell_running_ns: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+            prev_subcell_own_ns: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+            prev_subcell_lent_ns: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+            prev_subcell_queued_ns: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+            prev_subcell_demand_sum: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
@@ -579,6 +597,9 @@ impl<'a> Scheduler<'a> {
             rebalance_cooldown: Duration::from_secs(opts.rebalance_cooldown_s),
             demand_smoothing: opts.demand_smoothing,
             smoothed_util: [0.0; MAX_CELLS],
+            smoothed_subcell_util: [[0.0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+            smoothed_subcell_load: [[0.0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
+            smoothed_subcell_demand: [[0.0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
             last_rebalance: Instant::now(),
             rebalance_count: 0,
             epoll,
@@ -773,6 +794,9 @@ impl<'a> Scheduler<'a> {
         // leak if the cell ID is reused later.
         for &cell_id in &destroyed_cell_ids {
             self.smoothed_util[cell_id as usize] = 0.0;
+            self.smoothed_subcell_util[cell_id as usize] = [0.0; MAX_SUBCELLS_PER_CELL];
+            self.smoothed_subcell_load[cell_id as usize] = [0.0; MAX_SUBCELLS_PER_CELL];
+            self.smoothed_subcell_demand[cell_id as usize] = [0.0; MAX_SUBCELLS_PER_CELL];
         }
 
         let cpu_assignments = self
@@ -1602,6 +1626,8 @@ impl<'a> Scheduler<'a> {
 
         self.collect_demand_metrics(&cpu_ctxs)
             .context("collecting demand metrics")?;
+        self.collect_subcell_demand_metrics(&cpu_ctxs)
+            .context("collecting subcell demand metrics")?;
 
         for (cell_id, cell) in &self.cells {
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
@@ -1616,6 +1642,13 @@ impl<'a> Scheduler<'a> {
                 .and_modify(|cell_metrics| {
                     cell_metrics.num_cpus = cell.cpus.weight() as u32;
                     cell_metrics.cgroup_path = cgroup_path;
+                    for subcell in &cell.subcells {
+                        cell_metrics
+                            .subcells
+                            .entry(subcell.id)
+                            .or_default()
+                            .update_name_and_cpus(&subcell.name, subcell.primary.weight() as u32);
+                    }
                 });
         }
         self.metrics.num_cells = self.cells.len() as u32;
@@ -1751,6 +1784,155 @@ impl<'a> Scheduler<'a> {
 
         self.metrics
             .update_demand(global_util_pct, global_borrow_pct, global_lent_pct);
+
+        Ok(())
+    }
+
+    /// Compute per-subcell demand metrics from BPF running_ns counters.
+    fn collect_subcell_demand_metrics(&mut self, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Result<()> {
+        let mut total_running_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
+        let mut on_own_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
+        let mut lent_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
+        let mut queued_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
+        let mut demand_sum = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
+        let active_subcells: HashMap<(usize, usize), (usize, String)> = self
+            .cells
+            .iter()
+            .flat_map(|(&cell_id, cell)| {
+                cell.subcells.iter().map(move |subcell| {
+                    (
+                        (cell_id as usize, subcell.id as usize),
+                        (subcell.primary.weight(), subcell.name.clone()),
+                    )
+                })
+            })
+            .collect();
+        let subcell_accounts = read_subcell_accounts(&self.skel, active_subcells.keys().copied())
+            .context("reading subcell accounts")?;
+
+        for (cpu, cpu_ctx) in cpu_ctxs.iter().enumerate() {
+            let owner_cell = cpu_ctx.cell as usize;
+            let owner_subcell = cpu_ctx.subcell as usize;
+            if owner_cell >= MAX_CELLS || owner_subcell >= MAX_SUBCELLS_PER_CELL {
+                bail!(
+                    "CPU has invalid subcell assignment {}:{} (max {}:{})",
+                    owner_cell,
+                    owner_subcell,
+                    MAX_CELLS,
+                    MAX_SUBCELLS_PER_CELL
+                );
+            }
+
+            let mut total_on_cpu = 0u64;
+            for (&(cell, subcell), per_cpu_accounts) in &subcell_accounts {
+                let ns = per_cpu_accounts[cpu].running_ns;
+                total_running_ns[cell][subcell] =
+                    total_running_ns[cell][subcell].saturating_add(ns);
+                queued_ns[cell][subcell] =
+                    queued_ns[cell][subcell].saturating_add(per_cpu_accounts[cpu].queued_ns);
+                demand_sum[cell][subcell] =
+                    demand_sum[cell][subcell].wrapping_add(per_cpu_accounts[cpu].demand_sum);
+                total_on_cpu = total_on_cpu.saturating_add(ns);
+                if owner_cell == cell && owner_subcell == subcell {
+                    on_own_ns[cell][subcell] = on_own_ns[cell][subcell].saturating_add(ns);
+                }
+            }
+
+            let owner_on_cpu = subcell_accounts
+                .get(&(owner_cell, owner_subcell))
+                .map_or(0, |per_cpu_accounts| per_cpu_accounts[cpu].running_ns);
+            lent_ns[owner_cell][owner_subcell] = lent_ns[owner_cell][owner_subcell]
+                .saturating_add(total_on_cpu.saturating_sub(owner_on_cpu));
+        }
+
+        let interval_ns = self.monitor_interval.as_nanos() as u64;
+
+        for cell in 0..MAX_CELLS {
+            for subcell in 0..MAX_SUBCELLS_PER_CELL {
+                let delta_running = total_running_ns[cell][subcell]
+                    .saturating_sub(self.prev_subcell_running_ns[cell][subcell]);
+                let delta_on_own = on_own_ns[cell][subcell]
+                    .saturating_sub(self.prev_subcell_own_ns[cell][subcell]);
+                let delta_lent =
+                    lent_ns[cell][subcell].saturating_sub(self.prev_subcell_lent_ns[cell][subcell]);
+                let delta_queued = queued_ns[cell][subcell]
+                    .saturating_sub(self.prev_subcell_queued_ns[cell][subcell]);
+                // The demand sum is allowed to wrap; a wrapping delta stays exact.
+                let delta_demand = demand_sum[cell][subcell]
+                    .wrapping_sub(self.prev_subcell_demand_sum[cell][subcell]);
+
+                self.prev_subcell_running_ns[cell][subcell] = total_running_ns[cell][subcell];
+                self.prev_subcell_own_ns[cell][subcell] = on_own_ns[cell][subcell];
+                self.prev_subcell_lent_ns[cell][subcell] = lent_ns[cell][subcell];
+                self.prev_subcell_queued_ns[cell][subcell] = queued_ns[cell][subcell];
+                self.prev_subcell_demand_sum[cell][subcell] = demand_sum[cell][subcell];
+
+                if delta_running == 0 && delta_lent == 0 && delta_queued == 0 && delta_demand == 0 {
+                    continue;
+                }
+
+                let Some((nr_cpus, name)) = active_subcells.get(&(cell, subcell)) else {
+                    continue;
+                };
+                if *nr_cpus == 0 {
+                    // Transitional: the applied masks have not been read back
+                    // yet. Skip the sample but keep the smoothed history.
+                    continue;
+                }
+
+                let capacity = (*nr_cpus as u64) * interval_ns;
+                let delta_borrowed = delta_running.saturating_sub(delta_on_own);
+                let util_pct = 100.0 * (delta_running as f64) / (capacity as f64);
+                let demand_borrow_pct = if delta_running > 0 {
+                    100.0 * (delta_borrowed as f64) / (delta_running as f64)
+                } else {
+                    0.0
+                };
+                let lent_pct = 100.0 * (delta_lent as f64) / (capacity as f64);
+                // Time-averaged runnable task count: running plus queued time
+                // over the interval. Unlike util_pct it is not bounded by the
+                // subcell's current capacity.
+                let load = delta_running.saturating_add(delta_queued) as f64 / interval_ns as f64;
+                // Sum of the tasks' unconstrained demand, in CPUs.
+                let demand = delta_demand as f64 / (DEMAND_ONE * interval_ns as f64);
+
+                if self.enable_rebalancing {
+                    self.smoothed_subcell_util[cell][subcell] = self.demand_smoothing * util_pct
+                        + (1.0 - self.demand_smoothing) * self.smoothed_subcell_util[cell][subcell];
+                    self.smoothed_subcell_load[cell][subcell] = self.demand_smoothing * load
+                        + (1.0 - self.demand_smoothing) * self.smoothed_subcell_load[cell][subcell];
+                    self.smoothed_subcell_demand[cell][subcell] = self.demand_smoothing * demand
+                        + (1.0 - self.demand_smoothing)
+                            * self.smoothed_subcell_demand[cell][subcell];
+                }
+
+                let subcell_metrics = self
+                    .metrics
+                    .cells
+                    .entry(cell as u32)
+                    .or_default()
+                    .subcells
+                    .entry(subcell as u32)
+                    .or_default();
+                subcell_metrics.update_demand(
+                    util_pct,
+                    demand_borrow_pct,
+                    lent_pct,
+                    delta_running,
+                    delta_borrowed,
+                    delta_lent,
+                    delta_queued,
+                    load,
+                    demand,
+                );
+                subcell_metrics.update_name_and_cpus(name, *nr_cpus as u32);
+                if self.enable_rebalancing {
+                    subcell_metrics.smoothed_util_pct = self.smoothed_subcell_util[cell][subcell];
+                    subcell_metrics.smoothed_load = self.smoothed_subcell_load[cell][subcell];
+                    subcell_metrics.smoothed_demand = self.smoothed_subcell_demand[cell][subcell];
+                }
+            }
+        }
 
         Ok(())
     }
@@ -2147,6 +2329,65 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         });
     }
     Ok(cpu_ctxs)
+}
+
+/// Read the per-CPU accounting slots of `active_subcells` from BPF.
+fn read_subcell_accounts<I>(
+    skel: &BpfSkel,
+    active_subcells: I,
+) -> Result<HashMap<(usize, usize), Vec<bpf_intf::subcell_account>>>
+where
+    I: IntoIterator<Item = (usize, usize)>,
+{
+    let mut accounts_by_subcell = HashMap::new();
+
+    for (cell, subcell) in active_subcells {
+        if cell >= MAX_CELLS || subcell >= MAX_SUBCELLS_PER_CELL {
+            bail!(
+                "Invalid subcell account key {}:{} (max {}:{})",
+                cell,
+                subcell,
+                MAX_CELLS,
+                MAX_SUBCELLS_PER_CELL
+            );
+        }
+
+        let packed = ((cell * MAX_SUBCELLS_PER_CELL) + subcell) as u32;
+        let per_cpu_values = skel
+            .maps
+            .subcell_accounts
+            .lookup_percpu(&packed.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+            .with_context(|| format!("Failed to lookup subcell_accounts key {}", packed))?
+            .with_context(|| format!("subcell_accounts key {} is missing", packed))?;
+
+        if per_cpu_values.len() < *NR_CPUS_POSSIBLE {
+            bail!(
+                "subcell_accounts returned {} entries but expected {}",
+                per_cpu_values.len(),
+                *NR_CPUS_POSSIBLE
+            );
+        }
+
+        let mut values = Vec::with_capacity(*NR_CPUS_POSSIBLE);
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let value = per_cpu_values[cpu].as_slice();
+            if value.len() < std::mem::size_of::<bpf_intf::subcell_account>() {
+                bail!(
+                    "subcell_accounts key {} cpu {} value is too small: {}",
+                    packed,
+                    cpu,
+                    value.len()
+                );
+            }
+            values.push(unsafe {
+                std::ptr::read_unaligned(value.as_ptr() as *const bpf_intf::subcell_account)
+            });
+        }
+
+        accounts_by_subcell.insert((cell, subcell), values);
+    }
+
+    Ok(accounts_by_subcell)
 }
 
 fn run(opts: Opts) -> Result<()> {
