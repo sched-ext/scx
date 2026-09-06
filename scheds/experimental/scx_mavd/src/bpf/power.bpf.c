@@ -431,6 +431,12 @@ int do_core_compaction(void)
 	}
 	sys_stat.nr_active_cpdoms = nr_active_cpdoms;
 
+	/*
+	 * The active counters just published no longer include the overflow
+	 * CPUs.
+	 */
+	WRITE_ONCE(ovrflw_counted_active, false);
+
 	return 0;
 }
 
@@ -679,6 +685,14 @@ int reinit_active_cpumask_for_performance(void)
 	 * In a symmetric system, all online CPUs belong to the active set.
 	 */
 	if (have_little_core) {
+		/*
+		 * The little CPUs below are counted as active and put in the
+		 * overflow set, the latter only to give the big CPUs priority.
+		 * Raise the flag before they enter the overflow set, so that
+		 * calc_comp_time_on_cpdom() never counts them twice;
+		 * do_core_compaction() lowers it once they no longer are.
+		 */
+		WRITE_ONCE(ovrflw_counted_active, true);
 		bpf_arena_for(cpu, 0, nr_cids) {
 			struct cpdom_ctx *cpdomc;
 

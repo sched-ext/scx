@@ -37,6 +37,8 @@ volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 volatile bool __arena_global	reinit_cpumask_for_performance;
 volatile bool __arena_global	no_preemption;
 volatile bool __arena_global	no_core_compaction;
+/* overflow CPUs also counted as active */
+volatile bool __arena_global	ovrflw_counted_active;
 volatile bool __arena_global	no_freq_scaling;
 
 const volatile bool	no_wake_sync;
