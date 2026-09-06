@@ -13,6 +13,7 @@ mod bpf_streams;
 pub use bpf_intf::*;
 
 mod cpu_order;
+use scx_utils::Topology;
 use scx_utils::init_libbpf_logging;
 mod stats;
 use std::ffi::CStr;
@@ -169,6 +170,23 @@ struct Opts {
     /// Set to 0 to disable. Set to 100 to always bypass deadline scheduling.
     #[clap(long = "lb-local-dsq-util-pct", default_value = "10", value_parser=Opts::lb_local_dsq_util_pct_range)]
     lb_local_dsq_util_pct: u8,
+
+    /// Least completion-time gain, in microseconds, that justifies migrating
+    /// a task across big and LITTLE clusters sharing an L3. When the load
+    /// balancer has classified the sticky cpdom as overloaded and it has no
+    /// idle CPU, a task is migrated to a neighbor cpdom only if its estimated
+    /// completion time there is shorter by more than this much. A smaller
+    /// difference is treated as no difference, and the task stays where its
+    /// cache is warm.
+    ///
+    /// Only meaningful on heterogeneous (big.LITTLE) systems. On a
+    /// homogeneous machine this is forced to 0, since completion-time
+    /// migration would override the cache-locality bias without a capacity
+    /// payoff.
+    ///
+    /// Default is 350. Set to 0 to disable.
+    #[clap(long = "xmig-min-gain-us", default_value = "350", value_parser=Opts::xmig_min_gain_us_range)]
+    xmig_min_gain_us: u64,
 
     /// Slice duration in microseconds to use for all tasks when pinned tasks
     /// are running on a CPU. Must be between slice-min-us and slice-max-us.
@@ -410,6 +428,31 @@ impl Opts {
             self.no_core_compaction = false;
         }
 
+        // Completion-time migration only says anything where cpdoms differ in
+        // capacity. On a homogeneous machine both estimates come out nearly
+        // equal, so the check would migrate on queue-depth noise and override
+        // the cache-locality bias with no capacity payoff. Zero the option
+        // itself, not just what is handed to BPF, so the options logged below
+        // describe what the scheduler will actually do.
+        if self.xmig_min_gain_us > 0 {
+            let topo = match self.topology.as_ref() {
+                Some(args) => Topology::with_args(args),
+                None => Topology::new(),
+            };
+            match topo {
+                Ok(topo) if !topo.has_little_cores() => {
+                    info!("Completion-time migration is disabled on a homogeneous machine.");
+                    self.xmig_min_gain_us = 0;
+                }
+                Ok(_) => {}
+                Err(e) => warn!(
+                    "Could not read the topology to classify the machine; \
+                     leaving --xmig-min-gain-us as set: {}",
+                    e
+                ),
+            }
+        }
+
         if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
             self.no_use_em = true;
         }
@@ -463,6 +506,10 @@ impl Opts {
 
     fn lb_local_dsq_util_pct_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 100)
+    }
+
+    fn xmig_min_gain_us_range(s: &str) -> Result<u64, String> {
+        number_range(s, 0, 100_000)
     }
 }
 
@@ -746,6 +793,7 @@ impl<'a> Scheduler<'a> {
         rodata.warm_cpu_ns = opts.warm_cpu_us * 1000;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
         rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
+        rodata.xmig_min_gain_ns = opts.xmig_min_gain_us * 1000;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
         rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
