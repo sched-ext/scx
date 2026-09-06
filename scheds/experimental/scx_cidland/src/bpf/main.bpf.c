@@ -20,8 +20,9 @@
  * Placement follows the topology: a waking task is dispatched directly to an
  * idle cid when one can be found, preferring (in order) a fully idle core, the
  * previous LLC, and finally anything idle in the system. Tasks that don't get
- * an idle cid are queued to a single shared DSQ, ordered by the virtual
- * deadline computed by task_dl().
+ * an idle cid are queued on the DSQ of the cid they last ran on, ordered by
+ * the virtual deadline computed by task_dl(), and every dispatch scans the
+ * heads of the other cids' queues for an earlier deadline to take.
  */
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
@@ -70,13 +71,6 @@ struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
 UEI_DEFINE(uei);
 
 /*
- * Shared queue: all the tasks that can't be dispatched directly to an idle cid
- * are queued here, ordered by their virtual deadline, and consumed by the first
- * cid that runs out of work.
- */
-#define SHARED_DSQ	0
-
-/*
  * Slack pages added to the arena's static pool on top of what the cid keyed
  * arrays need, for the task context allocator's own bookkeeping. Same
  * granularity ArenaLib uses.
@@ -120,9 +114,15 @@ static u64 __arena *primary_cpus;
 const volatile u64 slice_lag;
 
 /*
+ * Number of other cids' DSQs sampled at each dispatch while this cid has work
+ * of its own. 0 = a busy cid never steals, only an idle one pulls.
+ */
+const volatile u64 steal_sample;
+
+/*
  * Scheduling statistics.
  */
-volatile u64 nr_direct_dispatches, nr_shared_enqueues, nr_idle_kicks;
+volatile u64 nr_direct_dispatches, nr_queued, nr_steals;
 volatile u64 nr_local_llc, nr_remote_llc;
 
 /*
@@ -175,6 +175,7 @@ static u64 sum_weight;
  */
 struct task_ctx {
 	u64 last_run_at;		/* when the task last started running */
+	u64 last_stop_at;		/* when the task last stopped running */
 	u64 vruntime;			/* total runtime, scaled by the weight */
 	s64 vlag;			/* lag carried across a sleep */
 	struct scx_cmask allowed;	/* cids the task is allowed to run on */
@@ -217,6 +218,7 @@ struct cid_ctx {
 	u32 llc_base;		/* first cid of the LLC this cid belongs to */
 	u32 llc_nr;		/* number of cids in the LLC */
 	u64 vtime_rem;		/* service not yet folded into @vtime_now */
+	u32 steal_cursor;	/* where the last queue scan stopped */
 };
 
 /*
@@ -269,6 +271,21 @@ static struct cid_ctx __arena *cid_ctx(s32 cid)
 	TOUCH_ARENA();
 
 	return &cid_ctxs[cid];
+}
+
+/*
+ * Return the DSQ of @cid.
+ *
+ * Every cid owns a deadline ordered DSQ where the tasks that last ran on it
+ * are queued, and every dispatch scans the heads of the other cids' DSQs for
+ * the earliest deadline (see try_steal_task()). All the keys are built on the
+ * same system-wide vruntime reference, so the queues behave as a single
+ * system-wide deadline queue, without the single lock that a single queue puts
+ * in the path of every wakeup.
+ */
+static inline u64 cid_dsq(s32 cid)
+{
+	return cid;
 }
 
 static bool cid_test_idle(s32 cid)
@@ -518,6 +535,28 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 }
 
 /*
+ * Floor on the weight used to stretch the request and the lag bound.
+ *
+ * The scx weight of a nice 19 task is 1, so its request would be a hundred
+ * times the base slice and the lag it can carry two hundred times: under a
+ * deep backlog V takes many seconds to cover that, well past the watchdog. The
+ * vruntime is still charged with the real weight, so the share is what nice
+ * asks for; only how far ahead the deadline and the lag can stretch is capped,
+ * which update_deadline() itself notes is "probably good enough".
+ */
+#define MIN_DL_WEIGHT	25
+
+static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
+{
+	u64 weight = p->scx.weight;
+
+	if (weight < MIN_DL_WEIGHT)
+		weight = MIN_DL_WEIGHT;
+
+	return value * 100 / weight;
+}
+
+/*
  * Return the virtual deadline of @p.
  *
  * This is EEVDF's virtual deadline, see update_deadline():
@@ -554,7 +593,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
  */
 static u64 task_dl(const struct task_struct *p, const struct task_ctx __arena *tctx)
 {
-	return tctx->vruntime + scale_by_task_weight_inverse(p, slice_ns);
+	return tctx->vruntime + scale_by_dl_weight(p, slice_ns);
 }
 
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
@@ -600,20 +639,6 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
 static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 {
 	return !__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p);
-}
-
-/*
- * Return true if queueing @p to the shared DSQ needs an explicit cid kick.
- *
- * ops.select_cid() provides the wakeup side effect for the tasks that can run
- * anywhere. Affinity constrained and migration disabled tasks can otherwise be
- * left waiting in the shared queue with no eligible cid looking at it, so
- * always kick the cid they're sitting on.
- */
-static bool task_needs_shared_dsq_kick(struct task_struct *p, u64 enq_flags)
-{
-	return p->nr_cpus_allowed != nr_cpu_ids || is_migration_disabled(p) ||
-	       task_should_migrate(p, enq_flags);
 }
 
 void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
@@ -682,18 +707,24 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 
 	tctx = lookup_task_ctx(p);
 
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice_ns, task_dl(p, tctx), enq_flags);
-	__sync_fetch_and_add(&nr_shared_enqueues, 1);
+	/*
+	 * Queue the task on @prev_cid's DSQ, ordered by deadline.
+	 *
+	 * Any other cid can take it from there, but only while dispatching: if
+	 * @prev_cid went idle in the meantime and the rest of the system is
+	 * idle too, nothing would ever look at it. Kick @prev_cid, which is a
+	 * no-op unless it is idle.
+	 */
+	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns,
+				 task_dl(p, tctx), enq_flags);
+	__sync_fetch_and_add(&nr_queued, 1);
 
-	if (task_needs_shared_dsq_kick(p, enq_flags)) {
-		scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
-		__sync_fetch_and_add(&nr_idle_kicks, 1);
-	}
+	scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
 }
 
 /*
  * Return true if @p can keep running on the current cid, instead of being put
- * back on the shared queue.
+ * back on a deadline ordered queue.
  */
 static bool keep_running(const struct task_struct *p, s32 cid)
 {
@@ -714,18 +745,128 @@ static bool keep_running(const struct task_struct *p, s32 cid)
 	return true;
 }
 
+/*
+ * A task that ran within this long on its cid is still cache hot there and is
+ * not stolen, like task_hot() with sysctl_sched_migration_cost.
+ */
+#define MIGRATION_COST_NS	500000ULL
+
+static bool task_hot(struct task_struct *p, u64 now)
+{
+	const struct task_ctx __arena *tctx = lookup_task_ctx(p);
+
+	return time_before(now, tctx->last_stop_at + MIGRATION_COST_NS);
+}
+
+/*
+ * Dispatch on @dst_cid the task with the earliest deadline among the head of
+ * its own DSQ and the heads of the DSQs of the other cids.
+ *
+ * With the per-cid keys all built on the same system-wide vruntime reference,
+ * the earliest head across the queues is the task a single system-wide queue
+ * would hand out. Peeking every queue at every dispatch costs as much as the
+ * single queue's lock did, though, so the scan is bounded: a cid with work of
+ * its own samples @steal_sample other queues, rotating through them across
+ * dispatches, and takes a remote head only when it is at least a full request
+ * ahead of its own; a task with real lag to spend is found within a few
+ * dispatches, while under a balanced load nothing clears the bar and every cid
+ * drains its own queue, as its own runqueue would be drained by EEVDF. A cid
+ * with nothing of its own takes the first task it finds instead of the
+ * earliest, the way the idle balancer pulls whatever is available.
+ *
+ * A task that ran on its cid a moment ago is left there in both cases: its
+ * home cid takes it back within a slice, while moving it costs its cache, see
+ * task_hot(). This is what keeps a wakeup-heavy load from migrating on every
+ * idle transition.
+ *
+ * Only the heads are considered, a queue whose head cannot run on @dst_cid (or
+ * is still hot there) is skipped as a whole.
+ *
+ * Return true if a task has been dispatched, false otherwise.
+ */
+static bool try_steal_task(s32 dst_cid)
+{
+	TOUCH_ARENA();
+
+	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
+	struct task_struct *own = __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
+	u64 min_dl = 0, now = bpf_ktime_get_ns();
+	u32 limit, start, cid, i;
+	s32 min_cid = -1;
+
+	/*
+	 * One extra slot covers @dst_cid itself falling in the sample.
+	 */
+	limit = own ? (steal_sample ? steal_sample + 1 : 0) : nr_cids;
+	start = cctx->steal_cursor;
+	if (start >= nr_cids)
+		start = 0;
+
+	bpf_for(i, 0, limit) {
+		const struct task_ctx __arena *tctx;
+		struct task_struct *p;
+
+		cid = start + 1 + i;
+		if (cid >= nr_cids)
+			cid -= nr_cids;
+		if (cid >= nr_cids || cid == dst_cid)
+			continue;
+
+		p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
+		if (!p)
+			continue;
+
+		tctx = lookup_task_ctx(p);
+		if (!__cmask_test(dst_cid, &tctx->allowed) || task_hot(p, now))
+			continue;
+
+		if (min_cid < 0 || time_before(p->scx.dsq_vtime, min_dl)) {
+			min_dl = p->scx.dsq_vtime;
+			min_cid = cid;
+		}
+
+		/*
+		 * Nothing to compare against: take the first task found.
+		 */
+		if (!own)
+			break;
+	}
+	if (limit) {
+		start += limit;
+		if (start >= nr_cids)
+			start -= nr_cids;
+		cctx->steal_cursor = start;
+	}
+
+	if (own && (min_cid < 0 ||
+		    !time_before(min_dl + slice_ns, own->scx.dsq_vtime)))
+		min_cid = dst_cid;
+
+	if (min_cid < 0)
+		return false;
+
+	if (!scx_bpf_dsq_move_to_local(cid_dsq(min_cid), 0))
+		return false;
+
+	if (min_cid != dst_cid)
+		__sync_fetch_and_add(&nr_steals, 1);
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
 	/*
-	 * Give this cid a task from the shared queue, if there's any.
+	 * Take the earliest deadline waiting anywhere, then fall back to this
+	 * cid's own DSQ in case the pick raced with another cid.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ, 0))
+	if (try_steal_task(cid) || scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))
 		return;
 
 	/*
 	 * Nothing else wants to run here: refill @prev's time slice and let it
 	 * continue. Without this, SCX_OPS_ENQ_LAST would send @prev through
-	 * ops.enqueue() only to pull it right back from the shared queue.
+	 * ops.enqueue() only to pull it right back from its own queue.
 	 */
 	if (prev && keep_running(prev, cid)) {
 		scx_bpf_task_set_slice(prev, slice_ns);
@@ -769,7 +910,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 * against the reference alone would hand every task that sleeps long
 	 * enough the full credit, no matter whether it had earned it.
 	 */
-	limit = scale_by_task_weight_inverse(p, slice_lag);
+	limit = scale_by_dl_weight(p, slice_lag);
 	lag = (s64)(vtime_now - tctx->vruntime);
 	if (lag > limit)
 		lag = limit;
@@ -815,7 +956,8 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 
 	tctx = lookup_task_ctx(p);
 
-	slice = bpf_ktime_get_ns() - tctx->last_run_at;
+	tctx->last_stop_at = bpf_ktime_get_ns();
+	slice = tctx->last_stop_at - tctx->last_run_at;
 
 	/*
 	 * Charge the service just consumed to the task's vruntime, the way
@@ -1035,6 +1177,7 @@ static void init_primary_cids(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 {
 	s32 err;
+	u32 i;
 
 	if (!nr_cids_max) {
 		scx_bpf_error("cidland_arena_init() didn't run");
@@ -1071,7 +1214,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 
 	init_primary_cids();
 
-	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+	/*
+	 * Create the per-cid DSQs.
+	 */
+	bpf_for(i, 0, nr_cids) {
+		err = scx_bpf_create_dsq(cid_dsq(i), -1);
+		if (err) {
+			scx_bpf_error("failed to create DSQ for cid %u: %d", i, err);
+			return err;
+		}
+	}
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(cidland_exit, struct scx_exit_info *ei)
