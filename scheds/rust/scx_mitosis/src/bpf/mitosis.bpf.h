@@ -114,6 +114,16 @@ struct task_ctx {
 	/* When the task last became runnable without running; 0 while running
 	 * or sleeping. Closed into its subcell's queued_ns. */
 	u64 runnable_at;
+	/* When the task went to sleep; 0 while runnable. */
+	u64 quiescent_at;
+	/* Start of the current demand window and the running and sleeping
+	 * time observed in it. Windows close at stopping and when dispatch
+	 * extends a slice. */
+	u64 demand_window_at;
+	u64 window_run_ns;
+	u64 window_sleep_ns;
+	/* EWMA of run / (run + sleep), 1.0 == 1 << DEMAND_SHIFT. */
+	u32 demand;
 	/* Packed subcell whose vtime should be charged for this task. */
 	u32 vtime_charge_subcell;
 	u64 basis_vtime;
