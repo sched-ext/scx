@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-//
+
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
@@ -72,24 +72,19 @@ fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result
     Ok(())
 }
 
-/// scx_cidland: a cid-based, topology-aware scheduler.
-///
-/// Rather than raw CPU numbers, this scheduler addresses CPUs by their cid
-/// (topological CPU ID), a dense id space where the CPUs of a core, of an LLC
-/// and of a NUMA node occupy contiguous ranges. Idle CPU selection is a plain
-/// range scan over a bitmap of idle cids, preferring a fully idle core in the
-/// LLC the task last ran on.
-///
-/// Tasks that can't be dispatched to an idle cid are queued to a single shared
-/// DSQ, ordered by a virtual deadline that prioritizes tasks which sleep often
-/// and run in short bursts, and consumed by the first cid that runs out of
-/// work.
-///
-/// This requires a kernel with cid-form sched_ext support (struct
-/// sched_ext_ops_cid).
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
+#[command(
+    name = "scx_cidland",
+    version,
+    disable_version_flag = true,
+    about = "Lightweight scheduler optimized for preserving task-to-CPU locality."
+)]
 struct Opts {
-    /// Time slice assigned to each task in microseconds.
+    /// Exit debug dump buffer length. 0 indicates default.
+    #[clap(long, default_value = "0")]
+    exit_dump_len: u32,
+
+    /// Maximum scheduling slice duration in microseconds.
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
@@ -106,17 +101,22 @@ struct Opts {
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
 
-    /// Disable SMT awareness: every cid is treated as a core of its own.
-    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
+    /// Disable CPU frequency control.
+    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
+    disable_cpufreq: bool,
+
+    /// Disable SMT.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// Ignore synchronous wakeup events.
+    /// Disable direct dispatch during synchronous wakeups.
+    ///
+    /// Enabling this option can lead to a more uniform load distribution across available cores,
+    /// potentially improving performance in certain scenarios. However, it may come at the cost of
+    /// reduced efficiency for pipe-intensive workloads that benefit from tighter producer-consumer
+    /// coupling.
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
-
-    /// Exit debug dump buffer length. 0 indicates default.
-    #[clap(long, default_value = "0")]
-    exit_dump_len: u32,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -144,6 +144,10 @@ struct Opts {
 }
 
 struct Scheduler<'a> {
+    /// The arena's user-space services. Nothing here needs reclaiming, the
+    /// arena is carved once at start, but the stream watcher turns an arena
+    /// fault in a BPF program, which the kernel would otherwise fix up
+    /// silently by dropping the access, into a report and an abort.
     _arenalib: ArenaLib,
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -158,27 +162,38 @@ impl<'a> Scheduler<'a> {
             bail!("--slice-us must be greater than 0");
         }
 
-        let topo = Topology::new().context("detecting system topology")?;
-        info!(
-            "{} {} ({} CPUs, {} LLCs)",
-            SCHEDULER_NAME,
-            build_id::full_version(env!("CARGO_PKG_VERSION")),
-            *NR_CPUS_POSSIBLE,
-            topo.all_llcs.len(),
-        );
+        // Initialize CPU topology.
+        let topo = Topology::new().unwrap();
 
-        // Only walk the node ranges when there is more than one node with
-        // CPUs on it: on a single node system they cover everything and the
-        // extra pass is pure overhead.
+        // Check host topology to determine if we need to enable SMT capabilities.
+        let smt_enabled = !opts.disable_smt && topo.smt_enabled;
+
+        // Determine the amount of non-empty NUMA nodes in the system.
         let nr_nodes = topo
             .nodes
             .values()
             .filter(|node| !node.all_cpus.is_empty())
             .count();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
         let numa_enabled = !opts.disable_numa && nr_nodes > 1;
         if !numa_enabled {
-            info!("NUMA optimizations disabled");
+            info!("Disabling NUMA optimizations");
         }
+
+        info!(
+            "{} {} {}",
+            SCHEDULER_NAME,
+            build_id::full_version(env!("CARGO_PKG_VERSION")),
+            if smt_enabled { "SMT on" } else { "SMT off" }
+        );
+
+        // Print command line.
+        info!(
+            "scheduler options: {}",
+            std::env::args().collect::<Vec<_>>().join(" ")
+        );
 
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -189,15 +204,13 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
 
-        let rodata = skel
-            .maps
-            .rodata_data
-            .as_mut()
-            .expect("rodata_data missing after skel open");
+        // Override default BPF scheduling parameters.
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
+        rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.numa_enabled = numa_enabled;
-        rodata.smt_enabled = !opts.disable_smt && topo.smt_enabled;
+        rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
@@ -225,27 +238,26 @@ impl<'a> Scheduler<'a> {
 
         // Set scheduler flags.
         //
-        // SCX_OPS_BUILTIN_IDLE_PER_NODE is intentionally left out: cid-form
-        // schedulers can't use the built-in idle tracking at all, this one
-        // does its own via ops.update_idle().
+        // SCX_OPS_BUILTIN_IDLE_PER_NODE is left out: a cid-form scheduler
+        // cannot use the built-in idle tracking, this one does its own.
         skel.struct_ops.cidland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.cidland_ops_mut().flags
         );
 
-        // Load and attach the scheduler.
-        let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei).context("loading BPF skeleton")?;
+        // Load the BPF program for validation.
+        let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei)?;
 
-        // Bring up the arena: this sizes everything that is indexed by cid
-        // and the per-task contexts. It has to happen before the scheduler is
-        // visible to the kernel, so it sits between load and attach.
-        //
-        // The cid space is num_possible_cpus() wide, so the CPU count is all
-        // the BPF side needs to size itself.
+        // Size the arena for the cid space, which is num_possible_cpus()
+        // wide, and hand over the capacity of each CPU. The cid layout is
+        // only known once the kernel has built it, at attach, so this is in
+        // cpu space and ops.init() translates. It has to happen between
+        // load and attach: the tables must be in place before ops.init().
         let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
         let mut args = types::cidland_arena_args {
             nr_cpus: nr_cpus as u64,
@@ -253,10 +265,6 @@ impl<'a> Scheduler<'a> {
         };
         run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
             .context("running cidland_arena_init")?;
-
-        // Hand over the capacity and the tier of each CPU, in cpu space: the
-        // cid layout is only known once the kernel has built it, at attach, so
-        // ops.init() translates.
         for (cpu, capacity, tier) in cpu_tiers {
             let mut args = types::cidland_cpu_args {
                 cpu,
@@ -267,14 +275,13 @@ impl<'a> Scheduler<'a> {
                 .context("running cidland_set_cpu")?;
         }
 
-        // The BPF side has a scheduler-specific initialization path, but the
-        // allocator still needs ArenaLib's userspace services. In particular,
-        // scx_task_free_rcu() relies on its reclaim daemon to return exited
-        // task contexts to the allocator.
+        // Watch the BPF streams: an arena fault is reported and fatal rather
+        // than silently fixed up.
         let arenalib =
             ArenaLib::start(skel.object_mut()).context("starting arena userspace services")?;
 
-        let struct_ops = Some(scx_ops_attach!(skel, cidland_ops).context("attaching scheduler")?);
+        // Attach the scheduler.
+        let struct_ops = Some(scx_ops_attach!(skel, cidland_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
@@ -286,28 +293,21 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&self) -> Metrics {
-        let bss_data = self
-            .skel
-            .maps
-            .bss_data
-            .as_ref()
-            .expect("bss_data missing after skel load");
+        let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
-            nr_direct_dispatches: bss_data.nr_direct_dispatches,
-            nr_queued: bss_data.nr_queued,
             nr_steals: bss_data.nr_steals,
-            nr_local_llc: bss_data.nr_local_llc,
-            nr_remote_llc: bss_data.nr_remote_llc,
         }
     }
 
-    fn exited(&mut self) -> bool {
+    pub fn exited(&mut self) -> bool {
         uei_exited!(&self.skel, uei)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+            // Update statistics and check for exit condition.
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -370,9 +370,14 @@ fn main() -> Result<()> {
         let shutdown_copy = shutdown.clone();
         let jh = std::thread::spawn(move || {
             match stats::monitor(Duration::from_secs_f64(intv), shutdown_copy) {
-                Ok(_) => debug!("stats monitor thread finished successfully"),
+                Ok(_) => {
+                    debug!("stats monitor thread finished successfully")
+                }
                 Err(error_object) => {
-                    warn!("stats monitor thread finished because of an error {error_object}")
+                    warn!(
+                        "stats monitor thread finished because of an error {}",
+                        error_object
+                    )
                 }
             }
         });
