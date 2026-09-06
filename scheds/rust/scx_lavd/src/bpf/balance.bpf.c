@@ -382,6 +382,21 @@ u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc)
 }
 
 /*
+ * Estimated completion time for a task dispatched straight to @cpuc's local
+ * DSQ, in wall-clock ns.
+ *
+ * Inclusive of everything already queued on that local DSQ. This is the
+ * innermost level, so there is nothing beneath it. No residual, like the other
+ * entry points; a caller that wants a wall-clock wait adds calc_residual_time().
+ */
+__hidden __attribute__((noinline))
+u64 calc_comp_time_on_local(u64 task_svc_invr, struct cpu_ctx *cpuc)
+{
+	return calc_comp_time(task_svc_invr, cpuc->qload_svc_local_invr,
+			      READ_ONCE(cpuc->effective_capacity), 1);
+}
+
+/*
  * Estimated completion time for a task placed in @cpdomc.
  *
  * Inclusive of every task queued anywhere in the domain -- local, per-CPU and
