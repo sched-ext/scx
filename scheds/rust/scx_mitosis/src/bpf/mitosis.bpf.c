@@ -169,6 +169,13 @@ struct {
 	__uint(max_entries, 1);
 } cpu_ctxs SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct subcell_account);
+	__uint(max_entries, MAX_CELLS * MAX_SUBCELLS_PER_CELL);
+} subcell_accounts SEC(".maps");
+
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
 	struct cpu_ctx *cctx;
@@ -1048,20 +1055,33 @@ static __always_inline bool pinned_dsq_overdue(struct cpu_ctx *cctx)
 
 /*
  * Charge the running time of the task described by @tctx since it was last
- * accounted to its cell's demand counter on the target CPU.
+ * accounted to its cell and subcell demand counters on the target CPU.
  */
-static __always_inline int account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now)
+static __always_inline int account_task_running(s32 cpu, struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now)
 {
 	u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
+	struct subcell_account *account;
+	s32 packed;
+	u32 key;
 	u64 used;
 
 	if (!running) {
 		scx_bpf_error("Task cell index too large: %d", tctx->cell);
 		return -EINVAL;
 	}
+	packed = pack_subcell_id(tctx->cell, tctx->subcell);
+	if (packed < 0)
+		return packed;
+	key = packed;
+	account = bpf_map_lookup_percpu_elem(&subcell_accounts, &key, cpu);
+	if (!account) {
+		scx_bpf_error("Task cell or subcell index too large: %d, %d", tctx->cell, tctx->subcell);
+		return -ENOENT;
+	}
 	used = time_delta(now, tctx->running_accounted_at);
 	tctx->running_accounted_at = now;
 	*running += used;
+	account->running_ns += used;
 	return 0;
 }
 
@@ -1172,7 +1192,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				 * last tick or slice extension, and let stopping()
 				 * charge the remainder.
 				 */
-				if (account_task_running(cctx, tctx, scx_clock_task(cpu)) < 0)
+				if (account_task_running(cpu, cctx, tctx, scx_clock_task(cpu)) < 0)
 					return;
 				scx_bpf_task_set_slice(prev, slice_ns);
 			}
@@ -1218,6 +1238,55 @@ static inline void advance_subcell_llc_vtime(struct subcell *subcell, u32 llc_id
 		WRITE_ONCE(llc_state->vtime_now, task_vtime);
 }
 
+/*
+ * Charge the time @tctx's task spent runnable but off-CPU since it was last
+ * marked runnable to its subcell, on the current CPU's accounting slot.
+ */
+static __always_inline int account_task_queued(struct task_ctx *tctx, u64 now)
+{
+	struct subcell_account *account;
+	s32 packed;
+	u32 key;
+
+	if (!tctx->runnable_at)
+		return 0;
+
+	packed = pack_subcell_id(tctx->cell, tctx->subcell);
+	if (packed < 0)
+		return packed;
+	key = packed;
+	account = bpf_map_lookup_elem(&subcell_accounts, &key);
+	if (!account) {
+		scx_bpf_error("Task cell or subcell index too large: %d, %d", tctx->cell, tctx->subcell);
+		return -ENOENT;
+	}
+	account->queued_ns += time_delta(now, tctx->runnable_at);
+	tctx->runnable_at = 0;
+	return 0;
+}
+
+void BPF_STRUCT_OPS(mitosis_runnable, struct task_struct *p, u64 enq_flags)
+{
+	struct task_ctx *tctx;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+
+	tctx->runnable_at = scx_bpf_now();
+}
+
+void BPF_STRUCT_OPS(mitosis_quiescent, struct task_struct *p, u64 deq_flags)
+{
+	struct task_ctx *tctx;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+
+	/* Dequeued without running again: close the wait it was in, if any. */
+	if (account_task_queued(tctx, scx_bpf_now()) < 0)
+		return;
+}
+
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx *cctx;
@@ -1243,8 +1312,11 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 			advance_subcell_llc_vtime(subcell, (u32)llc, p->scx.dsq_vtime);
 	}
 
-	/* Record the running slice start time. */
 	now = scx_bpf_now();
+	/* The task waited from its last runnable mark until now. */
+	if (account_task_queued(tctx, now) < 0)
+		return;
+	/* Record the running slice start time. */
 	tctx->started_running_at = now;
 	tctx->running_accounted_at = scx_clock_task(scx_bpf_task_cpu(p));
 
@@ -1277,7 +1349,7 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 
 	if (!(cctx = lookup_cpu_ctx(scx_bpf_task_cpu(p))) || !(tctx = lookup_task_ctx(p)))
 		return;
-	if (account_task_running(cctx, tctx, scx_clock_task(scx_bpf_task_cpu(p))) < 0)
+	if (account_task_running(scx_bpf_task_cpu(p), cctx, tctx, scx_clock_task(scx_bpf_task_cpu(p))) < 0)
 		return;
 }
 
@@ -1361,8 +1433,11 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	tctx->borrowed = false;
 
 	/* Charge whatever the slice extensions since the last flush left over. */
-	if (account_task_running(cctx, tctx, scx_clock_task(scx_bpf_task_cpu(p))) < 0)
+	if (account_task_running(scx_bpf_task_cpu(p), cctx, tctx, scx_clock_task(scx_bpf_task_cpu(p))) < 0)
 		return;
+
+	/* A preempted task is still runnable; its next wait starts now. */
+	tctx->runnable_at = runnable ? now : 0;
 }
 
 SEC("fentry/cpuset_write_resmask")
@@ -2368,9 +2443,11 @@ SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
+	       .runnable		= (void *)mitosis_runnable,
 	       .running			= (void *)mitosis_running,
 	       .tick			= (void *)mitosis_tick,
 	       .stopping		= (void *)mitosis_stopping,
+	       .quiescent		= (void *)mitosis_quiescent,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,
