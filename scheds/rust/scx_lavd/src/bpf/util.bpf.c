@@ -372,19 +372,43 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
  * We define the primary cpu in the physical core as the lowest logical cpu id.
  */
 __hidden
-u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
+u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu)
+{
 	const volatile u32 *sibling;
 
 	if (!is_smt_active)
 		return cpu;
 
 	sibling = MEMBER_VPTR(cpu_sibling, [cpu]);
-	if (!sibling) {
+	if (unlikely(!sibling)) {
 		debugln("Infeasible CPU id: %d", cpu);
 		return cpu;
 	}
 
 	return ((cpu < *sibling) ? cpu : *sibling);
+}
+
+/*
+ * The SMT sibling of @cpu, or @cpu itself when SMT is inactive or the sibling
+ * is unknown. lavd models 2-way SMT: cpu_sibling[] holds a single id.
+ */
+__hidden
+u32 __attribute__ ((noinline)) get_sibling_cpu(u32 cpu)
+{
+	const volatile u32 *sibling;
+
+	if (!is_smt_active)
+		return cpu;
+
+	/*
+	 * Userspace stores -1 for a core with a single thread -- an E-core on
+	 * a hybrid part, or a core whose sibling is offline -- so bound the id.
+	 */
+	sibling = MEMBER_VPTR(cpu_sibling, [cpu]);
+	if (unlikely(!sibling || *sibling >= nr_cpu_ids))
+		return cpu;
+
+	return *sibling;
 }
 
 __hidden
