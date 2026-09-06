@@ -313,6 +313,24 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	return 0;
 }
 
+/*
+ * A pinned task is placed on a per-CPU DSQ and takes its basis from that CPU's
+ * clock, which belongs to whichever subcell owns the CPU. Charge that subcell
+ * rather than the task's own, so stopping() advances the clocks the task is
+ * compared against. Otherwise a task pinned outside its subcell never advances
+ * them and its vtime ratchets ahead until it loses every comparison.
+ */
+static __always_inline int set_vtime_charge_cpu(struct task_ctx *tctx, struct cpu_ctx *cpu_ctx)
+{
+	s32 packed_subcell = pack_subcell_id(cpu_ctx->cell, cpu_ctx->subcell);
+
+	if (packed_subcell < 0)
+		return -EINVAL;
+
+	tctx->vtime_charge_subcell = packed_subcell;
+	return 0;
+}
+
 static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
 {
 	s32 packed_subcell = pack_subcell_id(tctx->cell, tctx->subcell);
@@ -662,7 +680,11 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 			return prev_cpu;
 
 		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			if (set_vtime_charge_subcell(tctx))
+			struct cpu_ctx *target_cctx;
+
+			if (!(target_cctx = lookup_cpu_ctx(cpu)))
+				return prev_cpu;
+			if (set_vtime_charge_cpu(tctx, target_cctx))
 				return prev_cpu;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
@@ -821,6 +843,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!(cctx = lookup_cpu_ctx(cpu)))
 			return;
 		/* Task is pinned to specific CPUs, use per-CPU DSQ */
+		if (set_vtime_charge_cpu(tctx, cctx))
+			return;
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
