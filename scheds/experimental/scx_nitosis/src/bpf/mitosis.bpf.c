@@ -310,6 +310,18 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 }
 
 /*
+ * A pinned task is placed on a per-cid DSQ and takes its basis from that cid's
+ * clock, which belongs to whichever cell owns the cid. Charge that cell rather
+ * than the task's own, so stopping() advances the clocks the task is compared
+ * against. Otherwise a task pinned outside its cell never advances them and its
+ * vtime ratchets ahead until it loses every comparison.
+ */
+static __always_inline void set_pinned_vtime_charge_cid(struct task_ctx __arena *tctx, struct cpu_ctx __arena *cctx)
+{
+	tctx->vtime_charge_cell = cctx->cell;
+}
+
+/*
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
  */
@@ -749,7 +761,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cid, struct task_struct *p, s32 prev_cid, u64 
 			return prev_cid;
 
 		if (idle_cid_cleared || claim_idle_cid(cid)) {
-			tctx->vtime_charge_cell = tctx->cell;
+			set_pinned_vtime_charge_cid(tctx, &cpu_ctxs[cid]);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
 		return cid;
@@ -889,6 +901,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		cctx = &cpu_ctxs[cid];
 		/* Task is pinned to specific cids, use per-cid DSQ */
+		set_pinned_vtime_charge_cid(tctx, cctx);
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
