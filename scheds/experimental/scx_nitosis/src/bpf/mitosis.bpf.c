@@ -274,11 +274,15 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 		if (cid >= cmask_end(allowed))
 			return -EINVAL;
 
-		tctx->dsq = get_cid_dsq_id(cid);
-		if (dsq_is_invalid(tctx->dsq))
+		dsq_id_t cid_dsq = get_cid_dsq_id(cid);
+
+		if (dsq_is_invalid(cid_dsq))
 			return -EINVAL;
 
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctxs[cid].vtime_now));
+		/* Only re-base when the task actually changes domain. */
+		if (cid_dsq.raw != tctx->dsq.raw || tctx->all_cell_cpus_allowed)
+			scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctxs[cid].vtime_now));
+		tctx->dsq = cid_dsq;
 		tctx->all_cell_cpus_allowed = false;
 		return 0;
 	}
@@ -292,11 +296,14 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	}
 
 	/* Non-LLC aware version */
-	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
-	if (dsq_is_invalid(tctx->dsq))
+	dsq_id_t cell_dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
+	if (dsq_is_invalid(cell_dsq))
 		return -EINVAL;
 
-	scx_bpf_task_set_dsq_vtime(p, cell_llc_vtime_read(&cells[tctx->cell], FAKE_FLAT_CELL_LLC));
+	/* Only re-base when the task actually changes domain. */
+	if (cell_dsq.raw != tctx->dsq.raw || !tctx->all_cell_cpus_allowed)
+		scx_bpf_task_set_dsq_vtime(p, cell_llc_vtime_read(&cells[tctx->cell], FAKE_FLAT_CELL_LLC));
+	tctx->dsq = cell_dsq;
 	tctx->all_cell_cpus_allowed = true;
 
 	return 0;
