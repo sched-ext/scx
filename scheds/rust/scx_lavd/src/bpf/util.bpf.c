@@ -38,6 +38,7 @@ const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT i
 volatile bool		reinit_cpumask_for_performance;
 volatile bool		no_preemption;
 volatile bool		no_core_compaction;
+volatile bool		ovrflw_counted_active; /* overflow CPUs also counted as active */
 volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
