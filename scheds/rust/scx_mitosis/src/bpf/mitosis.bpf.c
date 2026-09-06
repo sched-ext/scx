@@ -1041,11 +1041,71 @@ static __always_inline bool pinned_dsq_overdue(struct cpu_ctx *cctx)
 	return since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
 }
 
+/* Time constant of the per-task demand estimate. */
+#define DEMAND_TAU_NS (100ULL * 1000 * 1000)
+/* Bound on one measurement window, keeps the fixed-point products in range. */
+#define DEMAND_MAX_WINDOW_NS (1ULL << 40)
+
+/*
+ * A task's demand is the share of its non-waiting time that it spends
+ * running: run / (run + sleep) over the window since the last measurement.
+ * Waiting for a CPU is left out of the denominator, so contention does not
+ * inflate the estimate. Windows close in stopping and when dispatch extends
+ * a solo task's slice, never on wakeup, so a window spans whole cycles of
+ * sleep, wait, and run.
+ *
+ * The estimate is blended with a time constant: a window much longer than
+ * DEMAND_TAU_NS mostly replaces the old value, a short one nudges it. The
+ * blended value times the window is charged to the subcell, so a task that
+ * stops cycling stops contributing on its own.
+ *
+ * A slice extension only closes a window that has already grown past the
+ * time constant. Closing on every extension would split a run across two
+ * windows and leave the one holding the sleep with only part of the run,
+ * biasing the ratio low; that path exists for long runs that never stop.
+ */
+static __always_inline void update_task_demand(struct task_ctx *tctx, struct subcell_account *account, u64 now,
+					       bool stopping)
+{
+	u64 window, active;
+
+	if (!tctx->demand_window_at) {
+		tctx->demand_window_at = now;
+		tctx->window_run_ns = 0;
+		tctx->window_sleep_ns = 0;
+		return;
+	}
+
+	window = time_delta(now, tctx->demand_window_at);
+	if (!window || (!stopping && window < DEMAND_TAU_NS))
+		return;
+	if (window > DEMAND_MAX_WINDOW_NS)
+		window = DEMAND_MAX_WINDOW_NS;
+
+	active = tctx->window_run_ns + tctx->window_sleep_ns;
+	if (active) {
+		u64 sample = (tctx->window_run_ns << DEMAND_SHIFT) / active;
+		u64 demand = tctx->demand;
+
+		/* BPF has no signed division; move toward the sample by hand. */
+		if (sample >= demand)
+			demand += (sample - demand) * window / (window + DEMAND_TAU_NS);
+		else
+			demand -= (demand - sample) * window / (window + DEMAND_TAU_NS);
+		tctx->demand = demand;
+	}
+
+	account->demand_sum += (u64)tctx->demand * window;
+	tctx->demand_window_at = now;
+	tctx->window_run_ns = 0;
+	tctx->window_sleep_ns = 0;
+}
+
 /*
  * Charge the running time of the task described by @tctx since it was last
  * accounted to its cell and subcell demand counters on the current CPU.
  */
-static __always_inline void account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now)
+static __always_inline void account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now, bool stopping)
 {
 	u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
 	struct subcell_account *account;
@@ -1070,6 +1130,8 @@ static __always_inline void account_task_running(struct cpu_ctx *cctx, struct ta
 	tctx->running_accounted_at = now;
 	*running += used;
 	account->running_ns += used;
+	tctx->window_run_ns += used;
+	update_task_demand(tctx, account, now, stopping);
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
@@ -1181,7 +1243,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				 * here, at slice granularity, and let stopping()
 				 * charge the remainder.
 				 */
-				account_task_running(cctx, tctx, scx_bpf_now());
+				account_task_running(cctx, tctx, scx_bpf_now(), false);
 				scx_bpf_task_set_slice(prev, slice_ns);
 			}
 		}
@@ -1257,11 +1319,17 @@ static __always_inline void account_task_queued(struct task_ctx *tctx, u64 now)
 void BPF_STRUCT_OPS(mitosis_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	u64 now;
 
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
-	tctx->runnable_at = scx_bpf_now();
+	now = scx_bpf_now();
+	if (tctx->quiescent_at) {
+		tctx->window_sleep_ns += time_delta(now, tctx->quiescent_at);
+		tctx->quiescent_at = 0;
+	}
+	tctx->runnable_at = now;
 }
 
 void BPF_STRUCT_OPS(mitosis_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1271,8 +1339,11 @@ void BPF_STRUCT_OPS(mitosis_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
+	u64 now = scx_bpf_now();
+
 	/* Dequeued without running again: close the wait it was in, if any. */
-	account_task_queued(tctx, scx_bpf_now());
+	account_task_queued(tctx, now);
+	tctx->quiescent_at = now;
 }
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
@@ -1409,7 +1480,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	tctx->borrowed = false;
 
 	/* Charge whatever the slice extensions since the last flush left over. */
-	account_task_running(cctx, tctx, now);
+	account_task_running(cctx, tctx, now, true);
 
 	/* A preempted task is still runnable; its next wait starts now. */
 	tctx->runnable_at = runnable ? now : 0;
