@@ -103,6 +103,17 @@ const volatile u64 slice_lag;
 const volatile bool numa_enabled;
 
 /*
+ * True when SMT is enabled and a core can hold more than one cid (see
+ * --disable-smt). With SMT off every cid is a core of its own.
+ */
+const volatile bool smt_enabled = true;
+
+/*
+ * Ignore SCX_WAKE_SYNC (see --no-wake-sync).
+ */
+const volatile bool no_wake_sync;
+
+/*
  * Scheduling statistics.
  */
 volatile u64 nr_direct_dispatches, nr_queued, nr_steals;
@@ -380,14 +391,14 @@ static void seed_task_cmask(struct task_struct *p, struct task_ctx __arena *tctx
 }
 
 /*
- * Return true if @p can run on more than one cid.
+ * Return true if @p can only run on a single CPU, false otherwise.
  *
- * Mirrors the condition the core scheduler uses in select_task_rq() to decide
- * whether to consult the scheduling class at all.
+ * The negation is the condition the core scheduler uses in select_task_rq() to
+ * decide whether to consult the scheduling class at all.
  */
-static bool task_can_migrate(const struct task_struct *p)
+static inline bool is_pcpu_task(const struct task_struct *p)
 {
-	return p->nr_cpus_allowed > 1 && !is_migration_disabled(p);
+	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
 }
 
 /*
@@ -482,8 +493,7 @@ static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
  *
  * Return the claimed cid or a negative value if the whole system is busy.
  */
-static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
-			 bool from_enqueue, bool core_only)
+static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 {
 	const struct cid_ctx __arena *cctx;
 	const struct scx_cmask __arena *allowed = all_cids;
@@ -506,7 +516,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 	 * That's their only candidate, so try it and give up, rather than
 	 * scanning cids they can't use anyway.
 	 */
-	if (from_enqueue && !task_can_migrate(p)) {
+	if (is_pcpu_task(p)) {
 		if (!cid_claim_idle(prev_cid))
 			return -EBUSY;
 		__sync_fetch_and_add(&nr_local_llc, 1);
@@ -523,23 +533,53 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 		allowed = &lookup_task_ctx(p)->allowed;
 
 	/*
-	 * Fully idle cores first, across every tier, then any idle cid: a
-	 * caller that only wants a whole core stops after the first pass,
-	 * since taking an SMT sibling would put the task on a core that is
-	 * already running something, which costs more than the wait it saves.
+	 * Fully idle cores first, across every tier, then any idle cid: the
+	 * whole core pass runs across every tier before settling for a
+	 * thread, since sharing a core costs more than the step down to the
+	 * next tier, the way select_idle_core() looks for a whole core before
+	 * select_idle_cpu().
 	 */
-	cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, true);
-	if (cid < 0 && !core_only)
-		cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, false);
+	if (smt_enabled) {
+		cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, true);
+		if (cid >= 0)
+			goto found;
+	}
+	cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, false);
 	if (cid < 0)
 		return cid;
 
+found:
 	if (cid >= cctx->llc_base && cid < cctx->llc_base + cctx->llc_nr)
 		__sync_fetch_and_add(&nr_local_llc, 1);
 	else
 		__sync_fetch_and_add(&nr_remote_llc, 1);
 
 	return cid;
+}
+
+/*
+ * Return true if @p should be stacked on the waker's cid @this_cid.
+ *
+ * On a synchronous wakeup the waker is about to sleep, so its CPU is where the
+ * data the two just exchanged stays hot. The waker is still on it, though: @p
+ * is not going to run there right away, it is going to wait in that cid's DSQ,
+ * ordered by deadline, until the waker blocks.
+ *
+ * This is wake_affine_idle(), which takes the waker's CPU when the waker is
+ * the only runnable task on it (nr_running == 1), and it is consulted only
+ * after the idle scan has failed, the way the kernel still runs
+ * select_idle_sibling() on the CPU that wake_affine() returned: a CPU that is
+ * really idle beats stacking on a busy one.
+ */
+static bool wake_affine_cid(const struct task_struct *p, s32 prev_cid,
+			    s32 this_cid, u64 wake_flags)
+{
+	return !no_wake_sync && (wake_flags & SCX_WAKE_SYNC) &&
+	       cid_valid(this_cid) &&
+	       __cmask_test(this_cid, &lookup_task_ctx(p)->allowed) &&
+	       cid_ctx(this_cid)->llc_base == cid_ctx(prev_cid)->llc_base &&
+	       !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) &&
+	       !scx_bpf_dsq_nr_queued(cid_dsq(this_cid));
 }
 
 /*
@@ -820,32 +860,48 @@ static u64 task_dl(const struct task_struct *p, const struct task_ctx __arena *t
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
 		   u64 wake_flags)
 {
-	s32 cid;
+	s32 cid, this_cid = scx_bpf_this_cid();
 
-	cid = pick_idle_cid(p, prev_cid, false, false);
-	if (cid < 0) {
-		/*
-		 * A new task with no idle cid to go to is queued on the cid
-		 * with the shortest queue rather than behind its parent.
-		 */
-		if ((wake_flags & SCX_WAKE_FORK) && cid_valid(prev_cid)) {
-			const struct scx_cmask __arena *allowed = all_cids;
-
-			if (p->nr_cpus_allowed < nr_cpu_ids)
-				allowed = &lookup_task_ctx(p)->allowed;
-
-			cid = shallowest_queue_cid(p, allowed, cid_ctx(prev_cid));
-			if (cid >= 0)
-				return cid;
-		}
-
+	if (!cid_valid(prev_cid))
 		return prev_cid;
+
+	/*
+	 * Try to find an idle cid and dispatch the task directly to it,
+	 * without bouncing it through ops.enqueue().
+	 */
+	cid = pick_idle_cid(p, prev_cid);
+	if (cid >= 0) {
+		direct_dispatch_local(p, lookup_task_ctx(p), cid);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return cid;
 	}
 
-	direct_dispatch_local(p, lookup_task_ctx(p), cid);
-	__sync_fetch_and_add(&nr_direct_dispatches, 1);
+	/*
+	 * Nothing is idle: on a synchronous wakeup stack the wakee on the
+	 * waker's cid. Not as a direct dispatch, the local DSQ is for a task
+	 * that can run right away and the waker is still on the CPU: the
+	 * wakee goes through ops.enqueue() into that cid's deadline-ordered
+	 * DSQ and the CPU takes it once the waker blocks.
+	 */
+	if (wake_affine_cid(p, prev_cid, this_cid, wake_flags))
+		return this_cid;
 
-	return cid;
+	/*
+	 * A new task with no idle cid to go to is queued on the cid with the
+	 * shortest queue rather than behind its parent.
+	 */
+	if (wake_flags & SCX_WAKE_FORK) {
+		const struct scx_cmask __arena *allowed = all_cids;
+
+		if (p->nr_cpus_allowed < nr_cpu_ids)
+			allowed = &lookup_task_ctx(p)->allowed;
+
+		cid = shallowest_queue_cid(p, allowed, cid_ctx(prev_cid));
+		if (cid >= 0)
+			return cid;
+	}
+
+	return prev_cid;
 }
 
 /*
@@ -864,34 +920,30 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx __arena *tctx;
 	s32 cid, prev_cid = scx_bpf_task_cid(p);
 
+	if (!cid_valid(prev_cid))
+		return;
+
 	/*
-	 * Try to place @p on an idle cid before falling back to the shared
-	 * queue.
+	 * Attempt to dispatch directly to an idle cid if the task can
+	 * migrate.
 	 *
-	 * Queueing to the shared DSQ and kicking a cid to come and find the
-	 * task there costs an enqueue -> kick -> dispatch round trip, and it
-	 * makes the deadline ordered queue the path every wakeup takes. Under
-	 * load that queue fills with tasks that sleep more than they run, and
-	 * since @vtime_now only advances when a task with a larger vruntime
-	 * gets to run, anything that accumulates runtime ends up ordered behind
-	 * all of them for as long as they keep waking up.
+	 * A waking task has already been through ops.select_cid(), which
+	 * scanned for an idle cid and decided where to put it: that is what
+	 * SCX_ENQ_CPU_SELECTED reports, see task_should_migrate(). Scanning
+	 * again here would only undo that decision, and on a synchronous
+	 * wakeup it would pull the wakee off the waker it was deliberately
+	 * stacked on. A task that got here without that scan (the kernel
+	 * skips ops.select_cid() for a task that can't migrate, and a
+	 * re-enqueue never goes through it) is scanned for.
 	 *
-	 * Dispatching straight to the local DSQ of an idle cid keeps those
-	 * tasks out of the queue entirely, which leaves it as the overflow path
-	 * it's meant to be.
-	 *
-	 * The search is skipped when ops.select_cid() has already run and come
-	 * up empty, unless @prev_cid is busy: repeating it right away would
-	 * just walk the same masks again.
-	 *
-	 * A busy @prev_cid is a reason to leave only when it is busy with
-	 * someone else. A task that is re-enqueued from its own cid at the
-	 * end of its slice is what @prev_cid is busy with, and it is giving
-	 * the CPU up to whoever was waiting for it, typically a per-CPU
-	 * kworker that is done a few microseconds later. Pushing it away at
-	 * that point turns every such handover into a migration. Leave it
-	 * queued instead, the way a task stays on its runqueue: its own cid
-	 * takes it back as soon as it is free again.
+	 * A busy @prev_cid is a reason for a re-enqueued task to leave only
+	 * when it is busy with someone else. A task that is re-enqueued from
+	 * its own cid at the end of its slice is what @prev_cid is busy with,
+	 * and it is giving the CPU up to whoever was waiting for it,
+	 * typically a per-CPU kworker that is done a few microseconds later.
+	 * Pushing it away at that point turns every such handover into a
+	 * migration. Leave it queued instead, the way a task stays on its
+	 * runqueue: its own cid takes it back as soon as it is free again.
 	 *
 	 * A task re-enqueued from its own cid with slice left, on the other
 	 * hand, was preempted by a higher scheduling class (the kernel
@@ -900,21 +952,14 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * cid is the better option.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
-	    (!cid_test_idle(prev_cid) && (!scx_bpf_task_running(p) || p->scx.slice))) {
-		/*
-		 * A task that ops.select_cid() already looked at is only moved
-		 * onto a fully idle core: it is being re-queued rather than
-		 * woken, so stacking it on an SMT sibling would slow down the
-		 * core that is already busy without saving it any wait.
-		 */
-		cid = pick_idle_cid(p, prev_cid, true,
-				    !task_should_migrate(p, enq_flags));
+	    (scx_bpf_task_running(p) && p->scx.slice && !cid_test_idle(prev_cid))) {
+		cid = pick_idle_cid(p, prev_cid);
 		if (cid >= 0) {
 			/*
 			 * SCX_ENQ_IMMED bounces @p back here if the cid can't
 			 * run it right away, so the local DSQ stays a "run now"
-			 * fast path instead of a queue that outranks the shared
-			 * one, see cidland_select_cid().
+			 * fast path instead of a queue that outranks the
+			 * deadline ordered ones, see cidland_select_cid().
 			 */
 			place_task(cid, p, lookup_task_ctx(p));
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice_ns,
@@ -945,8 +990,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * A faster cid sitting idle would never look at this queue on its
 	 * own: wake it up so that it pulls the task, see try_steal_task().
 	 */
-	if (task_can_migrate(p)) {
-		s32 cid = idle_faster_cid(prev_cid);
+	if (!is_pcpu_task(p)) {
+		cid = idle_faster_cid(prev_cid);
 
 		if (cid >= 0)
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
@@ -1459,8 +1504,8 @@ static s32 init_cid_ctxs(void)
 			node_nr = cid + 1 - topo->node_cid;
 		}
 
-		cctx->core_base = topo->core_cid;
-		cctx->core_nr = core_nr;
+		cctx->core_base = smt_enabled ? topo->core_cid : cid;
+		cctx->core_nr = smt_enabled ? core_nr : 1;
 		cctx->llc_base = topo->llc_cid;
 		cctx->llc_nr = llc_nr;
 		cctx->node_base = topo->node_cid;

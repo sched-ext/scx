@@ -106,6 +106,14 @@ struct Opts {
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
 
+    /// Disable SMT awareness: every cid is treated as a core of its own.
+    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
+    disable_smt: bool,
+
+    /// Ignore synchronous wakeup events.
+    #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
+    no_wake_sync: bool,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -189,6 +197,8 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.numa_enabled = numa_enabled;
+        rodata.smt_enabled = !opts.disable_smt && topo.smt_enabled;
+        rodata.no_wake_sync = opts.no_wake_sync;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
         // tier per distinct capacity, 0 being the fastest. Capacities are
