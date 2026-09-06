@@ -109,6 +109,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     steal_sample: u64,
 
+    /// Disable NUMA optimizations.
+    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
+    disable_numa: bool,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -162,6 +166,19 @@ impl<'a> Scheduler<'a> {
             topo.all_llcs.len(),
         );
 
+        // Only walk the node ranges when there is more than one node with
+        // CPUs on it: on a single node system they cover everything and the
+        // extra pass is pure overhead.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
+        let numa_enabled = !opts.disable_numa && nr_nodes > 1;
+        if !numa_enabled {
+            info!("NUMA optimizations disabled");
+        }
+
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
@@ -179,6 +196,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.steal_sample = opts.steal_sample;
+        rodata.numa_enabled = numa_enabled;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
         // tier per distinct capacity, 0 being the fastest. Capacities are
