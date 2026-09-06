@@ -249,6 +249,15 @@ const volatile u64	lb_low_util_wall = 0;
 const volatile u64	lb_local_dsq_util_wall = 0;
 
 /*
+ * Least completion-time gain, in ns, that justifies a cross-cpdom migration
+ * on big.LITTLE systems. When non-zero, a task whose sticky cpdom the load
+ * balancer has marked overloaded migrates to a neighbor sharing its L3 only if
+ * its estimated completion time there is shorter by more than this. 0 disables
+ * the feature.
+ */
+const volatile u64	xmig_min_gain_ns = 0;
+
+/*
  * Slice time for all tasks when pinned tasks are running on the CPU.
  * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
  * the dispatch logic compares vtimes across DSQs.
