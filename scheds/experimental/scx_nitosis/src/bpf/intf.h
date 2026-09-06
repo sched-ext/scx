@@ -84,7 +84,7 @@ struct cpu_ctx {
 	u64 vtime_now;
 	u32 cell;
 	u32 llc;
-	/* cpu this cid maps to, used by userspace to translate array indices */
+	/* the cid's Linux CPU, read by userspace and for scx_clock_task() */
 	u32 cpu;
 	/* guards the sub fields below, see sub_charge() */
 	arena_spinlock_t sub_lock;

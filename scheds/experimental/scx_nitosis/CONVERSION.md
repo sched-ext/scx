@@ -275,6 +275,14 @@ for them.
 Per-cid contexts use NUMA_NO_NODE arena pages. Their placement can differ
 from the percpu map's, so measure locality effects on multi-node hardware.
 
+running_ns comes from scx_clock_task(), which leaves out IRQ and steal time.
+A delegated cell's sub_ns, charged by ops.sub_cid_sched_updated() and by the
+sub_charge_cids() syscall program, stays on scx_bpf_now(). scx_clock_task()
+reads the rq clock and needs the cid's rq lock, which sub_charge_cids() does
+not hold when it charges every cid remotely. The cell's utilization
+therefore adds a clock that counts IRQ and steal time to one that leaves
+them out. It is to be fixed together with the sub accounting.
+
 ## Arena cleanup invariants
 
 The cells array and the per-cid contexts are indexed directly. mitosis's
@@ -361,6 +369,18 @@ into it fail in update_task_cell(). This is memory-model reasoning, not an
 observed failure, and the gate predates the conversion. The port of
 929f6c3708d8 ("scx_mitosis: Always use tracepoints for cgroup tracking")
 makes it apply to every load.
+
+Since the port of 37905edcf7e3 ("scx_mitosis: Charge running time when
+dispatch extends a solo task's slice"), ops.dispatch() charges the
+dispatched cid's context and ops.running() and ops.stopping() the task's
+cid. Under core scheduling, where dispatch runs for an SMT sibling, and
+under a remote sched_change, where stopping() and running() run from another
+cpu, a cid's cstats are incremented from another cpu while the cid's own
+ops.select_cid() and ops.enqueue() increment them through cur_cpu_ctx()
+without its rq lock.
+
+cstat_add() is a plain +=, so increments can be lost. This affects
+statistics only, and mitosis has had the same race since 37905edcf7e3.
 
 ## Syncing with mitosis
 

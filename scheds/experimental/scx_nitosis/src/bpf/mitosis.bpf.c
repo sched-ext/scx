@@ -1119,6 +1119,19 @@ static __always_inline bool pinned_dsq_overdue(struct cpu_ctx *cctx)
 	return since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
 }
 
+/*
+ * Charge the running time of the task described by @tctx since it was last
+ * accounted to its cell's demand counter on the target CPU.
+ */
+static __always_inline void account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now)
+{
+	u64 used;
+
+	used = time_delta(now, tctx->running_accounted_at);
+	tctx->running_accounted_at = now;
+	cctx->running_ns[tctx->cell] += used;
+}
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
 	MITOSIS_TOUCH_ARENA();
@@ -1127,7 +1140,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 	u32 cell;
 	u64 sub_cgid;
 
-	cctx = cur_cpu_ctx();
+	cctx = &cpu_ctxs[cid];
 	cell = READ_ONCE(cctx->cell);
 	sub_cgid = READ_ONCE(cells[cell].sub_cgid);
 
@@ -1219,8 +1232,20 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 					stay = tctx->dsq.raw == cid_dsq.raw;
 			}
 
-			if (stay)
+			if (stay) {
+				/*
+				 * This is an accounting hook as well as a refill.
+				 * Once prev's slice is extended the core picks it
+				 * again, and put_prev_set_next_task() returns early
+				 * for next == prev, so neither stopping() nor
+				 * running() fires for as long as prev stays alone on
+				 * this cpu. Charge any runtime accumulated since the
+				 * last tick or slice extension, and let stopping()
+				 * charge the remainder.
+				 */
+				account_task_running(cctx, tctx, scx_clock_task(cctx->cpu));
 				scx_bpf_task_set_slice(prev, slice_ns);
+			}
 		}
 		return;
 	}
@@ -1265,8 +1290,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+	u64 now;
 
-	cctx = cur_cpu_ctx();
+	cctx = &cpu_ctxs[scx_bpf_task_cid(p)];
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
@@ -1288,8 +1314,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	/* Record the running slice start time. */
-	tctx->started_running_at = scx_bpf_now();
-	tctx->charged_at = tctx->started_running_at;
+	now = scx_bpf_now();
+	tctx->started_running_at = now;
+	tctx->running_accounted_at = scx_clock_task(cctx->cpu);
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
 	if (enable_slice_shrinking) {
@@ -1313,25 +1340,15 @@ static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
 		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
 }
 
-/*
- * Charge the task's time since the last charge to its cell. Called from the
- * tick as well as stopping(), so a task kept running by the slice extension
- * accrues as it runs.
- */
-static void charge_running(struct task_ctx *tctx, struct cpu_ctx *cctx,
-			   u64 now)
-{
-	cctx->running_ns[tctx->cell] += time_delta(now, tctx->charged_at);
-	tctx->charged_at = now;
-}
-
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 {
+	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
+	cctx = &cpu_ctxs[scx_bpf_task_cid(p)];
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
-	charge_running(tctx, cur_cpu_ctx(), scx_bpf_now());
+	account_task_running(cctx, tctx, scx_clock_task(cctx->cpu));
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -1342,7 +1359,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	u64 now, used;
 	u32 cidx;
 
-	cctx = cur_cpu_ctx();
+	cctx = &cpu_ctxs[scx_bpf_task_cid(p)];
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
@@ -1408,7 +1425,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	charge_running(tctx, cctx, now);
+	/* Charge whatever the slice extensions since the last flush left over. */
+	account_task_running(cctx, tctx, scx_clock_task(cctx->cpu));
 }
 
 SEC("fentry/cpuset_write_resmask")
