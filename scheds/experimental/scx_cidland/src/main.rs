@@ -109,6 +109,16 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
+    /// Report every CPU at the same capacity, collapsing the capacity tiers.
+    ///
+    /// The capacity is guessed from ACPI CPPC or cpufreq, which separates the
+    /// P-cores, the favored P-cores and the E-cores of a hybrid x86 into three
+    /// tiers. The kernel's own cpu_capacity is uniform on those machines, so
+    /// fair.c has no fast-core preference on the wakeup path. This makes cidland
+    /// see what fair.c sees, for comparing the placement decisions of the two.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    uniform_capacity: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -222,6 +232,10 @@ impl<'a> Scheduler<'a> {
         let mut tier = 0u64;
         let mut cpu_tiers: Vec<(u64, u64, u64)> = Vec::new();
         for (i, cpu) in cpus.iter().enumerate() {
+            if opts.uniform_capacity {
+                cpu_tiers.push((cpu.id as u64, 1024, 0));
+                continue;
+            }
             let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
             if i > 0 && cpus[i - 1].cpu_capacity != cpu.cpu_capacity {
                 tier += 1;
