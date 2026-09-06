@@ -646,7 +646,7 @@ __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
  */
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 {
-	bool is_prev_allowed = cid_allowed(p, prev_cid);
+	bool is_prev_allowed = !is_restricted(p) || cid_allowed(p, prev_cid);
 	s32 cid = -EBUSY;
 	int i;
 
@@ -1021,6 +1021,47 @@ static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, 
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
 }
 
+/*
+ * Return an allowed cid as close to @cid as possible: its LLC first, then
+ * its node, then anywhere, or -ENOENT.
+ *
+ * @cid is one the task is not allowed on. That happens when the affinity
+ * of a sleeping task is changed to exclude the CPU it last ran on: the
+ * kernel does not migrate a task that is not queued, it leaves task_cpu()
+ * stale and relies on the wakeup to land somewhere valid. The cache the
+ * task left behind is still where it ran, so the CPUs that share it are
+ * the best of the remaining options, which is why select_fallback_rq()
+ * walks the node of task_cpu() before anything else.
+ */
+static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+	u32 i;
+
+	bpf_arena_for(i, 0, topo->llc_nr) {
+		s32 c = topo->llc_base + i;
+
+		if (cid_allowed(p, c))
+			return c;
+	}
+
+	if (numa_enabled && topo->node_nr > topo->llc_nr) {
+		bpf_arena_for(i, 0, topo->node_nr) {
+			s32 c = topo->node_base + i;
+
+			if (cid_allowed(p, c))
+				return c;
+		}
+	}
+
+	bpf_arena_for(i, 0, nr_cids) {
+		if (cid_allowed(p, i))
+			return i;
+	}
+
+	return -ENOENT;
+}
+
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 wake_flags)
 {
 	s32 cid, this_cid = scx_bpf_this_cid();
@@ -1033,20 +1074,16 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 		return prev_cid;
 
 	/*
-	 * Make sure @prev_cid is usable, otherwise try to move close to
-	 * the waker's CPU. If the waker's CPU is also not usable, then
-	 * pick the first usable CPU.
+	 * Make sure @prev_cid is usable, otherwise fall back to the closest
+	 * cid the task is allowed on. Only a restricted task can fail the
+	 * test, so the cpumask lookup stays off the common path.
 	 */
-	if (!cid_allowed(p, prev_cid)) {
-		if (cid_valid(this_cid) && cid_allowed(p, this_cid)) {
-			prev_cid = this_cid;
-		} else {
-			s32 first = scx_bpf_cpu_to_cid(bpf_cpumask_first(p->cpus_ptr));
+	if (is_restricted(p) && !cid_allowed(p, prev_cid)) {
+		s32 near = nearest_allowed_cid(p, prev_cid);
 
-			if (!cid_valid(first))
-				return prev_cid;
-			prev_cid = first;
-		}
+		if (!cid_valid(near))
+			return prev_cid;
+		prev_cid = near;
 	}
 
 	/*
