@@ -21,8 +21,7 @@
  * idle cid when one can be found, preferring (in order) a fully idle core, the
  * previous LLC, and finally anything idle in the system. Tasks that don't get
  * an idle cid are queued to a single shared DSQ, ordered by the virtual
- * deadline computed by task_dl(), which prioritizes tasks that sleep often and
- * run in short bursts.
+ * deadline computed by task_dl().
  */
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
@@ -116,8 +115,7 @@ const volatile bool primary_all = true;
 static u64 __arena *primary_cpus;
 
 /*
- * Bound on the lag a task carries across a sleep, before being scaled by the
- * inverse of its weight (see ops.quiescent()).
+ * Maximum lag, in virtual time, that a task can carry across a sleep.
  */
 const volatile u64 slice_lag;
 
@@ -177,7 +175,6 @@ static u64 sum_weight;
  */
 struct task_ctx {
 	u64 last_run_at;		/* when the task last started running */
-	u64 burst_runtime;		/* runtime accumulated since the last sleep */
 	u64 vruntime;			/* total runtime, scaled by the weight */
 	s64 vlag;			/* lag carried across a sleep */
 	struct scx_cmask allowed;	/* cids the task is allowed to run on */
@@ -523,26 +520,41 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 /*
  * Return the virtual deadline of @p.
  *
- * The deadline is defined as:
+ * This is EEVDF's virtual deadline, see update_deadline():
  *
- *   deadline = vruntime + burst_vruntime
+ *	vd_i = ve_i + r_i / w_i
  *
- * Here @vruntime is the task's total accumulated runtime, inversely scaled by
- * its weight, while @burst_vruntime accounts only for the runtime accumulated
- * since the task last went to sleep, also inversely scaled by its weight.
- *
- * Fairness is driven by @vruntime, while @burst_vruntime prioritizes tasks that
- * sleep frequently and use the CPU in short bursts (hence with a small
- * @burst_vruntime), which are typically the latency critical ones.
+ * The request size r_i is the same @slice_ns for everybody, exactly like
+ * sysctl_sched_base_slice: the weight does not buy a task a longer time
+ * slice, it buys it an earlier deadline, so it runs more often instead of
+ * running longer.
  *
  * The deadline is the DSQ key and nothing else. The kernel stores what is
  * passed to scx_bpf_dsq_insert_vtime() in p->scx.dsq_vtime, so the
  * vruntime has to live somewhere the key cannot overwrite it, see
  * task_ctx.vruntime.
+ *
+ * pick_eevdf() considers only the eligible tasks, v_i <= V, and picks the
+ * earliest deadline among them. A DSQ cannot skip a task and its key is
+ * fixed at insertion, so the filter is not applied here. It is mostly not
+ * needed: a task that is over-served carries the excess in its key and
+ * sorts after the under-served tasks of the same weight, and stays there
+ * until V has moved past it, which is the wait pick_eevdf() would impose
+ * anyway. What is lost is the case of a heavier over-served task, whose
+ * r_i / w_i is smaller, sorting ahead of a lighter under-served one: it
+ * wins by at most the difference between the two requests, a bounded
+ * latency skew, not a fairness leak, since the vruntime is charged all
+ * the same.
+ *
+ * Pushing the ineligible tasks further back with an offset, to apply the
+ * filter exactly, would starve them instead. V advances by the service
+ * delivered divided by the total weight, so under load it barely moves,
+ * and a task waiting for V to cover a fixed offset waits for seconds
+ * while every newly woken task keeps being queued ahead of it.
  */
 static u64 task_dl(const struct task_struct *p, const struct task_ctx __arena *tctx)
 {
-	return tctx->vruntime + scale_by_task_weight_inverse(p, tctx->burst_runtime);
+	return tctx->vruntime + scale_by_task_weight_inverse(p, slice_ns);
 }
 
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
@@ -758,9 +770,6 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 	tctx = lookup_task_ctx(p);
 
-	/* The task just woke up: restart accounting its burst runtime. */
-	tctx->burst_runtime = 0;
-
 	/*
 	 * Place the task back at the lag it had when it went to sleep, the
 	 * way place_entity() does:
@@ -793,12 +802,12 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
 	/*
-	 * Charge the used time slice to the task's vruntime and to the runtime
-	 * accumulated since its last sleep, capping the latter at @slice_lag so
-	 * that CPU intensive tasks don't get starved.
+	 * Charge the service just consumed to the task's vruntime, the way
+	 * update_curr() does:
+	 *
+	 *	se->vruntime += calc_delta_fair(delta_exec, se);
 	 */
 	tctx->vruntime += scale_by_task_weight_inverse(p, slice);
-	tctx->burst_runtime = MIN(tctx->burst_runtime + slice, slice_lag);
 
 	/*
 	 * Advance the system virtual time by the service just delivered.

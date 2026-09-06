@@ -95,11 +95,7 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
-    /// Maximum time slice credit, in microseconds, that a task can accumulate
-    /// while sleeping.
-    ///
-    /// Larger values give a bigger priority boost to tasks that sleep a lot,
-    /// at the cost of fairness towards CPU intensive tasks.
+    /// Maximum lag, in microseconds of virtual time, that a task can carry across a sleep.
     #[clap(short = 'l', long, default_value = "20000")]
     slice_lag_us: u64,
 
