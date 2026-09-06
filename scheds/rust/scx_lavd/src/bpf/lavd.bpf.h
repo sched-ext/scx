@@ -760,7 +760,52 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 
 u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
 		   u64 nr_cpus);
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc);
 u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc);
+
+/*
+ * Time until whatever is running on @cpuc stops, in wall-clock ns.
+ *
+ * Kept apart from the calc_comp_time_on_*() estimators, which carry no
+ * residual so that they stay comparable with one another. A caller that needs
+ * a wall-clock wait rather than a comparison adds this on top.
+ *
+ * SCX_SLICE_INF means nothing is running: lavd only ever writes it to
+ * est_stopping_clk when a CPU goes idle, is taken offline, or is initialized,
+ * and never as a task's slice. So there is nothing to wait for and the
+ * residual is zero.
+ *
+ * est_stopping_clk is the running task's average runtime counted from its
+ * start, not its slice. While it lies ahead it is the better guess, bounded
+ * by the slice the kernel will enforce. Once the task has outrun its average
+ * there is nothing left to predict from, so guess twice and take the larger:
+ * a quarter of the average, as the spread of its runtimes, so a task a
+ * little past its average still reads as about to stop; and the overrun
+ * itself, so a task deep into a burst reads as staying for as long again.
+ * Each guess is wrong where the other is right, and the larger is wrong
+ * only where both are optimistic. The remaining slice caps them, being the
+ * bound the kernel enforces.
+ */
+static __always_inline u64 calc_residual_time(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 est = READ_ONCE(cpuc->est_stopping_clk);
+	struct task_struct *curr;
+	u64 remaining;
+
+	if (est == SCX_SLICE_INF)
+		return 0;
+
+	curr = __COMPAT_scx_bpf_cpu_curr(cpuc->cpu_id);
+	remaining = curr ? curr->scx.slice : 0;
+	if (now >= est) {
+		u64 spread = time_delta(est, cpuc->running_clk) / 4;
+		u64 overrun = time_delta(now, est);
+
+		return min(max(spread, overrun), remaining);
+	}
+
+	return min(time_delta(est, now), remaining);
+}
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
 bool is_cpu_congested(struct cpu_ctx *cpuc);

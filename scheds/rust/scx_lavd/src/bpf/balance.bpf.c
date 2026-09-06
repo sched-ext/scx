@@ -323,6 +323,65 @@ calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum, u64 nr_cpus)
 }
 
 /*
+ * Estimated completion time for a task placed on @cpuc, in wall-clock ns: the
+ * time to drain that CPU's queues and the task itself.
+ *
+ * Inclusive of @cpuc's local DSQ and its per-CPU DSQ -- qload_svc_invr already
+ * carries both, since account_queued_load_pcpu() is called for either
+ * destination.
+ *
+ * The per-CPU DSQ is per physical core: lavd_init() creates one only for the
+ * primary sibling, and every writer charges qload_svc_invr through
+ * get_primary_cpu(). So read the queue from the primary -- a secondary
+ * sibling, which no writer ever charges, would otherwise report an empty queue
+ * forever -- and count both siblings in the drain rate, since both consume
+ * that DSQ. Each sibling counts as a full core here, as it does everywhere
+ * else in lavd's capacity model.
+ *
+ * Summing the two capacities halves the wait term while leaving the run term
+ * unchanged, @nr_cpus scaling it back: the queue drains on two threads, the
+ * task runs on one.
+ *
+ * No residual for the task already running, as with calc_comp_time_on_cpdom(),
+ * so the two stay comparable; a caller that wants a wall-clock wait adds
+ * calc_residual_time() itself.
+ */
+__hidden __attribute__((noinline))
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc)
+{
+	struct cpu_ctx *primary_cpuc = cpuc, *sibling_cpuc;
+	u64 cap_sum = READ_ONCE(cpuc->effective_capacity);
+	u64 nr_cpus = 1;
+	u32 cpu = cpuc->cpu_id, sib;
+
+	sib = get_sibling_cpu(cpu);
+	if (sib != cpu) {
+		sibling_cpuc = get_cpu_ctx_id(sib);
+		if (unlikely(!sibling_cpuc))
+			return LAVD_COMP_TIME_INF;
+		/*
+		 * An offline sibling drains nothing. The queue may still live
+		 * on its ctx, though: writers charge get_primary_cpu() whether
+		 * or not that CPU is online, so the redirect below stays.
+		 */
+		if (sibling_cpuc->is_online) {
+			cap_sum += READ_ONCE(sibling_cpuc->effective_capacity);
+			nr_cpus = 2;
+		}
+		/*
+		 * Ask get_primary_cpu() rather than re-deriving the rule: if
+		 * @cpu is not the primary, its sibling is, and that is the
+		 * ctx every writer charges.
+		 */
+		if (get_primary_cpu(cpu) != cpu)
+			primary_cpuc = sibling_cpuc;
+	}
+
+	return calc_comp_time(task_svc_invr, primary_cpuc->qload_svc_invr,
+			      cap_sum, nr_cpus);
+}
+
+/*
  * Estimated completion time for a task placed in @cpdomc.
  *
  * Inclusive of every task queued anywhere in the domain -- local, per-CPU and
