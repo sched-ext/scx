@@ -405,16 +405,19 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
- * Scan [@base, @base + @nr) for an idle cid of tier @t usable by @p and claim
- * it.
+ * Scan [@base, @base + @nr) for an idle cid of tier @t usable by @p.
  *
  * If @whole_core is true only cids whose entire core is idle are considered,
  * to avoid stacking tasks on SMT siblings while full cores are available.
  *
- * Return the claimed cid or a negative value if none was found.
+ * The idle state is not claimed here: claiming is an atomic write to a mask
+ * every CPU reads, and doing it for every candidate would bounce that mask
+ * across the machine on every wakeup.
+ *
+ * Return the cid or a negative value if none was found.
  */
-static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed, u32 t,
-				u32 base, u32 nr, bool whole_core)
+static s32 scan_idle_range(const struct scx_cmask __arena *allowed, u32 t,
+			   u32 base, u32 nr, bool whole_core)
 {
 	TOUCH_ARENA();
 
@@ -434,8 +437,8 @@ static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed, u32 t,
 			continue;
 		if (!__cmask_test(cid, allowed))
 			continue;
-		if (cid_claim_idle(cid))
-			return cid;
+
+		return cid;
 	}
 
 	return -EBUSY;
@@ -456,39 +459,45 @@ static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed, u32 t,
  * this scan covers them all. Each domain is a contiguous range, so a wakeup
  * reads the cids of its own LLC before anything else.
  *
+ * The idle state is claimed only for the cid that is returned. -EAGAIN means
+ * a candidate was found but claimed by someone else first.
+ *
  * Return the claimed cid or a negative value if nothing idle was found.
  */
 static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
 				const struct cid_ctx __arena *cctx, s32 prev_cid,
 				bool whole_core)
 {
+	s32 best = -EBUSY;
 	u32 t;
 
 	bpf_for(t, 0, nr_tiers) {
-		s32 cid;
-
 		if (cctx->tier == t && __cmask_test(prev_cid, allowed) &&
 		    cid_test_idle(prev_cid) &&
-		    (!whole_core || core_is_idle(prev_cid)) &&
-		    cid_claim_idle(prev_cid))
-			return prev_cid;
+		    (!whole_core || core_is_idle(prev_cid))) {
+			best = prev_cid;
+			break;
+		}
 
 		/*
 		 * A domain that is the whole of the next one is not scanned
 		 * twice.
 		 */
-		cid = claim_idle_cid_range(allowed, t, cctx->llc_base, cctx->llc_nr,
-					   whole_core);
-		if (cid < 0 && numa_enabled && cctx->node_nr > cctx->llc_nr)
-			cid = claim_idle_cid_range(allowed, t, cctx->node_base,
-						   cctx->node_nr, whole_core);
-		if (cid < 0 && (numa_enabled ? cctx->node_nr : cctx->llc_nr) < nr_cids)
-			cid = claim_idle_cid_range(allowed, t, 0, nr_cids, whole_core);
-		if (cid >= 0)
-			return cid;
+		best = scan_idle_range(allowed, t, cctx->llc_base, cctx->llc_nr,
+				       whole_core);
+		if (best < 0 && numa_enabled && cctx->node_nr > cctx->llc_nr)
+			best = scan_idle_range(allowed, t, cctx->node_base,
+					       cctx->node_nr, whole_core);
+		if (best < 0 && (numa_enabled ? cctx->node_nr : cctx->llc_nr) < nr_cids)
+			best = scan_idle_range(allowed, t, 0, nr_cids, whole_core);
+		if (best >= 0)
+			break;
 	}
 
-	return -EBUSY;
+	if (best >= 0 && !cid_claim_idle(best))
+		best = -EAGAIN;
+
+	return best;
 }
 
 /*
