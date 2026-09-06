@@ -323,15 +323,15 @@ SCX_ALLOW_OLD_CLANG is set.
 scx_mavd's stack model reads any object. On the object built from this tree
 at the last sync, the deepest chain is:
 
-    mitosis_enqueue     152 -> 160
+    mitosis_enqueue     144 -> 144
     update_task_cell     56 ->  64
     update_task_cmask   136 -> 144
     cmask_and           112 -> 112
-                               480
+                               464
 
 The left column is the deepest r10 offset in the object, the right one the
 rounded frame the verifier adds. The same chain ending in set_task_llc()
-instead of cmask_and() also models at 480. ops.select_cid() models at 400
+instead of cmask_and() also models at 464. ops.select_cid() models at 400
 through the same helpers, and ops.dispatch() at 448 through the idle pick
 phases. The verifier's own stack depths and the per-program instruction
 counts have not been measured. To re-measure, build scx_nitosis and run the
