@@ -42,6 +42,7 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 			const struct cpumask *cpumask);
 bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
+u32 get_sibling_cpu(u32 cpu);
 
 static inline bool rt_or_dl_task(struct task_struct *p)
 {
