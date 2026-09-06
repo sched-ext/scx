@@ -642,6 +642,37 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	return true;
 }
 
+/*
+ * Is @ctx's task faster to completion on @target than on @sticky?
+ *
+ * Scoped to one LLC: both cpdoms must share L3, so the cost of moving is
+ * small and bounded, and the two estimates are comparable without modelling
+ * cache refill. A cross-LLC candidate is rejected outright.
+ *
+ * Within that scope, migrate only if the estimated completion time on @target
+ * is shorter by more than xmig_min_gain_ns. A smaller difference is treated as
+ * no difference, and the task stays where its cache is warm.
+ *
+ * The asymmetry between big -> LITTLE and LITTLE -> big falls out of the math:
+ * migrating to a less-powerful cluster grows the run term, gating short tasks,
+ * while migrating to a more-powerful one shrinks it, encouraging perf-critical
+ * tasks to migrate up.
+ */
+static __always_inline bool
+is_migration_faster(u64 svc_invr, u64 ct_s, struct cpdom_ctx *sticky,
+		    struct cpdom_ctx *target)
+{
+	u64 ct_t;
+
+	/* L3-sharing guard: only migrate within the same LLC. */
+	if (sticky->llc_id != target->llc_id)
+		return false;
+
+	ct_t = calc_comp_time_on_cpdom(svc_invr, target);
+
+	return ct_s > ct_t && (ct_s - ct_t) > xmig_min_gain_ns;
+}
+
 static
 s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			u64 scope, s64 *sticky_cpdom, bool *is_idle)
@@ -649,23 +680,40 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	struct cpdom_ctx *mig_cpdc;
 	s64 mig_cpdom, nr_nbr;
 	s32 cpu = -ENOENT;
+	/* Userspace forces this to 0 on a homogeneous machine. */
+	bool ct_enabled = xmig_min_gain_ns > 0;
+	u64 svc_invr = ctx->taskc->avg_runtime_invr;
+	u64 ct_s = ct_enabled ? calc_comp_time_on_cpdom(svc_invr, cpdc) : 0;
 	int i, j;
 
 	/*
-	 * Let's migrate a task to neighbor domain when:
-	 *  1) The sticky domain is over-loaded (cpdc->is_stealee)
-	 *  2) The target domain is under-loaded (mig_cpdc->is_stealer)
-	 *     that has a fully idle core.
+	 * Migrate a task (donate it) to a neighbor cpdom. Donation works
+	 * better than task stealing when DSQs are mostly empty (i.e., hard
+	 * to steal from a DSQ), so both gates below take this
+	 * redirect-at-wakeup approach.
 	 *
-	 * Note that when a system is under-loaded, task donation works better
-	 * than task stealing because DSQs are mostly empty (i.e., it is hard
-	 * to steal from a DSQ).
+	 * Two triggers compete per-neighbor in topology-distance order;
+	 * the first neighbor that satisfies either is chosen:
+	 *
+	 *  - Legacy stealer fast path: neighbor mig_cpdc->is_stealer.
+	 *
+	 *  - big.LITTLE completion-time path: ct_enabled AND
+	 *    is_migration_faster() (same LLC, and the estimated
+	 *    completion time is shorter on the neighbor by more than
+	 *    xmig_min_gain_ns). Both callers already require
+	 *    the sticky cpdom to be a stealee, so this path refines which
+	 *    neighbor is taken within an imbalance the load balancer has
+	 *    detected; it does not ask whether the neighbor is a stealer,
+	 *    and skips the flag-clearing below so as not to disturb
+	 *    load-balancer state it didn't consume.
 	 */
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
+			bool via_stealer;
+
 			if (j >= nr_nbr)
 				break;
 			mig_cpdom = get_neighbor_id(cpdc, i, j);
@@ -673,20 +721,23 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 				continue;
 
 			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
-			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+			if (!mig_cpdc)
+				continue;
+
+			via_stealer = READ_ONCE(mig_cpdc->is_stealer);
+			if (!via_stealer &&
+			    !(ct_enabled &&
+			      is_migration_faster(svc_invr, ct_s, cpdc, mig_cpdc)))
 				continue;
 
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
 			if (cpu >= 0) {
 				/*
-				 * Leave both stealer and stealee flags
-				 * active for the round. Donation redirects
-				 * a waking task — it was never queued in
-				 * the stealee domain, so don't touch the
-				 * budget. Flags are cleared only by budget
-				 * exhaustion in the stealing path.
+				 * Clear stealer/stealee flags only when we
+				 * actually consumed the legacy stealer
+				 * signal -- the CT path didn't rely on them.
 				 */
-				if (no_fast_lb) {
+				if (no_fast_lb && via_stealer) {
 					WRITE_ONCE(mig_cpdc->is_stealer, false);
 					WRITE_ONCE(cpdc->is_stealee, false);
 				}
