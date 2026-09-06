@@ -642,60 +642,108 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	return true;
 }
 
+/*
+ * How much sooner @ctx's task would finish on @target than on @sticky, in
+ * wall-clock ns; negative when later. Scoped to one LLC since we don't model
+ * the L3 cache refill cost: a cross-LLC @target reads as no gain.
+ */
+static __always_inline s64
+comp_time_gain(u64 svc_invr, u64 ct_s, struct cpdom_ctx *sticky,
+	       struct cpdom_ctx *target)
+{
+	if (sticky->llc_id != target->llc_id)
+		return 0;
+
+	return (s64)ct_s - (s64)calc_comp_time_on_cpdom(svc_invr, target);
+}
+
 static
 s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			u64 scope, s64 *sticky_cpdom, bool *is_idle)
 {
 	struct cpdom_ctx *mig_cpdc;
-	s64 mig_cpdom, nr_nbr;
+	s64 mig_cpdom, nr_nbr, gain;
 	s32 cpu = -ENOENT;
+	bool ct_enabled = xmig_min_gain_ns > 0; /* Userspace forces this to 0 on a homogeneous machine. */
+	u64 ct_s;
 	int i, j;
 
 	/*
-	 * Let's migrate a task to neighbor domain when:
-	 *  1) The sticky domain is over-loaded (cpdc->is_stealee)
-	 *  2) The target domain is under-loaded (mig_cpdc->is_stealer)
-	 *     that has a fully idle core.
+	 * The caller only gets here when the sticky domain is over-loaded
+	 * (cpdc->is_stealee) and has no idle CPU. Walk the neighbors in
+	 * topology-distance order and take the first one that qualifies.
+	 *
+	 * On a homogeneous system a neighbor qualifies when the load balancer
+	 * flagged it under-loaded (mig_cpdc->is_stealer) and it has an idle
+	 * CPU: every core is alike, so an idle one always finishes the task
+	 * sooner than the over-loaded queue.
+	 *
+	 * On a heterogeneous system the estimate decides instead: the task
+	 * must finish on the neighbor sooner by more than xmig_min_gain_ns,
+	 * idle core or not. An idle core does not qualify by itself, since a
+	 * compute-heavy task would finish later on a slow idle core than in a
+	 * fast queue; and a neighbor whose queue finishes the task clearly
+	 * sooner qualifies even without an idle core, in which case the task
+	 * joins that queue. An idle CPU is preferred when the neighbor has one.
 	 *
 	 * Note that when a system is under-loaded, task donation works better
 	 * than task stealing because DSQs are mostly empty (i.e., it is hard
 	 * to steal from a DSQ).
 	 */
+	if (ct_enabled)
+		ct_s = calc_comp_time_on_cpdom(ctx->taskc->avg_runtime_invr, cpdc);
+
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
-			if (j >= nr_nbr)
+			if (unlikely(j >= nr_nbr))
 				break;
+
 			mig_cpdom = get_neighbor_id(cpdc, i, j);
-			if (mig_cpdom < 0)
+			if (unlikely(mig_cpdom < 0))
 				continue;
 
 			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
-			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+			if (unlikely(!mig_cpdc))
 				continue;
 
+			if (ct_enabled) {
+				gain = comp_time_gain(
+					ctx->taskc->avg_runtime_invr, ct_s,
+					cpdc, mig_cpdc);
+				if (gain  <= (s64)xmig_min_gain_ns)
+					continue;
+			} else if (!READ_ONCE(mig_cpdc->is_stealer)) {
+				continue;
+			}
+
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
-			if (cpu >= 0) {
-				/*
-				 * Leave both stealer and stealee flags
-				 * active for the round. Donation redirects
-				 * a waking task — it was never queued in
-				 * the stealee domain, so don't touch the
-				 * budget. Flags are cleared only by budget
-				 * exhaustion in the stealing path.
-				 */
-				if (no_fast_lb) {
-					WRITE_ONCE(mig_cpdc->is_stealer, false);
-					WRITE_ONCE(cpdc->is_stealee, false);
+			if (cpu >= 0)
+				goto found;
+
+			if (ct_enabled) {
+				cpu = find_sticky_cpu_at_cpdom(ctx, -ENOENT, mig_cpdom);
+				if (cpu >= 0) {
+					*is_idle = false;
+					goto found;
 				}
-				*sticky_cpdom = mig_cpdom;
-				break;
 			}
 		}
 	}
 
+	return cpu;
+
+found:
+	/*
+	 * Under the legacy balancer a donation consumes the imbalance.
+	 */
+	if (no_fast_lb) {
+		WRITE_ONCE(mig_cpdc->is_stealer, false);
+		WRITE_ONCE(cpdc->is_stealee, false);
+	}
+	*sticky_cpdom = mig_cpdom;
 	return cpu;
 }
 
@@ -985,7 +1033,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 * If there is a fully idle core in the system (i.e., !is_smt_empty),
 	 * let's try to migrate a task to another domain.
 	 */
-	if (!i_smt_empty && (nr_cpdoms > 1) &&
+	if ((!i_smt_empty || xmig_min_gain_ns > 0) && (nr_cpdoms > 1) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		cpu = migrate_to_neighbor(ctx, cpdc, SCX_PICK_IDLE_CORE,
