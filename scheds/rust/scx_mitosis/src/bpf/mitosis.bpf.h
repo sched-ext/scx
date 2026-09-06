@@ -107,8 +107,10 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *llc_cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	/* running time is charged up to here, see charge_running() */
-	u64 charged_at;
+	/* scx_clock_task() timestamp through which running time has been
+	 * charged to the demand counters; advanced on ticks and slice
+	 * extensions so long runs show up continuously. */
+	u64 running_accounted_at;
 	/* Packed subcell whose vtime should be charged for this task. */
 	u32 vtime_charge_subcell;
 	u64 basis_vtime;
