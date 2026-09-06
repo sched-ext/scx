@@ -22,6 +22,8 @@ enum consts {
 	MAX_COMM = 16,
 	MAX_SUBCELL_MATCH_ORS = 4,
 	MAX_SUBCELL_MATCH_ANDS = 4,
+	/* Fixed-point scale of a task's demand: 1.0 == 1 << DEMAND_SHIFT. */
+	DEMAND_SHIFT = 10,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
 	MAX_CG_DEPTH = 256,
@@ -113,6 +115,11 @@ struct subcell_account {
 	u64 running_ns;
 	/* Time tasks spent runnable but waiting for a CPU. */
 	u64 queued_ns;
+	/*
+	 * Sum over measurement windows of demand times window length,
+	 * in (1 << DEMAND_SHIFT) * ns. Wraps; consumers must use deltas.
+	 */
+	u64 demand_sum;
 };
 
 /* Serialized subcell config shared between userspace and BPF. */
