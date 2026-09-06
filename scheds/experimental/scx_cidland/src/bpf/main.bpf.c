@@ -92,23 +92,6 @@ UEI_DEFINE(uei);
 const volatile u64 slice_ns;
 
 /*
- * Primary scheduling domain: the cpus that should be preferred when looking
- * for an idle cid (see --primary-domain).
- *
- * Expressed in cpu space, as userspace has no way to know the cid layout: the
- * kernel builds it at scheduler enable time. ops.init() translates it to the
- * @primary_cids mask below. @primary_all short circuits the whole thing when
- * the domain covers everything.
- */
-const volatile bool primary_all = true;
-
-/*
- * Primary domain in cpu space, filled by cidland_set_primary_word() before
- * attach and consumed once by ops.init().
- */
-static u64 __arena *primary_cpus;
-
-/*
  * Maximum lag, in virtual time, that a task can carry across a sleep.
  */
 const volatile u64 slice_lag;
@@ -132,12 +115,25 @@ volatile u64 nr_local_llc, nr_remote_llc;
 static u32 nr_cids;
 
 /*
- * Width of the cid space that the arena arrays below were sized for, and the
- * number of u64 words needed to hold one bit per cid. Both are established by
- * cidland_arena_init() from the CPU count userspace hands it.
+ * Width of the cid space that the arena arrays below were sized for,
+ * established by cidland_arena_init() from the CPU count userspace hands it.
  */
 static u32 nr_cids_max;
-static u32 nr_cid_words;
+
+/*
+ * Number of capacity tiers, 0 being the fastest, and whether there is more
+ * than one. Also set by cidland_arena_init().
+ */
+static u32 nr_tiers;
+static bool asym_capacity;
+
+/*
+ * Capacity and tier of every CPU, in cpu space, filled by cidland_set_cpu()
+ * before attach and consumed once by ops.init(): userspace has no way to know
+ * the cid layout, the kernel only builds it at scheduler enable time.
+ */
+static u64 __arena *cpu_cap_in;
+static u32 __arena *cpu_tier_in;
 
 /*
  * Number of words of storage a cmask framed over the cid space needs.
@@ -145,7 +141,7 @@ static u32 nr_cid_words;
  * CMASK_NR_WORDS() asks for a word beyond the bits themselves, so that a mask
  * based at a cid that isn't word aligned still has room for the word its range
  * spills into. The cmask helpers size their loops off it, so the storage has to
- * match: with @nr_cid_words alone, cmask_init() and cmask_zero() write one word
+ * match: with one word per 64 cids alone, cmask_init() and cmask_zero() write one word
  * past the allocation.
  */
 static u32 nr_cmask_words;
@@ -187,7 +183,7 @@ static u64 cmask_size(u32 nr_words)
 	return sizeof(struct scx_cmask) + (u64)nr_words * sizeof(u64);
 }
 
-/* Size of a task context holding @nr_cid_words words of allowed cids. */
+/* Size of a task context holding @nr_words words of allowed cids. */
 static u64 task_ctx_size(u32 nr_words)
 {
 	return sizeof(struct task_ctx) + (u64)nr_words * sizeof(u64);
@@ -195,8 +191,8 @@ static u64 task_ctx_size(u32 nr_words)
 
 /*
  * Task contexts are allocated from the arena so that @allowed is an arena
- * pointer like @all_cids and @primary_cids, and the pick loop can take either
- * without caring which one it got.
+ * pointer like @all_cids, and the pick loop can take either without caring
+ * which one it got.
  *
  * Every ops path that looks a context up runs between ops.init_task() and
  * ops.exit_task(), so this never returns NULL and the callers don't test it.
@@ -213,6 +209,8 @@ static struct task_ctx __arena *lookup_task_ctx(const struct task_struct *p)
  * space and are guaranteed to be contiguous.
  */
 struct cid_ctx {
+	u64 cap;		/* capacity of the CPU behind this cid, 1024 = fastest */
+	u32 tier;		/* capacity tier, 0 = fastest */
 	u32 core_base;		/* first cid of the core this cid belongs to */
 	u32 core_nr;		/* number of cids (SMT siblings) in the core */
 	u32 llc_base;		/* first cid of the LLC this cid belongs to */
@@ -236,11 +234,6 @@ static struct cid_ctx __arena *cid_ctxs;
  * NULL one, which the verifier can't follow through the inlined tests.
  */
 static struct scx_cmask __arena *all_cids;
-
-/*
- * Primary domain in cid space, built in ops.init() from @primary_cpus.
- */
-static struct scx_cmask __arena *primary_cids;
 
 /*
  * Bitmap of the cids that are currently idle, maintained by ops.update_idle().
@@ -379,15 +372,15 @@ static bool task_can_migrate(const struct task_struct *p)
 }
 
 /*
- * Scan [@base, @base + @nr) for an idle cid usable by @p and claim it.
+ * Scan [@base, @base + @nr) for an idle cid of tier @t usable by @p and claim
+ * it.
  *
  * If @whole_core is true only cids whose entire core is idle are considered,
  * to avoid stacking tasks on SMT siblings while full cores are available.
  *
  * Return the claimed cid or a negative value if none was found.
  */
-static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed,
-				const struct scx_cmask __arena *domain,
+static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed, u32 t,
 				u32 base, u32 nr, bool whole_core)
 {
 	TOUCH_ARENA();
@@ -395,17 +388,18 @@ static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed,
 	u32 cid;
 
 	bpf_for(cid, base, base + nr) {
+		const struct cid_ctx __arena *cctx;
+
 		if (cid >= nr_cids)
 			break;
 		if (!cid_test_idle(cid))
 			continue;
-		if (whole_core) {
-			const struct cid_ctx __arena *cctx = cid_ctx(cid);
-
-			if (!cid_range_is_idle(cctx->core_base, cctx->core_nr))
-				continue;
-		}
-		if (!__cmask_test(cid, allowed) || !__cmask_test(cid, domain))
+		cctx = cid_ctx(cid);
+		if (cctx->tier != t)
+			continue;
+		if (whole_core && !cid_range_is_idle(cctx->core_base, cctx->core_nr))
+			continue;
+		if (!__cmask_test(cid, allowed))
 			continue;
 		if (cid_claim_idle(cid))
 			return cid;
@@ -415,54 +409,44 @@ static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed,
 }
 
 /*
- * Run the idle search within @domain, preferring topological locality with
- * @prev_cid.
+ * Pick an idle cid for @p one capacity tier at a time, from the fastest.
  *
- * Return the claimed cid or a negative value if @domain has nothing idle that
- * @allowed permits.
+ * Only fully idle cores are considered if @whole_core is set, any idle cid
+ * otherwise: the caller runs the whole core pass first, across every tier,
+ * since sharing a core costs more than the step down to the next tier, the way
+ * select_idle_core() looks for a whole core before select_idle_cpu() settles
+ * for a thread.
+ *
+ * Within a tier @prev_cid wins, then a cid in the same LLC, then any cid, to
+ * keep the task where its cache is: the order select_idle_sibling() applies
+ * within one domain.
+ *
+ * Return the claimed cid or a negative value if nothing idle was found.
  */
-static s32 pick_idle_cid_domain(const struct scx_cmask __arena *allowed,
-				const struct scx_cmask __arena *domain,
+static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
 				const struct cid_ctx __arena *cctx, s32 prev_cid,
-				bool core_only)
+				bool whole_core)
 {
-	s32 cid;
+	u32 t;
 
-	/*
-	 * Stay on @prev_cid if its whole core is idle: caches are warm and no
-	 * SMT sibling is competing for the core.
-	 */
-	if (__cmask_test(prev_cid, allowed) && __cmask_test(prev_cid, domain) &&
-	    cid_range_is_idle(cctx->core_base, cctx->core_nr) &&
-	    cid_claim_idle(prev_cid))
-		return prev_cid;
+	bpf_for(t, 0, nr_tiers) {
+		s32 cid;
 
-	/* Then any fully idle core in the same LLC. */
-	cid = claim_idle_cid_range(allowed, domain, cctx->llc_base, cctx->llc_nr, true);
-	if (cid >= 0)
-		return cid;
+		if (cctx->tier == t && __cmask_test(prev_cid, allowed) &&
+		    cid_test_idle(prev_cid) &&
+		    (!whole_core || cid_range_is_idle(cctx->core_base, cctx->core_nr)) &&
+		    cid_claim_idle(prev_cid))
+			return prev_cid;
 
-	/*
-	 * A caller that only wants a whole core stops here, after one more
-	 * look for one anywhere in @domain: taking an SMT sibling would put
-	 * the task on a core that is already running something, which costs
-	 * more than the wait it saves.
-	 */
-	if (core_only)
-		return claim_idle_cid_range(allowed, domain, 0, nr_cids, true);
+		cid = claim_idle_cid_range(allowed, t, cctx->llc_base, cctx->llc_nr,
+					   whole_core);
+		if (cid < 0 && cctx->llc_nr < nr_cids)
+			cid = claim_idle_cid_range(allowed, t, 0, nr_cids, whole_core);
+		if (cid >= 0)
+			return cid;
+	}
 
-	/* Then @prev_cid, even if its SMT sibling is busy. */
-	if (__cmask_test(prev_cid, allowed) && __cmask_test(prev_cid, domain) &&
-	    cid_claim_idle(prev_cid))
-		return prev_cid;
-
-	/* Then any idle cid in the same LLC. */
-	cid = claim_idle_cid_range(allowed, domain, cctx->llc_base, cctx->llc_nr, false);
-	if (cid >= 0)
-		return cid;
-
-	/* Lastly, anything idle in @domain. */
-	return claim_idle_cid_range(allowed, domain, 0, nr_cids, false);
+	return -EBUSY;
 }
 
 /*
@@ -511,18 +495,14 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 		allowed = &lookup_task_ctx(p)->allowed;
 
 	/*
-	 * Search the primary domain first and fall back to the rest of the
-	 * system only when it has nothing idle to offer.
+	 * Fully idle cores first, across every tier, then any idle cid: a
+	 * caller that only wants a whole core stops after the first pass,
+	 * since taking an SMT sibling would put the task on a core that is
+	 * already running something, which costs more than the wait it saves.
 	 */
-	if (!primary_all)
-		cid = pick_idle_cid_domain(allowed, primary_cids, cctx, prev_cid,
-					   core_only);
-	else
-		cid = -EBUSY;
-
-	if (cid < 0)
-		cid = pick_idle_cid_domain(allowed, all_cids, cctx, prev_cid,
-					   core_only);
+	cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, true);
+	if (cid < 0 && !core_only)
+		cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, false);
 	if (cid < 0)
 		return cid;
 
@@ -532,6 +512,39 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 		__sync_fetch_and_add(&nr_remote_llc, 1);
 
 	return cid;
+}
+
+/*
+ * Return an idle cid faster than @cid whose whole core is idle, or -ENOENT.
+ * The idle state is not claimed: the caller is expected to kick it.
+ *
+ * Only a fully idle faster core counts: pulling a task from a whole slow core
+ * onto a fast thread whose sibling is busy trades the capacity for a shared
+ * core, which is what asym_smt_can_pull_tasks() refuses to do.
+ */
+static s32 idle_faster_cid(s32 cid)
+{
+	const struct cid_ctx __arena *cctx;
+	u32 tier, c;
+
+	if (!asym_capacity || !cid_valid(cid))
+		return -ENOENT;
+
+	cctx = cid_ctx(cid);
+	tier = cctx->tier;
+
+	bpf_for(c, 0, nr_cids) {
+		const struct cid_ctx __arena *other = cid_ctx(c);
+
+		if (other->tier >= tier || !cid_test_idle(c))
+			continue;
+		if (!cid_range_is_idle(other->core_base, other->core_nr))
+			continue;
+
+		return c;
+	}
+
+	return -ENOENT;
 }
 
 /*
@@ -720,6 +733,17 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	__sync_fetch_and_add(&nr_queued, 1);
 
 	scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
+
+	/*
+	 * A faster cid sitting idle would never look at this queue on its
+	 * own: wake it up so that it pulls the task, see try_steal_task().
+	 */
+	if (task_can_migrate(p)) {
+		s32 cid = idle_faster_cid(prev_cid);
+
+		if (cid >= 0)
+			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+	}
 }
 
 /*
@@ -732,14 +756,6 @@ static bool keep_running(const struct task_struct *p, s32 cid)
 
 	/* The task doesn't want to run anymore. */
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
-		return false;
-
-	/*
-	 * Don't hold a task on a cid outside the primary domain when it could
-	 * move: letting it go through the shared queue gives it a chance to
-	 * land in the primary domain instead.
-	 */
-	if (!primary_all && !__cmask_test(cid, primary_cids) && task_can_migrate(p))
 		return false;
 
 	return true;
@@ -802,6 +818,39 @@ static bool try_steal_task(s32 dst_cid)
 	if (start >= nr_cids)
 		start = 0;
 
+	/*
+	 * A cid with nothing to do looks at the slower cids first, and takes
+	 * their tasks hot or not: a task is better off on a faster core than
+	 * with a warm cache on a slow one. This is what pulls the load up the
+	 * capacity ladder, the way asym packing does.
+	 */
+	if (!own && asym_capacity) {
+		u32 best_tier = cctx->tier;
+
+		bpf_for(i, 0, nr_cids) {
+			const struct cid_ctx __arena *other = cid_ctx(i);
+			const struct task_ctx __arena *tctx;
+			struct task_struct *p;
+
+			if (other->tier <= best_tier)
+				continue;
+
+			p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(i));
+			if (!p)
+				continue;
+
+			tctx = lookup_task_ctx(p);
+			if (!__cmask_test(dst_cid, &tctx->allowed))
+				continue;
+
+			best_tier = other->tier;
+			min_dl = p->scx.dsq_vtime;
+			min_cid = i;
+		}
+		if (min_cid >= 0)
+			goto pick;
+	}
+
 	bpf_for(i, 0, limit) {
 		const struct task_ctx __arena *tctx;
 		struct task_struct *p;
@@ -842,6 +891,7 @@ static bool try_steal_task(s32 dst_cid)
 		    !time_before(min_dl + slice_ns, own->scx.dsq_vtime)))
 		min_cid = dst_cid;
 
+pick:
 	if (min_cid < 0)
 		return false;
 
@@ -1110,8 +1160,21 @@ static s32 init_cid_ctxs(void)
 		struct scx_cid_topo *topo = &init_topo;
 		s32 cid = nr_cids - 1 - i;
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
+		s32 cpu = scx_bpf_cid_to_cpu(cid);
 
 		scx_bpf_cid_topo(cid, topo);
+
+		/*
+		 * A cid with no CPU behind it (offline when the cid space was
+		 * built) is treated as the slowest thing in the system.
+		 */
+		if (cpu >= 0 && (u32)cpu < nr_cpu_ids) {
+			cctx->cap = cpu_cap_in[cpu];
+			cctx->tier = cpu_tier_in[cpu];
+		} else {
+			cctx->cap = 1;
+			cctx->tier = nr_tiers - 1;
+		}
 
 		/*
 		 * Cids in the no-topo tail (CPUs that were offline when the cid
@@ -1144,36 +1207,6 @@ static s32 init_cid_ctxs(void)
 	return 0;
 }
 
-/*
- * Translate the primary domain from the cpu space userspace gave us to cid
- * space, which is only known once the kernel has built the cid layout.
- */
-static void init_primary_cids(void)
-{
-	TOUCH_ARENA();
-
-	u32 cpu;
-
-	if (primary_all)
-		return;
-
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		u32 idx = cpu / 64;
-		s32 cid;
-
-		if (idx >= nr_cid_words)
-			break;
-		if (!(primary_cpus[idx] & (1ULL << (cpu & 63))))
-			continue;
-
-		cid = scx_bpf_cpu_to_cid(cpu);
-		if (!cid_valid(cid))
-			continue;
-
-		__cmask_set(cid, primary_cids);
-	}
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 {
 	s32 err;
@@ -1202,7 +1235,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	 * Frame the masks over the cid space before anything sets a bit.
 	 */
 	cmask_init(all_cids, 0, nr_cids);
-	cmask_init(primary_cids, 0, nr_cids);
 	cmask_init(idle_cids, 0, nr_cids);
 
 	/* Handed to the pick loop for the tasks that can run anywhere. */
@@ -1211,8 +1243,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	err = init_cid_ctxs();
 	if (err)
 		return err;
-
-	init_primary_cids();
 
 	/*
 	 * Create the per-cid DSQs.
@@ -1245,11 +1275,12 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	u64 nr_cpus = args->nr_cpus, bytes;
 	s32 err;
 
-	if (!nr_cpus)
+	if (!nr_cpus || !args->nr_tiers)
 		return -EINVAL;
 
 	nr_cids_max = nr_cpus;
-	nr_cid_words = div_round_up(nr_cpus, 64);
+	nr_tiers = args->nr_tiers;
+	asym_capacity = nr_tiers > 1;
 	nr_cmask_words = CMASK_NR_WORDS(nr_cpus);
 
 	/*
@@ -1258,19 +1289,19 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	 * allocator's own bookkeeping.
 	 */
 	bytes = nr_cpus * sizeof(struct cid_ctx) +
-		3 * cmask_size(nr_cmask_words) +
-		(u64)nr_cid_words * sizeof(u64);
+		2 * cmask_size(nr_cmask_words) +
+		nr_cpus * (sizeof(u64) + sizeof(u32));
 	err = scx_static_init(div_round_up(bytes, PAGE_SIZE) + STATIC_ALLOC_PAGES);
 	if (err)
 		return err;
 
 	cid_ctxs = scx_static_alloc(nr_cpus * sizeof(struct cid_ctx), sizeof(u64));
 	all_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
-	primary_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
 	idle_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
-	primary_cpus = scx_static_alloc(nr_cid_words * sizeof(u64), sizeof(u64));
+	cpu_cap_in = scx_static_alloc(nr_cpus * sizeof(u64), sizeof(u64));
+	cpu_tier_in = scx_static_alloc(nr_cpus * sizeof(u32), sizeof(u32));
 
-	if (!cid_ctxs || !all_cids || !primary_cids || !idle_cids || !primary_cpus)
+	if (!cid_ctxs || !all_cids || !idle_cids || !cpu_cap_in || !cpu_tier_in)
 		return -ENOMEM;
 
 	/*
@@ -1281,22 +1312,23 @@ int cidland_arena_init(struct cidland_arena_args *args)
 }
 
 /*
- * Feed one word of the primary domain, in cpu space.
+ * Report the capacity and the tier of one CPU, in cpu space.
  *
- * Userspace calls this once per word after cidland_arena_init() and before
+ * Userspace calls this once per CPU after cidland_arena_init() and before
  * attach; ops.init() translates the result to cid space.
  */
 SEC("syscall")
-int cidland_set_primary_word(struct cidland_primary_args *args)
+int cidland_set_cpu(struct cidland_cpu_args *args)
 {
-	u64 idx = args->idx;
+	u64 cpu = args->cpu;
 
 	TOUCH_ARENA();
 
-	if (!primary_cpus || idx >= nr_cid_words)
+	if (!cpu_cap_in || cpu >= nr_cids_max || args->tier >= nr_tiers)
 		return -EINVAL;
 
-	primary_cpus[idx] = args->word;
+	cpu_cap_in[cpu] = args->capacity;
+	cpu_tier_in[cpu] = args->tier;
 
 	return 0;
 }

@@ -33,12 +33,10 @@ use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_cid_load;
@@ -111,23 +109,6 @@ struct Opts {
     #[clap(long, default_value = "0")]
     steal_sample: u64,
 
-    /// Specifies a group of CPUs to be preferred when looking for an idle CPU.
-    ///
-    /// Accepts a comma-separated list of CPUs or ranges (e.g. 0-3,8-11), or one
-    /// of the following keywords:
-    ///
-    /// "performance" = prioritize the fastest CPUs,
-    /// "powersave" = prioritize the slowest CPUs,
-    /// "turbo" = prioritize the CPUs with the highest max frequency,
-    /// "all" = all CPUs assigned to the primary domain.
-    ///
-    /// This is a preference, not an isolation mechanism: tasks still overflow
-    /// to the other CPUs when the primary domain has nothing idle to offer.
-    ///
-    /// By default all CPUs are used.
-    #[clap(short = 'm', long, value_name = "CPU_LIST")]
-    primary_domain: Option<String>,
-
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -155,73 +136,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-/// Resolve the --primary-domain argument: either one of the topology keywords
-/// or an explicit CPU list.
-fn parse_primary_domain(arg: &str) -> Result<Vec<usize>> {
-    let mode = match arg {
-        "performance" => Some(Powermode::Performance),
-        "powersave" => Some(Powermode::Powersave),
-        "turbo" => Some(Powermode::Turbo),
-        "all" => Some(Powermode::Any),
-        _ => None,
-    };
-
-    let Some(mode) = mode else {
-        return parse_cpu_list(arg);
-    };
-
-    let mut cpus = get_primary_cpus(mode).context("detecting the primary CPUs")?;
-    if cpus.is_empty() {
-        bail!("no CPU matches \"{arg}\" on this system");
-    }
-    cpus.sort_unstable();
-    cpus.dedup();
-
-    Ok(cpus)
-}
-
-/// Parse a comma-separated list of CPUs and ranges, e.g. "0-3,8,10-11".
-fn parse_cpu_list(arg: &str) -> Result<Vec<usize>> {
-    let mut cpus = Vec::new();
-
-    for token in arg.split(',') {
-        let token = token.trim();
-
-        if token.is_empty() {
-            continue;
-        }
-
-        if let Some((start, end)) = token.split_once('-') {
-            let start: usize = start
-                .trim()
-                .parse()
-                .with_context(|| format!("invalid range start in {token:?}"))?;
-            let end: usize = end
-                .trim()
-                .parse()
-                .with_context(|| format!("invalid range end in {token:?}"))?;
-            if start > end {
-                bail!("invalid range {token:?}");
-            }
-            cpus.extend(start..=end);
-        } else {
-            cpus.push(
-                token
-                    .parse()
-                    .with_context(|| format!("invalid cpu id {token:?}"))?,
-            );
-        }
-    }
-
-    if cpus.is_empty() {
-        bail!("no CPU specified");
-    }
-    cpus.sort_unstable();
-    cpus.dedup();
-
-    Ok(cpus)
 }
 
 struct Scheduler<'a> {
@@ -266,25 +180,27 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.steal_sample = opts.steal_sample;
 
-        // Define the primary scheduling domain, in cpu space: the BPF side
-        // translates it to cids once the kernel has built the cid layout. The
-        // mask itself is handed over after load, see below.
-        let mut primary_cpus: Vec<usize> = Vec::new();
-        if let Some(ref domain) = opts.primary_domain {
-            let cpus = parse_primary_domain(domain).context("parsing primary domain")?;
-
-            if let Some(cpu) = cpus.iter().find(|cpu| **cpu >= *NR_CPU_IDS) {
-                bail!(
-                    "primary domain cpu {} exceeds nr_cpu_ids {}",
-                    cpu,
-                    *NR_CPU_IDS
-                );
+        // Capacity tiers: CPUs sorted by capacity in descending order, one
+        // tier per distinct capacity, 0 being the fastest. Capacities are
+        // normalized to 1..1024 so the highest is always 1024.
+        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+        let max_cap = cpus.first().map(|c| c.cpu_capacity).unwrap_or(1).max(1);
+        let mut tier = 0u64;
+        let mut cpu_tiers: Vec<(u64, u64, u64)> = Vec::new();
+        for (i, cpu) in cpus.iter().enumerate() {
+            let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
+            if i > 0 && cpus[i - 1].cpu_capacity != cpu.cpu_capacity {
+                tier += 1;
             }
-            if cpus.len() < *NR_CPU_IDS {
-                info!("primary domain: {:?}", cpus);
-                primary_cpus = cpus;
-                rodata.primary_all = false;
-            }
+            cpu_tiers.push((cpu.id as u64, normalized as u64, tier));
+        }
+        let nr_tiers = tier + 1;
+        if nr_tiers > 1 {
+            info!(
+                "CPUs by capacity: {:?}",
+                cpus.iter().map(|cpu| cpu.id).collect::<Vec<_>>()
+            );
         }
 
         // Set scheduler flags.
@@ -313,26 +229,22 @@ impl<'a> Scheduler<'a> {
         let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
         let mut args = types::cidland_arena_args {
             nr_cpus: nr_cpus as u64,
+            nr_tiers,
         };
         run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
             .context("running cidland_arena_init")?;
 
-        // Hand over the primary domain a word at a time, so that nothing on
-        // either side has to cap the number of CPUs.
-        let mut words = vec![0u64; nr_cpus.div_ceil(64)];
-        for cpu in &primary_cpus {
-            words[cpu / 64] |= 1u64 << (cpu % 64);
-        }
-        for (idx, word) in words.iter().enumerate() {
-            if *word == 0 {
-                continue;
-            }
-            let mut args = types::cidland_primary_args {
-                idx: idx as u64,
-                word: *word,
+        // Hand over the capacity and the tier of each CPU, in cpu space: the
+        // cid layout is only known once the kernel has built it, at attach, so
+        // ops.init() translates.
+        for (cpu, capacity, tier) in cpu_tiers {
+            let mut args = types::cidland_cpu_args {
+                cpu,
+                capacity,
+                tier,
             };
-            run_syscall_prog(&skel.progs.cidland_set_primary_word, &mut args)
-                .context("running cidland_set_primary_word")?;
+            run_syscall_prog(&skel.progs.cidland_set_cpu, &mut args)
+                .context("running cidland_set_cpu")?;
         }
 
         // The BPF side has a scheduler-specific initialization path, but the
