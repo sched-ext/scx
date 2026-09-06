@@ -77,7 +77,7 @@ fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result
     name = "scx_cidland",
     version,
     disable_version_flag = true,
-    about = "Lightweight scheduler optimized for preserving task-to-CPU locality."
+    about = "Topology-aware scheduler that preserves task-to-CPU locality, built on EEVDF concepts."
 )]
 struct Opts {
     /// Exit debug dump buffer length. 0 indicates default.
