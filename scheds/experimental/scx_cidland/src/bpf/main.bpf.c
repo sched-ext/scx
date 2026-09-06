@@ -85,12 +85,6 @@ UEI_DEFINE(uei);
 #define STATIC_ALLOC_PAGES	8
 
 /*
- * Maximum measured task wakeup rate. Used to avoid spikes when prioritizing
- * wakeup-intensive tasks.
- */
-#define MAX_WAKEUP_FREQ	1024
-
-/*
  * The verifier only associates a program with an arena if the program emits an
  * LD_IMM64 loading the map. Reaching the arena through a pointer kept in a
  * global doesn't do that, so a program that has no other reason to load the
@@ -165,19 +159,25 @@ static u32 nr_cmask_words;
 static u32 nr_cpu_ids;
 
 /*
- * Current system virtual time: the largest vruntime seen so far, used to give
- * waking tasks a sane starting point.
+ * Current system virtual time: the reference every task is placed against.
  */
 static u64 vtime_now;
+
+/*
+ * Total weight of the runnable tasks, EEVDF's \Sum w_i (cfs_rq->sum_weight).
+ *
+ * Maintained across the ops.runnable() / ops.quiescent() pair, which the core
+ * scheduler guarantees to be symmetric, so it converges even when a task is
+ * dequeued without ever being consumed by the BPF side.
+ */
+static u64 sum_weight;
 
 /*
  * Per-task context.
  */
 struct task_ctx {
 	u64 last_run_at;		/* when the task last started running */
-	u64 last_woke_at;		/* when the task last woke up */
 	u64 burst_runtime;		/* runtime accumulated since the last sleep */
-	u64 wakeup_freq;		/* average wakeup frequency */
 	struct scx_cmask allowed;	/* cids the task is allowed to run on */
 };
 
@@ -217,6 +217,7 @@ struct cid_ctx {
 	u32 core_nr;		/* number of cids (SMT siblings) in the core */
 	u32 llc_base;		/* first cid of the LLC this cid belongs to */
 	u32 llc_nr;		/* number of cids in the LLC */
+	u64 vtime_rem;		/* service not yet folded into @vtime_now */
 };
 
 /*
@@ -518,27 +519,6 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 }
 
 /*
- * Exponentially weighted moving average:
- *
- * new_avg := (old_avg * .75) + (new_val * .25)
- */
-static u64 calc_avg(u64 old_val, u64 new_val)
-{
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
-}
-
-/*
- * Update the average frequency of an event, given the @interval since the
- * previous one.
- */
-static u64 update_freq(u64 freq, u64 interval)
-{
-	u64 new_freq = (100 * NSEC_PER_MSEC) / interval;
-
-	return calc_avg(freq, new_freq);
-}
-
-/*
  * Return the virtual deadline of @p.
  *
  * The deadline is defined as:
@@ -553,19 +533,35 @@ static u64 update_freq(u64 freq, u64 interval)
  * sleep frequently and use the CPU in short bursts (hence with a small
  * @burst_vruntime), which are typically the latency critical ones.
  *
- * To avoid over-prioritizing tasks that sleep for a long time, the vruntime
- * credit they can build up while sleeping is capped at @slice_lag, scaled by
- * the task's weight and by its wakeup frequency: tasks that sleep often get a
- * bigger lag than tasks with infrequent, long sleeps.
+ * The distance from @vtime_now is bounded on both sides by @slice_lag, which
+ * caps both the credit a sleeper builds up and how far a task that has been
+ * running can drift behind.
  */
 static u64 task_dl(struct task_struct *p, const struct task_ctx __arena *tctx)
 {
-	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
-	u64 vtime_min = vtime_now - vsleep_max;
+	u64 limit = scale_by_task_weight_inverse(p, slice_lag);
+	u64 vtime_min = vtime_now - limit;
+	u64 vtime_max = vtime_now + limit;
 
+	/*
+	 * Bound the lag on both sides, like EEVDF's entity_lag():
+	 *
+	 *	return clamp(vlag, -limit, limit);
+	 *
+	 * The lower bound caps the credit a sleeper builds up. The upper bound
+	 * is what keeps a task that has been running from drifting arbitrarily
+	 * far behind: without it the gap only ever grows, and a task that is
+	 * never picked never advances the clock either, so nothing brings it
+	 * back.
+	 *
+	 * The limit is scaled by the inverse of the task's weight, matching
+	 * calc_delta_fair(): the same amount of real time is a smaller step in
+	 * virtual time for a heavier task.
+	 */
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		scx_bpf_task_set_dsq_vtime(p, vtime_min);
+	else if (time_after(p->scx.dsq_vtime, vtime_max))
+		scx_bpf_task_set_dsq_vtime(p, vtime_max);
 
 	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->burst_runtime);
 }
@@ -745,22 +741,21 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	cid_set_idle(cid, true);
 }
 
+void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
+{
+	__sync_fetch_and_sub(&sum_weight, p->scx.weight);
+}
+
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = bpf_ktime_get_ns(), delta_t;
 	struct task_ctx __arena *tctx;
+
+	__sync_fetch_and_add(&sum_weight, p->scx.weight);
 
 	tctx = lookup_task_ctx(p);
 
 	/* The task just woke up: restart accounting its burst runtime. */
 	tctx->burst_runtime = 0;
-
-	/*
-	 * Refresh the wakeup frequency, capped to avoid large spikes.
-	 */
-	delta_t = now - tctx->last_woke_at;
-	tctx->wakeup_freq = MIN(update_freq(tctx->wakeup_freq, delta_t), MAX_WAKEUP_FREQ);
-	tctx->last_woke_at = now;
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
@@ -770,16 +765,13 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	tctx = lookup_task_ctx(p);
 
 	tctx->last_run_at = bpf_ktime_get_ns();
-
-	/* Keep the system virtual time in sync with the running task. */
-	if (time_before(vtime_now, p->scx.dsq_vtime))
-		vtime_now = p->scx.dsq_vtime;
 }
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 {
+	s32 cid = scx_bpf_task_cid(p);
 	struct task_ctx __arena *tctx;
-	u64 slice;
+	u64 slice, weight;
 
 	tctx = lookup_task_ctx(p);
 
@@ -793,6 +785,42 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime +
 				   scale_by_task_weight_inverse(p, slice));
 	tctx->burst_runtime = MIN(tctx->burst_runtime + slice, slice_lag);
+
+	/*
+	 * Advance the system virtual time by the service just delivered.
+	 *
+	 * EEVDF's reference is the weighted average of the runnable set,
+	 *
+	 *	V = \Sum (w_i * v_i) / \Sum w_i
+	 *
+	 * so serving @p for @slice moves it by
+	 *
+	 *	dV = w_p * dv_p / \Sum w_i = slice * NICE_0 / \Sum w_i
+	 *
+	 * since dv_p is the slice scaled by the inverse of @p's weight. That
+	 * is an identity, not an approximation: what matters is that V rises
+	 * with the service handed out no matter who receives it. Deriving it
+	 * from the running task's own vruntime instead (the previous
+	 * max-of-running rule) stalls the clock exactly when it is needed,
+	 * because the tasks that are behind never run and the tasks that do
+	 * run barely advance their own vruntime.
+	 *
+	 * The division truncates, and once the total weight exceeds a
+	 * hundred times the length of a burst every burst contributes
+	 * nothing: with a few thousand runnable tasks V would stop entirely
+	 * and everything queued behind it would starve. Carry the remainder
+	 * per cid so that the service is accounted in full.
+	 */
+	weight = sum_weight;
+	if (weight && cid_valid(cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
+		u64 acc = slice * 100 + cctx->vtime_rem;
+		u64 delta = acc / weight;
+
+		cctx->vtime_rem = acc - delta * weight;
+		if (delta)
+			__sync_fetch_and_add(&vtime_now, delta);
+	}
 }
 
 /*
@@ -1083,6 +1111,7 @@ SCX_OPS_CID_DEFINE(cidland_ops,
 		   .enqueue		= (void *)cidland_enqueue,
 		   .dispatch		= (void *)cidland_dispatch,
 		   .runnable		= (void *)cidland_runnable,
+		   .quiescent		= (void *)cidland_quiescent,
 		   .running		= (void *)cidland_running,
 		   .stopping		= (void *)cidland_stopping,
 		   .set_cmask		= (void *)cidland_set_cmask,
