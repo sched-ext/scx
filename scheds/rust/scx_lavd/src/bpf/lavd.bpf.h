@@ -832,29 +832,25 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
  * budget? The base budget is warm_cpu_ns; warm cache and TLB state on @cpu
  * stretch it up to 2x, so a task still warm there waits rather than migrate to
  * a cold CPU and refill. The wait is the time until the running task stops plus
- * the service time of tasks already queued ahead on that CPU's DSQ.
+ * the service time already queued on that CPU.
  */
 static __always_inline
 bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 {
 	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
-	u64 heat, budget, est, wait;
+	u64 heat, budget, wait;
 
 	if (!cpuc)
 		return false;
 
 	heat = task_cpu_warmth(taskc, cpu, now);
 	budget = (warm_cpu_ns * (LAVD_SCALE + heat)) >> LAVD_SHIFT;
-	est = READ_ONCE(cpuc->est_stopping_clk);
-	wait = time_delta(est, now);
 
 	/*
-	 * Add the wait for tasks already queued ahead on @cpu. This is rough: it
-	 * assumes @p is served last and that every queued task runs the
-	 * system-average slice. A per-core qload_invr would sharpen the latter;
-	 * revisit once per-core queued load is tracked.
+	 * The wait is the queued backlog on @cpu plus the running task's
+	 * residual: a wall-clock wait, not a comparison, so the residual counts.
 	 */
-	wait += (u64)scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) * sys_stat.slice_wall;
+	wait = calc_residual_time(cpuc, now) + calc_comp_time_on_cpu(0, cpuc);
 
 	return wait <= budget;
 }
