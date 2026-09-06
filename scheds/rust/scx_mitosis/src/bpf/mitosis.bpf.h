@@ -111,6 +111,9 @@ struct task_ctx {
 	 * counters; advanced whenever dispatch extends a slice so long runs
 	 * show up continuously. */
 	u64 running_accounted_at;
+	/* When the task last became runnable without running; 0 while running
+	 * or sleeping. Closed into its subcell's queued_ns. */
+	u64 runnable_at;
 	/* Packed subcell whose vtime should be charged for this task. */
 	u32 vtime_charge_subcell;
 	u64 basis_vtime;

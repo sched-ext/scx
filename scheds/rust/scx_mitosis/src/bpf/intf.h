@@ -108,6 +108,13 @@ struct subcell_match_and_group {
 	struct subcell_match matches[MAX_SUBCELL_MATCH_ANDS];
 };
 
+/* Per-CPU time accounting for the tasks that belong to one subcell. */
+struct subcell_account {
+	u64 running_ns;
+	/* Time tasks spent runnable but waiting for a CPU. */
+	u64 queued_ns;
+};
+
 /* Serialized subcell config shared between userspace and BPF. */
 struct subcell_config {
 	u32 id;
