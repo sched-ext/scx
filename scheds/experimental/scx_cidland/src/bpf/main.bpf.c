@@ -116,8 +116,8 @@ const volatile bool primary_all = true;
 static u64 __arena *primary_cpus;
 
 /*
- * Maximum time slice credit a task can accumulate while sleeping, before being
- * scaled by its weight and its wakeup frequency (see task_dl()).
+ * Bound on the lag a task carries across a sleep, before being scaled by the
+ * inverse of its weight (see ops.quiescent()).
  */
 const volatile u64 slice_lag;
 
@@ -178,6 +178,8 @@ static u64 sum_weight;
 struct task_ctx {
 	u64 last_run_at;		/* when the task last started running */
 	u64 burst_runtime;		/* runtime accumulated since the last sleep */
+	u64 vruntime;			/* total runtime, scaled by the weight */
+	s64 vlag;			/* lag carried across a sleep */
 	struct scx_cmask allowed;	/* cids the task is allowed to run on */
 };
 
@@ -533,37 +535,14 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
  * sleep frequently and use the CPU in short bursts (hence with a small
  * @burst_vruntime), which are typically the latency critical ones.
  *
- * The distance from @vtime_now is bounded on both sides by @slice_lag, which
- * caps both the credit a sleeper builds up and how far a task that has been
- * running can drift behind.
+ * The deadline is the DSQ key and nothing else. The kernel stores what is
+ * passed to scx_bpf_dsq_insert_vtime() in p->scx.dsq_vtime, so the
+ * vruntime has to live somewhere the key cannot overwrite it, see
+ * task_ctx.vruntime.
  */
-static u64 task_dl(struct task_struct *p, const struct task_ctx __arena *tctx)
+static u64 task_dl(const struct task_struct *p, const struct task_ctx __arena *tctx)
 {
-	u64 limit = scale_by_task_weight_inverse(p, slice_lag);
-	u64 vtime_min = vtime_now - limit;
-	u64 vtime_max = vtime_now + limit;
-
-	/*
-	 * Bound the lag on both sides, like EEVDF's entity_lag():
-	 *
-	 *	return clamp(vlag, -limit, limit);
-	 *
-	 * The lower bound caps the credit a sleeper builds up. The upper bound
-	 * is what keeps a task that has been running from drifting arbitrarily
-	 * far behind: without it the gap only ever grows, and a task that is
-	 * never picked never advances the clock either, so nothing brings it
-	 * back.
-	 *
-	 * The limit is scaled by the inverse of the task's weight, matching
-	 * calc_delta_fair(): the same amount of real time is a smaller step in
-	 * virtual time for a heavier task.
-	 */
-	if (time_before(p->scx.dsq_vtime, vtime_min))
-		scx_bpf_task_set_dsq_vtime(p, vtime_min);
-	else if (time_after(p->scx.dsq_vtime, vtime_max))
-		scx_bpf_task_set_dsq_vtime(p, vtime_max);
-
-	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->burst_runtime);
+	return tctx->vruntime + scale_by_task_weight_inverse(p, tctx->burst_runtime);
 }
 
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
@@ -743,7 +722,32 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
+	struct task_ctx __arena *tctx;
+	s64 limit, lag;
+
 	__sync_fetch_and_sub(&sum_weight, p->scx.weight);
+
+	tctx = lookup_task_ctx(p);
+
+	/*
+	 * Remember how far the task is from the reference as it stops being
+	 * runnable, clamped both ways, like update_entity_lag():
+	 *
+	 *	vlag = avg_vruntime(cfs_rq) - se->vruntime;
+	 *	se->vlag = clamp(vlag, -limit, limit);
+	 *
+	 * What is preserved across a sleep is the position relative to the
+	 * reference, not the absolute vruntime. Restoring the vruntime
+	 * against the reference alone would hand every task that sleeps long
+	 * enough the full credit, no matter whether it had earned it.
+	 */
+	limit = scale_by_task_weight_inverse(p, slice_lag);
+	lag = (s64)(vtime_now - tctx->vruntime);
+	if (lag > limit)
+		lag = limit;
+	else if (lag < -limit)
+		lag = -limit;
+	tctx->vlag = lag;
 }
 
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
@@ -756,6 +760,17 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 	/* The task just woke up: restart accounting its burst runtime. */
 	tctx->burst_runtime = 0;
+
+	/*
+	 * Place the task back at the lag it had when it went to sleep, the
+	 * way place_entity() does:
+	 *
+	 *	se->vruntime = vruntime - lag;
+	 *
+	 * A task that had consumed its share before sleeping comes back with
+	 * no credit, while one that was still owed service keeps it.
+	 */
+	tctx->vruntime = vtime_now - tctx->vlag;
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
@@ -782,8 +797,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 * accumulated since its last sleep, capping the latter at @slice_lag so
 	 * that CPU intensive tasks don't get starved.
 	 */
-	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime +
-				   scale_by_task_weight_inverse(p, slice));
+	tctx->vruntime += scale_by_task_weight_inverse(p, slice);
 	tctx->burst_runtime = MIN(tctx->burst_runtime + slice, slice_lag);
 
 	/*
@@ -897,7 +911,9 @@ void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
  */
 void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 {
-	scx_bpf_task_set_dsq_vtime(p, vtime_now);
+	struct task_ctx __arena *tctx = lookup_task_ctx(p);
+
+	tctx->vruntime = vtime_now;
 }
 
 /*
