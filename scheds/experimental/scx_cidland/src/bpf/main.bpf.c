@@ -103,6 +103,12 @@ const volatile u64 slice_lag;
 const volatile u64 steal_sample;
 
 /*
+ * True when the system has more than one NUMA node and the node ranges are
+ * worth walking (see --disable-numa).
+ */
+const volatile bool numa_enabled;
+
+/*
  * Scheduling statistics.
  */
 volatile u64 nr_direct_dispatches, nr_queued, nr_steals;
@@ -215,6 +221,8 @@ struct cid_ctx {
 	u32 core_nr;		/* number of cids (SMT siblings) in the core */
 	u32 llc_base;		/* first cid of the LLC this cid belongs to */
 	u32 llc_nr;		/* number of cids in the LLC */
+	u32 node_base;		/* first cid of the NUMA node this cid belongs to */
+	u32 node_nr;		/* number of cids in the node */
 	u64 vtime_rem;		/* service not yet folded into @vtime_now */
 	u32 steal_cursor;	/* where the last queue scan stopped */
 };
@@ -417,9 +425,11 @@ static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed, u32 t,
  * select_idle_core() looks for a whole core before select_idle_cpu() settles
  * for a thread.
  *
- * Within a tier @prev_cid wins, then a cid in the same LLC, then any cid, to
- * keep the task where its cache is: the order select_idle_sibling() applies
- * within one domain.
+ * Within a tier @prev_cid wins, then a cid in the same LLC, then a cid on the
+ * same node, then any cid, to keep the task where its cache is: the order
+ * select_idle_sibling() applies within one domain, with the node on top since
+ * this scan covers them all. Each domain is a contiguous range, so a wakeup
+ * reads the cids of its own LLC before anything else.
  *
  * Return the claimed cid or a negative value if nothing idle was found.
  */
@@ -438,9 +448,16 @@ static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
 		    cid_claim_idle(prev_cid))
 			return prev_cid;
 
+		/*
+		 * A domain that is the whole of the next one is not scanned
+		 * twice.
+		 */
 		cid = claim_idle_cid_range(allowed, t, cctx->llc_base, cctx->llc_nr,
 					   whole_core);
-		if (cid < 0 && cctx->llc_nr < nr_cids)
+		if (cid < 0 && numa_enabled && cctx->node_nr > cctx->llc_nr)
+			cid = claim_idle_cid_range(allowed, t, cctx->node_base,
+						   cctx->node_nr, whole_core);
+		if (cid < 0 && (numa_enabled ? cctx->node_nr : cctx->llc_nr) < nr_cids)
 			cid = claim_idle_cid_range(allowed, t, 0, nr_cids, whole_core);
 		if (cid >= 0)
 			return cid;
@@ -851,14 +868,28 @@ static bool try_steal_task(s32 dst_cid)
 			goto pick;
 	}
 
-	bpf_for(i, 0, limit) {
+	/*
+	 * An idle cid looks in its own LLC before the rest of the system, the
+	 * way the idle balancer walks the domains bottom up. A busy cid
+	 * sampling for an earlier deadline scans a couple of queues wherever
+	 * they are, so it does a single pass.
+	 */
+	bpf_for(i, 0, own ? limit : 2 * limit) {
+		const struct cid_ctx __arena *other;
 		const struct task_ctx __arena *tctx;
+		bool local_pass = !own && i < limit;
 		struct task_struct *p;
 
-		cid = start + 1 + i;
+		cid = start + 1 + (i < limit ? i : i - limit);
 		if (cid >= nr_cids)
 			cid -= nr_cids;
 		if (cid >= nr_cids || cid == dst_cid)
+			continue;
+		other = cid_ctx(cid);
+		if (numa_enabled && !own &&
+		    (cid < cctx->node_base || cid >= cctx->node_base + cctx->node_nr))
+			continue;
+		if (!own && (other->llc_base == cctx->llc_base) != local_pass)
 			continue;
 
 		p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
@@ -1152,8 +1183,8 @@ static struct scx_cid_topo init_topo;
  */
 static s32 init_cid_ctxs(void)
 {
-	s32 cur_core = -1, cur_llc = -1;
-	u32 core_nr = 0, llc_nr = 0;
+	s32 cur_core = -1, cur_llc = -1, cur_node = -1;
+	u32 core_nr = 0, llc_nr = 0, node_nr = 0;
 	u32 i;
 
 	bpf_for(i, 0, nr_cids) {
@@ -1178,14 +1209,16 @@ static s32 init_cid_ctxs(void)
 
 		/*
 		 * Cids in the no-topo tail (CPUs that were offline when the cid
-		 * space was built) report -1 everywhere: treat them as a core
-		 * and an LLC of their own.
+		 * space was built) report -1 everywhere: treat them as a core,
+		 * an LLC and a node of their own.
 		 */
-		if (topo->core_cid < 0 || topo->llc_cid < 0) {
+		if (topo->core_cid < 0 || topo->llc_cid < 0 || topo->node_cid < 0) {
 			cctx->core_base = cid;
 			cctx->core_nr = 1;
 			cctx->llc_base = cid;
 			cctx->llc_nr = 1;
+			cctx->node_base = cid;
+			cctx->node_nr = 1;
 			continue;
 		}
 
@@ -1197,11 +1230,17 @@ static s32 init_cid_ctxs(void)
 			cur_llc = topo->llc_cid;
 			llc_nr = cid + 1 - topo->llc_cid;
 		}
+		if (topo->node_cid != cur_node) {
+			cur_node = topo->node_cid;
+			node_nr = cid + 1 - topo->node_cid;
+		}
 
 		cctx->core_base = topo->core_cid;
 		cctx->core_nr = core_nr;
 		cctx->llc_base = topo->llc_cid;
 		cctx->llc_nr = llc_nr;
+		cctx->node_base = topo->node_cid;
+		cctx->node_nr = node_nr;
 	}
 
 	return 0;
