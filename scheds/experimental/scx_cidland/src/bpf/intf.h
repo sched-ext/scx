@@ -1,25 +1,37 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- *
- * This software may be used and distributed according to the terms of the GNU
- * General Public License version 2.
- */
 #ifndef __INTF_H
 #define __INTF_H
 
-#define MAX(x, y)	((x) > (y) ? (x) : (y))
-#define MIN(x, y)	((x) < (y) ? (x) : (y))
+#include <limits.h>
 
-enum {
-	NSEC_PER_USEC	= 1000ULL,
-	NSEC_PER_MSEC	= (1000ULL * NSEC_PER_USEC),
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#define CLAMP(val, lo, hi) MIN(MAX(val, lo), hi)
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+
+enum consts {
+	NSEC_PER_USEC = 1000ULL,
+	NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
+	NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
 };
 
+#ifndef __VMLINUX_H__
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef unsigned long u64;
+
+typedef signed char s8;
+typedef signed short s16;
+typedef signed int s32;
+typedef signed long s64;
+
+typedef int pid_t;
+#endif /* __VMLINUX_H__ */
+
 /*
- * Arguments to cidland_arena_init(), which sizes everything that is indexed by
- * cid: the width of the cid space, num_possible_cpus(), and the number of
- * capacity tiers. Userspace knows both before the scheduler is attached.
+ * Arguments to cidland_arena_init(), which sizes everything indexed by cid:
+ * the width of the cid space, num_possible_cpus(), and the number of
+ * capacity tiers.
  */
 struct cidland_arena_args {
 	unsigned long long	nr_cpus;
@@ -27,8 +39,8 @@ struct cidland_arena_args {
 };
 
 /*
- * Arguments to cidland_set_cpu(): the capacity and the tier of one CPU, in cpu
- * space.
+ * Arguments to cidland_set_cpu(): the capacity and the tier of one CPU, in
+ * cpu space.
  */
 struct cidland_cpu_args {
 	unsigned long long	cpu;

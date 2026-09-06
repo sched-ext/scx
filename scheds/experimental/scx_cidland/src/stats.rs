@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-//
-// Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-//
-// This software may be used and distributed according to the terms of the
-// GNU General Public License version 2.
-
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -22,40 +15,19 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Number of tasks dispatched directly to an idle cid")]
-    pub nr_direct_dispatches: u64,
-    #[stat(desc = "Number of tasks queued to a deadline ordered DSQ")]
-    pub nr_queued: u64,
-    #[stat(desc = "Number of tasks stolen from another cid's DSQ")]
+    #[stat(desc = "Tasks stolen from another CPU's queue")]
     pub nr_steals: u64,
-    #[stat(desc = "Number of idle cids picked in the previous LLC")]
-    pub nr_local_llc: u64,
-    #[stat(desc = "Number of idle cids picked outside of the previous LLC")]
-    pub nr_remote_llc: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
-        writeln!(
-            w,
-            "[{}] dispatch -> direct: {:<7} queued: {:<7} steals: {:<7} | idle cid -> local llc: {:<7} remote llc: {:<7}",
-            crate::SCHEDULER_NAME,
-            self.nr_direct_dispatches,
-            self.nr_queued,
-            self.nr_steals,
-            self.nr_local_llc,
-            self.nr_remote_llc,
-        )?;
+        writeln!(w, "[{}] steals={}", crate::SCHEDULER_NAME, self.nr_steals,)?;
         Ok(())
     }
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
-            nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
-            nr_queued: self.nr_queued - rhs.nr_queued,
             nr_steals: self.nr_steals - rhs.nr_steals,
-            nr_local_llc: self.nr_local_llc - rhs.nr_local_llc,
-            nr_remote_llc: self.nr_remote_llc - rhs.nr_remote_llc,
         }
     }
 }
