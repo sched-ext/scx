@@ -364,20 +364,6 @@ static __always_inline bool cid_allowed(const struct task_struct *p, s32 cid)
 }
 
 /*
- * Return true if the CPU behind @cid is running its idle task.
- */
-static inline bool is_cid_idle(s32 cid)
-{
-	struct task_struct *p;
-
-	if (!cid_valid(cid))
-		return false;
-	p = scx_bpf_cid_curr(cid);
-
-	return p ? p->flags & PF_IDLE : false;
-}
-
-/*
  * Idle cid tracking.
  *
  * The idle state of every cid is kept here rather than in the kernel's
@@ -1164,7 +1150,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * select_idle_core(), and leaves a running task where it is.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
-	    (!is_cid_idle(prev_cid) && scx_bpf_task_running(p) && p->scx.slice)) {
+	    (p->scx.slice && scx_bpf_task_running(p) && !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx);
