@@ -896,6 +896,24 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Charge the running time of the task described by @tctx since it was last
+ * accounted to its cell's demand counter on the current CPU.
+ */
+static __always_inline void account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now)
+{
+	u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
+	u64 used;
+
+	if (!running) {
+		scx_bpf_error("Task cell index too large: %d", tctx->cell);
+		return;
+	}
+	used = time_delta(now, tctx->running_accounted_at);
+	tctx->running_accounted_at = now;
+	*running += used;
+}
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
@@ -993,8 +1011,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 					stay = tctx->dsq.raw == cpu_dsq.raw;
 			}
 
-			if (stay)
+			if (stay) {
+				/*
+				 * This is an accounting hook as well as a refill.
+				 * Once prev's slice is extended the core picks it
+				 * again, and put_prev_set_next_task() returns early
+				 * for next == prev, so neither stopping() nor
+				 * running() fires for as long as prev stays alone on
+				 * this cpu. Between its start and its eventual stop
+				 * this is the only place the scheduler sees such a
+				 * task, so charge the running time it has accumulated
+				 * here, at slice granularity, and let stopping()
+				 * charge the remainder.
+				 */
+				account_task_running(cctx, tctx, scx_bpf_now());
 				scx_bpf_task_set_slice(prev, slice_ns);
+			}
 		}
 		return;
 	}
@@ -1044,6 +1076,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct subcell *subcell;
+	u64 now;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1064,7 +1097,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	/* Record the running slice start time. */
-	tctx->started_running_at = scx_bpf_now();
+	now = scx_bpf_now();
+	tctx->started_running_at = now;
+	tctx->running_accounted_at = now;
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
 	if (enable_slice_shrinking) {
@@ -1167,14 +1202,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	{
-		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
-		if (!running) {
-			scx_bpf_error("Task cell index too large: %d", tctx->cell);
-			return;
-		}
-		*running += used;
-	}
+	/* Charge whatever the slice extensions since the last flush left over. */
+	account_task_running(cctx, tctx, now);
 }
 
 SEC("fentry/cpuset_write_resmask")
