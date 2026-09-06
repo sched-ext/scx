@@ -25,6 +25,7 @@
  * heads of the other cids' queues for an earlier deadline to take.
  */
 #include <scx/common.bpf.h>
+#include <lib/arena_loop.h>
 #include <lib/arena_map.h>
 #include <lib/const-defs.h>
 #include <lib/sdt_task.h>
@@ -152,6 +153,12 @@ static u64 __arena *cpu_cap_in;
 static u32 __arena *cpu_tier_in;
 
 /*
+ * Number of u64 words the cid space spans, one bit per cid. Set in ops.init()
+ * from the framed masks, which is what the word scans read.
+ */
+static u32 nr_words;
+
+/*
  * Number of words of storage a cmask framed over the cid space needs.
  *
  * CMASK_NR_WORDS() asks for a word beyond the bits themselves, so that a mask
@@ -258,6 +265,27 @@ static struct cid_ctx __arena *cid_ctxs;
  * NULL one, which the verifier can't follow through the inlined tests.
  */
 static struct scx_cmask __arena *all_cids;
+
+/*
+ * One mask per capacity tier: the cids of that tier. The idle scan intersects
+ * them with the idle bitmap a word at a time, so a tier is a word AND rather
+ * than a per-cid lookup.
+ */
+static struct scx_cmask __arena *tier_cids;
+static u64 tier_stride;			/* bytes from one tier mask to the next */
+
+static __always_inline struct scx_cmask __arena *tier_mask(u32 t)
+{
+	return (struct scx_cmask __arena *)((char __arena *)tier_cids + t * tier_stride);
+}
+
+/*
+ * Return the word @k of the cids of tier @t.
+ */
+static __always_inline u64 tier_word(u32 t, u32 k)
+{
+	return cmask_word(tier_mask(t), k);
+}
 
 /*
  * Bitmap of the cids that are currently idle, maintained by ops.update_idle().
@@ -410,40 +438,55 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
- * Scan [@base, @base + @nr) for an idle cid of tier @t usable by @p.
- *
- * If @whole_core is true only cids whose entire core is idle are considered,
- * to avoid stacking tasks on SMT siblings while full cores are available.
+ * Return the first idle cid of word @k of @w that @p can run on and, if
+ * @whole_core is set, whose whole core is idle, or -EBUSY. The plain case is
+ * the first bit; the walk of the bits is bounded, as the walk of the cores in
+ * select_idle_core() is.
+ */
+static __always_inline s32 first_idle_cid(const struct scx_cmask __arena *allowed,
+					  u64 w, u32 k, bool restricted,
+					  bool whole_core)
+{
+	while (w && can_loop) {
+		s32 cid = k * 64 + __builtin_ctzll(w);
+
+		if ((!whole_core || core_is_idle(cid)) &&
+		    (!restricted || __cmask_test(cid, allowed)))
+			return cid;
+		w &= w - 1;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Scan the idle cids of tier @t within [@base, @base + @nr) for one @p can
+ * take, see first_idle_cid(). The range is contiguous in cid space, so only
+ * the words it spans are read.
  *
  * The idle state is not claimed here: claiming is an atomic write to a mask
  * every CPU reads, and doing it for every candidate would bounce that mask
  * across the machine on every wakeup.
- *
- * Return the cid or a negative value if none was found.
  */
-static s32 scan_idle_range(const struct scx_cmask __arena *allowed, u32 t,
-			   u32 base, u32 nr, bool whole_core)
+static __always_inline s32
+scan_idle_range(const struct scx_cmask __arena *allowed, u32 t, u32 base, u32 nr,
+		bool restricted, bool whole_core)
 {
-	TOUCH_ARENA();
+	u32 k, last;
 
-	u32 cid;
+	if (!nr)
+		return -EBUSY;
+	last = (base + nr - 1) / 64;
+	bpf_arena_for(k, base / 64, last + 1) {
+		u64 w = cmask_word(idle_cids, k) & tier_word(t, k) &
+			cmask_range_word(idle_cids, k, base, nr);
+		s32 cid;
 
-	bpf_for(cid, base, base + nr) {
-		const struct cid_ctx __arena *cctx;
-
-		if (cid >= nr_cids)
-			break;
-		if (!cid_test_idle(cid))
+		if (!w)
 			continue;
-		cctx = cid_ctx(cid);
-		if (cctx->tier != t)
-			continue;
-		if (whole_core && !core_is_idle(cid))
-			continue;
-		if (!__cmask_test(cid, allowed))
-			continue;
-
-		return cid;
+		cid = first_idle_cid(allowed, w, k, restricted, whole_core);
+		if (cid >= 0)
+			return cid;
 	}
 
 	return -EBUSY;
@@ -462,23 +505,42 @@ static s32 scan_idle_range(const struct scx_cmask __arena *allowed, u32 t,
  * same node, then any cid, to keep the task where its cache is: the order
  * select_idle_sibling() applies within one domain, with the node on top since
  * this scan covers them all. Each domain is a contiguous range, so a wakeup
- * reads the cids of its own LLC before anything else.
+ * reads the words of its own LLC before anything else.
  *
  * The idle state is claimed only for the cid that is returned. -EAGAIN means
- * a candidate was found but claimed by someone else first.
+ * a candidate was found but claimed by someone else first. @flags packs
+ * @is_prev_allowed (bit 0) and @whole_core (bit 1).
  *
- * Return the claimed cid or a negative value if nothing idle was found.
+ * A global function: verified once rather than at every call site, of which
+ * the claim retries make eight.
  */
-static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
-				const struct cid_ctx __arena *cctx, s32 prev_cid,
-				bool whole_core)
+__noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
+				    s32 prev_cid, u32 flags)
 {
+	bool is_prev_allowed = flags & 1, whole_core = flags & 2;
+	const struct scx_cmask __arena *allowed = all_cids;
+	const struct cid_ctx __arena *cctx;
+	bool restricted;
 	s32 best = -EBUSY;
 	u32 t;
 
-	bpf_for(t, 0, nr_tiers) {
-		if (cctx->tier == t && __cmask_test(prev_cid, allowed) &&
-		    cid_test_idle(prev_cid) &&
+	TOUCH_ARENA();
+
+	if (!cid_valid(prev_cid))
+		return -EBUSY;
+	cctx = cid_ctx(prev_cid);
+
+	/*
+	 * Only the tasks that can't run everywhere need their allowed mask,
+	 * which keeps the task context lookup out of the wakeup path for all
+	 * the others.
+	 */
+	restricted = p->nr_cpus_allowed < nr_cpu_ids;
+	if (restricted)
+		allowed = &lookup_task_ctx(p)->allowed;
+
+	bpf_arena_for(t, 0, nr_tiers) {
+		if (is_prev_allowed && cctx->tier == t && cid_test_idle(prev_cid) &&
 		    (!whole_core || core_is_idle(prev_cid))) {
 			best = prev_cid;
 			break;
@@ -489,12 +551,13 @@ static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
 		 * twice.
 		 */
 		best = scan_idle_range(allowed, t, cctx->llc_base, cctx->llc_nr,
-				       whole_core);
+				       restricted, whole_core);
 		if (best < 0 && numa_enabled && cctx->node_nr > cctx->llc_nr)
 			best = scan_idle_range(allowed, t, cctx->node_base,
-					       cctx->node_nr, whole_core);
+					       cctx->node_nr, restricted, whole_core);
 		if (best < 0 && (numa_enabled ? cctx->node_nr : cctx->llc_nr) < nr_cids)
-			best = scan_idle_range(allowed, t, 0, nr_cids, whole_core);
+			best = scan_idle_range(allowed, t, 0, nr_cids, restricted,
+					       whole_core);
 		if (best >= 0)
 			break;
 	}
@@ -506,14 +569,15 @@ static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
 }
 
 /*
- * Find an idle cid for @p, preferring topological locality with @prev_cid.
+ * Scan for an idle cid: fully idle cores first, then any idle cid, from the
+ * fastest tier.
  *
- * Return the claimed cid or a negative value if the whole system is busy.
+ * Return the claimed cid or -EBUSY if nothing idle was found.
  */
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 {
 	const struct cid_ctx __arena *cctx;
-	const struct scx_cmask __arena *allowed = all_cids;
+	u32 flags;
 	s32 cid = -EBUSY;
 	int i;
 
@@ -551,22 +615,10 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	if (cmask_empty(idle_cids))
 		return -EBUSY;
 
-	/*
-	 * Only the tasks that can't run everywhere need their allowed mask,
-	 * which keeps the task storage lookup out of the wakeup path for all
-	 * the others. Checking it once here also beats re-checking the task's
-	 * affinity for every candidate cid.
-	 */
-	if (p->nr_cpus_allowed < nr_cpu_ids)
-		allowed = &lookup_task_ctx(p)->allowed;
+	flags = p->nr_cpus_allowed >= nr_cpu_ids ||
+		__cmask_test(prev_cid, &lookup_task_ctx(p)->allowed) ? 1 : 0;
 
 	/*
-	 * Fully idle cores first, across every tier, then any idle cid: the
-	 * whole core pass runs across every tier before settling for a
-	 * thread, since sharing a core costs more than the step down to the
-	 * next tier, the way select_idle_core() looks for a whole core before
-	 * select_idle_cpu().
-	 *
 	 * A claim that fails lost a race with another wakeup for the same
 	 * cid. Scan again rather than give up: the bit is clear now, so the
 	 * next candidate is a different cid, the way scx_bpf_pick_idle_cpu()
@@ -577,13 +629,13 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	 * both siblings of a P-core busy and E-cores idle.
 	 */
 	for (i = 0; i < CLAIM_RETRIES; i++) {
-		if (smt_enabled) {
-			cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, true);
-			if (cid >= 0)
-				goto found;
-		}
-		if (cid != -EAGAIN)
-			cid = pick_idle_cid_ranked(allowed, cctx, prev_cid, false);
+		cid = pick_idle_cid_ranked((struct task_struct *)p, prev_cid,
+					   flags | (smt_enabled ? 2 : 0));
+		if (cid >= 0)
+			goto found;
+		if (cid != -EAGAIN && smt_enabled)
+			cid = pick_idle_cid_ranked((struct task_struct *)p,
+						   prev_cid, flags);
 		if (cid != -EAGAIN)
 			break;
 	}
@@ -1596,6 +1648,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	 */
 	cmask_init(all_cids, 0, nr_cids);
 	cmask_init(idle_cids, 0, nr_cids);
+	bpf_for(i, 0, nr_tiers)
+		cmask_init(tier_mask(i), 0, nr_cids);
+
+	nr_words = cmask_nr_words(idle_cids);
 
 	/* Handed to the pick loop for the tasks that can run anywhere. */
 	cmask_fill(all_cids);
@@ -1605,13 +1661,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 		return err;
 
 	/*
-	 * Create the per-cid DSQs and start with every cid idle, the way the
+	 * Build the bitmap of each capacity tier, create the per-cid DSQs and
+	 * start with every cid idle, the way the
 	 * kernel resets its own idle masks: a cid that is busy clears its bit
 	 * as soon as a task runs there, while a cid that sits idle from the
 	 * start never transitions, and left with its bit clear it would never
 	 * be picked, so never transition, for good.
 	 */
 	bpf_for(i, 0, nr_cids) {
+		struct cid_ctx __arena *cctx = cid_ctx(i);
+
+		if (cctx->tier >= nr_tiers)
+			cctx->tier = nr_tiers - 1;
+		__cmask_set(i, tier_mask(cctx->tier));
+
 		err = scx_bpf_create_dsq(cid_dsq(i), -1);
 		if (err) {
 			scx_bpf_error("failed to create DSQ for cid %u: %d", i, err);
@@ -1654,8 +1717,9 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	 * allocator's own bookkeeping.
 	 */
 	bytes = nr_cpus * sizeof(struct cid_ctx) +
-		2 * cmask_size(nr_cmask_words) +
-		nr_cpus * (sizeof(u64) + sizeof(u32));
+		(2 + nr_tiers) * cmask_size(nr_cmask_words) +
+		nr_cpus * (sizeof(u64) + sizeof(u32) +
+			   sizeof(struct bpf_arena_loop_ctr));
 	err = scx_static_init(div_round_up(bytes, PAGE_SIZE) + STATIC_ALLOC_PAGES);
 	if (err)
 		return err;
@@ -1665,8 +1729,13 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	idle_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
 	cpu_cap_in = scx_static_alloc(nr_cpus * sizeof(u64), sizeof(u64));
 	cpu_tier_in = scx_static_alloc(nr_cpus * sizeof(u32), sizeof(u32));
+	tier_stride = (cmask_size(nr_cmask_words) + 63) & ~63ULL;
+	tier_cids = scx_static_alloc(nr_tiers * tier_stride, SCX_CACHELINE_SIZE);
+	bpf_arena_loop_ctrs = scx_static_alloc(nr_cpus * sizeof(struct bpf_arena_loop_ctr),
+					       SCX_CACHELINE_SIZE);
 
-	if (!cid_ctxs || !all_cids || !idle_cids || !cpu_cap_in || !cpu_tier_in)
+	if (!cid_ctxs || !all_cids || !idle_cids || !cpu_cap_in || !cpu_tier_in ||
+	    !tier_cids || !bpf_arena_loop_ctrs)
 		return -ENOMEM;
 
 	/*
