@@ -542,6 +542,16 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	}
 
 	/*
+	 * Nothing idle at all is the common case under load: say so without
+	 * walking the tiers, reading the words of the bitmap rather than a
+	 * counter kept next to it. A count is a second operation on every
+	 * transition, and between the two another cid reads a value that is
+	 * off by one.
+	 */
+	if (cmask_empty(idle_cids))
+		return -EBUSY;
+
+	/*
 	 * Only the tasks that can't run everywhere need their allowed mask,
 	 * which keeps the task storage lookup out of the wakeup path for all
 	 * the others. Checking it once here also beats re-checking the task's
