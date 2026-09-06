@@ -324,7 +324,10 @@ static void cid_set_idle(s32 cid, bool idle)
  *
  * Claiming keeps two tasks queued back to back from aiming at the same cid.
  * It's optimistic: if the claimed cid ends up with nothing to run, its idle bit
- * is re-armed in ops.dispatch(), see cidland_dispatch().
+ * is re-armed in ops.dispatch(), see cidland_dispatch(). The re-arm can be
+ * wrong the other way, when a task lands on the cid right after it, since a cid
+ * that never went idle sees no transition either: ops.running() clears the bit
+ * again in that case.
  */
 static bool cid_claim_idle(s32 cid)
 {
@@ -1274,6 +1277,17 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
+	 * A cid that ops.dispatch() re-armed as idle and that found a task
+	 * before it got there never went idle, so no transition clears the
+	 * bit: clear it here, where the cid is running for sure. Left set,
+	 * the bit has wakeups aim at a busy cid and, worse, has the idle scan
+	 * take the sibling of a busy cid for a whole idle core.
+	 */
+	cid = scx_bpf_task_cid(p);
+	if (cid_test_idle(cid))
+		cid_claim_idle(cid);
+
+	/*
 	 * A task that was moved here from another cid's queue, by the
 	 * balancer or an idle pull, carries a vruntime that means nothing
 	 * against this cid's pack: taken from a pack that was far ahead it
@@ -1282,7 +1296,6 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * how far the task was from the pack it left is how far it is placed
 	 * from the pack it joins.
 	 */
-	cid = scx_bpf_task_cid(p);
 	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
 		s64 limit = scale_by_dl_weight(p, slice_lag);
 		s64 lag = (s64)(cid_vref(tctx->vcid) - tctx->vruntime);
