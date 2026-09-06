@@ -246,7 +246,11 @@ const volatile u64	lb_low_util_wall = 0;
  * The value is pre-scaled by userspace. 0 = disabled.
  * Default: p2s(10) = 102.
  */
-const volatile u64	lb_local_dsq_util_wall = 0;
+/*
+ * Longest wait, in ns, that still justifies bypassing vtime ordering by direct
+ * dispatch. 0 disables it beyond the fast path for an already-claimed idle CPU.
+ */
+const volatile u64	dd_max_wait_ns = 0;
 
 /*
  * Least completion-time gain, in ns, that justifies a cross-cpdom migration
@@ -694,29 +698,65 @@ static void update_stat_for_refill(struct task_struct *p,
 					   taskc->acc_runtime_invr);
 }
 
-static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
+/*
+ * Should @p skip the vtime-ordered queue @dsq_id and go straight to @cpuc's
+ * local DSQ? Only if it starts within dd_max_wait_ns, does not overtake the
+ * head of @dsq_id, and finishes no later here than there. The last check
+ * matters on big.LITTLE: an idle little core starts a task at once yet can
+ * finish it after the big cluster's queue would.
+ */
+static bool can_direct_dispatch(struct task_struct *p, task_ctx *taskc,
+				struct cpu_ctx *cpuc, u64 dsq_id,
+				bool is_cpu_idle)
 {
+	struct cpdom_ctx *cpdomc;
+	u64 svc_invr, now;
+
 	/*
-	 * An idle CPU with nothing queued cannot be congested --
-	 * queued_on_cpu() covers every DSQ that is_cpu_congested()
-	 * counts -- so no congestion check is needed on this path.
+	 * A CPU an RT/DL task has taken strands the task in its local DSQ
+	 * until the higher class yields: the sched_switch hook re-enqueues
+	 * only what was queued at the switch. The idle bit lags, so even a
+	 * CPU claimed idle may be running one.
 	 */
-	if (is_cpu_idle && !queued_on_cpu(cpuc))
+	if (is_rt_or_dl_task_running(cpuc->cpu_id))
+		return false;
+
+	/* The CPU is already claimed for this task: it starts now. */
+	if (is_cpu_idle)
 		return true;
 
 	/*
-	 * Bypass deadline ordering under low utilization, but never
-	 * direct-dispatch into a congested CPU (tasks are already waiting
-	 * across its DSQs, and inserting into the local DSQ would let the
-	 * new task jump ahead of them) nor into a CPU an RT/DL task has
-	 * taken (the task would be stranded in a non-stealable local DSQ
-	 * until the higher class yields). Both walk/peek remote state, so
-	 * evaluate them last, only after the cheap utilization checks pass.
+	 * Wall-clock wait: the running task's residual plus the local
+	 * backlog. Zero disables the path.
 	 */
-	return lb_local_dsq_util_wall > 0 &&
-	       cpuc->avg_util_wall < lb_local_dsq_util_wall &&
-	       !is_cpu_congested(cpuc) &&
-	       !is_rt_or_dl_task_running(cpuc->cpu_id);
+	now = scx_bpf_now();
+	if (calc_residual_time(cpuc, now) + calc_comp_time_on_local(0, cpuc) >=
+	    dd_max_wait_ns)
+		return false;
+
+	/*
+	 * The local DSQ is served before every other queue, so skipping
+	 * @dsq_id is fine only if the task would have been at its head
+	 * anyway. An empty queue peeks as U64_MAX.
+	 */
+	if (peek_dsq_vtime(dsq_id) < p->scx.dsq_vtime)
+		return false;
+
+	/*
+	 * A CPU drains its local DSQ before its per-CPU DSQ, so the task
+	 * runs no later here than in @dsq_id.
+	 */
+	if (dsq_type(dsq_id) == LAVD_DSQ_TYPE_CPU)
+		return true;
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	if (!cpdomc)
+		return false;
+
+	svc_invr = taskc->avg_runtime_invr;
+
+	return calc_comp_time_on_local(svc_invr, cpuc) <
+	       calc_comp_time_on_cpdom(svc_invr, cpdomc);
 }
 
 /*
@@ -947,8 +987,9 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		set_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 
 		/*
-		 * If there is an idle cpu and its associated DSQs are empty,
-		 * dispatch the task to the idle cpu right now.
+		 * An idle CPU has been claimed for this task; let
+		 * can_direct_dispatch() decide whether to dispatch it there
+		 * right now.
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
@@ -956,7 +997,9 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 
-		if (can_direct_dispatch(cpuc, true)) {
+		if (can_direct_dispatch(p, ictx.taskc, cpuc,
+					pick_target_dsq_id(p, cpuc, ictx.taskc),
+					true)) {
 			/*
 			 * The direct-dispatch path bypasses ops.enqueue(), so
 			 * the throttle check there is never reached.  Skip the
@@ -1167,22 +1210,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	if (can_direct_dispatch(cpuc, is_idle)) {
-		reset_task_flag(taskc, LAVD_FLAG_WARM_CPU);
+	dsq_id = pick_target_dsq_id(p, cpuc, taskc);
+	reset_task_flag(taskc, LAVD_FLAG_WARM_CPU);
+
+	if (can_direct_dispatch(p, taskc, cpuc, dsq_id, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 		account_queued_load_pcpu(taskc, cpu, true);
-	} else if (test_task_flag(taskc, LAVD_FLAG_WARM_CPU)) {
-		/*
-		 * Only queue on per core DSQ to ensure task doesn't
-		 * migrate away.
-		 */
-		reset_task_flag(taskc, LAVD_FLAG_WARM_CPU);
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
-					 p->scx.dsq_vtime, enq_flags);
-		account_queued_load_pcpu(taskc, cpu, false);
 	} else {
-		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 		if (dsq_type(dsq_id) == LAVD_DSQ_TYPE_CPU)

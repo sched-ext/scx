@@ -162,14 +162,21 @@ struct Opts {
     #[clap(long = "lb-low-util-pct", default_value = "25", value_parser=Opts::lb_low_util_pct_range)]
     lb_low_util_pct: u8,
 
-    /// Low utilization threshold percentage (0-100) for bypassing deadline
-    /// scheduling. When set to a non-zero value, tasks are dispatched directly
-    /// to the local DSQ (FIFO) instead of using deadline-based ordering when
-    /// the per-CPU utilization is below this percentage.
-    /// Default is 10 (bypass deadline scheduling below 10% utilization).
-    /// Set to 0 to disable. Set to 100 to always bypass deadline scheduling.
-    #[clap(long = "lb-local-dsq-util-pct", default_value = "10", value_parser=Opts::lb_local_dsq_util_pct_range)]
-    lb_local_dsq_util_pct: u8,
+    /// Longest wait, in microseconds, that still justifies direct dispatch.
+    /// A task bypasses deadline ordering and goes straight to a CPU's local
+    /// DSQ only if it would start there within this long and finish no later
+    /// than in the queue it would otherwise join.
+    ///
+    /// Default is 350; tail latency stops improving past about this wait on
+    /// the machines measured. Set to 0 to allow direct dispatch only to an
+    /// idle CPU.
+    #[clap(long = "dd-max-wait-us", default_value = "350", value_parser=Opts::dd_max_wait_us_range)]
+    dd_max_wait_us: u64,
+
+    /// Deprecated and ignored; use --dd-max-wait-us. Removed at the end of
+    /// 2026.
+    #[clap(long = "lb-local-dsq-util-pct", hide = true)]
+    lb_local_dsq_util_pct: Option<u8>,
 
     /// Least completion-time gain, in microseconds, that justifies migrating
     /// a task across big and LITTLE clusters sharing an L3. When the load
@@ -184,7 +191,8 @@ struct Opts {
     /// migration would override the cache-locality bias without a capacity
     /// payoff.
     ///
-    /// Default is 350. Set to 0 to disable.
+    /// Default is 350, the same tolerance --dd-max-wait-us applies to
+    /// starting a task. Set to 0 to disable.
     #[clap(long = "xmig-min-gain-us", default_value = "350", value_parser=Opts::xmig_min_gain_us_range)]
     xmig_min_gain_us: u64,
 
@@ -504,8 +512,8 @@ impl Opts {
         number_range(s, 0, 100)
     }
 
-    fn lb_local_dsq_util_pct_range(s: &str) -> Result<u8, String> {
-        number_range(s, 0, 100)
+    fn dd_max_wait_us_range(s: &str) -> Result<u64, String> {
+        number_range(s, 0, 100_000)
     }
 
     fn xmig_min_gain_us_range(s: &str) -> Result<u64, String> {
@@ -792,7 +800,7 @@ impl<'a> Scheduler<'a> {
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.warm_cpu_ns = opts.warm_cpu_us * 1000;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
-        rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
+        rodata.dd_max_wait_ns = opts.dd_max_wait_us * 1000;
         rodata.xmig_min_gain_ns = opts.xmig_min_gain_us * 1000;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
@@ -1228,6 +1236,13 @@ fn main(mut opts: Opts) -> Result<()> {
 
     if opts.verbose > 0 {
         warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
+    }
+
+    if opts.lb_local_dsq_util_pct.is_some() {
+        warn!(
+            "--lb-local-dsq-util-pct is deprecated and ignored; it will be removed \
+             at the end of 2026. Use --dd-max-wait-us instead."
+        );
     }
 
     if let Some(run_id) = opts.run_id {
