@@ -41,6 +41,8 @@ const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
+/* Debt a task may carry over its domain clock at enqueue, in slices. */
+#define VTIME_DEBT_CAP_SLICES 16
 const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool cpu_controller_disabled = false;
@@ -855,11 +857,14 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 	tctx->basis_vtime = basis_vtime;
 
-	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
-		scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u subcell=%u", p->pid,
-			      p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime, tctx->cell, tctx->subcell);
-		return;
-	}
+	/*
+	 * A task can legitimately owe at most one weighted slice over the clock
+	 * it competes against; anything beyond that is an accounting gap (a
+	 * clock that did not follow the task) and would only starve the task.
+	 * Cap the debt instead of carrying or aborting on it.
+	 */
+	if (time_after(vtime, basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns))
+		vtime = basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns;
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
