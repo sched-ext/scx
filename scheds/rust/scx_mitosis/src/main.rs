@@ -884,8 +884,6 @@ impl<'a> Scheduler<'a> {
             (self.cell_manager()?.get_cell_assignments(), cpu_assignments)
         };
 
-        // TODO(kkd): Plug in demand weighted subcell assignments once
-        // supported.
         let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
@@ -1086,10 +1084,26 @@ impl<'a> Scheduler<'a> {
                     .cells
                     .get(&cell_assignment.id)
                     .map(|cell| {
+                        let use_demand = self.enable_rebalancing
+                            && (cell_assignment.id as usize) < MAX_CELLS
+                            && cell.subcells.iter().any(|subcell| {
+                                (subcell.id as usize) < MAX_SUBCELLS_PER_CELL
+                                    && self.smoothed_subcell_demand[cell_assignment.id as usize]
+                                        [subcell.id as usize]
+                                        > 0.0
+                            });
                         cell.subcells
                             .iter()
                             .map(|subcell| {
-                                CpuRecipient::unpinned(subcell.id, 1.0, &cell_assignment.primary)
+                                let weight = if use_demand
+                                    && (subcell.id as usize) < MAX_SUBCELLS_PER_CELL
+                                {
+                                    self.smoothed_subcell_demand[cell_assignment.id as usize]
+                                        [subcell.id as usize]
+                                } else {
+                                    1.0
+                                };
+                                CpuRecipient::unpinned(subcell.id, weight, &cell_assignment.primary)
                             })
                             .collect()
                     })
