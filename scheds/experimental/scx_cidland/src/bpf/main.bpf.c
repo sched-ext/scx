@@ -97,12 +97,6 @@ const volatile u64 slice_ns;
 const volatile u64 slice_lag;
 
 /*
- * Number of other cids' DSQs sampled at each dispatch while this cid has work
- * of its own. 0 = a busy cid never steals, only an idle one pulls.
- */
-const volatile u64 steal_sample;
-
-/*
  * True when the system has more than one NUMA node and the node ranges are
  * worth walking (see --disable-numa).
  */
@@ -224,6 +218,7 @@ struct cid_ctx {
 	u32 node_base;		/* first cid of the NUMA node this cid belongs to */
 	u32 node_nr;		/* number of cids in the node */
 	u64 vtime_rem;		/* service not yet folded into @vtime_now */
+	u64 last_balance_at;	/* when this cid last sampled the other queues */
 	u32 steal_cursor;	/* where the last queue scan stopped */
 };
 
@@ -339,6 +334,17 @@ static bool cid_range_is_idle(u32 base, u32 nr)
 }
 
 /*
+ * Return true if the whole core of @cid is idle, i.e. @cid is idle and so are
+ * its SMT siblings, if any.
+ */
+static bool core_is_idle(s32 cid)
+{
+	const struct cid_ctx __arena *cctx = cid_ctx(cid);
+
+	return cid_range_is_idle(cctx->core_base, cctx->core_nr);
+}
+
+/*
  * Seed @tctx->allowed with the cids @p can currently run on, translating its
  * cpumask into cid space one cpu at a time.
  *
@@ -405,7 +411,7 @@ static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed, u32 t,
 		cctx = cid_ctx(cid);
 		if (cctx->tier != t)
 			continue;
-		if (whole_core && !cid_range_is_idle(cctx->core_base, cctx->core_nr))
+		if (whole_core && !core_is_idle(cid))
 			continue;
 		if (!__cmask_test(cid, allowed))
 			continue;
@@ -444,7 +450,7 @@ static s32 pick_idle_cid_ranked(const struct scx_cmask __arena *allowed,
 
 		if (cctx->tier == t && __cmask_test(prev_cid, allowed) &&
 		    cid_test_idle(prev_cid) &&
-		    (!whole_core || cid_range_is_idle(cctx->core_base, cctx->core_nr)) &&
+		    (!whole_core || core_is_idle(prev_cid)) &&
 		    cid_claim_idle(prev_cid))
 			return prev_cid;
 
@@ -532,6 +538,48 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 }
 
 /*
+ * Return the cid of the node of @prev_cid with the fewest tasks queued that @p
+ * can run on, the fastest one on ties, or -EBUSY.
+ *
+ * A new task that finds no idle cid would otherwise be queued behind its
+ * parent, and a parent forking a hundred workers on a busy system would stack
+ * them all on one queue. find_idlest_cpu() spreads forks by load for the same
+ * reason.
+ */
+static s32 shallowest_queue_cid(const struct task_struct *p,
+				const struct scx_cmask __arena *allowed,
+				const struct cid_ctx __arena *prev)
+{
+	u32 base = numa_enabled ? prev->node_base : 0;
+	u32 nr = numa_enabled ? prev->node_nr : nr_cids;
+	s32 best = -EBUSY, best_nr = 0;
+	u32 best_tier = 0, cid;
+
+	bpf_for(cid, base, base + nr) {
+		const struct cid_ctx __arena *other;
+		s32 nr_queued;
+
+		if (cid >= nr_cids)
+			break;
+		if (!__cmask_test(cid, allowed))
+			continue;
+
+		other = cid_ctx(cid);
+		nr_queued = scx_bpf_dsq_nr_queued(cid_dsq(cid));
+		if (best < 0 || nr_queued < best_nr ||
+		    (nr_queued == best_nr && other->tier < best_tier)) {
+			best = cid;
+			best_nr = nr_queued;
+			best_tier = other->tier;
+			if (!nr_queued && !best_tier)
+				break;
+		}
+	}
+
+	return best;
+}
+
+/*
  * Return an idle cid faster than @cid whose whole core is idle, or -ENOENT.
  * The idle state is not claimed: the caller is expected to kick it.
  *
@@ -555,7 +603,7 @@ static s32 idle_faster_cid(s32 cid)
 
 		if (other->tier >= tier || !cid_test_idle(c))
 			continue;
-		if (!cid_range_is_idle(other->core_base, other->core_nr))
+		if (!core_is_idle(c))
 			continue;
 
 		return c;
@@ -632,8 +680,24 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid,
 	s32 cid;
 
 	cid = pick_idle_cid(p, prev_cid, false, false);
-	if (cid < 0)
+	if (cid < 0) {
+		/*
+		 * A new task with no idle cid to go to is queued on the cid
+		 * with the shortest queue rather than behind its parent.
+		 */
+		if ((wake_flags & SCX_WAKE_FORK) && cid_valid(prev_cid)) {
+			const struct scx_cmask __arena *allowed = all_cids;
+
+			if (p->nr_cpus_allowed < nr_cpu_ids)
+				allowed = &lookup_task_ctx(p)->allowed;
+
+			cid = shallowest_queue_cid(p, allowed, cid_ctx(prev_cid));
+			if (cid >= 0)
+				return cid;
+		}
+
 		return prev_cid;
+	}
 
 	/*
 	 * An idle cid was claimed, dispatch @p directly to it: the local DSQ of
@@ -792,25 +856,37 @@ static bool task_hot(struct task_struct *p, u64 now)
 }
 
 /*
- * Dispatch on @dst_cid the task with the earliest deadline among the head of
- * its own DSQ and the heads of the DSQs of the other cids.
+ * Number of other cids' queues a busy cid looks at on each dispatch for a
+ * queue deeper than its own.
+ */
+#define BALANCE_SAMPLE	2
+
+/*
+ * Dispatch on @dst_cid a task from its own DSQ or from the DSQ of another cid.
  *
- * With the per-cid keys all built on the same system-wide vruntime reference,
- * the earliest head across the queues is the task a single system-wide queue
- * would hand out. Peeking every queue at every dispatch costs as much as the
- * single queue's lock did, though, so the scan is bounded: a cid with work of
- * its own samples @steal_sample other queues, rotating through them across
- * dispatches, and takes a remote head only when it is at least a full request
- * ahead of its own; a task with real lag to spend is found within a few
- * dispatches, while under a balanced load nothing clears the bar and every cid
- * drains its own queue, as its own runqueue would be drained by EEVDF. A cid
- * with nothing of its own takes the first task it finds instead of the
- * earliest, the way the idle balancer pulls whatever is available.
+ * A cid with nothing queued pulls the first task it finds: from the slower
+ * cids first, hot or not, since a task is better off on a faster core than
+ * with a warm cache on a slow one (this is what carries the load up the
+ * capacity ladder, the way asym packing does), but only when its whole core is
+ * idle, as a fast thread sharing its core is no better than a whole slow one
+ * and asym_smt_can_pull_tasks() refuses that move too; then from its own LLC,
+ * then from the rest of the node, leaving alone a task that ran on its cid a
+ * moment ago, see task_hot(): its home cid takes it back within a slice, while
+ * moving it costs its cache.
  *
- * A task that ran on its cid a moment ago is left there in both cases: its
- * home cid takes it back within a slice, while moving it costs its cache, see
- * task_hot(). This is what keeps a wakeup-heavy load from migrating on every
- * idle transition.
+ * A cid with work of its own samples BALANCE_SAMPLE other queues, rotating
+ * through them across dispatches, and takes the head of one that is more than
+ * twice as deep as its own and at least two tasks deeper. Every queue is fed
+ * by the wakeups of its own cid, so this is the only way a pile-up gets spread
+ * out, e.g. a hundred children forked on one cid while every other cid was
+ * busy with a task of its own, the way the load balancer moves tasks off the
+ * busiest runqueue. The margin is what keeps cids under an even load from
+ * trading tasks back and forth (the balancer has its imbalance_pct), and a cid
+ * samples at most once per slice, the way the load balancer runs on the tick
+ * rather than on every pick: sampling on every dispatch under a wakeup storm
+ * moved tasks around faster than they could warm a cache. Otherwise the cid
+ * takes its own head: waiting for the owning cid's slice end is what EEVDF
+ * does under RUN_TO_PARITY.
  *
  * Only the heads are considered, a queue whose head cannot run on @dst_cid (or
  * is still hot there) is skipped as a whole.
@@ -823,25 +899,22 @@ static bool try_steal_task(s32 dst_cid)
 
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
 	struct task_struct *own = __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
-	u64 min_dl = 0, now = bpf_ktime_get_ns();
-	u32 limit, start, cid, i;
-	s32 min_cid = -1;
+	u64 now = bpf_ktime_get_ns();
+	u32 limit, start, cid, i, own_nr = 0;
+	s32 src = -1;
 
-	/*
-	 * One extra slot covers @dst_cid itself falling in the sample.
-	 */
-	limit = own ? (steal_sample ? steal_sample + 1 : 0) : nr_cids;
+	if (own) {
+		if (time_before(now, cctx->last_balance_at + slice_ns))
+			goto own;
+		cctx->last_balance_at = now;
+		own_nr = scx_bpf_dsq_nr_queued(cid_dsq(dst_cid));
+	}
+
 	start = cctx->steal_cursor;
 	if (start >= nr_cids)
 		start = 0;
 
-	/*
-	 * A cid with nothing to do looks at the slower cids first, and takes
-	 * their tasks hot or not: a task is better off on a faster core than
-	 * with a warm cache on a slow one. This is what pulls the load up the
-	 * capacity ladder, the way asym packing does.
-	 */
-	if (!own && asym_capacity) {
+	if (!own && asym_capacity && core_is_idle(dst_cid)) {
 		u32 best_tier = cctx->tier;
 
 		bpf_for(i, 0, nr_cids) {
@@ -861,19 +934,18 @@ static bool try_steal_task(s32 dst_cid)
 				continue;
 
 			best_tier = other->tier;
-			min_dl = p->scx.dsq_vtime;
-			min_cid = i;
+			src = i;
 		}
-		if (min_cid >= 0)
+		if (src >= 0)
 			goto pick;
 	}
 
 	/*
-	 * An idle cid looks in its own LLC before the rest of the system, the
-	 * way the idle balancer walks the domains bottom up. A busy cid
-	 * sampling for an earlier deadline scans a couple of queues wherever
-	 * they are, so it does a single pass.
+	 * One extra slot covers @dst_cid itself falling in the sample. An idle
+	 * cid walks its own LLC before the rest of the node, so it does two
+	 * passes.
 	 */
+	limit = own ? BALANCE_SAMPLE + 1 : nr_cids;
 	bpf_for(i, 0, own ? limit : 2 * limit) {
 		const struct cid_ctx __arena *other;
 		const struct task_ctx __arena *tctx;
@@ -891,6 +963,12 @@ static bool try_steal_task(s32 dst_cid)
 			continue;
 		if (!own && (other->llc_base == cctx->llc_base) != local_pass)
 			continue;
+		if (own) {
+			u32 nr = scx_bpf_dsq_nr_queued(cid_dsq(cid));
+
+			if (nr < own_nr + 2 || nr <= 2 * own_nr)
+				continue;
+		}
 
 		p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
 		if (!p)
@@ -900,36 +978,26 @@ static bool try_steal_task(s32 dst_cid)
 		if (!__cmask_test(dst_cid, &tctx->allowed) || task_hot(p, now))
 			continue;
 
-		if (min_cid < 0 || time_before(p->scx.dsq_vtime, min_dl)) {
-			min_dl = p->scx.dsq_vtime;
-			min_cid = cid;
-		}
-
-		/*
-		 * Nothing to compare against: take the first task found.
-		 */
-		if (!own)
-			break;
+		src = cid;
+		break;
 	}
-	if (limit) {
-		start += limit;
-		if (start >= nr_cids)
-			start -= nr_cids;
-		cctx->steal_cursor = start;
-	}
+	start += limit;
+	if (start >= nr_cids)
+		start -= nr_cids;
+	cctx->steal_cursor = start;
 
-	if (own && (min_cid < 0 ||
-		    !time_before(min_dl + slice_ns, own->scx.dsq_vtime)))
-		min_cid = dst_cid;
+own:
+	if (src < 0 && own)
+		src = dst_cid;
 
 pick:
-	if (min_cid < 0)
+	if (src < 0)
 		return false;
 
-	if (!scx_bpf_dsq_move_to_local(cid_dsq(min_cid), 0))
+	if (!scx_bpf_dsq_move_to_local(cid_dsq(src), 0))
 		return false;
 
-	if (min_cid != dst_cid)
+	if (src != dst_cid)
 		__sync_fetch_and_add(&nr_steals, 1);
 
 	return true;
@@ -938,8 +1006,8 @@ pick:
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
 	/*
-	 * Take the earliest deadline waiting anywhere, then fall back to this
-	 * cid's own DSQ in case the pick raced with another cid.
+	 * Take a task from this cid's queue or from a deeper one, then fall
+	 * back to this cid's own DSQ in case the pick raced with another cid.
 	 */
 	if (try_steal_task(cid) || scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))
 		return;
