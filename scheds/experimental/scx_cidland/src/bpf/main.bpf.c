@@ -76,6 +76,19 @@ const volatile u64 slice_ns = 1000000ULL;
 const volatile u64 slice_lag = 20000000ULL;
 
 /*
+ * A task that ran within this long on its CPU is still cache hot there and
+ * is not stolen, like task_hot() with sysctl_sched_migration_cost.
+ */
+const volatile u64 migration_cost_ns = 500000ULL;
+
+/*
+ * Number of other cids' queues a busy cid looks at on each dispatch for a
+ * queue deeper than its own. 0 disables the sampling, leaving a busy cid
+ * with its own queue only.
+ */
+const volatile u32 balance_sample = 2;
+
+/*
  * The globals written on the hot path sit on cache lines of their own.
  *
  * The rest of .bss is read by every op on every CPU (the sizes, the arena
@@ -1227,24 +1240,12 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-/*
- * A task that ran within this long on its CPU is still cache hot there and
- * is not stolen, like task_hot() with sysctl_sched_migration_cost.
- */
-#define MIGRATION_COST_NS	500000ULL
-
 static bool task_hot(struct task_struct *p, u64 now)
 {
 	const struct task_ctx *tctx = try_lookup_task_ctx(p);
 
-	return tctx && time_before(now, tctx->last_stop_at + MIGRATION_COST_NS);
+	return tctx && time_before(now, tctx->last_stop_at + migration_cost_ns);
 }
-
-/*
- * Number of other cids' queues a busy cid looks at on each dispatch for a
- * queue deeper than its own.
- */
-#define BALANCE_SAMPLE	2
 
 /*
  * Look at the queued cids of @w, word @k rotated by @s (packed in @ks as
@@ -1358,7 +1359,7 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  * task that ran on its CPU a moment ago, see task_hot(): its home CPU
  * takes it back within a slice, while moving it costs its cache.
  *
- * A cid with work of its own samples BALANCE_SAMPLE other queues, rotating
+ * A cid with work of its own samples @balance_sample other queues, rotating
  * through them across dispatches, and takes the head of one that is more
  * than twice as deep as its own and at least two tasks deeper. Every queue
  * is fed by the wakeups of its own CPU, so this is the only way a pile-up
@@ -1424,7 +1425,7 @@ static bool try_steal_task(s32 dst_cid)
 		 * through them across dispatches.
 		 */
 		src = steal_from_range(dst_cid, -1, node_base, node_nr, start + 1,
-				       now, true, own_nr, BALANCE_SAMPLE);
+				       now, true, own_nr, balance_sample);
 	} else {
 		/*
 		 * An idle cid walks its own LLC before the rest of the node,
@@ -1438,7 +1439,7 @@ static bool try_steal_task(s32 dst_cid)
 			src = steal_from_range(dst_cid, -1, node_base, node_nr,
 					       start + 1, now, true, 0, 0xff);
 	}
-	cctx->steal_cursor = src >= 0 ? src : start + BALANCE_SAMPLE;
+	cctx->steal_cursor = src >= 0 ? src : start + balance_sample;
 
 own:
 	if (src < 0 && own)

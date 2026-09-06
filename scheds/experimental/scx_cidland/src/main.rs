@@ -97,6 +97,29 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "2000")]
     slice_lag_us: u64,
 
+    /// Time, in microseconds, that a task stays cache hot on the CPU it last ran on.
+    ///
+    /// A task that stopped running within this long is left alone by the idle CPUs
+    /// looking for work to steal: its own CPU takes it back within a slice, while
+    /// moving it costs its cache. This is the equivalent of task_hot() with
+    /// sysctl_sched_migration_cost in fair.c. 0 makes every queued task stealable
+    /// right away, which spreads the load faster at the cost of cache locality.
+    #[clap(short = 'm', long, default_value = "500")]
+    migration_cost_us: u64,
+
+    /// Number of remote queues a busy CPU samples on each dispatch.
+    ///
+    /// A CPU with a queue of its own looks at this many other queues, rotating
+    /// through them across dispatches, and takes the head of one that is more than
+    /// twice as deep as its own and at least two tasks deeper; this is what spreads
+    /// out a pile-up created on a single CPU, the way the load balancer moves tasks
+    /// off the busiest runqueue. A larger value finds an imbalance sooner and costs
+    /// more work on every dispatch; 0 disables the sampling, leaving a busy CPU with
+    /// its own queue only. Idle CPUs are not affected: they always scan the whole
+    /// node for work.
+    #[clap(short = 'b', long, default_value = "2", value_parser = clap::value_parser!(u32).range(0..=255))]
+    balance_sample: u32,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -218,6 +241,8 @@ impl<'a> Scheduler<'a> {
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
+        rodata.migration_cost_ns = opts.migration_cost_us * 1000;
+        rodata.balance_sample = opts.balance_sample;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
