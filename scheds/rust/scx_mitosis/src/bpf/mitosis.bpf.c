@@ -274,11 +274,15 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
 
-		tctx->dsq = get_cpu_dsq_id(cpu);
-		if (dsq_is_invalid(tctx->dsq))
+		dsq_id_t cpu_dsq = get_cpu_dsq_id(cpu);
+
+		if (dsq_is_invalid(cpu_dsq))
 			return -EINVAL;
 
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctx->vtime_now));
+		/* Only re-base when the task actually changes domain. */
+		if (cpu_dsq.raw != tctx->dsq.raw || tctx->all_cell_cpus_allowed)
+			scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctx->vtime_now));
+		tctx->dsq = cpu_dsq;
 		tctx->all_cell_cpus_allowed = false;
 		return 0;
 	}
@@ -292,15 +296,18 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	}
 
 	/* Non-LLC aware version */
-	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, FAKE_FLAT_SUBCELL_LLC);
-	if (dsq_is_invalid(tctx->dsq))
+	dsq_id_t subcell_dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, FAKE_FLAT_SUBCELL_LLC);
+	if (dsq_is_invalid(subcell_dsq))
 		return -EINVAL;
 
 	struct subcell *subcell;
 	if (!(subcell = lookup_subcell(tctx->cell, tctx->subcell)))
 		return -ENOENT;
 
-	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(subcell->llcs[FAKE_FLAT_SUBCELL_LLC].vtime_now));
+	/* Only re-base when the task actually changes domain. */
+	if (subcell_dsq.raw != tctx->dsq.raw || !tctx->all_cell_cpus_allowed)
+		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(subcell->llcs[FAKE_FLAT_SUBCELL_LLC].vtime_now));
+	tctx->dsq = subcell_dsq;
 	tctx->all_cell_cpus_allowed = true;
 
 	return 0;
