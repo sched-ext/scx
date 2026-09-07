@@ -37,16 +37,6 @@ char _license[] SEC("license") = "GPL";
 #define CLAIM_RETRIES	4
 
 /*
- * Thresholds for applying hysteresis to CPU performance scaling:
- *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
- *  - CPUFREQ_HIGH_THRESH: above this level, raise performance to maximum
- *
- * Values between the two thresholds retain the current smoothed performance level.
- */
-#define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
-#define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
-
-/*
  * Enable cpufreq integration.
  */
 const volatile bool cpufreq_enabled = true;
@@ -395,27 +385,28 @@ static u64 cid_util(s32 cid, u64 now)
 }
 
 /*
- * Apply target cpufreq performance level to @cid.
+ * Tell the cpufreq governor how busy @cid is.
+ *
+ * Just how busy it is, with nothing added: what schedutil is handed is a
+ * utilization, and it does the shaping itself in
+ * sugov_effective_cpu_perf():
+ *
+ *	actual = map_util_perf(actual);
+ *	if (actual < max)
+ *		max = actual;
+ *	return max(min, max);
+ *
+ * so the quarter of headroom is already there, the ceiling is already
+ * there, and @min already keeps a CPU above whatever floor the bandwidth
+ * of what runs on it demands. This is what the fair class passes, see
+ * cpu_util_cfs_boost() in sugov_get_util().
  */
 static void update_cpufreq(s32 cid)
 {
-	u64 util, perf_lvl;
-
 	if (!cpufreq_enabled || !cid_valid(cid))
 		return;
-	util = cid_util(cid, bpf_ktime_get_ns());
 
-	/*
-	 * Apply target performance level to the cpufreq governor.
-	 */
-	if (util >= CPUFREQ_HIGH_THRESH)
-		perf_lvl = SCX_CPUPERF_ONE;
-	else if (util <= CPUFREQ_LOW_THRESH)
-		perf_lvl = SCX_CPUPERF_ONE / 2;
-	else
-		perf_lvl = util;
-
-	scx_bpf_cidperf_set(cid, perf_lvl);
+	scx_bpf_cidperf_set(cid, cid_util(cid, bpf_ktime_get_ns()));
 }
 
 /*
