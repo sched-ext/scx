@@ -120,6 +120,20 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "2", value_parser = clap::value_parser!(u32).range(0..=255))]
     balance_sample: u32,
 
+    /// Failed scans an idle CPU tolerates before it stops honouring cache hotness.
+    ///
+    /// An idle CPU that finds nothing it is allowed to take, while work is queued
+    /// somewhere it could have run, counts the attempt; once it has counted more
+    /// than this many in a row it takes the head of a queue whether or not the
+    /// task is still hot on the CPU it ran on. This is sd->cache_nice_tries
+    /// against sd->nr_balance_failed in can_migrate_task(), and the value applies
+    /// to a scan within the LLC; one more is allowed beyond it. 0 gives up cache
+    /// locality on the first failure, a large value never gives it up and lets a
+    /// CPU stay idle beside a runnable task for as long as the task keeps being
+    /// hot.
+    #[clap(short = 'c', long, default_value = "1", value_parser = clap::value_parser!(u32).range(0..=255))]
+    cache_nice_tries: u32,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -272,6 +286,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.balance_sample = opts.balance_sample;
+        rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;

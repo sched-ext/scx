@@ -82,6 +82,16 @@ const volatile u64 slice_lag = 20000000ULL;
 const volatile u64 migration_cost_ns = 500000ULL;
 
 /*
+ * How many times in a row an idle cid may come back from a scan with
+ * nothing it is allowed to take before it stops honouring cache hotness,
+ * like sd->cache_nice_tries against sd->nr_balance_failed in
+ * can_migrate_task(). This is the value for a scan within the LLC; one
+ * more is allowed beyond it, the way sd_init() gives a SD_NUMA domain
+ * one more than a SD_SHARE_LLC one.
+ */
+const volatile u32 cache_nice_tries = 1;
+
+/*
  * Do not interrupt a running task for one that wakes up with an earlier
  * deadline, leaving it to run until its slice ends.
  */
@@ -217,6 +227,7 @@ struct cid_ctx {
 	u64 curr_w;		/* its weight */
 	u64 curr_run_at;	/* when it was picked */
 	u32 steal_cursor;
+	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 };
 
 /*
@@ -1810,6 +1821,14 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  * task that ran on its CPU a moment ago, see task_hot(): its home CPU
  * takes it back within a slice, while moving it costs its cache.
  *
+ * That last preference is given up once the cid has come back empty from
+ * @cache_nice_tries scans in a row with work queued somewhere it could
+ * not take: an idle CPU beside a runnable task is worse than a cold
+ * cache, and a preference that never yields is a barrier. This is what
+ * can_migrate_task() does with sd->nr_balance_failed, and the counter is
+ * cleared as soon as a scan finds something, or finds the node genuinely
+ * empty.
+ *
  * A cid with work of its own samples @balance_sample other queues, rotating
  * through them across dispatches, and takes the head of one that is more
  * than twice as deep as its own and at least two tasks deeper. Every queue
@@ -1865,8 +1884,10 @@ static bool try_steal_task(s32 dst_cid)
 		bpf_arena_for(t, 0, nr_tiers - topo->tier - 1) {
 			src = steal_from_range(dst_cid, nr_tiers - 1 - t, node_base,
 					       node_nr, node_base, now, false, 0, 0xff);
-			if (src >= 0)
+			if (src >= 0) {
+				cctx->nr_balance_failed = 0;
 				goto pick;
+			}
 		}
 	}
 
@@ -1878,17 +1899,31 @@ static bool try_steal_task(s32 dst_cid)
 		src = steal_from_range(dst_cid, -1, node_base, node_nr, start + 1,
 				       now, true, own_nr, balance_sample);
 	} else {
+		u32 failed = cctx->nr_balance_failed;
+
 		/*
 		 * An idle cid walks its own LLC before the rest of the node,
 		 * or the rest of the machine when there is nothing to gain by
-		 * keeping to a node. A domain that is the whole of the next
-		 * one is not walked twice.
+		 * keeping to a node, honouring hotness until it has failed often
+		 * enough to stop. A domain that is the whole of the next one is
+		 * not walked twice.
 		 */
 		src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
-				       start + 1, now, true, 0, 0xff);
+				       start + 1, now,
+				       failed <= cache_nice_tries, 0, 0xff);
 		if (src < 0 && node_nr > topo->llc_nr)
 			src = steal_from_range(dst_cid, -1, node_base, node_nr,
-					       start + 1, now, true, 0, 0xff);
+					       start + 1, now,
+					       failed <= cache_nice_tries + 1,
+					       0, 0xff);
+
+		/*
+		 * Nothing queued anywhere is a balanced node, not a failure.
+		 */
+		if (src >= 0 || cmask_empty(queued_cids))
+			cctx->nr_balance_failed = 0;
+		else
+			cctx->nr_balance_failed = failed + 1;
 	}
 	cctx->steal_cursor = src >= 0 ? src : start + balance_sample;
 
