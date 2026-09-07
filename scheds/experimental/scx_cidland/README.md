@@ -29,9 +29,10 @@ The placement and the fairness rules are the ones the kernel's own scheduler
 uses, translated to cid space:
 
  - **Virtual deadline.** Tasks that can't be placed on an idle CPU are queued
-   by `vd_i = ve_i + r_i / w_i`, EEVDF's `update_deadline()`, with a request
-   size `r_i` that is the same for everybody, like `sysctl_sched_base_slice`:
-   the weight buys an earlier deadline, not a longer slice.
+   by `vd_i = ve_i + r_i / w_i`, EEVDF's `update_deadline()`. The request size
+   `r_i` is the scheduler's base slice unless the task supplies a custom one
+   through `sched_attr.sched_runtime`; the weight buys an earlier deadline,
+   not a longer slice.
 
  - **Per-runqueue reference.** Each CPU keeps `V = \Sum (w_i * v_i) / \Sum w_i`
    over the tasks queued on it, EEVDF's `avg_vruntime()`, kept incrementally,
@@ -71,8 +72,10 @@ uses, translated to cid space:
    ones, the way asym packing does, but only onto a fully idle faster core,
    which is what `asym_smt_can_pull_tasks()` refuses to give up.
 
-Time slices are fixed (1 ms by default) and a task that runs out of its slice
-with nothing waiting on its CPU keeps running there.
+Time slices are 1 ms by default. A task can select its own slice with
+`sched_attr.sched_runtime` (subject to the kernel's limits), and setting it to
+zero restores the scheduler default. A task that runs out of its slice with
+nothing waiting on its CPU keeps running there.
 
 ## Requirements
 
