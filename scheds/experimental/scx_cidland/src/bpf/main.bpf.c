@@ -1927,22 +1927,21 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  * cid of the node.
  *
  * A cid with nothing queued pulls the first task it finds: from the slower
- * cids first, hot or not, since a task is better off on a faster core than
- * with a warm cache on a slow one (this is what carries the load up the
- * capacity ladder, the way asym packing does), but only when its whole
- * core is idle, as a fast thread sharing its core is no better than a
- * whole slow one and asym_smt_can_pull_tasks() refuses that move too;
- * then from its own LLC, then from the rest of the node, leaving alone a
- * task that ran on its CPU a moment ago, see task_hot(): its home CPU
- * takes it back within a slice, while moving it costs its cache.
+ * cids first, once the task is no longer cache-hot on its previous CPU. This
+ * carries load up the capacity ladder without migrating a task as soon as a
+ * faster core becomes transiently idle. The pull is only onto a fully idle
+ * faster core, as a fast thread sharing its core is no better than a whole
+ * slow one and asym_smt_can_pull_tasks() refuses that move too; then the cid
+ * scans its own LLC and the rest of the node with the same hot-task check.
  *
- * That last preference is given up once the cid has come back empty from
- * @cache_nice_tries scans in a row with work queued somewhere it could
- * not take: an idle CPU beside a runnable task is worse than a cold
- * cache, and a preference that never yields is a barrier. This is what
- * can_migrate_task() does with sd->nr_balance_failed, and the counter is
- * cleared as soon as a scan finds something, or finds the node genuinely
- * empty.
+ * The check is given up, on the climb as much as on the scans that
+ * follow it, once the cid has come back empty from @cache_nice_tries
+ * scans in a row with work queued somewhere it could not take: an idle
+ * CPU beside a runnable task is worse than a cold cache, and a
+ * preference that never yields is a barrier. This is what
+ * can_migrate_task() does with sd->nr_balance_failed, and the counter
+ * is cleared as soon as a scan finds something, or finds the node
+ * genuinely empty.
  *
  * A cid with work of its own samples @balance_sample other queues, rotating
  * through them across dispatches, and takes the head of one that is more
@@ -1973,6 +1972,7 @@ static bool try_steal_task(s32 dst_cid)
 		   __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
+	u32 failed = cctx->nr_balance_failed;
 	u64 now = bpf_ktime_get_ns();
 	u32 start, own_nr = 0;
 	s32 src = -1;
@@ -1993,12 +1993,11 @@ static bool try_steal_task(s32 dst_cid)
 	if (!own && asym_capacity && (!smt_enabled || core_is_idle(dst_cid))) {
 		u32 t;
 
-		/*
-		 * Slower tiers first, from the slowest, hot or not.
-		 */
+		/* Slower tiers first, from the slowest, leaving hot tasks alone. */
 		bpf_arena_for(t, 0, nr_tiers - topo->tier - 1) {
 			src = steal_from_range(dst_cid, nr_tiers - 1 - t, node_base,
-					       node_nr, node_base, now, false, 0, 0xff);
+					       node_nr, node_base, now,
+					       failed <= cache_nice_tries, 0, 0xff);
 			if (src >= 0) {
 				cctx->nr_balance_failed = 0;
 				goto pick;
@@ -2014,8 +2013,6 @@ static bool try_steal_task(s32 dst_cid)
 		src = steal_from_range(dst_cid, -1, node_base, node_nr, start + 1,
 				       now, true, own_nr, balance_sample);
 	} else {
-		u32 failed = cctx->nr_balance_failed;
-
 		/*
 		 * An idle cid walks its own LLC before the rest of the node,
 		 * or the rest of the machine when there is nothing to gain by
