@@ -151,6 +151,16 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Interrupt on the deadlines alone, without asking who is owed service.
+    ///
+    /// The wakeup preemption normally fires only when the woken task is owed
+    /// service and the running one is not, the way pick_eevdf() drops an
+    /// ineligible current task and then picks an eligible waiter. This skips
+    /// both tests and decides on the deadlines alone. For comparing the two
+    /// rules against each other.
+    #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
+    no_eligibility: bool,
+
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -256,6 +266,7 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
+        rodata.no_eligibility = opts.no_eligibility;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
         // tier per distinct capacity, 0 being the fastest. Capacities are
