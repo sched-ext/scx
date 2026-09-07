@@ -164,6 +164,9 @@ struct task_ctx {
 	s32 vcid;
 	u64 vjoin_w;
 	u64 vjoin_v;
+
+	/* still owed its first, halved request, see task_dl() */
+	bool initial;
 };
 
 struct {
@@ -987,10 +990,32 @@ static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
  */
 static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
 {
+	u64 slice = slice_ns;
+
 	if (tctx->deadline && time_before(tctx->vruntime, tctx->deadline))
 		return tctx->deadline;
 
-	tctx->deadline = tctx->vruntime + scale_by_dl_weight(p, slice_ns);
+	/*
+	 * A task that has just been forked asks for half a request the
+	 * first time, which is PLACE_DEADLINE_INITIAL:
+	 *
+	 *	if (sched_feat(PLACE_DEADLINE_INITIAL) && (flags & ENQUEUE_INITIAL))
+	 *		vslice /= 2;
+	 *
+	 * The tasks it is joining are on average halfway through requests
+	 * of their own, so a whole one puts it behind all of them and it
+	 * waits out the competition before it has run at all. Half a
+	 * request is the average of what they have left, which is what
+	 * joining in the middle should cost. It buys no extra service: the
+	 * deadline is where the task sits in the order, the vruntime is
+	 * what it is charged, and only the first one is halved.
+	 */
+	if (tctx->initial) {
+		tctx->initial = false;
+		slice /= 2;
+	}
+
+	tctx->deadline = tctx->vruntime + scale_by_dl_weight(p, slice);
 
 	return tctx->deadline;
 }
@@ -2098,6 +2123,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 	tctx->vcid = -1;
+
+	/*
+	 * @fork tells a task that is being created apart from one that was
+	 * already running when the scheduler was loaded, which is the
+	 * distinction ENQUEUE_INITIAL draws: wake_up_new_task() sets it and
+	 * nothing else does, see task_dl().
+	 */
+	tctx->initial = args->fork;
 
 	return 0;
 }
