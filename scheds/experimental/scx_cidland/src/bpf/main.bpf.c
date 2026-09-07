@@ -201,8 +201,8 @@ struct cid_ctx {
 	u64 vtime_rem;
 	u64 last_balance_at;
 	u64 vsum_w;
-	u64 vsum_wv;
-	u64 vzero;
+	u64 vref;
+	u64 vref_rem;
 	u32 steal_cursor;
 };
 
@@ -1022,67 +1022,90 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
  *
  * Do the same per cid: a task joins the cid it is queued on or runs on,
  * leaves it when it stops being runnable, and its contribution follows
- * the vruntime it is charged in ops.stopping(). The vruntimes are scaled
- * down in the sums to keep the weighted products from overflowing.
+ * the vruntime it is charged in ops.stopping().
  *
- * A cid whose pack is empty has no average to take, so it keeps the
- * reference its last member left behind in @vzero, the way a cfs_rq keeps
- * cfs_rq->zero_vruntime across going idle. The clock of an idle cid simply
- * stops: nothing is served there, so nothing is owed there, and a task
- * arriving later starts from where the cid was left. A cid whose sums are
- * found inconsistent still falls back to the system-wide reference.
+ * Keep V itself rather than the two sums it is the quotient of. A cfs_rq
+ * divides \Sum w_i*v_i by \Sum w_i under its rq lock and always gets a
+ * pair that belongs together; here the words are updated by whichever CPU
+ * the task is on, so a reader can take one from either side of a join and
+ * divide sums that never coexisted. The miss is the joining weight over
+ * the old total, which a nice -20 task landing on a pack of one nice 19
+ * task inflates by almost six thousand, and the result is not merely read
+ * but assigned as a task's vruntime in place_task().
+ *
+ * So move V by the exact increment each event is worth, and let a reader
+ * take it in a single load, which cannot tear:
+ *
+ *	join    V' = (W*V + w_i*v_i) / (W + w_i) = V + w_i*(v_i - V)/(W + w_i)
+ *	leave   V' = (W*V - w_i*v_i) / (W - w_i) = V + w_i*(V - v_i)/(W - w_i)
+ *	charge  dV = w_i * dv_i / W
+ *
+ * The W each increment divides by is read without a lock too, but a stale
+ * W only scales a bounded increment slightly wrong, where a stale divisor
+ * under a quotient produced a number with no relation to the pack.
+ *
+ * The last member out divides by nothing and leaves V where it stands,
+ * which is what an empty pack wants: the clock of an idle cid stops,
+ * nothing is served there so nothing is owed there, and a task arriving
+ * later starts from where the cid was left. That is cfs_rq->zero_vruntime
+ * without a field of its own.
  */
-#define VREF_SHIFT	10
+/*
+ * Divide a signed value by a positive one. BPF has no signed division, so
+ * take the magnitude through the unsigned divide and put the sign back.
+ */
+static s64 vdiv(s64 v, u64 d)
+{
+	if (v < 0)
+		return -(s64)((u64)(-v) / d);
+
+	return (s64)((u64)v / d);
+}
 
 static u64 cid_vref(s32 cid)
 {
-	struct cid_ctx __arena *cctx;
-	u64 w, wv, v;
-
 	if (!cid_valid(cid))
 		return vtime_now;
-	cctx = cid_ctx(cid);
 
-	w = cctx->vsum_w;
-	wv = cctx->vsum_wv;
-	if (!w)
-		return cctx->vzero;
-
-	v = (wv / w) << VREF_SHIFT;
-	if (time_after(v, vtime_now + slice_lag * 100) ||
-	    time_before(v, vtime_now - slice_lag * 100))
-		return vtime_now;
-
-	return v;
+	return cid_ctx(cid)->vref;
 }
 
+/*
+ * Drop @tctx out of its pack's reference, see cid_vref().
+ */
 static void vref_leave(struct task_ctx *tctx)
 {
 	struct cid_ctx __arena *cctx;
 	u64 w;
+	s64 d;
 
 	if (!cid_valid(tctx->vcid))
 		return;
-
 	cctx = cid_ctx(tctx->vcid);
+
 	w = __sync_fetch_and_sub(&cctx->vsum_w, tctx->vjoin_w);
-	__sync_fetch_and_sub(&cctx->vsum_wv, tctx->vjoin_w * tctx->vjoin_v);
 
 	/*
-	 * Last one out leaves the reference behind. With a single member
-	 * the weighted average is that member's own vruntime, so that is
-	 * where the cid's clock stops, and where the next task to arrive is
-	 * placed.
+	 * V' = V + w_i*(V - v_i) / (W - w_i), and the last one out leaves
+	 * the reference standing where it is.
 	 */
-	if (w == tctx->vjoin_w)
-		cctx->vzero = tctx->vjoin_v << VREF_SHIFT;
+	if (w > tctx->vjoin_w) {
+		d = (s64)(cctx->vref - tctx->vjoin_v);
+		__sync_fetch_and_add(&cctx->vref,
+				     vdiv((s64)tctx->vjoin_w * d, w - tctx->vjoin_w));
+	}
 
 	tctx->vcid = -1;
 }
 
+/*
+ * Fold @p into @cid's reference, see cid_vref().
+ */
 static void vref_join(s32 cid, const struct task_struct *p, struct task_ctx *tctx)
 {
 	struct cid_ctx __arena *cctx;
+	u64 w;
+	s64 d;
 
 	if (tctx->vcid == cid)
 		return;
@@ -1093,29 +1116,55 @@ static void vref_join(s32 cid, const struct task_struct *p, struct task_ctx *tct
 	cctx = cid_ctx(cid);
 
 	tctx->vjoin_w = task_weight(p);
-	tctx->vjoin_v = tctx->vruntime >> VREF_SHIFT;
+	tctx->vjoin_v = tctx->vruntime;
 	tctx->vcid = cid;
-	__sync_fetch_and_add(&cctx->vsum_w, tctx->vjoin_w);
-	__sync_fetch_and_add(&cctx->vsum_wv, tctx->vjoin_w * tctx->vjoin_v);
+
+	/*
+	 * V' = V + w_i*(v_i - V) / (W + w_i). On an empty pack W is 0 and
+	 * the increment is exactly v_i - V, so the first member becomes the
+	 * reference, which is what the average of one is.
+	 */
+	w = __sync_fetch_and_add(&cctx->vsum_w, tctx->vjoin_w);
+	d = (s64)(tctx->vruntime - cctx->vref);
+	__sync_fetch_and_add(&cctx->vref,
+			     vdiv((s64)tctx->vjoin_w * d, w + tctx->vjoin_w));
 }
 
 /*
  * Bring the contribution of @tctx up to date with its vruntime.
+ *
+ *	dV = w_i * dv_i / W
+ *
+ * EEVDF's identity for the service just delivered, taken against the pack
+ * that received it. The division truncates, and a pack heavy enough that
+ * w_i * dv_i falls below W would advance by nothing at all and freeze, so
+ * carry the remainder. Only the cid the task ran on is touched, so the
+ * carry needs no atomic.
  */
 static void vref_charge(struct task_ctx *tctx)
 {
 	struct cid_ctx __arena *cctx;
-	u64 dv;
+	u64 acc, delta, w;
+	s64 dv;
 
 	if (!cid_valid(tctx->vcid))
 		return;
-
-	dv = (tctx->vruntime >> VREF_SHIFT) - tctx->vjoin_v;
-	if (!dv)
-		return;
-	tctx->vjoin_v += dv;
 	cctx = cid_ctx(tctx->vcid);
-	__sync_fetch_and_add(&cctx->vsum_wv, tctx->vjoin_w * dv);
+
+	dv = (s64)(tctx->vruntime - tctx->vjoin_v);
+	if (dv <= 0)
+		return;
+	tctx->vjoin_v = tctx->vruntime;
+
+	w = cctx->vsum_w;
+	if (!w)
+		return;
+
+	acc = tctx->vjoin_w * (u64)dv + cctx->vref_rem;
+	delta = acc / w;
+	cctx->vref_rem = acc - delta * w;
+	if (delta)
+		__sync_fetch_and_add(&cctx->vref, delta);
 }
 
 /*
