@@ -66,10 +66,10 @@ uses, translated to cid space:
  - **Asymmetric capacity.** On systems with CPUs of different capacity (e.g.
    P-cores and E-cores), capacities within 5% of the fastest CPU in a tier are
    coalesced by default, so marginal differences do not create a strict
-   ordering. Idle CPUs are handed out in capacity order and idle faster CPUs
-   pull work up from slower ones, the way asym packing does, but only onto a
-   fully idle faster core, which is what `asym_smt_can_pull_tasks()` refuses
-   to give up.
+   ordering. An idle previous CPU is retained; otherwise idle CPUs are handed
+   out in capacity order. Idle faster CPUs pull work up from slower ones, the
+   way asym packing does, but only onto a fully idle faster core, which is what
+   `asym_smt_can_pull_tasks()` refuses to give up.
 
 Time slices are fixed (1 ms by default) and a task that runs out of its slice
 with nothing waiting on its CPU keeps running there.
