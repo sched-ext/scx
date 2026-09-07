@@ -156,6 +156,16 @@ struct Opts {
     #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
     uniform_capacity: bool,
 
+    /// Maximum capacity difference, in percent, within one capacity tier.
+    ///
+    /// Capacities are compared with the fastest CPU in the current tier, so
+    /// small differences such as favored versus ordinary P-cores do not make
+    /// wakeups chase a marginally faster CPU. A larger gap still starts a new
+    /// tier and retains the preference for P-cores over E-cores. 0 restores
+    /// one tier per distinct reported capacity.
+    #[clap(short = 't', long, default_value = "5", value_parser = clap::value_parser!(u32).range(0..=50))]
+    capacity_tier_tolerance_pct: u32,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -230,6 +240,32 @@ struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
 }
 
+/// Assign sorted, descending CPU capacities to tiers.
+///
+/// Each capacity is compared with the fastest CPU in the current tier rather
+/// than with the preceding CPU. This prevents a chain of individually small
+/// differences from merging CPUs whose capacities differ significantly.
+fn capacity_tiers(capacities: &[usize], tolerance_pct: u32) -> Vec<u64> {
+    let Some(&first) = capacities.first() else {
+        return Vec::new();
+    };
+    let keep_pct = 100usize - tolerance_pct as usize;
+    let mut anchor = first;
+    let mut tier = 0u64;
+    let mut tiers = Vec::with_capacity(capacities.len());
+
+    for &capacity in capacities {
+        debug_assert!(capacity <= anchor);
+        if capacity.saturating_mul(100) < anchor.saturating_mul(keep_pct) {
+            tier += 1;
+            anchor = capacity;
+        }
+        tiers.push(tier);
+    }
+
+    tiers
+}
+
 impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         try_set_rlimit_infinity();
@@ -295,13 +331,14 @@ impl<'a> Scheduler<'a> {
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_vref_update = opts.no_vref_update;
 
-        // Capacity tiers: CPUs sorted by capacity in descending order, one
-        // tier per distinct capacity, 0 being the fastest. Capacities are
-        // normalized to 1..1024 so the highest is always 1024.
+        // Capacity tiers: CPUs sorted by capacity in descending order, with
+        // close capacities coalesced into a tier, 0 being the fastest.
+        // Capacities are normalized to 1..1024 so the highest is always 1024.
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
         cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
         let max_cap = cpus.first().map(|c| c.cpu_capacity).unwrap_or(1).max(1);
-        let mut tier = 0u64;
+        let capacities: Vec<_> = cpus.iter().map(|cpu| cpu.cpu_capacity).collect();
+        let tiers = capacity_tiers(&capacities, opts.capacity_tier_tolerance_pct);
         let mut cpu_tiers: Vec<(u64, u64, u64)> = Vec::new();
         for (i, cpu) in cpus.iter().enumerate() {
             if opts.uniform_capacity {
@@ -309,12 +346,13 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
             let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
-            if i > 0 && cpus[i - 1].cpu_capacity != cpu.cpu_capacity {
-                tier += 1;
-            }
-            cpu_tiers.push((cpu.id as u64, normalized as u64, tier));
+            cpu_tiers.push((cpu.id as u64, normalized as u64, tiers[i]));
         }
-        let nr_tiers = tier + 1;
+        let nr_tiers = if opts.uniform_capacity {
+            1
+        } else {
+            tiers.last().copied().unwrap_or(0) + 1
+        };
         if nr_tiers > 1 {
             info!(
                 "CPUs by capacity: {:?}",
@@ -483,4 +521,24 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capacity_tiers;
+
+    #[test]
+    fn capacity_tiers_use_current_tier_anchor() {
+        assert_eq!(capacity_tiers(&[1024, 980, 940], 5), vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn capacity_tiers_keep_meaningful_gaps() {
+        assert_eq!(capacity_tiers(&[1024, 1000, 700, 680], 5), vec![0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn zero_tolerance_keeps_distinct_capacities() {
+        assert_eq!(capacity_tiers(&[1024, 1024, 1000], 0), vec![0, 0, 1]);
+    }
 }
