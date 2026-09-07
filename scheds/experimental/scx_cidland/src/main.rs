@@ -151,6 +151,14 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Never interrupt a running task for a woken one with an earlier deadline.
+    ///
+    /// Every task then runs until its slice ends or it blocks, and a woken task
+    /// waits for that, up to a full slice. This is the behavior before wakeup
+    /// preemption was added, kept for comparison.
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
+    no_wakeup_preempt: bool,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -247,6 +255,7 @@ impl<'a> Scheduler<'a> {
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
         // tier per distinct capacity, 0 being the fastest. Capacities are
@@ -335,6 +344,7 @@ impl<'a> Scheduler<'a> {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
             nr_steals: bss_data.nr_steals,
+            nr_preempts: bss_data.nr_preempts,
         }
     }
 
