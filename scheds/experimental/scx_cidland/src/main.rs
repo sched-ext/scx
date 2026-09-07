@@ -169,6 +169,17 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     no_wakeup_preempt: bool,
 
+    /// Place and test tasks against a pack reference that is not up to date.
+    ///
+    /// A running task's vruntime is only charged when it stops, so the
+    /// reference of its pack stands still while it runs and everything read
+    /// off it in between is behind by up to a request. It is normally brought
+    /// up to date on the spot, the way update_curr() does before every
+    /// place_entity() and every entity_eligible(). This reads it as stored,
+    /// for comparing the two against each other.
+    #[clap(short = 'U', long, action = clap::ArgAction::SetTrue)]
+    no_vref_update: bool,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -267,6 +278,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
+        rodata.no_vref_update = opts.no_vref_update;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, one
         // tier per distinct capacity, 0 being the fastest. Capacities are

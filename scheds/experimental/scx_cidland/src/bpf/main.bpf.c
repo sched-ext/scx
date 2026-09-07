@@ -94,6 +94,13 @@ const volatile bool no_wakeup_preempt;
 const volatile bool no_eligibility;
 
 /*
+ * Place tasks and test them for eligibility against the pack reference as
+ * it stands, without the service the task running there has taken since
+ * it was picked, see cid_vref_at().
+ */
+const volatile bool no_vref_update;
+
+/*
  * Number of other cids' queues a busy cid looks at on each dispatch for a
  * queue deeper than its own. 0 disables the sampling, leaving a busy cid
  * with its own queue only.
@@ -1104,6 +1111,82 @@ static u64 cid_vref(s32 cid)
 }
 
 /*
+ * The reference of @cid's pack at @now, with the service the task running
+ * there has taken since it was picked folded in, see cid_vref().
+ *
+ * A running task's vruntime is only charged in ops.stopping(), so between
+ * two context switches the reference stands still while the CPU goes on
+ * delivering service, and everything read off it in between is behind by
+ * as much as a whole request. A task placed against a reference that low
+ * is placed further back than it should be, and one tested against it
+ * looks over-served when it is not.
+ *
+ * fair.c has no such window. update_curr() runs before every
+ * place_entity() and every entity_eligible(), so V is exact wherever it
+ * is used. This is that update, for the one task a cid knows it is
+ * running,
+ *
+ *	dV = w_i * dv_i / W
+ *
+ * and it is only a read: the service is charged for real, once, by
+ * vref_charge() when the task stops. ops.stopping() clears @curr_w, so a
+ * cid with nothing of ours on it projects nothing, and past a whole
+ * request there is nothing worth projecting either - the task is due to
+ * be rescheduled and the estimate would be running past what it can know.
+ */
+static u64 cid_vref_at(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+	u64 w, sum_w, delta, dv;
+
+	if (!cid_valid(cid))
+		return 0;
+	cctx = cid_ctx(cid);
+
+	w = cctx->curr_w;
+	sum_w = cctx->vsum_w;
+	delta = now - cctx->curr_run_at;
+	if (!w || !sum_w || delta >= slice_ns)
+		return cctx->vref;
+
+	dv = delta * NICE_0_WEIGHT / w;
+
+	return cctx->vref + dv * w / sum_w;
+}
+
+/*
+ * The reference to place a task against and to test it against, which is
+ * cid_vref_at() unless --no-vref-update pins it to the stored value.
+ */
+static u64 cid_vref_place(s32 cid, u64 now)
+{
+	return no_vref_update ? cid_vref(cid) : cid_vref_at(cid, now);
+}
+
+/*
+ * Is the task running on @cid still owed service at @now?
+ *
+ * Its vruntime is only charged in ops.stopping() too, so the service it
+ * has taken since it was picked is added to it here, and to the reference
+ * it is measured against by cid_vref_at(). This is what
+ * wakeup_preempt_fair() calls update_curr_fair() for before deciding
+ * anything. A task that has run for a whole request is past its deadline
+ * as well and has no protection left either way.
+ */
+static bool curr_owed_service(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	u64 w = cctx->curr_w, delta = now - cctx->curr_run_at;
+	u64 dv;
+
+	if (!w || delta >= slice_ns)
+		return false;
+	dv = delta * NICE_0_WEIGHT / w;
+
+	return !time_after(cctx->curr_v + dv, cid_vref_at(cid, now));
+}
+
+/*
  * Drop @tctx out of its pack's reference, see cid_vref().
  */
 static void vref_leave(struct task_ctx *tctx)
@@ -1227,10 +1310,11 @@ static u64 cid_pack_weight(s32 cid)
  * preferred wake target, see pick_idle_cid(), so this is the common
  * placement, not a corner of one.
  */
-static void place_task(s32 cid, const struct task_struct *p, struct task_ctx *tctx)
+static void place_task(s32 cid, const struct task_struct *p,
+		       struct task_ctx *tctx, u64 now)
 {
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
-		tctx->vruntime = cid_vref(cid);
+		tctx->vruntime = cid_vref_place(cid, now);
 		if (cid_pack_weight(cid))
 			tctx->vruntime -= tctx->vlag;
 		tctx->deadline = 0;
@@ -1255,7 +1339,7 @@ static void place_task(s32 cid, const struct task_struct *p, struct task_ctx *tc
  */
 static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid)
 {
-	place_task(cid, p, tctx);
+	place_task(cid, p, tctx, bpf_ktime_get_ns());
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
 }
 
@@ -1390,14 +1474,11 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * is still owed and takes up again, not its place in the order: it keeps
  * the deadline it was picked with, see task_dl().
  *
- * The vruntime of a running task is only charged in ops.stopping(), so
- * the service it has taken since it was picked is added here, and the
- * reference is moved by what that service is worth to the pack,
- *
- *	dV = w_i * dv_i / W
- *
- * which is what wakeup_preempt_fair() calls update_curr_fair() for before
- * deciding anything.
+ * Nothing here reads a reference that is behind: the service the running
+ * task has taken since it was picked is folded into both sides of every
+ * comparison, see cid_vref_at() and curr_owed_service(), the way
+ * wakeup_preempt_fair() calls update_curr_fair() before deciding
+ * anything.
  *
  * All of it compares because all of it is in @cid's virtual time: the
  * running task joined that reference in ops.running() and the queued one
@@ -1411,16 +1492,15 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * leaves the CPU with the class that owns it, which is where not kicking
  * would have left it too.
  */
-static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl)
+static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
+			    u64 now)
 {
 	struct cid_ctx __arena *cctx;
-	u64 now, vref;
 
 	if (no_wakeup_preempt || cid_idle_test(cid))
 		goto idle;
 
 	cctx = cid_ctx(cid);
-	vref = cctx->vref;
 
 	/*
 	 * Would a pick return the task just queued? It has to hold the
@@ -1428,28 +1508,17 @@ static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl)
 	 */
 	if (!time_before(dl, cctx->curr_dl))
 		goto idle;
-	if (!no_eligibility && time_after(tctx->vruntime, vref))
+	if (!no_eligibility &&
+	    time_after(tctx->vruntime, cid_vref_place(cid, now)))
 		goto idle;
 
-	now = bpf_ktime_get_ns();
 	/*
 	 * Is the running task still owed service? Once it has run for a
 	 * whole request it is past its deadline as well, and either way it
 	 * has no protection left.
 	 */
-	if (!no_eligibility) {
-		u64 delta = now - cctx->curr_run_at;
-		u64 w = cctx->curr_w;
-
-		if (w && delta < slice_ns) {
-			u64 dv = delta * NICE_0_WEIGHT / w;
-
-			if (cctx->vsum_w)
-				vref += dv * w / cctx->vsum_w;
-			if (!time_after(cctx->curr_v + dv, vref))
-				goto idle;
-		}
-	}
+	if (!no_eligibility && curr_owed_service(cid, now))
+		goto idle;
 
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
 	__sync_fetch_and_add(&nr_preempts, 1);
@@ -1463,13 +1532,15 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct task_ctx *tctx;
-	u64 dl;
+	u64 dl, now;
 
 	TOUCH_ARENA();
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx || !cid_valid(prev_cid))
 		return;
+
+	now = bpf_ktime_get_ns();
 
 	/*
 	 * Attempt to dispatch directly to an idle cid if the task can
@@ -1508,14 +1579,14 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	    (reenq_preempted(p, enq_flags) && p->scx.slice && !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid);
 		if (cid >= 0) {
-			place_task(cid, p, tctx);
+			place_task(cid, p, tctx, now);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   slice_ns, enq_flags | SCX_ENQ_IMMED);
 			return;
 		}
 	}
 
-	place_task(prev_cid, p, tctx);
+	place_task(prev_cid, p, tctx, now);
 	dl = task_dl(p, tctx);
 
 	/*
@@ -1529,7 +1600,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns, dl, enq_flags);
 	cid_queued_set(prev_cid);
-	kick_queued_cid(prev_cid, tctx, dl);
+	kick_queued_cid(prev_cid, tctx, dl, now);
 
 	/*
 	 * A faster CPU sitting idle would never look at this queue on its
@@ -1857,7 +1928,8 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
 	if (cid_valid(cid)) {
 		limit = scale_by_dl_weight(p, slice_lag);
-		lag = (s64)(cid_vref(cid) - tctx->vruntime);
+		lag = (s64)(cid_vref_place(cid, bpf_ktime_get_ns()) -
+			    tctx->vruntime);
 		if (lag > limit)
 			lag = limit;
 		else if (lag < -limit)
@@ -1921,13 +1993,14 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 */
 	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
 		s64 limit = scale_by_dl_weight(p, slice_lag);
-		s64 lag = (s64)(cid_vref(tctx->vcid) - tctx->vruntime);
+		s64 lag = (s64)(cid_vref_place(tctx->vcid, tctx->last_run_at) -
+				tctx->vruntime);
 
 		if (lag > limit)
 			lag = limit;
 		else if (lag < -limit)
 			lag = -limit;
-		tctx->vruntime = cid_vref(cid) - lag;
+		tctx->vruntime = cid_vref_place(cid, tctx->last_run_at) - lag;
 		tctx->deadline = 0;
 	}
 	vref_join(cid, p, tctx);
@@ -1956,12 +2029,14 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *tctx;
 	u64 slice;
+	s32 cid;
 
 	TOUCH_ARENA();
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	cid = scx_bpf_task_cid(p);
 
 	/*
 	 * Evaluate the used time slice.
@@ -1987,6 +2062,14 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 */
 	tctx->vruntime += calc_delta_fair(p, slice);
 	vref_charge(tctx);
+
+	/*
+	 * The service just charged is in the reference for real now, so
+	 * there is nothing left for cid_vref_at() to project on this cid
+	 * until ops.running() picks the next task.
+	 */
+	if (cid_valid(cid))
+		cid_ctx(cid)->curr_w = 0;
 
 	/*
 	 * Update per-cid statistics.
