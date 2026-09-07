@@ -82,6 +82,12 @@ const volatile u64 slice_lag = 20000000ULL;
 const volatile u64 migration_cost_ns = 500000ULL;
 
 /*
+ * Do not interrupt a running task for one that wakes up with an earlier
+ * deadline, leaving it to run until its slice ends.
+ */
+const volatile bool no_wakeup_preempt;
+
+/*
  * Number of other cids' queues a busy cid looks at on each dispatch for a
  * queue deeper than its own. 0 disables the sampling, leaving a busy cid
  * with its own queue only.
@@ -103,6 +109,7 @@ const volatile u32 balance_sample = 2;
  * Scheduler statistics.
  */
 volatile u64 nr_steals __hot_written;
+volatile u64 nr_preempts __hot_written;
 
 /*
  * Scheduler's exit status.
@@ -189,6 +196,8 @@ struct cid_ctx {
 	u64 vsum_w;
 	u64 vref;
 	u64 vref_rem;
+	u64 curr_dl;		/* deadline of the task running here */
+	u64 curr_run_at;	/* when that task started running */
 	u32 steal_cursor;
 };
 
@@ -1340,10 +1349,67 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	return prev_cid;
 }
 
+/*
+ * Kick @cid, on whose DSQ a task has just been queued with deadline @dl.
+ *
+ * An idle cid only has to be told that there is work: the kick makes it
+ * dispatch. A busy one is running a task of its own, and what the kick
+ * has to decide is whether that task should be interrupted.
+ *
+ * A dispatch takes the earliest deadline of the queue, so a task queued
+ * with a deadline earlier than the running task's is one the cid would
+ * have picked had it been asked again, and leaving it there costs it
+ * whatever is left of the slice, up to @slice_ns. That is the wait this
+ * scheduler has no other way to shorten: no cid is idle under a full
+ * load, so nothing pulls the task either, and a millisecond spent waiting
+ * for a CPU that is already the right one is most of the budget of a
+ * frame that has to be finished eight milliseconds after the one before.
+ *
+ * This is EEVDF's wakeup preemption, check_preempt_wakeup_fair() calling
+ * pick_eevdf() and getting back the wakee rather than the running task,
+ * with one difference: set_protect_slice() under RUN_TO_PARITY protects
+ * the running task up to its own deadline first, and here nothing does
+ * yet. What the running task loses is the rest of a
+ * slice it is still owed and takes up again, not its place in the order:
+ * it keeps the deadline it was picked with, see task_dl(), so the wakee
+ * that beat it runs, and then it is the earliest again.
+ *
+ * Both deadlines are in @cid's virtual time, the running task having
+ * joined that reference in ops.running() and the queued one having been
+ * placed against it just above, so the two compare. Deadlines from two
+ * cids do not, which is why the only cid this looks at is the one the
+ * task was queued on.
+ *
+ * @curr_dl describes the last task of ours to run there and says nothing
+ * about a cid running something else. The idle test covers the idle task;
+ * for a higher scheduling class the kick costs an IPI and leaves the CPU
+ * with the class that owns it, which is where not kicking would have left
+ * it too.
+ */
+static void kick_queued_cid(s32 cid, u64 dl)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (no_wakeup_preempt || cid_idle_test(cid))
+		goto idle;
+
+	cctx = cid_ctx(cid);
+	if (!time_before(dl, cctx->curr_dl))
+		goto idle;
+
+	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
+	__sync_fetch_and_add(&nr_preempts, 1);
+
+	return;
+idle:
+	scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+}
+
 void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct task_ctx *tctx;
+	u64 dl;
 
 	TOUCH_ARENA();
 
@@ -1396,6 +1462,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	place_task(prev_cid, p, tctx);
+	dl = task_dl(p, tctx);
 
 	/*
 	 * Queue the task on @prev_cid's DSQ, ordered by deadline.
@@ -1403,12 +1470,12 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Any cid of the node can take it from there, but only while
 	 * dispatching: if @prev_cid went idle in the meantime and the rest
 	 * of the node is idle too, nothing would ever look at it. Kick
-	 * @prev_cid, which is a no-op unless it is idle.
+	 * @prev_cid, which either wakes it or interrupts what it is running
+	 * for this task, see kick_queued_cid().
 	 */
-	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid),
-				 slice_ns, task_dl(p, tctx), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns, dl, enq_flags);
 	cid_queued_set(prev_cid);
-	scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
+	kick_queued_cid(prev_cid, dl);
 
 	/*
 	 * A faster CPU sitting idle would never look at this queue on its
@@ -1810,6 +1877,18 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		tctx->deadline = 0;
 	}
 	vref_join(cid, p, tctx);
+
+	/*
+	 * Publish what this cid is running. A task queued here later is
+	 * compared against that deadline to decide whether it is worth
+	 * interrupting, see kick_queued_cid().
+	 */
+	if (cid_valid(cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
+
+		cctx->curr_dl = task_dl(p, tctx);
+		cctx->curr_run_at = tctx->last_run_at;
+	}
 
 	/*
 	 * Refresh cpufreq performance level.

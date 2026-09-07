@@ -17,17 +17,27 @@ use serde::Serialize;
 pub struct Metrics {
     #[stat(desc = "Tasks stolen from another CPU's queue")]
     pub nr_steals: u64,
+
+    #[stat(desc = "Running tasks interrupted for a woken task")]
+    pub nr_preempts: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
-        writeln!(w, "[{}] steals={}", crate::SCHEDULER_NAME, self.nr_steals,)?;
+        writeln!(
+            w,
+            "[{}] steals={} preempts={}",
+            crate::SCHEDULER_NAME,
+            self.nr_steals,
+            self.nr_preempts,
+        )?;
         Ok(())
     }
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
             nr_steals: self.nr_steals - rhs.nr_steals,
+            nr_preempts: self.nr_preempts - rhs.nr_preempts,
         }
     }
 }
