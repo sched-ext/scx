@@ -1929,7 +1929,25 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  * Dispatch on @dst_cid a task from its own DSQ or from the DSQ of another
  * cid of the node.
  *
- * A cid with nothing queued pulls the first task it finds: from the slower
+ * @has_prev says the CPU still has the task it was running: @prev is
+ * runnable and merely off the DSQ while dispatch decides whether to renew
+ * its slice. A cid in that state is busy, not idle, and fair.c draws the
+ * line in the same place, in pick_task_fair():
+ *
+ *	if (!cfs_rq->h_nr_queued)
+ *		goto idle;
+ *	...
+ * idle:
+ *	new_tasks = sched_balance_newidle(rq, rf);
+ *
+ * A task whose slice has expired is still on the runqueue, so no newidle
+ * balance is run for it. Taking the slice end for an idle CPU here instead
+ * ran a full pull once per slice on every CPU, took a task off a neighbour
+ * that had no imbalance to correct, and left that neighbour with nothing to
+ * run and nothing cold to take back: under `stress-ng -c 0` that alone kept
+ * the CPUs at 99.6% busy where fair.c holds every one of them at 100%.
+ *
+ * A cid with nothing to run pulls the first task it finds: from the slower
  * cids first, once the task is no longer cache-hot on its previous CPU. This
  * carries load up the capacity ladder without migrating a task as soon as a
  * faster core becomes transiently idle. The pull is only onto a fully idle
@@ -1967,12 +1985,13 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  *
  * Return true if a task has been dispatched, false otherwise.
  */
-static bool try_steal_task(s32 dst_cid)
+static bool try_steal_task(s32 dst_cid, bool has_prev)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
 	struct cid_topo __arena *topo = cid_topo(dst_cid);
 	bool own = cid_queued_test(dst_cid) &&
 		   __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
+	bool busy = own || has_prev;
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
@@ -1980,20 +1999,20 @@ static bool try_steal_task(s32 dst_cid)
 	u32 start, own_nr = 0;
 	s32 src = -1;
 
-	if (own) {
+	if (busy) {
 		if (time_before(now, cctx->last_balance_at + slice_ns))
 			goto own;
-		cctx->last_balance_at = now;
 		own_nr = scx_bpf_dsq_nr_queued(cid_dsq(dst_cid));
 		if (!own_nr)
 			goto own;
+		cctx->last_balance_at = now;
 	}
 
 	start = cctx->steal_cursor;
 	if (start >= nr_cids)
 		start = 0;
 
-	if (!own && asym_capacity && (!smt_enabled || core_is_idle(dst_cid))) {
+	if (!busy && asym_capacity && (!smt_enabled || core_is_idle(dst_cid))) {
 		u32 t;
 
 		/* Slower tiers first, from the slowest, leaving hot tasks alone. */
@@ -2008,7 +2027,7 @@ static bool try_steal_task(s32 dst_cid)
 		}
 	}
 
-	if (own) {
+	if (busy) {
 		/*
 		 * A busy cid samples a few queues of its node, rotating
 		 * through them across dispatches.
@@ -2083,6 +2102,8 @@ __noinline int cid_idle_rearm(s32 cid)
 
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
+	bool has_prev;
+
 	TOUCH_ARENA();
 
 	if (!cid_valid(cid))
@@ -2093,7 +2114,8 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * node, then fall back to this cid's own DSQ in case the pick raced
 	 * with another cid.
 	 */
-	if (try_steal_task(cid))
+	has_prev = prev && is_task_queued(prev);
+	if (try_steal_task(cid, has_prev))
 		return;
 	if (scx_bpf_dsq_move_to_local(cid_dsq(cid), 0)) {
 		cid_queued_check(cid);
@@ -2104,7 +2126,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * If the previous task expired its time slice, but no other task
 	 * wants to run on this CPU, give it another time slot.
 	 */
-	if (prev && is_task_queued(prev)) {
+	if (has_prev) {
 		scx_bpf_task_set_slice(prev, task_request(prev));
 		return;
 	}
