@@ -1119,14 +1119,39 @@ static void vref_charge(struct task_ctx *tctx)
 }
 
 /*
+ * Return the total weight of the pack queued on @cid, 0 if it is empty.
+ */
+static u64 cid_pack_weight(s32 cid)
+{
+	return cid_valid(cid) ? cid_ctx(cid)->vsum_w : 0;
+}
+
+/*
  * Place @p on @cid: a task that is not running is put at the cid's
  * reference minus the lag it carries, the way place_entity() does, and
  * either way it becomes a member of @cid's reference.
+ *
+ * The lag only means something against a pack. place_entity() applies it
+ * under
+ *
+ *	if (sched_feat(PLACE_LAG) && cfs_rq->nr_queued && se->vlag)
+ *
+ * and skips it on an empty runqueue, where there is nobody to be ahead of
+ * or behind: the task is placed at the base with neither credit nor debt,
+ * and being the only member it becomes the reference itself. Applying the
+ * lag there would only move the cid's clock, since the task's vruntime is
+ * the average when it is alone, and a task carrying credit would take it
+ * to an idle cid and have it silently absorbed. An idle cid is the
+ * preferred wake target, see pick_idle_cid(), so this is the common
+ * placement, not a corner of one.
  */
 static void place_task(s32 cid, const struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!scx_bpf_task_running(p))
-		tctx->vruntime = cid_vref(cid) - tctx->vlag;
+	if (!scx_bpf_task_running(p)) {
+		tctx->vruntime = cid_vref(cid);
+		if (cid_pack_weight(cid))
+			tctx->vruntime -= tctx->vlag;
+	}
 	vref_join(cid, p, tctx);
 }
 
