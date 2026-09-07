@@ -1676,9 +1676,24 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 		scx_bpf_kick_cid(peer, SCX_KICK_IDLE);
 }
 
-static bool task_hot(struct task_struct *p, u64 now)
+/*
+ * Is @p, queued on @src_cid, still cache hot there as far as @dst_cid is
+ * concerned?
+ *
+ * Two threads of one core share every cache there is, so a task is never
+ * hot between them: moving it costs nothing and leaving one of them idle
+ * costs a thread. task_hot() says the same of a domain with
+ * SD_SHARE_CPUCAPACITY.
+ */
+static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid, u64 now)
 {
-	const struct task_ctx *tctx = try_lookup_task_ctx(p);
+	const struct task_ctx *tctx;
+
+	if (smt_enabled &&
+	    cid_topo(src_cid)->core_base == cid_topo(dst_cid)->core_base)
+		return false;
+
+	tctx = try_lookup_task_ctx(p);
 
 	return tctx && time_before(now, tctx->last_stop_at + migration_cost_ns);
 }
@@ -1729,7 +1744,7 @@ __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
 			continue;
 		}
 		if (!bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr) ||
-		    (check_hot && task_hot(p, now)))
+		    (check_hot && task_hot(p, cid, dst_cid, now)))
 			continue;
 
 		ret = cid;
