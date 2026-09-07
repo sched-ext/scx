@@ -173,6 +173,7 @@ struct task_ctx {
 	u64 util_est;		/* what the last activation used */
 	u64 vruntime;
 	u64 deadline;
+	u64 request;
 	s64 vlag;
 	s32 vcid;
 	u64 vjoin_w;
@@ -229,6 +230,7 @@ struct cid_ctx {
 	u64 curr_v;		/* its vruntime when it was picked */
 	u64 curr_w;		/* its weight */
 	u64 curr_run_at;	/* when it was picked */
+	u64 curr_request;	/* request for which it was picked */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 };
@@ -1059,16 +1061,25 @@ static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
 }
 
 /*
+ * Return the task's effective request. sched_runtime is the request hint for
+ * fair policies, including SCHED_EXT; zero leaves cidland's default in force.
+ */
+static u64 task_request(const struct task_struct *p)
+{
+	return p->se.custom_slice ? p->se.slice : slice_ns;
+}
+
+/*
  * Calculate and return the virtual deadline for the given task.
  *
  * This is EEVDF's virtual deadline, see update_deadline():
  *
  *	vd_i = ve_i + r_i / w_i
  *
- * The request size r_i is the same @slice_ns for everybody, exactly like
- * sysctl_sched_base_slice: the weight does not buy a task a longer time
- * slice, it buys it an earlier deadline, so it runs more often instead of
- * running longer.
+ * The request size r_i is @slice_ns by default, like sysctl_sched_base_slice,
+ * and a task can override it with sched_attr.sched_runtime. The weight does
+ * not buy a task a longer time slice, it buys it an earlier deadline, so it
+ * runs more often instead of running longer.
  *
  * The deadline is the DSQ key and nothing else. The kernel stores what is
  * passed to scx_bpf_dsq_insert_vtime() in p->scx.dsq_vtime, so the
@@ -1114,7 +1125,17 @@ static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
  */
 static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 slice = slice_ns;
+	u64 request = task_request(p);
+
+	/*
+	 * sched_setattr() can change a runnable task's request between two
+	 * enqueues. A deadline belongs to the request that created it, so do
+	 * not carry one calculated from the old request into the new one.
+	 */
+	if (tctx->request != request) {
+		tctx->request = request;
+		tctx->deadline = 0;
+	}
 
 	if (tctx->deadline && time_before(tctx->vruntime, tctx->deadline))
 		return tctx->deadline;
@@ -1136,10 +1157,10 @@ static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
 	 */
 	if (tctx->initial) {
 		tctx->initial = false;
-		slice /= 2;
+		request /= 2;
 	}
 
-	tctx->deadline = tctx->vruntime + scale_by_dl_weight(p, slice);
+	tctx->deadline = tctx->vruntime + scale_by_dl_weight(p, request);
 
 	return tctx->deadline;
 }
@@ -1295,7 +1316,7 @@ static u64 cid_vref_at(s32 cid, u64 now)
 	w = cctx->curr_w;
 	sum_w = cctx->vsum_w;
 	delta = now - cctx->curr_run_at;
-	if (!w || !sum_w || delta >= slice_ns)
+	if (!w || !sum_w || delta >= cctx->curr_request)
 		return cctx->vref;
 
 	dv = delta * NICE_0_WEIGHT / w;
@@ -1328,7 +1349,7 @@ static bool curr_owed_service(s32 cid, u64 now)
 	u64 w = cctx->curr_w, delta = now - cctx->curr_run_at;
 	u64 dv;
 
-	if (!w || delta >= slice_ns)
+	if (!w || delta >= cctx->curr_request)
 		return false;
 	dv = delta * NICE_0_WEIGHT / w;
 
@@ -1489,7 +1510,7 @@ static void place_task(s32 cid, const struct task_struct *p,
 static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid)
 {
 	place_task(cid, p, tctx, bpf_ktime_get_ns());
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
 
 /*
@@ -1730,7 +1751,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cid >= 0) {
 			place_task(cid, p, tctx, now);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
-					   slice_ns, enq_flags | SCX_ENQ_IMMED);
+					   task_request(p), enq_flags | SCX_ENQ_IMMED);
 			return;
 		}
 	}
@@ -1747,7 +1768,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * @prev_cid, which either wakes it or interrupts what it is running
 	 * for this task, see kick_queued_cid().
 	 */
-	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns, dl, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), task_request(p), dl,
+				 enq_flags);
 	cid_queued_set(prev_cid);
 	kick_queued_cid(prev_cid, tctx, dl, now);
 }
@@ -2102,7 +2124,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * wants to run on this CPU, give it another time slot.
 	 */
 	if (prev && is_task_queued(prev)) {
-		scx_bpf_task_set_slice(prev, slice_ns);
+		scx_bpf_task_set_slice(prev, task_request(prev));
 		return;
 	}
 
@@ -2241,8 +2263,9 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 
 		cctx->curr_dl = task_dl(p, tctx);
 		cctx->curr_v = tctx->vruntime;
-		cctx->curr_w = task_weight(p);
 		cctx->curr_run_at = tctx->last_run_at;
+		cctx->curr_request = task_request(p);
+		cctx->curr_w = task_weight(p);
 	}
 
 	/*
