@@ -139,6 +139,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 last_stop_at;
 	u64 vruntime;
+	u64 deadline;
 	s64 vlag;
 	s32 vcid;
 	u64 vjoin_w;
@@ -940,10 +941,34 @@ static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
  * delivered divided by the total weight, so under load it barely moves,
  * and a task waiting for V to cover a fixed offset waits for seconds
  * while every newly woken task keeps being queued ahead of it.
+ *
+ * The deadline stands until the request it was issued for is consumed,
+ * which is the test update_deadline() opens with:
+ *
+ *	if ((s64)(se->vruntime - se->deadline) < 0)
+ *		return;
+ *
+ * A task queued again without having run for its whole request keeps the
+ * deadline it was queued with, instead of being pushed a full request
+ * further back for the fraction it did get. Every path that re-enqueues a
+ * task today either has it consume the request first (its slice ran out)
+ * or re-places its vruntime (a wakeup, a bounced direct dispatch), so
+ * this changes nothing as it stands; a task interrupted partway through
+ * its request is what needs it.
+ *
+ * A re-placed vruntime drops the deadline. It is a position in the
+ * virtual time of one cid and the packs drift apart, so a deadline
+ * carried across would order the task against a reference it was never
+ * measured on.
  */
-static u64 task_dl(const struct task_struct *p, const struct task_ctx *tctx)
+static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
 {
-	return tctx->vruntime + scale_by_dl_weight(p, slice_ns);
+	if (tctx->deadline && time_before(tctx->vruntime, tctx->deadline))
+		return tctx->deadline;
+
+	tctx->deadline = tctx->vruntime + scale_by_dl_weight(p, slice_ns);
+
+	return tctx->deadline;
 }
 
 /*
@@ -1191,6 +1216,7 @@ static void place_task(s32 cid, const struct task_struct *p, struct task_ctx *tc
 		tctx->vruntime = cid_vref(cid);
 		if (cid_pack_weight(cid))
 			tctx->vruntime -= tctx->vlag;
+		tctx->deadline = 0;
 	}
 	vref_join(cid, p, tctx);
 }
@@ -1781,6 +1807,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		else if (lag < -limit)
 			lag = -limit;
 		tctx->vruntime = cid_vref(cid) - lag;
+		tctx->deadline = 0;
 	}
 	vref_join(cid, p, tctx);
 
@@ -1838,6 +1865,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 
 	if (tctx) {
 		tctx->vruntime = 0;
+		tctx->deadline = 0;
 		tctx->vcid = -1;
 	}
 }
