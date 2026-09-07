@@ -202,6 +202,7 @@ struct cid_ctx {
 	u64 last_balance_at;
 	u64 vsum_w;
 	u64 vsum_wv;
+	u64 vzero;
 	u32 steal_cursor;
 };
 
@@ -1022,9 +1023,14 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
  * Do the same per cid: a task joins the cid it is queued on or runs on,
  * leaves it when it stops being runnable, and its contribution follows
  * the vruntime it is charged in ops.stopping(). The vruntimes are scaled
- * down in the sums to keep the weighted products from overflowing. A
- * cid with no members, or whose sums are found inconsistent, falls back
- * to the system-wide reference.
+ * down in the sums to keep the weighted products from overflowing.
+ *
+ * A cid whose pack is empty has no average to take, so it keeps the
+ * reference its last member left behind in @vzero, the way a cfs_rq keeps
+ * cfs_rq->zero_vruntime across going idle. The clock of an idle cid simply
+ * stops: nothing is served there, so nothing is owed there, and a task
+ * arriving later starts from where the cid was left. A cid whose sums are
+ * found inconsistent still falls back to the system-wide reference.
  */
 #define VREF_SHIFT	10
 
@@ -1040,7 +1046,7 @@ static u64 cid_vref(s32 cid)
 	w = cctx->vsum_w;
 	wv = cctx->vsum_wv;
 	if (!w)
-		return vtime_now;
+		return cctx->vzero;
 
 	v = (wv / w) << VREF_SHIFT;
 	if (time_after(v, vtime_now + slice_lag * 100) ||
@@ -1053,13 +1059,24 @@ static u64 cid_vref(s32 cid)
 static void vref_leave(struct task_ctx *tctx)
 {
 	struct cid_ctx __arena *cctx;
+	u64 w;
 
 	if (!cid_valid(tctx->vcid))
 		return;
 
 	cctx = cid_ctx(tctx->vcid);
-	__sync_fetch_and_sub(&cctx->vsum_w, tctx->vjoin_w);
+	w = __sync_fetch_and_sub(&cctx->vsum_w, tctx->vjoin_w);
 	__sync_fetch_and_sub(&cctx->vsum_wv, tctx->vjoin_w * tctx->vjoin_v);
+
+	/*
+	 * Last one out leaves the reference behind. With a single member
+	 * the weighted average is that member's own vruntime, so that is
+	 * where the cid's clock stops, and where the next task to arrive is
+	 * placed.
+	 */
+	if (w == tctx->vjoin_w)
+		cctx->vzero = tctx->vjoin_v << VREF_SHIFT;
+
 	tctx->vcid = -1;
 }
 
