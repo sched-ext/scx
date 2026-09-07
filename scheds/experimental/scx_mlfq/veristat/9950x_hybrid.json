@@ -27,17 +27,43 @@
                 },{
                     "mlfq_long_sleep_ns": 120000000
                 },{
+                    "mlfq_sameq_preempt_min_run_ns": 0
+                },{
+                    "mlfq_preempt_slice_ns": 150000
+                },{
+                    "mlfq_tree_t_int_ns": 1000000
+                },{
+                    "mlfq_tree_t_bound_ns": 3000000
+                },{
+                    "mlfq_adapt_enabled": true
+                },{
                     "mlfq_q1_quota": 4
                 },{
                     "mlfq_q2_quota": 8
                 },{
                     "mlfq_dispatch_max_batch": 32
                 },{
+                    "mlfq_rtdl_drain_interval_ns": 1000000
+                },{
                     "mlfq_primary_all": false
                 },{
                     "mlfq_nr_llcs": 8
                 },{
+                    "mlfq_llc_has_primary": [1, 1, 1, 1, 0, 0, 0, 0]
+                },{
+                    "mlfq_cpu_llc": [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7]
+                },{
+                    "mlfq_llc_largest": 0
+                },{
+                    "mlfq_idle_tracking": 1
+                },{
+                    "mlfq_smt_on": true
+                },{
+                    "mlfq_cpu_sibling": [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14]
+                },{
                     "__SCX_ENQ_WAKEUP": 1
+                },{
+                    "__SCX_ENQ_REENQ": 1099511627776
                 },{
                     "__SCX_KICK_PREEMPT": 2
                 },{
@@ -46,6 +72,29 @@
                     "__SCX_DSQ_LOCAL_ON": 13835058055282163712
                 },{
                     "uei_dump_len": 32768
+                }
+            ],
+            ".bss": [{
+                    "mlfq_idle_count": 4
+                },{
+                    "mlfq_sys_gauge": {
+                        "lat_ema": 0,
+                        "rate_ema": 0,
+                        "step_at": 0,
+                        "wait_total": 0,
+                        "wait_count": 0,
+                        "adapt_steps": 0,
+                        "pad": 0
+                    }
+                },{
+                    "mlfq_adapt_state": {
+                        "shift_fp": 0,
+                        "t_l_eff_ns": 250000,
+                        "t_h_eff_ns": 2000000,
+                        "t_int_eff_ns": 1000000,
+                        "t_bnd_eff_ns": 3000000,
+                        "guard_eff_ns": 0
+                    }
                 }
             ]
         }

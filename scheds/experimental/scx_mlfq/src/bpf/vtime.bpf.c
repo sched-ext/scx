@@ -7,7 +7,7 @@
  * The pure math (calc_delta_fair_bpf, the virtual-clock advance, and
  * place_entity) lives in intf.h so the native unit-test harness compiles
  * it directly. This module wires that math to the per-queue virtual
- * clock: the lock-free placement entry point used by enqueue(), the
+ * clock. The lock-free placement entry point used by enqueue(), the
  * monotone clock advance that follows the service given to a queue, and
  * the vruntime charging used by the lifecycle path.
  */
