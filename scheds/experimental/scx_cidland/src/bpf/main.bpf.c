@@ -772,12 +772,14 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
 }
 
 /*
- * Return an idle cid faster than @cid whose whole core is idle, or
- * -ENOENT. The idle state is not claimed: the caller is expected to kick
- * it.
+ * Return an idle cid of a tier faster than @cid's that @p can run on and
+ * whose whole core is idle, or -ENOENT. Only the strictly faster tiers
+ * are scanned, so the cid returned is never @cid itself, nor any peer of
+ * it. The idle state is not claimed: the caller is expected to kick it.
  */
-static s32 idle_faster_cid(s32 cid)
+static s32 idle_faster_tier_cid(const struct task_struct *p, s32 cid)
 {
+	bool restricted = is_restricted(p);
 	u32 tier, t;
 
 	if (!asym_capacity || !cid_valid(cid))
@@ -795,14 +797,13 @@ static s32 idle_faster_cid(s32 cid)
 
 		bpf_arena_for(k, 0, nr_words) {
 			u64 w = cmask_word(idle_cids, k) & tier_word(t, k);
+			s32 other;
 
-			while (w && can_loop) {
-				s32 other = k * 64 + __builtin_ctzll(w);
-
-				if (!smt_enabled || core_is_idle(other))
-					return other;
-				w &= w - 1;
-			}
+			if (!w)
+				continue;
+			other = first_idle_cid(p, w, k, restricted, smt_enabled);
+			if (other >= 0)
+				return other;
 		}
 	}
 
@@ -1386,9 +1387,11 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * A faster CPU sitting idle would never look at this queue on its
 	 * own: wake it up so that it pulls the task, see try_steal_task().
+	 * Only one the task can actually run on is worth waking, since it
+	 * is the task itself that it would be woken to pull.
 	 */
 	if (!is_pcpu_task(p)) {
-		cid = idle_faster_cid(prev_cid);
+		cid = idle_faster_tier_cid(p, prev_cid);
 		if (cid >= 0)
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 	}
