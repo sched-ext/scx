@@ -14,6 +14,7 @@
  */
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
+#include <lib/ravg.h>
 #include <lib/arena_loop.h>
 #include "intf.h"
 
@@ -168,6 +169,8 @@ static bool asym_capacity;
 struct task_ctx {
 	u64 last_run_at;
 	u64 last_stop_at;
+	struct ravg_data run_avg;	/* fraction of wall time spent running */
+	u64 util_est;		/* what the last activation used */
 	u64 vruntime;
 	u64 deadline;
 	s64 vlag;
@@ -284,6 +287,76 @@ static __always_inline struct cid_topo __arena *cid_topo(s32 cid)
 static __always_inline struct cid_ctx __arena *cid_ctx(s32 cid)
 {
 	return &cctxs[cid];
+}
+
+/*
+ * How much of a CPU a task uses, tracked as the fraction of wall time it
+ * spends running, decayed with a half life. fair.c gets the same number
+ * from PELT; nothing maintains p->se.avg for a sched_ext task, so it is
+ * measured here.
+ *
+ * The value is carried in the [0 .. SCX_CPUPERF_ONE] range that capacity
+ * is expressed in, so the two can be compared directly.
+ */
+#define UTIL_HALF_LIFE_NS	32000000U
+#define UTIL_SHIFT		(RAVG_FRAC_BITS - 10)
+
+/*
+ * Is a task of @util small enough to run on a CPU of @cap without filling
+ * it? fits_capacity() asks the same, with the same fifth off the top:
+ *
+ *	#define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
+ */
+#define util_fits_cap(util, cap)	((util) * 1280 < (cap) * 1024)
+
+/*
+ * Note that @p started or stopped running at @now.
+ */
+static void util_set_running(struct task_ctx *tctx, bool running, u64 now)
+{
+	ravg_accumulate(&tctx->run_avg, running, now, UTIL_HALF_LIFE_NS);
+}
+
+/*
+ * Return what @p is using, the larger of what it is using now and what it
+ * used over its last activation. This is task_util_est():
+ *
+ *	return max(task_util(p), _task_util_est(p));
+ *
+ * A task that runs in bursts, a frame at a time, is idle when it wakes,
+ * and the running average alone would call it small at exactly the moment
+ * it is about to ask for a whole CPU again.
+ */
+static u64 task_util(struct task_ctx *tctx, u64 now)
+{
+	u64 util = ravg_read(&tctx->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+
+	return MAX(util, tctx->util_est);
+}
+
+/*
+ * Fold what @p just used into its estimate, as it stops being runnable.
+ *
+ * The estimate rises to a new demand at once and comes down slowly, which
+ * is what util_est_update() does:
+ *
+ *	if (ewma <= dequeued) {
+ *		ewma = dequeued;
+ *		goto done;
+ *	}
+ *
+ * before smoothing the decrease. A task is asked to prove that it needs
+ * less, over several activations; it is taken at its word that it needs
+ * more.
+ */
+static void util_est_update(struct task_ctx *tctx, u64 now)
+{
+	u64 dequeued = ravg_read(&tctx->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+
+	if (tctx->util_est <= dequeued)
+		tctx->util_est = dequeued;
+	else
+		tctx->util_est -= (tctx->util_est - dequeued) >> 2;
 }
 
 /*
@@ -610,6 +683,43 @@ enum pick_idle_flags {
 };
 
 /*
+ * Would @p fit on a cid of this capacity, or does it want more of a CPU
+ * than that one is?
+ *
+ * select_idle_sibling() asks this before it settles for a CPU the task
+ * has already run on, and takes the idle one only if the task fits it:
+ *
+ *	if (prev != target && cpus_share_cache(prev, target) &&
+ *	    (!cpus_allowed || cpumask_test_cpu(prev, allowed)) &&
+ *	    choose_idle_cpu(prev, p) &&
+ *	    asym_fits_cpu(task_util, util_min, util_max, prev)) {
+ *
+ * Without the last test a task that once landed on a slow CPU and keeps
+ * waking while that CPU happens to be idle is never offered a faster one
+ * again: the cheapest answer is always the one it already has. A task
+ * that only wants a fraction of a CPU is welcome to stay, which is what
+ * makes the short circuit worth having; one that wants the whole of it
+ * goes on to the tier walk.
+ *
+ * Only asymmetric machines ask at all, as asym_fits_cpu() does with
+ * sched_asym_cpucap_active().
+ */
+static bool task_fits_cid(const struct task_struct *p, s32 cid)
+{
+	struct task_ctx *tctx;
+
+	if (!asym_capacity)
+		return true;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return true;
+
+	return util_fits_cap(task_util(tctx, bpf_ktime_get_ns()),
+			     cid_topo(cid)->cap);
+}
+
+/*
  * Pick an idle cid for @p one capacity tier at a time from the fastest.
  * Only fully idle cores are considered if @whole_core is set, any idle
  * cid otherwise: the caller runs the whole core pass first, across every
@@ -617,11 +727,14 @@ enum pick_idle_flags {
  * tier, the way select_idle_core() looks for a whole core before
  * select_idle_cpu() settles for a thread.
  *
- * Within a tier @prev_cid wins, then a cid in the same LLC, then a cid on
- * the same node, then any cid, to keep the task where its cache is: the
- * order select_idle_sibling() applies within one domain, with the node on
- * top since this scan covers them all. Each domain is a contiguous range,
- * so a wakeup reads the words of its own LLC before anything else.
+ * An idle @prev_cid wins before the capacity tiers are walked. Otherwise,
+ * each tier considers a cid in the same LLC, then the same node, then any
+ * cid. This keeps a task where its cache is warm instead of moving it for a
+ * transient capacity advantage, while capacity still decides among the idle
+ * alternatives when the previous cid is unavailable. The domain order is
+ * the one select_idle_sibling() applies, with the node on top since this scan
+ * covers them all. Each domain is a contiguous range, so a wakeup reads the
+ * words of its own LLC before anything else.
  *
  * The idle state is claimed only for the cid that is returned. -EAGAIN
  * means a candidate was found but claimed by someone else first. @flags
@@ -646,13 +759,14 @@ __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
 	restricted = is_restricted(p);
+	if (is_prev_allowed && cid_idle_test(prev_cid) &&
+	    (!whole_core || core_is_idle(prev_cid)) &&
+	    task_fits_cid(p, prev_cid)) {
+		best = prev_cid;
+		goto claim;
+	}
 
 	bpf_arena_for(t, 0, nr_tiers) {
-		if (is_prev_allowed && t == prev->tier && cid_idle_test(prev_cid) &&
-		    (!whole_core || core_is_idle(prev_cid))) {
-			best = prev_cid;
-			break;
-		}
 		/*
 		 * A domain that is the whole of the next one is not scanned
 		 * twice.
@@ -669,6 +783,7 @@ __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
 			break;
 	}
 
+claim:
 	if (best >= 0 && !(flags & PICK_IDLE_NO_CLAIM) && !cid_idle_claim(best))
 		best = -EAGAIN;
 
@@ -2024,6 +2139,8 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!tctx)
 		return;
 
+	util_est_update(tctx, bpf_ktime_get_ns());
+
 	/*
 	 * Remember how far the task is from the reference as it stops being
 	 * runnable, clamped both ways, like update_entity_lag():
@@ -2090,6 +2207,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * the used time slice).
 	 */
 	tctx->last_run_at = bpf_ktime_get_ns();
+	util_set_running(tctx, true, tctx->last_run_at);
 
 	cid = scx_bpf_task_cid(p);
 
@@ -2154,6 +2272,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 */
 	tctx->last_stop_at = bpf_ktime_get_ns();
 	slice = tctx->last_stop_at - tctx->last_run_at;
+	util_set_running(tctx, false, tctx->last_stop_at);
 
 	/*
 	 * The runtime is charged as wall-clock time whatever the CPU it was
