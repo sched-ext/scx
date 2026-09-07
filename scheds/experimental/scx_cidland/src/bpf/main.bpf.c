@@ -58,8 +58,12 @@ const volatile bool no_wake_sync;
 
 /*
  * Default time slice.
+ *
+ * Kept under one tick of a HZ=1000 kernel on purpose: a slice is only
+ * acted on from task_tick_scx(), so one worth a whole tick buys two, see
+ * the --slice-us option.
  */
-const volatile u64 slice_ns = 1000000ULL;
+const volatile u64 slice_ns = 700000ULL;
 
 /*
  * Maximum lag, in virtual time, that a task can carry across a sleep.

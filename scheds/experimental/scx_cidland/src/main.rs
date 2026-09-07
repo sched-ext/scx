@@ -85,7 +85,17 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "1000")]
+    ///
+    /// A slice is only ever acted on from the tick: update_curr_scx() charges
+    /// the time a task has run against it, and task_tick_scx() is the one
+    /// place that reschedules once it is spent, so the granularity of the
+    /// whole thing is 1/HZ no matter what is asked for here. A slice of
+    /// exactly one tick therefore buys two: the task is handed the CPU a few
+    /// microseconds after the tick that freed it, so at the next tick it is
+    /// those few microseconds short of its slice and runs a whole further
+    /// tick. Keep the default under a tick of a HZ=1000 kernel, at the
+    /// normalized_sysctl_sched_base_slice of fair.c.
+    #[clap(short = 's', long, default_value = "700")]
     slice_us: u64,
 
     /// Maximum lag, in microseconds of virtual time, that a task can carry across a sleep.
