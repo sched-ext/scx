@@ -593,6 +593,9 @@ enum pick_idle_flags {
 
 	/* Only consider cids whose whole core is idle */
 	PICK_IDLE_WHOLE_CORE	= 1 << 1,
+
+	/* Return the cid without claiming it, for a caller that only kicks */
+	PICK_IDLE_NO_CLAIM	= 1 << 2,
 };
 
 /*
@@ -655,7 +658,7 @@ __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
 			break;
 	}
 
-	if (best >= 0 && !cid_idle_claim(best))
+	if (best >= 0 && !(flags & PICK_IDLE_NO_CLAIM) && !cid_idle_claim(best))
 		best = -EAGAIN;
 
 	return best;
@@ -800,42 +803,37 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
 }
 
 /*
- * Return an idle cid of a tier faster than @cid's that @p can run on and
- * whose whole core is idle, or -ENOENT. Only the strictly faster tiers
- * are scanned, so the cid returned is never @cid itself, nor any peer of
- * it. The idle state is not claimed: the caller is expected to kick it.
+ * Return an idle cid that @p can run on, or -ENOENT. The idle state is
+ * not claimed: the caller only kicks the cid, so that it comes and looks
+ * at a queue it would otherwise never read.
+ *
+ * Fully idle cores first, then any idle cid, from the fastest tier: the
+ * ranking pick_idle_cid() applies, since the cid is being woken for one
+ * particular task and the best CPU for it is the one a wakeup would have
+ * chosen. Every tier is scanned, not only the tiers faster than @cid's:
+ * a CPU of the same tier is just as blind to a queue building up next to
+ * it, and it is the one that would otherwise stay idle beside a runnable
+ * task.
  */
-static s32 idle_faster_tier_cid(const struct task_struct *p, s32 cid)
+static s32 idle_peer_cid(const struct task_struct *p, s32 cid)
 {
-	bool restricted = is_restricted(p);
-	u32 tier, t;
+	s32 other;
 
-	if (!asym_capacity || !cid_valid(cid))
+	if (!cid_valid(cid) || is_pcpu_task(p) || cmask_empty(idle_cids))
 		return -ENOENT;
-	tier = cid_topo(cid)->tier;
 
-	/*
-	 * Only a fully idle faster core counts: pulling a task from a whole
-	 * slow core onto a fast thread whose sibling is busy trades the
-	 * capacity for a shared core, which is what asym_smt_can_pull_tasks()
-	 * refuses to do.
-	 */
-	bpf_arena_for(t, 0, tier) {
-		u32 k;
-
-		bpf_arena_for(k, 0, nr_words) {
-			u64 w = cmask_word(idle_cids, k) & tier_word(t, k);
-			s32 other;
-
-			if (!w)
-				continue;
-			other = first_idle_cid(p, w, k, restricted, smt_enabled);
-			if (other >= 0)
-				return other;
-		}
+	if (smt_enabled) {
+		other = pick_idle_cid_ranked((struct task_struct *)p, cid,
+					     PICK_IDLE_NO_CLAIM |
+					     PICK_IDLE_WHOLE_CORE);
+		if (other >= 0)
+			return other;
 	}
 
-	return -ENOENT;
+	other = pick_idle_cid_ranked((struct task_struct *)p, cid,
+				     PICK_IDLE_NO_CLAIM);
+
+	return other >= 0 ? other : -ENOENT;
 }
 
 /*
@@ -1626,18 +1624,56 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns, dl, enq_flags);
 	cid_queued_set(prev_cid);
 	kick_queued_cid(prev_cid, tctx, dl, now);
+}
 
-	/*
-	 * A faster CPU sitting idle would never look at this queue on its
-	 * own: wake it up so that it pulls the task, see try_steal_task().
-	 * Only one the task can actually run on is worth waking, since it
-	 * is the task itself that it would be woken to pull.
-	 */
-	if (!is_pcpu_task(p)) {
-		cid = idle_faster_tier_cid(p, prev_cid);
-		if (cid >= 0)
-			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
-	}
+/*
+ * Periodic tick on a cid that is running an scx task.
+ *
+ * A queue building up beside an idle CPU is nobody's job to notice, and
+ * fair.c has the same problem: an idle CPU that has already been through
+ * newidle_balance() will not look again by itself. It is told to, from
+ * the tick, by nohz_balancer_kick():
+ *
+ *	if (rq->nr_running >= 2) {
+ *		flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
+ *		goto out;
+ *	}
+ *
+ * and that is the only place the kernel sends it: sched_balance_trigger()
+ * has one caller, sched_tick(). Nothing on the enqueue or the wakeup path
+ * ever wakes a third CPU to come and pull. Here it is not sent at all,
+ * since sched_tick() skips sched_balance_trigger() once sched_ext has
+ * taken every task, so this is the whole of it.
+ *
+ * One task queued beside the running one is @rq->nr_running == 2, the
+ * condition above. The task woken for is the head of the queue, the one
+ * a scan would take, and only a cid it is allowed on is worth waking:
+ * it is that task the woken cid would come to pull, see try_steal_task().
+ * One cid is enough, since the scan it wakes into reads every queue of
+ * the node anyway.
+ *
+ * The tick is also the right rate. Scanning on every enqueue instead puts
+ * the walk and an IPI on the wakeup path, where they cost more than the
+ * idle CPU they are meant to recover, and pulls a wakee off the cid that
+ * wake_affine_cid() has just stacked it on.
+ */
+void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
+{
+	s32 cid = scx_bpf_this_cid(), peer;
+	struct task_struct *head;
+
+	TOUCH_ARENA();
+
+	if (!cid_valid(cid) || !scx_bpf_dsq_nr_queued(cid_dsq(cid)))
+		return;
+
+	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
+	if (!head)
+		return;
+
+	peer = idle_peer_cid(head, cid);
+	if (peer >= 0 && peer != cid)
+		scx_bpf_kick_cid(peer, SCX_KICK_IDLE);
 }
 
 static bool task_hot(struct task_struct *p, u64 now)
@@ -2367,6 +2403,7 @@ int cidland_set_cpu(struct cidland_cpu_args *args)
 SCX_OPS_CID_DEFINE(cidland_ops,
 		   .select_cid		= (void *)cidland_select_cid,
 		   .enqueue		= (void *)cidland_enqueue,
+		   .tick		= (void *)cidland_tick,
 		   .dispatch		= (void *)cidland_dispatch,
 		   .runnable		= (void *)cidland_runnable,
 		   .quiescent		= (void *)cidland_quiescent,
