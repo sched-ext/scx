@@ -220,8 +220,7 @@ struct cid_topo {
  * Per-cid scheduling state.
  */
 struct cid_ctx {
-	u64 last_update;
-	u64 perf_lvl;
+	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	u64 last_balance_at;
 	u64 vsum_w;
 	u64 vref;
@@ -362,45 +361,37 @@ static void util_est_update(struct task_ctx *tctx, u64 now)
 }
 
 /*
- * Exponential weighted moving average (EWMA).
+ * Note that @cid started or stopped running a task at @now, and fold the
+ * interval that just ended into how busy it has been.
  *
- * Copied from scx_lavd. Returns the new average as:
- *
- *	new_avg := (old_avg * .75) + (new_val * .25);
+ * The per-cid context lives in the arena, which ravg_accumulate() cannot
+ * be handed a pointer into, so it is staged through the stack.
  */
-static u64 calc_avg(u64 old_val, u64 new_val)
+static void cid_util_set_running(s32 cid, bool running, u64 now)
 {
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
-}
-
-/*
- * Update CPU load and scale target performance level accordingly.
- */
-static void update_cpu_load(struct task_struct *p, u64 slice)
-{
-	u64 now = bpf_ktime_get_ns();
-	s32 cid = scx_bpf_task_cid(p);
 	struct cid_ctx __arena *cctx;
-	u64 perf_lvl, delta_t;
+	struct ravg_data rd;
 
 	if (!cpufreq_enabled || !cid_valid(cid))
 		return;
 	cctx = cid_ctx(cid);
 
-	/*
-	 * Evaluate dynamic cpuperf scaling factor using the average CPU
-	 * utilization, normalized in the range [0 .. SCX_CPUPERF_ONE].
-	 */
-	delta_t = now - cctx->last_update;
-	if (!delta_t)
-		return;
+	ravg_from_arena(&rd, &cctx->run_avg);
+	ravg_accumulate(&rd, running, now, UTIL_HALF_LIFE_NS);
+	ravg_to_arena(&cctx->run_avg, &rd);
+}
 
-	/*
-	 * Refresh target performance level.
-	 */
-	perf_lvl = MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
-	cctx->perf_lvl = calc_avg(cctx->perf_lvl, perf_lvl);
-	cctx->last_update = now;
+/*
+ * Return how busy @cid has been, in the [0 .. SCX_CPUPERF_ONE] range the
+ * cpufreq governor is driven in.
+ */
+static u64 cid_util(s32 cid, u64 now)
+{
+	struct ravg_data rd;
+
+	ravg_from_arena(&rd, &cid_ctx(cid)->run_avg);
+
+	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
 }
 
 /*
@@ -408,22 +399,21 @@ static void update_cpu_load(struct task_struct *p, u64 slice)
  */
 static void update_cpufreq(s32 cid)
 {
-	struct cid_ctx __arena *cctx;
-	u64 perf_lvl;
+	u64 util, perf_lvl;
 
 	if (!cpufreq_enabled || !cid_valid(cid))
 		return;
-	cctx = cid_ctx(cid);
+	util = cid_util(cid, bpf_ktime_get_ns());
 
 	/*
 	 * Apply target performance level to the cpufreq governor.
 	 */
-	if (cctx->perf_lvl >= CPUFREQ_HIGH_THRESH)
+	if (util >= CPUFREQ_HIGH_THRESH)
 		perf_lvl = SCX_CPUPERF_ONE;
-	else if (cctx->perf_lvl <= CPUFREQ_LOW_THRESH)
+	else if (util <= CPUFREQ_LOW_THRESH)
 		perf_lvl = SCX_CPUPERF_ONE / 2;
 	else
-		perf_lvl = cctx->perf_lvl;
+		perf_lvl = util;
 
 	scx_bpf_cidperf_set(cid, perf_lvl);
 }
@@ -2227,6 +2217,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 */
 	tctx->last_run_at = bpf_ktime_get_ns();
 	util_set_running(tctx, true, tctx->last_run_at);
+	cid_util_set_running(scx_bpf_task_cid(p), true, tctx->last_run_at);
 
 	cid = scx_bpf_task_cid(p);
 
@@ -2293,6 +2284,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	tctx->last_stop_at = bpf_ktime_get_ns();
 	slice = tctx->last_stop_at - tctx->last_run_at;
 	util_set_running(tctx, false, tctx->last_stop_at);
+	cid_util_set_running(cid, false, tctx->last_stop_at);
 
 	/*
 	 * The runtime is charged as wall-clock time whatever the CPU it was
@@ -2324,7 +2316,6 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update per-cid statistics.
 	 */
-	update_cpu_load(p, slice);
 }
 
 void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
