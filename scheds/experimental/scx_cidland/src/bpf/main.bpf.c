@@ -88,6 +88,12 @@ const volatile u64 migration_cost_ns = 500000ULL;
 const volatile bool no_wakeup_preempt;
 
 /*
+ * Interrupt a running task on the deadlines alone, without asking which
+ * of the two is owed service, see kick_queued_cid().
+ */
+const volatile bool no_eligibility;
+
+/*
  * Number of other cids' queues a busy cid looks at on each dispatch for a
  * queue deeper than its own. 0 disables the sampling, leaving a busy cid
  * with its own queue only.
@@ -197,7 +203,9 @@ struct cid_ctx {
 	u64 vref;
 	u64 vref_rem;
 	u64 curr_dl;		/* deadline of the task running here */
-	u64 curr_run_at;	/* when that task started running */
+	u64 curr_v;		/* its vruntime when it was picked */
+	u64 curr_w;		/* its weight */
+	u64 curr_run_at;	/* when it was picked */
 	u32 steal_cursor;
 };
 
@@ -1350,52 +1358,98 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 }
 
 /*
- * Kick @cid, on whose DSQ a task has just been queued with deadline @dl.
+ * Kick @cid, on whose DSQ the task of @tctx has just been queued with
+ * deadline @dl.
  *
  * An idle cid only has to be told that there is work: the kick makes it
  * dispatch. A busy one is running a task of its own, and what the kick
  * has to decide is whether that task should be interrupted.
  *
- * A dispatch takes the earliest deadline of the queue, so a task queued
- * with a deadline earlier than the running task's is one the cid would
- * have picked had it been asked again, and leaving it there costs it
- * whatever is left of the slice, up to @slice_ns. That is the wait this
- * scheduler has no other way to shorten: no cid is idle under a full
- * load, so nothing pulls the task either, and a millisecond spent waiting
- * for a CPU that is already the right one is most of the budget of a
- * frame that has to be finished eight milliseconds after the one before.
+ * This is EEVDF's wakeup preemption. wakeup_preempt_fair() asks what the
+ * runqueue would pick now and reschedules when the answer is the task
+ * that just woke, and with every task asking for the same slice, as they
+ * all do here, that pick comes down to what pick_eevdf() opens with:
  *
- * This is EEVDF's wakeup preemption, check_preempt_wakeup_fair() calling
- * pick_eevdf() and getting back the wakee rather than the running task,
- * with one difference: set_protect_slice() under RUN_TO_PARITY protects
- * the running task up to its own deadline first, and here nothing does
- * yet. What the running task loses is the rest of a
- * slice it is still owed and takes up again, not its place in the order:
- * it keeps the deadline it was picked with, see task_dl(), so the wakee
- * that beat it runs, and then it is the earliest again.
+ *	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
+ *		curr = NULL;
+ *	if (curr && protect && protect_slice(curr))
+ *		return curr;
  *
- * Both deadlines are in @cid's virtual time, the running task having
- * joined that reference in ops.running() and the queued one having been
- * placed against it just above, so the two compare. Deadlines from two
- * cids do not, which is why the only cid this looks at is the one the
- * task was queued on.
+ * plus the queued task being eligible itself and holding the earlier
+ * deadline, which is what makes it the pick. set_protect_slice() protects
+ * the running task up to its own deadline, so for its whole request, but
+ * that protection is dropped before it is ever tested once the task is no
+ * longer eligible: served past the average of its pack, it keeps the CPU
+ * only until something that is owed service asks for it.
  *
- * @curr_dl describes the last task of ours to run there and says nothing
- * about a cid running something else. The idle test covers the idle task;
- * for a higher scheduling class the kick costs an IPI and leaves the CPU
- * with the class that owns it, which is where not kicking would have left
- * it too.
+ * So the protection needs no window of its own. A task just picked is
+ * owed service and holds the CPU; it becomes interruptible exactly when
+ * it has had the share the pack owes it, which under load is a fraction
+ * of the slice, and the woken task waits for that instead of for the
+ * slice to end. What the running task gives up is the rest of a slice it
+ * is still owed and takes up again, not its place in the order: it keeps
+ * the deadline it was picked with, see task_dl().
+ *
+ * The vruntime of a running task is only charged in ops.stopping(), so
+ * the service it has taken since it was picked is added here, and the
+ * reference is moved by what that service is worth to the pack,
+ *
+ *	dV = w_i * dv_i / W
+ *
+ * which is what wakeup_preempt_fair() calls update_curr_fair() for before
+ * deciding anything.
+ *
+ * All of it compares because all of it is in @cid's virtual time: the
+ * running task joined that reference in ops.running() and the queued one
+ * was placed against it just above. Two cids' references do not compare,
+ * which is why the only cid this looks at is the one the task was queued
+ * on.
+ *
+ * The @curr_ fields describe the last task of ours to run there and say
+ * nothing about a cid running something else. The idle test covers the
+ * idle task; for a higher scheduling class the kick costs an IPI and
+ * leaves the CPU with the class that owns it, which is where not kicking
+ * would have left it too.
  */
-static void kick_queued_cid(s32 cid, u64 dl)
+static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl)
 {
 	struct cid_ctx __arena *cctx;
+	u64 now, vref;
 
 	if (no_wakeup_preempt || cid_idle_test(cid))
 		goto idle;
 
 	cctx = cid_ctx(cid);
+	vref = cctx->vref;
+
+	/*
+	 * Would a pick return the task just queued? It has to hold the
+	 * earlier of the two deadlines and to be owed service.
+	 */
 	if (!time_before(dl, cctx->curr_dl))
 		goto idle;
+	if (!no_eligibility && time_after(tctx->vruntime, vref))
+		goto idle;
+
+	now = bpf_ktime_get_ns();
+	/*
+	 * Is the running task still owed service? Once it has run for a
+	 * whole request it is past its deadline as well, and either way it
+	 * has no protection left.
+	 */
+	if (!no_eligibility) {
+		u64 delta = now - cctx->curr_run_at;
+		u64 w = cctx->curr_w;
+
+		if (w && delta < slice_ns) {
+			u64 dv = delta * NICE_0_WEIGHT / w;
+
+			if (cctx->vsum_w)
+				vref += dv * w / cctx->vsum_w;
+			if (!time_after(cctx->curr_v + dv, vref))
+				goto idle;
+		}
+	}
 
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
 	__sync_fetch_and_add(&nr_preempts, 1);
@@ -1475,7 +1529,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), slice_ns, dl, enq_flags);
 	cid_queued_set(prev_cid);
-	kick_queued_cid(prev_cid, dl);
+	kick_queued_cid(prev_cid, tctx, dl);
 
 	/*
 	 * A faster CPU sitting idle would never look at this queue on its
@@ -1887,6 +1941,8 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
 
 		cctx->curr_dl = task_dl(p, tctx);
+		cctx->curr_v = tctx->vruntime;
+		cctx->curr_w = task_weight(p);
 		cctx->curr_run_at = tctx->last_run_at;
 	}
 
