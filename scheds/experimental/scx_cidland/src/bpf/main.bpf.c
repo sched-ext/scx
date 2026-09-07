@@ -94,8 +94,8 @@ const volatile u32 balance_sample = 2;
  * The rest of .bss is read by every op on every CPU (the sizes, the arena
  * pointers) and a written word sharing a line with them makes every one of
  * those reads a miss: the layout of .bss follows the whims of the compiler
- * and adding one global once moved nr_words next to vtime_now, which cost
- * ~5% of the BPF time.
+ * and adding one global once moved nr_words next to the system vruntime
+ * that used to live here, which cost ~5% of the BPF time.
  */
 #define __hot_written	__attribute__((aligned(64)))
 
@@ -131,20 +131,6 @@ static u32 nr_cpu_ids;
  */
 static u32 nr_tiers;
 static bool asym_capacity;
-
-/*
- * Current system vruntime.
- */
-static u64 vtime_now __hot_written;
-
-/*
- * Total weight of the runnable tasks, EEVDF's \Sum w_i (cfs_rq->sum_weight).
- *
- * Maintained across the ops.runnable() / ops.quiescent() pair, which the core
- * scheduler guarantees to be symmetric, so it converges even when a task is
- * dequeued without ever being consumed by the BPF side.
- */
-static u64 sum_weight __hot_written;
 
 /*
  * Per-task context.
@@ -198,7 +184,6 @@ struct cid_topo {
 struct cid_ctx {
 	u64 last_update;
 	u64 perf_lvl;
-	u64 vtime_rem;
 	u64 last_balance_at;
 	u64 vsum_w;
 	u64 vref;
@@ -1062,10 +1047,15 @@ static s64 vdiv(s64 v, u64 d)
 	return (s64)((u64)v / d);
 }
 
+/*
+ * The reference of @cid's pack. Callers pass a cid they have checked; the
+ * guard is there so a stray one indexes nothing, and its answer is not
+ * meant to be placed against.
+ */
 static u64 cid_vref(s32 cid)
 {
 	if (!cid_valid(cid))
-		return vtime_now;
+		return 0;
 
 	return cid_ctx(cid)->vref;
 }
@@ -1196,7 +1186,7 @@ static u64 cid_pack_weight(s32 cid)
  */
 static void place_task(s32 cid, const struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!scx_bpf_task_running(p)) {
+	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
 		tctx->vruntime = cid_vref(cid);
 		if (cid_pack_weight(cid))
 			tctx->vruntime -= tctx->vlag;
@@ -1694,10 +1684,9 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct task_ctx *tctx;
 	s64 limit, lag;
+	s32 cid;
 
 	TOUCH_ARENA();
-
-	__sync_fetch_and_sub(&sum_weight, task_weight(p));
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1715,14 +1704,16 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 * against the reference alone would hand every task that sleeps long
 	 * enough the full credit, no matter whether it had earned it.
 	 */
-	limit = scale_by_dl_weight(p, slice_lag);
-	lag = (s64)(cid_vref(cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p)) -
-		    tctx->vruntime);
-	if (lag > limit)
-		lag = limit;
-	else if (lag < -limit)
-		lag = -limit;
-	tctx->vlag = lag;
+	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
+	if (cid_valid(cid)) {
+		limit = scale_by_dl_weight(p, slice_lag);
+		lag = (s64)(cid_vref(cid) - tctx->vruntime);
+		if (lag > limit)
+			lag = limit;
+		else if (lag < -limit)
+			lag = -limit;
+		tctx->vlag = lag;
+	}
 	vref_leave(tctx);
 }
 
@@ -1732,25 +1723,22 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 	TOUCH_ARENA();
 
-	__sync_fetch_and_add(&sum_weight, task_weight(p));
-
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 
 	/*
-	 * Place the task back at the lag it had when it went to sleep, the
-	 * way place_entity() does:
+	 * Drop out of the pack the task was last a member of. The lag it
+	 * carries is what survives the sleep, and place_task() spends it
+	 * against the cid the task is about to be queued on, the way
+	 * place_entity() does:
 	 *
 	 *	se->vruntime = vruntime - lag;
 	 *
-	 * A task that had consumed its share before sleeping comes back with
-	 * no credit, while one that was still owed service keeps it. This
-	 * is against the system-wide reference; the task is placed again
-	 * against the cid it is queued on, see place_task().
+	 * A task that had consumed its share before sleeping comes back
+	 * with no credit, while one that was still owed service keeps it.
 	 */
 	vref_leave(tctx);
-	tctx->vruntime = vtime_now - tctx->vlag;
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
@@ -1801,9 +1789,8 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 {
-	s32 cid = scx_bpf_task_cid(p);
 	struct task_ctx *tctx;
-	u64 slice, weight;
+	u64 slice;
 
 	TOUCH_ARENA();
 
@@ -1837,42 +1824,6 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	vref_charge(tctx);
 
 	/*
-	 * Advance the system virtual time by the service just delivered.
-	 *
-	 * EEVDF's reference is the weighted average of the runnable set,
-	 *
-	 *	V = \Sum (w_i * v_i) / \Sum w_i
-	 *
-	 * so serving @p for @slice moves it by
-	 *
-	 *	dV = w_p * dv_p / \Sum w_i = slice * NICE_0 / \Sum w_i
-	 *
-	 * since dv_p is the slice scaled by the inverse of @p's weight. That
-	 * is an identity, not an approximation: what matters is that V rises
-	 * with the service handed out no matter who receives it. Deriving it
-	 * from the running task's own vruntime instead (the previous
-	 * max-of-running rule) stalls the clock exactly when it is needed,
-	 * because the tasks that are behind never run and the tasks that do
-	 * run barely advance their own vruntime.
-	 *
-	 * The division truncates, and once the total weight exceeds a
-	 * hundred times the length of a burst every burst contributes
-	 * nothing: with a few thousand runnable tasks V would stop entirely
-	 * and everything queued behind it would starve. Carry the remainder
-	 * per cid so that the service is accounted in full.
-	 */
-	weight = sum_weight;
-	if (weight && cid_valid(cid)) {
-		struct cid_ctx __arena *cctx = cid_ctx(cid);
-		u64 acc = slice * NICE_0_WEIGHT + cctx->vtime_rem;
-		u64 delta = acc / weight;
-
-		cctx->vtime_rem = acc - delta * weight;
-		if (delta)
-			__sync_fetch_and_add(&vtime_now, delta);
-	}
-
-	/*
 	 * Update per-cid statistics.
 	 */
 	update_cpu_load(p, slice);
@@ -1883,7 +1834,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 	struct task_ctx *tctx = try_lookup_task_ctx(p);
 
 	if (tctx) {
-		tctx->vruntime = vtime_now;
+		tctx->vruntime = 0;
 		tctx->vcid = -1;
 	}
 }
