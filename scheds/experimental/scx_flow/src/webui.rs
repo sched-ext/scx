@@ -110,17 +110,16 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc
     let mut server: Option<tiny_http::Server> = None;
     let mut tcp_addr = String::new();
 
-    if let Ok(s) = Server::http(&format!("[::1]:{}", PORT)) {
+    if let Ok(s) = Server::http(format!("[::1]:{}", PORT)) {
         tcp_addr = format!("[::1]:{}", PORT);
         server = Some(s);
     }
 
-    if server.is_none() {
-        if let Ok(s) = Server::http(&format!("127.0.0.1:{}", PORT)) {
+    if server.is_none()
+        && let Ok(s) = Server::http(format!("127.0.0.1:{}", PORT)) {
             tcp_addr = format!("127.0.0.1:{}", PORT);
             server = Some(s);
         }
-    }
 
     if let Some(server) = server {
         log::info!(
@@ -173,11 +172,10 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc
             "Web UI: TCP blocked (spawned by scx_loader?), falling back to {}",
             UNIX_SOCKET_PATH
         );
-        if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH) {
-            if meta.file_type().is_socket() {
+        if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH)
+            && meta.file_type().is_socket() {
                 let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
             }
-        }
 
         let listener = match UnixListener::bind(UNIX_SOCKET_PATH) {
             Ok(l) => l,
