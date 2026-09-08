@@ -40,14 +40,14 @@ impl Domain {
         self.mask.weight()
     }
 
-    pub fn ctx(&self) -> Option<&mut types::dom_ctx> {
+    pub fn ctx(&self) -> Option<&types::dom_ctx> {
         let domc = self.ctx.lock().unwrap();
 
         // Ideally we would be storing the dom_ctx as a reference in struct Domain,
         // in the first place. Rust makes embedding references to structs into other
         // structs very difficult, so this is more pragmatic.
         match *domc {
-            Some(ptr) => Some(unsafe { &mut *(ptr) }),
+            Some(ptr) => Some(unsafe { &*(ptr) }),
             None => None,
         }
     }
