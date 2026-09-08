@@ -61,7 +61,7 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     let max_cpu_id = *cpus.iter().max().unwrap();
 
     // Create a byte vector with enough bytes to cover all CPU IDs.
-    let mut bitmask = vec![0u8; (max_cpu_id + 1 + 7) / 8];
+    let mut bitmask = vec![0u8; (max_cpu_id + 1).div_ceil(8)];
 
     // Set the appropriate bits for each CPU ID.
     for cpu_id in cpus {
@@ -312,7 +312,7 @@ impl<'a> Scheduler<'a> {
             Self::resolve_energy_domain(&opts.primary_domain, power_profile).map_err(|err| {
                 anyhow!(
                     "failed to resolve primary domain '{}': {}",
-                    &opts.primary_domain,
+                    opts.primary_domain,
                     err
                 )
             })?;
@@ -513,11 +513,10 @@ impl<'a> Scheduler<'a> {
 
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
-            if domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
+            if domain.test_cpu(cpu)
+                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
                     bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
                 }
-            }
         }
 
         Ok(())
@@ -685,14 +684,13 @@ impl Drop for Scheduler<'_> {
         info!("Unregister {SCHEDULER_NAME} scheduler");
 
         // Restore default CPU idle QoS resume latency.
-        if self.opts.idle_resume_us >= 0 {
-            if cpu_idle_resume_latency_supported() {
+        if self.opts.idle_resume_us >= 0
+            && cpu_idle_resume_latency_supported() {
                 for cpu in self.topo.all_cpus.values() {
                     update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
                         .unwrap();
                 }
             }
-        }
     }
 }
 
