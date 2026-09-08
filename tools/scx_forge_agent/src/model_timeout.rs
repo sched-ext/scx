@@ -87,7 +87,7 @@ pub fn summary(err: &AnyhowError) -> String {
 
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
-    if secs >= 60 && secs % 60 == 0 {
+    if secs >= 60 && secs.is_multiple_of(60) {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")

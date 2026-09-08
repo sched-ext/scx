@@ -85,8 +85,8 @@ impl Report {
                 None => String::new(),
             }
         ));
-        if let (Some(start), Some(best)) = (self.start_value, self.best_value) {
-            if start != 0.0 {
+        if let (Some(start), Some(best)) = (self.start_value, self.best_value)
+            && start != 0.0 {
                 let pct = if self.goal == "minimize" {
                     (start - best) / start * 100.0
                 } else {
@@ -94,7 +94,6 @@ impl Report {
                 };
                 s.push_str(&format!("- Improvement over start: {pct:.2}%\n"));
             }
-        }
         s.push('\n');
 
         // Aligned table: pad the short columns to their content width (numeric

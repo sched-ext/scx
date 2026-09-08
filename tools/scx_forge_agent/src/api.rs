@@ -103,25 +103,22 @@ fn tool_call_label(name: &str, args: &str) -> String {
         .ok()
         .and_then(|v| {
             let scheduler = v.get("scheduler").and_then(|x| x.as_str());
-            if name == "read_file" {
-                if let Some(path) = v.get("path").and_then(|x| x.as_str()) {
+            if name == "read_file"
+                && let Some(path) = v.get("path").and_then(|x| x.as_str()) {
                     return Some(path_with_line_range(path, &v));
                 }
-            }
-            if name == "read_scheduler_file" {
-                if let (Some(scheduler), Some(path)) =
+            if name == "read_scheduler_file"
+                && let (Some(scheduler), Some(path)) =
                     (scheduler, v.get("path").and_then(|x| x.as_str()))
                 {
                     return Some(format!("{scheduler}/{}", path_with_line_range(path, &v)));
                 }
-            }
-            if name == "grep_schedulers" {
-                if let (Some(scheduler), Some(pattern)) =
+            if name == "grep_schedulers"
+                && let (Some(scheduler), Some(pattern)) =
                     (scheduler, v.get("pattern").and_then(|x| x.as_str()))
                 {
                     return Some(format!("{scheduler}:{pattern}"));
                 }
-            }
             v.get("path")
                 .or_else(|| v.get("pattern"))
                 .or_else(|| v.get("url"))
@@ -514,12 +511,11 @@ fn append_json_text(dst: &mut String, v: &Value) {
 
 fn apply_stream_delta(delta: &Value, streamed: &mut StreamedChat) -> Result<Option<String>> {
     let mut visible = String::new();
-    if let Some(content) = delta.get("content") {
-        if let Some(s) = content.as_str() {
+    if let Some(content) = delta.get("content")
+        && let Some(s) = content.as_str() {
             streamed.content.push_str(s);
             visible.push_str(s);
         }
-    }
 
     if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
         for (fallback_idx, tc) in calls.iter().enumerate() {
@@ -1112,8 +1108,8 @@ pub async fn chat(
         // The model ended its turn with no tool call. If it never edited and we
         // can still force one, push a directive and force edit_file next (covers
         // the model "giving up" before hitting the exploration budget).
-        if let Some(cfg) = tool_loop {
-            if cfg.allow_edit && edits_applied == 0 && !disable_tools {
+        if let Some(cfg) = tool_loop
+            && cfg.allow_edit && edits_applied == 0 && !disable_tools {
                 force_edit = true;
                 messages.push(assistant_message);
                 messages.push(json!({
@@ -1122,7 +1118,6 @@ pub async fn chat(
                 }));
                 continue;
             }
-        }
 
         let content = message_content_to_string(&assistant_message);
         return Ok(content);

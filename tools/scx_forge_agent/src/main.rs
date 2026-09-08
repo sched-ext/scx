@@ -678,11 +678,10 @@ fn print_final_report(
 ) -> Result<()> {
     if json {
         let mut out = rep.to_json();
-        if let Some(obj) = out.as_object_mut() {
-            if interrupted {
+        if let Some(obj) = out.as_object_mut()
+            && interrupted {
                 obj.insert("interrupted".to_string(), serde_json::Value::Bool(true));
             }
-        }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -2094,13 +2093,13 @@ async fn optimize_loop(
         let scheduler_cwd = source.join(crate_dir);
         let planning_tl = api::tool_loop(
             &scheduler_cwd,
-            scheds_root.as_deref(),
+            scheds_root,
             false,
             spec.ai.max_tool_iterations,
         );
         let edit_tl = api::tool_loop(
             &scheduler_cwd,
-            scheds_root.as_deref(),
+            scheds_root,
             true,
             spec.ai.max_tool_iterations,
         );
