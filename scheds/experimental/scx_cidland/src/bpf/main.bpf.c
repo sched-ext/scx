@@ -259,7 +259,8 @@ struct cid_ctx {
 	u64 curr_dl;		/* deadline of the task running here */
 	u64 curr_v;		/* its vruntime when it was picked */
 	u64 curr_w;		/* its weight */
-	u64 curr_run_at;	/* when it was picked */
+	u64 curr_run_at;	/* when its service was last charged */
+	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
@@ -1475,6 +1476,92 @@ static bool curr_owed_service(s32 cid, u64 now)
 }
 
 /*
+ * Longest a task may hold a CPU across the end of its slice before the
+ * queue gets its turn whatever the deadlines say, see keep_running().
+ *
+ * The share a weight buys is charged in the vruntime and is untouched by
+ * this: what it bounds is how long the task at the back of the queue can
+ * wait. fair.c lets that run to whatever the weights ask for, and a nice
+ * -20 task against a nice 19 one asks for a ratio of 5917, four seconds
+ * of one holding the CPU at the default slice. sched_ext does not have
+ * that much room: ops.timeout_ms ends the scheduler when a runnable task
+ * has not run for as long, and it does so before the ratio is served.
+ * Every nice pair inside a factor of a hundred and forty is exact at the
+ * default slice; past that the interleaving is forced finer than fair.c
+ * would make it, which costs the light task nothing.
+ */
+#define KEEP_RUNNING_MAX_NS	100000000ULL
+
+/*
+ * Does the task running on @cid keep it, rather than hand it to the head
+ * of @cid's queue?
+ *
+ * fair.c asks this at every pick. pick_next_task_fair() calls
+ * pick_next_entity(), which runs pick_eevdf() over the queued entities
+ * *and* curr, so a task whose slice has just ended goes on running
+ * whenever nothing queued has an earlier deadline. A slice bounds how
+ * long a task may hold a CPU without being asked again; it is not a turn
+ * it has to give up at the end of.
+ *
+ * Without the question there is no answer to give. A dispatch that always
+ * takes the head hands the CPU over in strict rotation, and the weights
+ * stop meaning anything wherever the queue holds a single task - which is
+ * every CPU running two runnable tasks, the shape a build next to a video
+ * call has. A nice 0 and a nice 6 task pinned together measured 1.02 to
+ * one where fair.c gives 3.76, and cpu.weight fared the same. Queue a
+ * third task and the deadline order picks among them and the ratios come
+ * out right, which is how this went unnoticed.
+ *
+ * The comparison is the one ops.stopping() and task_dl() would reach a
+ * moment later, taken from @cid's published view of what it is running so
+ * that nothing has to be looked up to decide: the service taken since it
+ * was last charged, charged at its weight, is the vruntime it is about to
+ * carry, and a request that vruntime has consumed is a deadline about to
+ * be reissued from there.
+ */
+static bool keep_running(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	struct task_struct *head;
+	u64 w, v, dl;
+
+	w = cctx->curr_w;
+	if (!w)
+		return false;
+
+	if (now - cctx->curr_since >= KEEP_RUNNING_MAX_NS)
+		return false;
+
+	/*
+	 * Nothing queued here to be preferred to. Say so rather than keep
+	 * the task: the queued bitmap is the only thing consulted, and the
+	 * dispatch that follows has a lookup of the DSQ itself to fall back
+	 * on for the races the bitmap loses.
+	 */
+	head = cid_queued_test(cid) ? __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid)) : NULL;
+	if (!head)
+		return false;
+
+	v = cctx->curr_v + (now - cctx->curr_run_at) * NICE_0_WEIGHT / w;
+
+	/*
+	 * A deadline stands until the request it was issued for is consumed,
+	 * see task_dl(); past that it is reissued from where the vruntime
+	 * has reached, which is what puts a task that has had its turn behind
+	 * the ones that have not.
+	 */
+	dl = cctx->curr_dl;
+	if (!dl || !time_before(v, dl)) {
+		if (w < MIN_DL_WEIGHT)
+			w = MIN_DL_WEIGHT;
+		dl = v + cctx->curr_request * NICE_0_WEIGHT / w;
+	}
+
+	/* A tie is kept: giving the CPU up costs a switch. */
+	return !time_after(dl, head->scx.dsq_vtime);
+}
+
+/*
  * Drop @tctx out of its pack's reference, see cid_vref().
  */
 static void vref_leave(struct task_ctx *tctx)
@@ -1613,6 +1700,39 @@ static void vref_charge(struct task_ctx *tctx)
 	cctx->vref_rem = acc - delta * w;
 	if (delta)
 		__sync_fetch_and_add(&cctx->vref, delta);
+}
+
+/*
+ * Settle up with the task that is keeping @cid across the end of its
+ * slice, see keep_running().
+ *
+ * A task that goes on running is a task that was picked again, and every
+ * reader of @cid has to see it that way: the service it has taken is
+ * charged to its vruntime and to its pack, the way ops.stopping() does,
+ * and what it is owed from here is published, the way ops.running() does.
+ * Without it a cid whose task keeps winning would hold a reference that
+ * stands still for as long as the task does, and everything placed or
+ * tested against that cid meanwhile is placed against a clock that
+ * stopped. @curr_since is what is not touched: it marks the moment the
+ * CPU last actually changed hands.
+ */
+static void keep_charge(struct task_struct *p, s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
+
+	if (!tctx)
+		return;
+
+	tctx->vruntime += calc_delta_fair(p, tctx, now - tctx->last_run_at);
+	tctx->last_run_at = now;
+	vref_charge(tctx);
+
+	cctx->curr_dl = task_dl(p, tctx);
+	cctx->curr_v = tctx->vruntime;
+	cctx->curr_w = task_weight(p, tctx);
+	cctx->curr_run_at = now;
+	cctx->curr_request = task_request(p);
 }
 
 /*
@@ -2184,11 +2304,11 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  *
  * Return true if a task has been dispatched, false otherwise.
  */
-static bool try_steal_task(s32 dst_cid, bool has_prev)
+static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
 	struct cid_topo __arena *topo = cid_topo(dst_cid);
-	bool own = cid_queued_test(dst_cid) &&
+	bool own = !keep && cid_queued_test(dst_cid) &&
 		   __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
 	bool busy = own || has_prev;
 	bool force_steal = !busy && READ_ONCE(cctx->force_steal);
@@ -2207,6 +2327,14 @@ static bool try_steal_task(s32 dst_cid, bool has_prev)
 	 */
 	if (force_steal)
 		WRITE_ONCE(cctx->force_steal, 0);
+
+	/*
+	 * A cid that is keeping the task it is running has nothing to pull:
+	 * not its own queue, whose head it has just been preferred to, and
+	 * not a neighbour's, since anything pulled in would displace it.
+	 */
+	if (keep)
+		goto own;
 
 	if (busy) {
 		if (time_before(now, cctx->last_balance_at + slice_ns))
@@ -2315,7 +2443,7 @@ __noinline int cid_idle_rearm(s32 cid)
 
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
-	bool has_prev;
+	bool has_prev, keep = false;
 
 	TOUCH_ARENA();
 
@@ -2325,19 +2453,29 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	/*
 	 * Take a task from this cid's queue or from a deeper one on the
 	 * node, then fall back to this cid's own DSQ in case the pick raced
-	 * with another cid.
+	 * with another cid. A task whose slice has ended is asked for the
+	 * CPU rather than simply relieved of it, see keep_running().
 	 */
 	has_prev = prev && is_task_queued(prev);
-	if (try_steal_task(cid, has_prev))
+	if (has_prev) {
+		u64 now = bpf_ktime_get_ns();
+
+		keep = keep_running(cid, now);
+		if (keep)
+			keep_charge(prev, cid, now);
+	}
+
+	if (try_steal_task(cid, has_prev, keep))
 		return;
-	if (scx_bpf_dsq_move_to_local(cid_dsq(cid), 0)) {
+	if (!keep && scx_bpf_dsq_move_to_local(cid_dsq(cid), 0)) {
 		cid_queued_check(cid);
 		return;
 	}
 
 	/*
-	 * If the previous task expired its time slice, but no other task
-	 * wants to run on this CPU, give it another time slot.
+	 * The task that was running keeps the CPU: either nothing else
+	 * wants it, or what does was asked and lost, see keep_running().
+	 * Either way it is given another slice to hold it with.
 	 */
 	if (has_prev) {
 		scx_bpf_task_set_slice(prev, task_request(prev));
@@ -2489,6 +2627,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		cctx->curr_dl = task_dl(p, tctx);
 		cctx->curr_v = tctx->vruntime;
 		cctx->curr_run_at = tctx->last_run_at;
+		cctx->curr_since = tctx->last_run_at;
 		cctx->curr_request = task_request(p);
 		cctx->curr_w = task_weight(p, tctx);
 	}

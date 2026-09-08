@@ -83,10 +83,16 @@ uses, translated to cid space:
    ones, the way asym packing does, but only onto a fully idle faster core,
    which is what `asym_smt_can_pull_tasks()` refuses to give up.
 
-Time slices are 1 ms by default. A task can select its own slice with
+Time slices are 700 us by default, `fair.c`'s
+`normalized_sysctl_sched_base_slice` and under a tick of a HZ=1000 kernel,
+which is what a slice is enforced from. A task can select its own slice with
 `sched_attr.sched_runtime` (subject to the kernel's limits), and setting it to
-zero restores the scheduler default. A task that runs out of its slice with
-nothing waiting on its CPU keeps running there.
+zero restores the scheduler default. The slice bounds how long a task holds a
+CPU without being asked again rather than a turn it has to give up: at the end
+of one it keeps the CPU unless something queued there has an earlier deadline,
+which is the comparison `pick_next_entity()` makes between `curr` and the tree,
+and without which the weights would mean nothing on a CPU whose queue holds a
+single task.
 
 ## Requirements
 
