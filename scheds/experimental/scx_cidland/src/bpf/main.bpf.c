@@ -105,6 +105,25 @@ const volatile bool no_wakeup_preempt;
 const volatile bool no_eligibility;
 
 /*
+ * Interrupt a running task that is still owed service, when the task
+ * that woke holds the earlier deadline, see kick_queued_cid().
+ *
+ * This is RUN_TO_PARITY turned off, in the sense the feature had when
+ * EEVDF was merged: the running task is not kept for the rest of the
+ * service its pack owes it. The woken task is still asked for its own
+ * eligibility, which is what tells this apart from @no_eligibility:
+ * that one decides on the deadlines alone, this one only stops the
+ * task already running from being protected by the service it is owed.
+ *
+ * fair.c has since moved the switch: pick_eevdf() takes the protection
+ * as an argument now, and the feature selects which slice sizes it in
+ * set_protect_slice(). On a queue where every task asks for the same
+ * slice that choice makes no difference, so the older reading is the
+ * one that names anything here.
+ */
+const volatile bool no_run_to_parity;
+
+/*
  * Place tasks and test them for eligibility against the pack reference as
  * it stands, without the service the task running there has taken since
  * it was picked, see cid_vref_at().
@@ -1967,9 +1986,10 @@ static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
 	/*
 	 * Is the running task still owed service? Once it has run for a
 	 * whole request it is past its deadline as well, and either way it
-	 * has no protection left.
+	 * has no protection left. This is the half of the pick that
+	 * RUN_TO_PARITY governed, and --no-run-to-parity drops it alone.
 	 */
-	if (!no_eligibility && curr_owed_service(cid, now))
+	if (!no_eligibility && !no_run_to_parity && curr_owed_service(cid, now))
 		goto idle;
 
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
