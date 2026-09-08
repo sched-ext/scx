@@ -526,10 +526,7 @@ mod tests {
 
             let (arch, ver, sha1) =
                 sscanf!(file_name_str, "arch/{String}/vmlinux-v{String}-g{String}.h").unwrap();
-            println!(
-                "vmlinux.h: arch={:?} ver={:?} sha1={:?}",
-                arch, ver, sha1,
-            );
+            println!("vmlinux.h: arch={:?} ver={:?} sha1={:?}", arch, ver, sha1,);
 
             assert!(
                 regex::Regex::new(r"^([1-9][0-9]*\.[0-9]+[a-z0-9-]*)$")

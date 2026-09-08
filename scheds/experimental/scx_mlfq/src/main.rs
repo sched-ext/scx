@@ -436,9 +436,10 @@ impl<'a> Scheduler<'a> {
                 mask |= crate::bpf_intf::MLFQ_GPU_TRACE_GPU_SCHED;
             }
             if mask != 0
-                && let Some(bss) = skel.maps.bss_data.as_mut() {
-                    bss.mlfq_gpu_trace_mask |= mask;
-                }
+                && let Some(bss) = skel.maps.bss_data.as_mut()
+            {
+                bss.mlfq_gpu_trace_mask |= mask;
+            }
         }
 
         let struct_ops = scx_ops_attach!(skel, mlfq_ops)?;

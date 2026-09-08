@@ -47,26 +47,25 @@ impl IrqHandlerAnalyzer {
                             (exit.irq, event_with_idx.event.timestamp)
                             && let Some(mut entry_event) =
                                 pending_entry.remove(&(cpu as u32, irq as u32))
-                            {
-                                let duration = exit_ts - entry_event.entry_ts;
-                                entry_event.exit_ts = Some(exit_ts);
-                                entry_event.duration_ns = Some(duration);
+                        {
+                            let duration = exit_ts - entry_event.entry_ts;
+                            entry_event.exit_ts = Some(exit_ts);
+                            entry_event.duration_ns = Some(duration);
 
-                                // Update stats
-                                let stats =
-                                    irq_stats.entry(irq as u32).or_insert_with(|| IrqStats {
-                                        irq: irq as u32,
-                                        count: 0,
-                                        total_duration_ns: 0,
-                                        durations: Vec::new(),
-                                    });
-                                stats.count += 1;
-                                stats.total_duration_ns += duration;
-                                stats.durations.push(duration);
+                            // Update stats
+                            let stats = irq_stats.entry(irq as u32).or_insert_with(|| IrqStats {
+                                irq: irq as u32,
+                                count: 0,
+                                total_duration_ns: 0,
+                                durations: Vec::new(),
+                            });
+                            stats.count += 1;
+                            stats.total_duration_ns += duration;
+                            stats.durations.push(duration);
 
-                                // Track per-CPU
-                                per_cpu_irq.entry(cpu as u32).or_default().push(entry_event);
-                            }
+                            // Track per-CPU
+                            per_cpu_irq.entry(cpu as u32).or_default().push(entry_event);
+                        }
                     }
                     _ => {}
                 }
@@ -129,18 +128,19 @@ impl IpiAnalyzer {
                     }
                     Some(ftrace_event::Event::IpiExit(exit)) => {
                         if let Some(exit_ts) = event_with_idx.event.timestamp
-                            && let Some(mut entry_event) = pending_entry.remove(&(cpu as u32)) {
-                                let duration = exit_ts - entry_event.entry_ts;
-                                entry_event.exit_ts = Some(exit_ts);
-                                entry_event.duration_ns = Some(duration);
-                                entry_event.reason = exit.reason.clone().unwrap_or_default();
+                            && let Some(mut entry_event) = pending_entry.remove(&(cpu as u32))
+                        {
+                            let duration = exit_ts - entry_event.entry_ts;
+                            entry_event.exit_ts = Some(exit_ts);
+                            entry_event.duration_ns = Some(duration);
+                            entry_event.reason = exit.reason.clone().unwrap_or_default();
 
-                                per_cpu_ipi
-                                    .entry(cpu as u32)
-                                    .or_default()
-                                    .push(entry_event.clone());
-                                ipi_events.push(entry_event);
-                            }
+                            per_cpu_ipi
+                                .entry(cpu as u32)
+                                .or_default()
+                                .push(entry_event.clone());
+                            ipi_events.push(entry_event);
+                        }
                     }
                     _ => {}
                 }

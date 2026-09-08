@@ -176,7 +176,7 @@ impl<Req, Res> Default for StatsServerData<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
- {
+{
     fn default() -> Self {
         Self::new()
     }
@@ -652,9 +652,10 @@ where
 
         let res = std::fs::remove_file(path);
         if let std::io::Result::Err(e) = &res
-            && e.kind() != std::io::ErrorKind::NotFound {
-                res.with_context(|| format!("deleting {path:?}"))?;
-            }
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            res.with_context(|| format!("deleting {path:?}"))?;
+        }
 
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {path:?}"))?;

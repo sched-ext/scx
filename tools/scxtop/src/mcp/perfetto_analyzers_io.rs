@@ -76,16 +76,17 @@ impl BlockIoAnalyzer {
                     Some(ftrace_event::Event::BlockRqComplete(complete)) => {
                         if let (Some(sector), Some(ts)) =
                             (complete.sector, event_with_idx.event.timestamp)
-                            && let Some(mut io_event) = pending_issue.remove(&sector) {
-                                io_event.complete_ts = Some(ts);
-                                if let Some(issue_ts) = io_event.issue_ts {
-                                    io_event.device_latency_ns = Some(ts - issue_ts);
-                                }
-                                if let Some(insert_ts) = io_event.insert_ts {
-                                    io_event.total_latency_ns = Some(ts - insert_ts);
-                                }
-                                completed_ios.push(io_event);
+                            && let Some(mut io_event) = pending_issue.remove(&sector)
+                        {
+                            io_event.complete_ts = Some(ts);
+                            if let Some(issue_ts) = io_event.issue_ts {
+                                io_event.device_latency_ns = Some(ts - issue_ts);
                             }
+                            if let Some(insert_ts) = io_event.insert_ts {
+                                io_event.total_latency_ns = Some(ts - insert_ts);
+                            }
+                            completed_ios.push(io_event);
+                        }
                     }
                     _ => {}
                 }
@@ -251,11 +252,12 @@ impl MemoryPressureAnalyzer {
                     }
                     Some(ftrace_event::Event::MmVmscanDirectReclaimEnd(_end)) => {
                         if let Some(ts) = event_with_idx.event.timestamp
-                            && let Some(mut reclaim) = pending_reclaim.remove(&(cpu as u32)) {
-                                reclaim.end_ts = Some(ts);
-                                reclaim.duration_ns = Some(ts - reclaim.begin_ts);
-                                reclaim_events.push(reclaim);
-                            }
+                            && let Some(mut reclaim) = pending_reclaim.remove(&(cpu as u32))
+                        {
+                            reclaim.end_ts = Some(ts);
+                            reclaim.duration_ns = Some(ts - reclaim.begin_ts);
+                            reclaim_events.push(reclaim);
+                        }
                     }
                     _ => {}
                 }
@@ -309,11 +311,12 @@ impl FileIoAnalyzer {
                     }
                     Some(ftrace_event::Event::Ext4SyncFileExit(_exit)) => {
                         if let Some(ts) = event_with_idx.event.timestamp
-                            && let Some(mut sync) = pending_sync.remove(&(cpu as u32)) {
-                                sync.exit_ts = Some(ts);
-                                sync.duration_ns = Some(ts - sync.enter_ts);
-                                sync_events.push(sync);
-                            }
+                            && let Some(mut sync) = pending_sync.remove(&(cpu as u32))
+                        {
+                            sync.exit_ts = Some(ts);
+                            sync.duration_ns = Some(ts - sync.enter_ts);
+                            sync_events.push(sync);
+                        }
                     }
                     _ => {}
                 }

@@ -762,20 +762,21 @@ impl<'a> Scheduler<'a> {
             if opts.perf_config.event_id > 0
                 && let Err(e) =
                     setup_perf_events(&skel.maps.scx_pmu_map, cpu as i32, &opts.perf_config, 0)
-                    && cpu == 0 {
-                        let err_str = e.to_string();
-                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
-                            warn!("Performance counters not available on this CPU architecture");
-                            warn!(
-                                "PMU event '{}' not supported - scheduler will run without perf monitoring",
-                                opts.perf_config.display_name
-                            );
-                        } else {
-                            warn!("Failed to setup perf events: {}", e);
-                        }
-                        perf_available = false;
-                        break;
-                    }
+                && cpu == 0
+            {
+                let err_str = e.to_string();
+                if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                    warn!("Performance counters not available on this CPU architecture");
+                    warn!(
+                        "PMU event '{}' not supported - scheduler will run without perf monitoring",
+                        opts.perf_config.display_name
+                    );
+                } else {
+                    warn!("Failed to setup perf events: {}", e);
+                }
+                perf_available = false;
+                break;
+            }
             if opts.perf_sticky.event_id > 0
                 && let Err(e) = setup_perf_events(
                     &skel.maps.scx_pmu_map,
@@ -783,20 +784,21 @@ impl<'a> Scheduler<'a> {
                     &opts.perf_sticky,
                     sticky_counter_idx,
                 )
-                    && cpu == 0 {
-                        let err_str = e.to_string();
-                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
-                            warn!("Performance counters not available on this CPU architecture");
-                            warn!(
-                                "PMU event '{}' not supported - scheduler will run without perf monitoring",
-                                opts.perf_sticky.display_name
-                            );
-                        } else {
-                            warn!("Failed to setup perf events: {}", e);
-                        }
-                        perf_available = false;
-                        break;
-                    }
+                && cpu == 0
+            {
+                let err_str = e.to_string();
+                if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                    warn!("Performance counters not available on this CPU architecture");
+                    warn!(
+                        "PMU event '{}' not supported - scheduler will run without perf monitoring",
+                        opts.perf_sticky.display_name
+                    );
+                } else {
+                    warn!("Failed to setup perf events: {}", e);
+                }
+                perf_available = false;
+                break;
+            }
         }
         if perf_available {
             info!("Performance counters configured successfully for all CPUs");

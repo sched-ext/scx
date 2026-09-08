@@ -563,8 +563,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let now_mono = now_monotonic();
         let load_half_life = self.skel.maps.rodata_data.as_ref().unwrap().load_half_life;
 
-        let mut aggregator =
-            LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight);
+        let mut aggregator = LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight);
 
         for (dom_id, dom) in self.dom_group.doms() {
             aggregator.init_domain(*dom_id);

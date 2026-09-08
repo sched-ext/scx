@@ -319,10 +319,7 @@ impl Opts {
     }
 
     fn can_performance(&self) -> bool {
-        !self.autopilot
-            && !self.autopower
-            && !self.powersave
-            && !self.balanced
+        !self.autopilot && !self.autopower && !self.powersave && !self.balanced
     }
 
     fn can_balanced(&self) -> bool {
@@ -447,7 +444,6 @@ impl msg_task_ctx {
 
 impl introspec {
     fn new() -> Self {
-        
         unsafe { mem::MaybeUninit::<introspec>::zeroed().assume_init() }
     }
 }
@@ -490,13 +486,12 @@ impl<'a> Scheduler<'a> {
 
         // Enable futex tracing using ftrace if available. If the ftrace is not
         // available, use tracepoint, which is known to be slower than ftrace.
-        if !opts.no_futex_boost
-            && !Self::attach_futex_ftraces(&mut skel)? {
-                info!("Fail to attach futex ftraces. Try with tracepoints.");
-                if !Self::attach_futex_tracepoints(&mut skel)? {
-                    info!("Fail to attach futex tracepoints.");
-                }
+        if !opts.no_futex_boost && !Self::attach_futex_ftraces(&mut skel)? {
+            info!("Fail to attach futex ftraces. Try with tracepoints.");
+            if !Self::attach_futex_tracepoints(&mut skel)? {
+                info!("Fail to attach futex tracepoints.");
             }
+        }
 
         // Initialize CPU topology with CLI arguments
         let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();

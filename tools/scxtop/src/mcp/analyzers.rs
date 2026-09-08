@@ -509,9 +509,10 @@ impl MigrationAnalyzer {
             if mig_group[0].pid == mig_group[1].pid
                 && mig_group[0].to_cpu == mig_group[1].from_cpu
                 && mig_group[0].from_cpu == mig_group[1].to_cpu
-                && let Some(stats) = per_process.get_mut(&mig_group[0].pid) {
-                    stats.ping_pong_count += 1;
-                }
+                && let Some(stats) = per_process.get_mut(&mig_group[0].pid)
+            {
+                stats.ping_pong_count += 1;
+            }
         }
 
         let mut process_patterns: Vec<_> = per_process.into_values().collect();

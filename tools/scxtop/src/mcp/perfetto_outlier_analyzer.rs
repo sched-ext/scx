@@ -436,22 +436,23 @@ impl PerfettoOutlierAnalyzer {
         // Process wakeup events
         for wakeup in wakeup_events {
             if let Some(wakee_pid) = self.extract_wakee_pid(wakeup)
-                && let Some(wakeup_ts) = wakeup.timestamp {
-                    // Find the first switch event for this PID after the wakeup timestamp
-                    if let Some(switch_list) = switch_by_pid.get(&wakee_pid) {
-                        // Binary search for first event after wakeup_ts
-                        let pos = switch_list.partition_point(|(ts, _)| *ts <= wakeup_ts);
+                && let Some(wakeup_ts) = wakeup.timestamp
+            {
+                // Find the first switch event for this PID after the wakeup timestamp
+                if let Some(switch_list) = switch_by_pid.get(&wakee_pid) {
+                    // Binary search for first event after wakeup_ts
+                    let pos = switch_list.partition_point(|(ts, _)| *ts <= wakeup_ts);
 
-                        if pos < switch_list.len() {
-                            let (switch_ts, _) = switch_list[pos];
-                            let latency = switch_ts - wakeup_ts;
-                            process_latencies
-                                .entry(wakee_pid)
-                                .or_default()
-                                .push(latency);
-                        }
+                    if pos < switch_list.len() {
+                        let (switch_ts, _) = switch_list[pos];
+                        let latency = switch_ts - wakeup_ts;
+                        process_latencies
+                            .entry(wakee_pid)
+                            .or_default()
+                            .push(latency);
                     }
                 }
+            }
         }
 
         process_latencies

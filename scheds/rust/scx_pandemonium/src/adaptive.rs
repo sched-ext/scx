@@ -211,14 +211,15 @@ impl LoadGraph {
                 // rather than on a completed loss. Only the positive half
                 // matters -- an oscillating CPU (r1 < 0) is already recovering.
                 if let Some(r1) = self.node_slowing.get(i).and_then(|v| *v)
-                    && r1.value > 0.0 {
-                        let tighten = Priced {
-                            value: 1.0 - 0.4 * r1.value.clamp(0.0, 1.0),
-                            confidence: r1.confidence,
-                        }
-                        .weighted(1.0);
-                        k.preempt_thresh_ns = ((k.preempt_thresh_ns as f64) * tighten) as u64;
+                    && r1.value > 0.0
+                {
+                    let tighten = Priced {
+                        value: 1.0 - 0.4 * r1.value.clamp(0.0, 1.0),
+                        confidence: r1.confidence,
                     }
+                    .weighted(1.0);
+                    k.preempt_thresh_ns = ((k.preempt_thresh_ns as f64) * tighten) as u64;
+                }
 
                 // PERSISTENCE -> CoDel RESCUE THRESHOLD.
                 // H > 0.5 says this CPU's load pattern tends to continue, so a

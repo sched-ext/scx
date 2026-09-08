@@ -10,8 +10,7 @@ use std::ffi::CString;
 use std::ffi::c_char;
 use std::mem;
 
-#[derive(Debug, Clone, Parser)]
-#[derive(Default)]
+#[derive(Debug, Clone, Parser, Default)]
 pub struct LibbpfOpts {
     /// Parse map definitions non-strictly, allowing extra attributes/data.
     #[clap(long)]
@@ -48,7 +47,6 @@ pub struct LibbpfOpts {
     #[clap(long)]
     pub bpf_token_path: Option<String>,
 }
-
 
 impl LibbpfOpts {
     /// Helper method to convert `LibbpfOpts` into an `Option<bpf_object_open_opts>`.

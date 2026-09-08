@@ -86,14 +86,15 @@ impl Report {
             }
         ));
         if let (Some(start), Some(best)) = (self.start_value, self.best_value)
-            && start != 0.0 {
-                let pct = if self.goal == "minimize" {
-                    (start - best) / start * 100.0
-                } else {
-                    (best - start) / start * 100.0
-                };
-                s.push_str(&format!("- Improvement over start: {pct:.2}%\n"));
-            }
+            && start != 0.0
+        {
+            let pct = if self.goal == "minimize" {
+                (start - best) / start * 100.0
+            } else {
+                (best - start) / start * 100.0
+            };
+            s.push_str(&format!("- Improvement over start: {pct:.2}%\n"));
+        }
         s.push('\n');
 
         // Aligned table: pad the short columns to their content width (numeric

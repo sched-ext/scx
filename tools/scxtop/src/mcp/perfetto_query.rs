@@ -143,9 +143,10 @@ impl QueryBuilder {
 
                 // Check PID filter
                 if let Some(pid_filter) = self.pid_filter
-                    && event.pid != Some(pid_filter as u32) {
-                        return None;
-                    }
+                    && event.pid != Some(pid_filter as u32)
+                {
+                    return None;
+                }
 
                 // Check field filters
                 for field_filter in &self.field_filters {

@@ -514,9 +514,10 @@ impl<'a> Scheduler<'a> {
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
             if domain.test_cpu(cpu)
-                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
-                    bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
-                }
+                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32)
+            {
+                bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
+            }
         }
 
         Ok(())
@@ -684,13 +685,12 @@ impl Drop for Scheduler<'_> {
         info!("Unregister {SCHEDULER_NAME} scheduler");
 
         // Restore default CPU idle QoS resume latency.
-        if self.opts.idle_resume_us >= 0
-            && cpu_idle_resume_latency_supported() {
-                for cpu in self.topo.all_cpus.values() {
-                    update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
-                        .unwrap();
-                }
+        if self.opts.idle_resume_us >= 0 && cpu_idle_resume_latency_supported() {
+            for cpu in self.topo.all_cpus.values() {
+                update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
+                    .unwrap();
             }
+        }
     }
 }
 

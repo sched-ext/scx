@@ -613,9 +613,10 @@ impl PerfProfiler {
             // Check duration
             if config.duration_secs > 0
                 && let Some(start) = self.start_time
-                    && start.elapsed() >= Duration::from_secs(config.duration_secs) {
-                        return true;
-                    }
+                && start.elapsed() >= Duration::from_secs(config.duration_secs)
+            {
+                return true;
+            }
         }
 
         false

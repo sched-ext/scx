@@ -10,10 +10,12 @@ fn create_test_track_events() -> Vec<ParsedTrackEvent> {
 
     // Create a variety of event types with different categories
     let categories = ["ONCPU", "WAKER", "WAKEE", "PREEMPTOR", "PREEMPTEE"];
-    let event_types = [TrackEventType::SliceBegin,
+    let event_types = [
+        TrackEventType::SliceBegin,
         TrackEventType::SliceEnd,
         TrackEventType::Instant,
-        TrackEventType::Counter];
+        TrackEventType::Counter,
+    ];
 
     for i in 0..200 {
         let category = categories[i % categories.len()];

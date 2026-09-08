@@ -211,10 +211,11 @@ impl<'a> Scheduler<'a> {
                 for e in rd.flatten() {
                     if let Ok(comm) = std::fs::read_to_string(e.path().join("comm"))
                         && comm.starts_with("FPSAimTrainer")
-                            && let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
-                                vip = pid;
-                                break;
-                            }
+                        && let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>()
+                    {
+                        vip = pid;
+                        break;
+                    }
                 }
             }
             rodata.cake_vip_tgid = vip;

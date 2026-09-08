@@ -397,12 +397,14 @@ impl<S: BusyIntervalSink> SchedBusyTracker<S> {
             state.last_seen_ns = time_ns;
 
             if let Some(task) = state.running_task.as_mut()
-                && record.tid == task.tid && record.hint != task.hint {
-                    task.hint = record.hint;
-                    if let Some(interval) = sync_cpu_state(state, time_ns) {
-                        emitted.push(interval);
-                    }
+                && record.tid == task.tid
+                && record.hint != task.hint
+            {
+                task.hint = record.hint;
+                if let Some(interval) = sync_cpu_state(state, time_ns) {
+                    emitted.push(interval);
                 }
+            }
 
             match classify_event(&record) {
                 ClassifiedEvent::SchedSwitch {
@@ -695,9 +697,10 @@ impl CompiledCategoryMatcher {
             matched.extend(indices.iter().copied());
         }
         if let Some(by_hint) = self.exact_by_hint.get(&interval.comm)
-            && let Some(indices) = by_hint.get(&interval.hint) {
-                matched.extend(indices.iter().copied());
-            }
+            && let Some(indices) = by_hint.get(&interval.hint)
+        {
+            matched.extend(indices.iter().copied());
+        }
 
         for glob in &self.glob_specs {
             if glob.hint.map(|hint| hint == interval.hint).unwrap_or(true)

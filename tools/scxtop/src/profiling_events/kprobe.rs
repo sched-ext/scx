@@ -47,9 +47,10 @@ fn resolve_kfunc_address(name: &str) -> Option<u64> {
     for line in reader.lines().map_while(std::io::Result::ok) {
         if line.ends_with(&format!(" {name}"))
             && let Some(addr_str) = line.split_whitespace().next()
-                && let Ok(addr) = u64::from_str_radix(addr_str, 16) {
-                    return Some(addr);
-                }
+            && let Ok(addr) = u64::from_str_radix(addr_str, 16)
+        {
+            return Some(addr);
+        }
     }
     None
 }

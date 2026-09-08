@@ -851,9 +851,10 @@ impl CpuTopology {
             let mut best: Option<(usize, f64)> = None;
             for (i, node) in frontier.iter().enumerate() {
                 if let DomainNode::Cut { phi, .. } = node
-                    && best.is_none_or(|(_, bp)| *phi < bp) {
-                        best = Some((i, *phi));
-                    }
+                    && best.is_none_or(|(_, bp)| *phi < bp)
+                {
+                    best = Some((i, *phi));
+                }
             }
             let Some((idx, _)) = best else { break }; // no cuts left to split
             let node = frontier[idx];

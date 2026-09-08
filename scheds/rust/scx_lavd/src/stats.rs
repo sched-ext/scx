@@ -436,8 +436,10 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 
 pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<SchedSamples>(
-        &[("target".into(), "sched_samples".into()),
-            ("nr_samples".into(), nr_samples.to_string())],
+        &[
+            ("target".into(), "sched_samples".into()),
+            ("nr_samples".into(), nr_samples.to_string()),
+        ],
         Duration::from_secs(0),
         || shutdown.load(Ordering::Relaxed),
         |ts| {

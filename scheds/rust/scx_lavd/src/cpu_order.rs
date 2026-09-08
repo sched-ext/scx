@@ -385,10 +385,11 @@ impl CpuOrderCtx {
                 'outer: for ncpdoms in v.neighbor_map.borrow().values() {
                     for ncpdom_id in ncpdoms.borrow().iter() {
                         if let Some(is_big) = cpdom_types.get(ncpdom_id)
-                            && *is_big == key.is_big {
-                                v.cpdom_alt_id.set(*ncpdom_id);
-                                break 'outer;
-                            }
+                            && *is_big == key.is_big
+                        {
+                            v.cpdom_alt_id.set(*ncpdom_id);
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -594,7 +595,6 @@ impl<'a> EnergyModelOptimizer<'a> {
     ) -> BTreeMap<usize, PerfCpuOrder> {
         let emo = EnergyModelOptimizer::new(em, cpus_pf);
         emo.gen_perf_cpu_order_table();
-        
 
         emo.perf_cpu_order.borrow().clone()
     }
@@ -616,8 +616,6 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     fn fake_pco(tot_perf: usize, cpuids: &'a Vec<CpuId>, powersave: bool) -> PerfCpuOrder {
-        
-
         let perf_cap = if powersave {
             cpuids[0].cpu_cap
         } else {
@@ -810,16 +808,17 @@ impl<'a> EnergyModelOptimizer<'a> {
                     // updated performance and power values) and delete the old
                     // base.
                     if let Some(ref best) = best_pdsi
-                        && best.pdcpu_set.is_subset(&base.pdcpu_set) {
-                            let ext_pdcpu = PDSetInfo {
-                                performance: best.performance,
-                                power: best.power,
-                                pdcpu_set: base.pdcpu_set.clone(),
-                                pd_id_set: base.pd_id_set.clone(),
-                            };
-                            best_pdsi = Some(ext_pdcpu);
-                            del_pdsi = Some(base.clone());
-                        }
+                        && best.pdcpu_set.is_subset(&base.pdcpu_set)
+                    {
+                        let ext_pdcpu = PDSetInfo {
+                            performance: best.performance,
+                            power: best.power,
+                            pdcpu_set: base.pdcpu_set.clone(),
+                            pd_id_set: base.pd_id_set.clone(),
+                        };
+                        best_pdsi = Some(ext_pdcpu);
+                        del_pdsi = Some(base.clone());
+                    }
                 }
                 None => {
                     best_pdsi = self.find_perf_pds_for(util, None);

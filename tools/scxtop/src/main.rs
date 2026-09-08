@@ -381,13 +381,15 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 }
                 // v2 API variants (6.19+)
                 if compat::ksym_exists("scx_bpf_dsq_insert___v2")?
-                    && let Ok(link) = skel.progs.scx_insert_v2.attach() {
-                        links.push(link);
-                    }
+                    && let Ok(link) = skel.progs.scx_insert_v2.attach()
+                {
+                    links.push(link);
+                }
                 if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")?
-                    && let Ok(link) = skel.progs.scx_insert_vtime_args.attach() {
-                        links.push(link);
-                    }
+                    && let Ok(link) = skel.progs.scx_insert_vtime_args.attach()
+                {
+                    links.push(link);
+                }
             } else {
                 if let Ok(link) = skel.progs.scx_dispatch.attach() {
                     links.push(link);

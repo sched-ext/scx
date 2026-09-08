@@ -164,14 +164,15 @@ pub fn parse_perf_event(s: &str) -> Result<PerfEventSpec, String> {
     }
 
     if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
-        && let Ok(config) = u64::from_str_radix(hex_str, 16) {
-            return Ok(PerfEventSpec {
-                event_id: config,
-                type_: bindings::PERF_TYPE_RAW,
-                config,
-                display_name: s.to_string(),
-            });
-        }
+        && let Ok(config) = u64::from_str_radix(hex_str, 16)
+    {
+        return Ok(PerfEventSpec {
+            event_id: config,
+            type_: bindings::PERF_TYPE_RAW,
+            config,
+            display_name: s.to_string(),
+        });
+    }
 
     if let Some(config) = parse_hardware_event(s) {
         let event_id = (bindings::PERF_TYPE_HARDWARE as u64) << 32 | config;

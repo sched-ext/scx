@@ -142,9 +142,10 @@ impl<'a> Scheduler<'a> {
         // Process the domain of primary CPUs.
         let mut domain = Cpumask::from_str(&opts.primary_domain)?;
         if domain.is_empty()
-            && let Some(cpu) = cpus.last() {
-                domain = Cpumask::from_str(&format!("{:x}", 1 << cpu.id).to_string())?;
-            }
+            && let Some(cpu) = cpus.last()
+        {
+            domain = Cpumask::from_str(&format!("{:x}", 1 << cpu.id).to_string())?;
+        }
         info!("primary CPU domain = 0x{:x}", domain);
 
         // Initialize BPF connector.
@@ -271,9 +272,10 @@ impl<'a> Scheduler<'a> {
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
             if domain.test_cpu(cpu)
-                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
-                    warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
-                }
+                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32)
+            {
+                warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
+            }
         }
 
         Ok(())

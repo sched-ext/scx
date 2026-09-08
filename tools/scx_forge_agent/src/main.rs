@@ -679,9 +679,10 @@ fn print_final_report(
     if json {
         let mut out = rep.to_json();
         if let Some(obj) = out.as_object_mut()
-            && interrupted {
-                obj.insert("interrupted".to_string(), serde_json::Value::Bool(true));
-            }
+            && interrupted
+        {
+            obj.insert("interrupted".to_string(), serde_json::Value::Bool(true));
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }

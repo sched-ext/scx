@@ -11,8 +11,7 @@ use anyhow::{Result, bail};
 use clap::Args;
 
 /// Topology configuration arguments
-#[derive(Args, Debug, Clone)]
-#[derive(Default)]
+#[derive(Args, Debug, Clone, Default)]
 pub struct TopologyArgs {
     /// Configure virtual LLC partitioning with min and max cores per partition.
     /// Format: --virt-llc [min_cores-max_cores]
@@ -65,4 +64,3 @@ impl TopologyArgs {
         Ok(())
     }
 }
-

@@ -759,24 +759,25 @@ impl Scheduler {
     /// Best-effort graceful then forceful teardown. Returns the final scx state.
     fn stop(&mut self, sudo: &Sudo) -> Option<String> {
         if let Some(child) = self.child.as_mut()
-            && matches!(child.try_wait(), Ok(None)) {
-                // sudo forwards SIGINT to its child; this is the clean path.
-                unsafe {
-                    libc::kill(child.id() as i32, libc::SIGINT);
-                }
-                let deadline = Instant::now() + Duration::from_secs(8);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) | Err(_) => break,
-                        Ok(None) => {
-                            if Instant::now() >= deadline {
-                                break;
-                            }
-                            sleep(Duration::from_millis(100));
+            && matches!(child.try_wait(), Ok(None))
+        {
+            // sudo forwards SIGINT to its child; this is the clean path.
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGINT);
+            }
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            break;
                         }
+                        sleep(Duration::from_millis(100));
                     }
                 }
             }
+        }
         // If still attached, escalate with sudo pkill on the binary basename
         // (our child is the sudo wrapper, so a plain kill is not enough to reach
         // a root-owned scheduler).

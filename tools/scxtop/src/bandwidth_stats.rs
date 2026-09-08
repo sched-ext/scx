@@ -187,10 +187,9 @@ impl BandwidthStats {
                 reading.mbm_total_bps = to_bps(prev, cur, now.duration_since(prev_t).as_secs_f64());
             }
 
-            if *has_occupancy
-                && let Ok(Some(occ)) = read_counter(&dom.path.join("llc_occupancy")) {
-                    reading.llc_occupancy_bytes = occ;
-                }
+            if *has_occupancy && let Ok(Some(occ)) = read_counter(&dom.path.join("llc_occupancy")) {
+                reading.llc_occupancy_bytes = occ;
+            }
 
             dom.last_local = cur_local.or(dom.last_local);
             dom.last_total = cur_total.or(dom.last_total);

@@ -116,10 +116,11 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc
     }
 
     if server.is_none()
-        && let Ok(s) = Server::http(format!("127.0.0.1:{}", PORT)) {
-            tcp_addr = format!("127.0.0.1:{}", PORT);
-            server = Some(s);
-        }
+        && let Ok(s) = Server::http(format!("127.0.0.1:{}", PORT))
+    {
+        tcp_addr = format!("127.0.0.1:{}", PORT);
+        server = Some(s);
+    }
 
     if let Some(server) = server {
         log::info!(
@@ -173,9 +174,10 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc
             UNIX_SOCKET_PATH
         );
         if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH)
-            && meta.file_type().is_socket() {
-                let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
-            }
+            && meta.file_type().is_socket()
+        {
+            let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
+        }
 
         let listener = match UnixListener::bind(UNIX_SOCKET_PATH) {
             Ok(l) => l,

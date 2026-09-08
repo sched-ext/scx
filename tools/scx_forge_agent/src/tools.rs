@@ -683,9 +683,10 @@ fn grep_dir(
                 .to_string_lossy()
                 .to_string();
             if let Some(g) = glob
-                && !rel.contains(g) {
-                    continue;
-                }
+                && !rel.contains(g)
+            {
+                continue;
+            }
             let shown = match prefix {
                 Some(prefix) => format!("{prefix}/{rel}"),
                 None => rel,

@@ -279,9 +279,11 @@ fn llc_size_bytes(cache_path: &Path) -> Option<u64> {
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
         if let Some(llc_id) = llc_id
-            && id.is_some() && id != Some(llc_id) {
-                continue;
-            }
+            && id.is_some()
+            && id != Some(llc_id)
+        {
+            continue;
+        }
         let Some(size) = std::fs::read_to_string(dir.join("size"))
             .ok()
             .and_then(|s| parse_cache_size(&s))

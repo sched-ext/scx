@@ -1285,25 +1285,24 @@ impl Stats {
                             ..
                         },
                     ) = (cur_cpu_stat, prev_cpu_stat)
-                    {
-                        let delta_total = cu.saturating_sub(*pu)
-                            + cn.saturating_sub(*pn)
-                            + cs.saturating_sub(*ps)
-                            + ci.saturating_sub(*pi)
-                            + cw.saturating_sub(*pw)
-                            + cq.saturating_sub(*pq)
-                            + cf.saturating_sub(*pf)
-                            + ct.saturating_sub(*pt);
-                        let overhead = cq.saturating_sub(*pq)
-                            + cf.saturating_sub(*pf)
-                            + ct.saturating_sub(*pt);
-                        let available = delta_total.saturating_sub(overhead);
-                        cpu_scales[cpu] = if available > 0 {
-                            (delta_total as f64 / available as f64).clamp(1.0, 20.0)
-                        } else {
-                            1.0
-                        };
-                    }
+                {
+                    let delta_total = cu.saturating_sub(*pu)
+                        + cn.saturating_sub(*pn)
+                        + cs.saturating_sub(*ps)
+                        + ci.saturating_sub(*pi)
+                        + cw.saturating_sub(*pw)
+                        + cq.saturating_sub(*pq)
+                        + cf.saturating_sub(*pf)
+                        + ct.saturating_sub(*pt);
+                    let overhead =
+                        cq.saturating_sub(*pq) + cf.saturating_sub(*pf) + ct.saturating_sub(*pt);
+                    let available = delta_total.saturating_sub(overhead);
+                    cpu_scales[cpu] = if available > 0 {
+                        (delta_total as f64 / available as f64).clamp(1.0, 20.0)
+                    } else {
+                        1.0
+                    };
+                }
             }
         }
 
@@ -1729,9 +1728,10 @@ impl GpuTaskAffinitizer {
                     work.extend(kids);
                 }
                 if let Some(proc_) = self.sys.process(pid)
-                    && let Some(tasks) = proc_.tasks() {
-                        pids_and_tids.extend(tasks.iter().copied());
-                    }
+                    && let Some(tasks) = proc_.tasks()
+                {
+                    pids_and_tids.extend(tasks.iter().copied());
+                }
             }
         }
         pids_and_tids
@@ -1775,9 +1775,10 @@ impl GpuTaskAffinitizer {
         let now = Instant::now();
 
         if let Some(last_process_time) = self.last_process_time
-            && (now - last_process_time) < self.poll_interval {
-                return;
-            }
+            && (now - last_process_time) < self.poll_interval
+        {
+            return;
+        }
 
         match self.update_gpu_pids() {
             Ok(_) => {}
@@ -4805,14 +4806,15 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                 ..
             } => {
                 if let Some((cpus_min, cpus_max)) = cpus_range
-                    && cpus_min > cpus_max {
-                        bail!(
-                            "Spec {:?} has invalid cpus_range({}, {})",
-                            spec.name,
-                            cpus_min,
-                            cpus_max
-                        );
-                    }
+                    && cpus_min > cpus_max
+                {
+                    bail!(
+                        "Spec {:?} has invalid cpus_range({}, {})",
+                        spec.name,
+                        cpus_min,
+                        cpus_max
+                    );
+                }
                 if util_range.0 >= util_range.1 {
                     bail!(
                         "Spec {:?} has invalid util_range ({}, {})",

@@ -387,7 +387,6 @@ impl TraceAnalyzer for DsqAnalyzerWrapper {
 
         let start = std::time::Instant::now();
         let analyzer = DsqAnalyzer::new(trace);
-        
 
         if let Some(summary) = analyzer.get_summary() {
             AnalyzerResult {

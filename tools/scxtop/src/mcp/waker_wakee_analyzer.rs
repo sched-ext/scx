@@ -245,19 +245,20 @@ impl WakerWakeeAnalyzer {
                 && let (Some(waker_cpu_info), Some(wakee_cpu_info)) = (
                     topo.all_cpus.get(&(wakeup.waker_cpu as usize)),
                     topo.all_cpus.get(&(wakee_cpu as usize)),
-                ) {
-                    if waker_cpu_info.llc_id == wakee_cpu_info.llc_id {
-                        stats.same_llc_count += 1;
-                    } else {
-                        stats.cross_llc_count += 1;
-                    }
-
-                    if waker_cpu_info.node_id == wakee_cpu_info.node_id {
-                        stats.same_node_count += 1;
-                    } else {
-                        stats.cross_node_count += 1;
-                    }
+                )
+            {
+                if waker_cpu_info.llc_id == wakee_cpu_info.llc_id {
+                    stats.same_llc_count += 1;
+                } else {
+                    stats.cross_llc_count += 1;
                 }
+
+                if waker_cpu_info.node_id == wakee_cpu_info.node_id {
+                    stats.same_node_count += 1;
+                } else {
+                    stats.cross_node_count += 1;
+                }
+            }
 
             // Enforce max relationships limit
             self.enforce_relationship_limit();

@@ -3665,14 +3665,16 @@ impl<'a> App<'a> {
             let mut has_third_row_content = false;
 
             if let Some(layer_id) = proc_data.layer_id
-                && self.layered_enabled && layer_id >= 0 {
-                    third_row.extend(vec![
-                        Span::styled("Layer: ", Style::default().fg(Color::Yellow)),
-                        Span::raw(layer_id.to_string()),
-                        Span::raw("  "),
-                    ]);
-                    has_third_row_content = true;
-                }
+                && self.layered_enabled
+                && layer_id >= 0
+            {
+                third_row.extend(vec![
+                    Span::styled("Layer: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(layer_id.to_string()),
+                    Span::raw("  "),
+                ]);
+                has_third_row_content = true;
+            }
 
             if let Some(dsq) = proc_data.dsq {
                 third_row.extend(vec![
@@ -4617,9 +4619,10 @@ impl<'a> App<'a> {
         if pid == tgid {
             self.proc_data.remove(&pid);
         } else if let Entry::Occupied(entry) = self.proc_data.entry(tgid)
-            && self.in_thread_view {
-                entry.into_mut().remove_thread(pid);
-            }
+            && self.in_thread_view
+        {
+            entry.into_mut().remove_thread(pid);
+        }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exit(action);
@@ -4655,9 +4658,10 @@ impl<'a> App<'a> {
                     proc_data.layer_id = Some(*parent_layer_id);
                     if self.in_thread_view
                         && let Some(selected_tgid) = self.selected_process
-                            && selected_tgid == parent_tgid {
-                                proc_data.add_thread(child_pid);
-                            }
+                        && selected_tgid == parent_tgid
+                    {
+                        proc_data.add_thread(child_pid);
+                    }
                 }
             }
         } else {
@@ -4695,11 +4699,12 @@ impl<'a> App<'a> {
         // Update waker information for the thread
         if let Some(proc_data) = self.proc_data.get_mut(&tgid)
             && self.in_thread_view
-                && let Some(thread_data) = proc_data.threads.get_mut(&tid)
-                    && *waker_pid != 0 {
-                        thread_data.last_waker_pid = Some(*waker_pid);
-                        thread_data.last_waker_comm = Some(waker_comm.to_string());
-                    }
+            && let Some(thread_data) = proc_data.threads.get_mut(&tid)
+            && *waker_pid != 0
+        {
+            thread_data.last_waker_pid = Some(*waker_pid);
+            thread_data.last_waker_comm = Some(waker_comm.to_string());
+        }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_wakeup(action);
@@ -4722,11 +4727,12 @@ impl<'a> App<'a> {
         // Update waker information for the thread
         if let Some(proc_data) = self.proc_data.get_mut(&tgid)
             && self.in_thread_view
-                && let Some(thread_data) = proc_data.threads.get_mut(&tid)
-                    && *waker_pid != 0 {
-                        thread_data.last_waker_pid = Some(*waker_pid);
-                        thread_data.last_waker_comm = Some(waker_comm.to_string());
-                    }
+            && let Some(thread_data) = proc_data.threads.get_mut(&tid)
+            && *waker_pid != 0
+        {
+            thread_data.last_waker_pid = Some(*waker_pid);
+            thread_data.last_waker_comm = Some(waker_comm.to_string());
+        }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_waking(action);
@@ -4807,9 +4813,10 @@ impl<'a> App<'a> {
 
                 if self.in_thread_view
                     && let Some(proc_data) = self.selected_proc_data()
-                        && proc_data.tgid == tgid {
-                            insert_or_update_thread(proc_data, tid, dsq, layer);
-                        }
+                    && proc_data.tgid == tgid
+                {
+                    insert_or_update_thread(proc_data, tid, dsq, layer);
+                }
             };
 
         let next_tgid = u32_to_i32(*next_tgid);
@@ -4833,17 +4840,19 @@ impl<'a> App<'a> {
         if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
             proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
             if self.in_thread_view
-                && let Some(thread_data) = proc_data.threads.get_mut(&prev_tid) {
-                    thread_data.add_event_data("slice_consumed", *prev_used_slice_ns);
-                }
+                && let Some(thread_data) = proc_data.threads.get_mut(&prev_tid)
+            {
+                thread_data.add_event_data("slice_consumed", *prev_used_slice_ns);
+            }
         }
 
         if let Some(proc_data) = self.proc_data.get_mut(&next_tgid) {
             proc_data.add_event_data("lat_us", *next_dsq_lat_us);
             if self.in_thread_view
-                && let Some(thread_data) = proc_data.threads.get_mut(&next_tid) {
-                    thread_data.add_event_data("lat_us", *next_dsq_lat_us);
-                }
+                && let Some(thread_data) = proc_data.threads.get_mut(&next_tid)
+            {
+                thread_data.add_event_data("lat_us", *next_dsq_lat_us);
+            }
         }
 
         if self.state == AppState::Tracing {
@@ -4989,9 +4998,10 @@ impl<'a> App<'a> {
             .sample_rate as u64;
 
         if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu)
-            && kprobe.instruction_pointer == Some(action.instruction_pointer) {
-                kprobe.increment_by(sample_rate);
-            }
+            && kprobe.instruction_pointer == Some(action.instruction_pointer)
+        {
+            kprobe.increment_by(sample_rate);
+        }
     }
 
     /// Gets the currently selected symbol in the perf top view.
@@ -5067,15 +5077,16 @@ impl<'a> App<'a> {
 
             // Only store detailed stack trace if this matches the highlighted instruction pointer
             if let Some(selected_symbol) = self.get_selected_symbol()
-                && selected_symbol.symbol_info.address == action.instruction_pointer {
-                    // Store the latest symbolized data for the selected symbol
-                    self.symbol_data.update_selected_symbol_details(
-                        action.instruction_pointer,
-                        &action.kernel_stack,
-                        &action.user_stack,
-                        action.pid,
-                    );
-                }
+                && selected_symbol.symbol_info.address == action.instruction_pointer
+            {
+                // Store the latest symbolized data for the selected symbol
+                self.symbol_data.update_selected_symbol_details(
+                    action.instruction_pointer,
+                    &action.kernel_stack,
+                    &action.user_stack,
+                    action.pid,
+                );
+            }
         }
     }
 
@@ -5093,12 +5104,12 @@ impl<'a> App<'a> {
                 if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info
                     && let Some((line, _col)) =
                         bpf_symbol_info.get_source_location(sample.symbol_info.address)
-                    {
-                        // Update the symbol name to include line number
-                        let base_name = &sample.symbol_info.symbol_name;
-                        enhanced.symbol_info.symbol_name = format!("{} (line {})", base_name, line);
-                        enhanced.symbol_info.line_number = Some(line);
-                    }
+                {
+                    // Update the symbol name to include line number
+                    let base_name = &sample.symbol_info.symbol_name;
+                    enhanced.symbol_info.symbol_name = format!("{} (line {})", base_name, line);
+                    enhanced.symbol_info.line_number = Some(line);
+                }
 
                 enhanced
             })
@@ -7162,9 +7173,10 @@ impl<'a> App<'a> {
         for proc in all_procs.flatten() {
             let tgid = proc.pid();
             if let std::collections::btree_map::Entry::Vacant(entry) = self.proc_data.entry(tgid)
-                && let Ok(proc_data) = ProcData::from_tgid(tgid, 10) {
-                    entry.insert(proc_data);
-                }
+                && let Ok(proc_data) = ProcData::from_tgid(tgid, 10)
+            {
+                entry.insert(proc_data);
+            }
         }
 
         Ok(())

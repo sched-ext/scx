@@ -374,12 +374,13 @@ fn run_processing(profile_dir: &Path, output_dir: &Path, verbose: bool) -> Resul
     };
     let hint_index = HintIndex::load_if_exists(profile_dir)?;
     if let Some(hint_index) = hint_index.as_ref()
-        && let Some(ordering_issues) = hint_index.ordering_issues.as_ref() {
-            ordering_issues.warn(
-                "hints.jsonl",
-                "Hint events will be sorted conservatively before annotation.",
-            );
-        }
+        && let Some(ordering_issues) = hint_index.ordering_issues.as_ref()
+    {
+        ordering_issues.warn(
+            "hints.jsonl",
+            "Hint events will be sorted conservatively before annotation.",
+        );
+    }
     copy_hints_if_present(profile_dir, output_dir)?;
     if let Some(mem_perf_script_dst) =
         prepare_trace_script_if_present(profile_dir, output_dir, mem_trace)?

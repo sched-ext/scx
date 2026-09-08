@@ -902,10 +902,7 @@ fn replace_with_virt_llcs(
 
         for (core_id, core) in llc.cores.iter() {
             let core_type = core.core_type == CoreType::Little;
-            cores_by_type
-                .entry(core_type)
-                .or_default()
-                .push(*core_id);
+            cores_by_type.entry(core_type).or_default().push(*core_id);
         }
 
         for core_ids in cores_by_type.values() {
@@ -949,29 +946,30 @@ fn replace_with_virt_llcs(
     for llc in node.llcs.values_mut() {
         for (core_id, core) in llc.cores.iter() {
             if let Some(&target_partition_id) = core_to_partition.get(core_id)
-                && let Some(target_llc) = virt_llcs.get_mut(&target_partition_id) {
-                    let target_llc_mut = Arc::get_mut(target_llc).unwrap();
+                && let Some(target_llc) = virt_llcs.get_mut(&target_partition_id)
+            {
+                let target_llc_mut = Arc::get_mut(target_llc).unwrap();
 
-                    // Clone core and update its LLC ID to match new partition
-                    let mut new_core = (**core).clone();
-                    new_core.llc_id = target_partition_id;
+                // Clone core and update its LLC ID to match new partition
+                let mut new_core = (**core).clone();
+                new_core.llc_id = target_partition_id;
 
-                    // Update all CPUs within this core to reference new LLC ID
-                    let mut updated_cpus = BTreeMap::new();
-                    for (cpu_id, cpu) in new_core.cpus.iter() {
-                        let mut new_cpu = (**cpu).clone();
-                        new_cpu.llc_id = target_partition_id;
+                // Update all CPUs within this core to reference new LLC ID
+                let mut updated_cpus = BTreeMap::new();
+                for (cpu_id, cpu) in new_core.cpus.iter() {
+                    let mut new_cpu = (**cpu).clone();
+                    new_cpu.llc_id = target_partition_id;
 
-                        // Add CPU to the virtual LLC's span
-                        target_llc_mut.span.set_cpu(*cpu_id)?;
+                    // Add CPU to the virtual LLC's span
+                    target_llc_mut.span.set_cpu(*cpu_id)?;
 
-                        updated_cpus.insert(*cpu_id, Arc::new(new_cpu));
-                    }
-                    new_core.cpus = updated_cpus;
-
-                    // Add the updated core to the virtual LLC
-                    target_llc_mut.cores.insert(*core_id, Arc::new(new_core));
+                    updated_cpus.insert(*cpu_id, Arc::new(new_cpu));
                 }
+                new_core.cpus = updated_cpus;
+
+                // Add the updated core to the virtual LLC
+                target_llc_mut.cores.insert(*core_id, Arc::new(new_core));
+            }
         }
     }
 

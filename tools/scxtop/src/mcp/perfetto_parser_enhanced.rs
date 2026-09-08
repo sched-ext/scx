@@ -421,9 +421,10 @@ impl CompatibilityDetector {
                         // Check for DSQ tracks (scxtop-specific)
                         if let Some(counter) = desc.counter.as_ref()
                             && let Some(unit) = &counter.unit_name
-                                && unit.contains("DSQ") {
-                                    has_dsq_tracks = true;
-                                }
+                            && unit.contains("DSQ")
+                        {
+                            has_dsq_tracks = true;
+                        }
                     }
                     Data::ChromeMetadata(_) => {
                         has_chrome_markers = true;

@@ -184,9 +184,10 @@ impl RunqueueDepthAnalyzer {
         for cpu in 0..num_cpus {
             let cpu_id = cpu as u32;
             if let Some(filter) = cpu_filter
-                && cpu_id != filter {
-                    continue;
-                }
+                && cpu_id != filter
+            {
+                continue;
+            }
 
             let events = self.trace.get_events_by_cpu(cpu_id);
             if events.is_empty() {

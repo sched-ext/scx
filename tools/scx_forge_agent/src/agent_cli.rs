@@ -393,9 +393,10 @@ fn arg_hint(input: Option<&Value>) -> Option<String> {
         "query",
     ] {
         if let Some(s) = input.get(key).and_then(|v| v.as_str())
-            && !s.is_empty() {
-                return Some(truncate(s, 100));
-            }
+            && !s.is_empty()
+        {
+            return Some(truncate(s, 100));
+        }
     }
     None
 }
@@ -489,12 +490,13 @@ impl ClaudePlanCapture {
                 self.plan_path = Some(path);
             }
         } else if name.eq_ignore_ascii_case("Write")
-            && let Some(path) = claude_plan_path(input) {
-                self.plan_path = Some(path);
-                if let Some(plan) = nonempty_string(input.get("content")) {
-                    self.write_plan = Some(plan);
-                }
+            && let Some(path) = claude_plan_path(input)
+        {
+            self.plan_path = Some(path);
+            if let Some(plan) = nonempty_string(input.get("content")) {
+                self.write_plan = Some(plan);
             }
+        }
     }
 
     fn resolve(&self) -> Result<Option<String>> {
@@ -692,10 +694,11 @@ fn invoke_claude(
         );
     };
     if text.trim().is_empty()
-        && let Some(plan) = recovered_plan {
-            print_recovered_claude_plan(&mut printer, stream_stdout, &plan)?;
-            text = plan;
-        }
+        && let Some(plan) = recovered_plan
+    {
+        print_recovered_claude_plan(&mut printer, stream_stdout, &plan)?;
+        text = plan;
+    }
     Ok((text, usage))
 }
 
@@ -777,11 +780,12 @@ fn invoke_opencode(
                                 .unwrap_or(false);
                         if !synthetic
                             && let Some(t) = part.get("text").and_then(|t| t.as_str())
-                                && !t.is_empty() {
-                                    text_parts.push(t.to_string());
-                                    printer.text(t)?;
-                                    printer.newline();
-                                }
+                            && !t.is_empty()
+                        {
+                            text_parts.push(t.to_string());
+                            printer.text(t)?;
+                            printer.newline();
+                        }
                     }
                 }
                 Some("reasoning") => {
@@ -975,31 +979,32 @@ fn invoke_codex(
             // execution items (with their command / changed paths) to stderr as
             // they complete.
             if v.get("type").and_then(|t| t.as_str()) == Some("item.completed")
-                && let Some(item) = v.get("item") {
-                    let ty = item
-                        .get("type")
-                        .or_else(|| item.get("item_type"))
-                        .and_then(|t| t.as_str());
-                    match ty {
-                        Some("agent_message") => {
-                            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                                printer.text(t)?;
-                                printer.newline();
-                            }
+                && let Some(item) = v.get("item")
+            {
+                let ty = item
+                    .get("type")
+                    .or_else(|| item.get("item_type"))
+                    .and_then(|t| t.as_str());
+                match ty {
+                    Some("agent_message") => {
+                        if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                            printer.text(t)?;
+                            printer.newline();
                         }
-                        Some("reasoning") => {
-                            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                                printer.reasoning(t)?;
-                                printer.newline();
-                            }
+                    }
+                    Some("reasoning") => {
+                        if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                            printer.reasoning(t)?;
+                            printer.newline();
                         }
-                        _ => {
-                            if let Some(label) = codex_item_label(item) {
-                                print_tool(&label, color);
-                            }
+                    }
+                    _ => {
+                        if let Some(label) = codex_item_label(item) {
+                            print_tool(&label, color);
                         }
                     }
                 }
+            }
             Ok(())
         },
     )?;
@@ -1151,9 +1156,10 @@ fn invoke_cursor(
                                     }
                                 }
                                 Some("thinking") | Some("reasoning")
-                                    if cursor_is_new_fragment(&mut think_seg, text) => {
-                                        printer.reasoning(text)?;
-                                    }
+                                    if cursor_is_new_fragment(&mut think_seg, text) =>
+                                {
+                                    printer.reasoning(text)?;
+                                }
                                 _ => {}
                             }
                         }
@@ -1162,9 +1168,10 @@ fn invoke_cursor(
                 // Surface each tool call once, when it starts.
                 Some("tool_call") => {
                     if v.get("subtype").and_then(|s| s.as_str()) == Some("started")
-                        && let Some(tc) = v.get("tool_call") {
-                            print_tool(&cursor_tool_label(tc), color);
-                        }
+                        && let Some(tc) = v.get("tool_call")
+                    {
+                        print_tool(&cursor_tool_label(tc), color);
+                    }
                 }
                 Some("result") => {
                     if let Some(u) = v.get("usage") {

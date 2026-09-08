@@ -95,12 +95,13 @@ impl EventFilter {
 
         // Check comm regex
         if let Some(ref pattern) = self.comm_regex
-            && let Ok(regex) = Regex::new(pattern) {
-                let comm = self.extract_comm(json);
-                if !regex.is_match(&comm) {
-                    return false;
-                }
+            && let Ok(regex) = Regex::new(pattern)
+        {
+            let comm = self.extract_comm(json);
+            if !regex.is_match(&comm) {
+                return false;
             }
+        }
 
         // Check minimum latency
         if let Some(min_lat) = self.min_latency_us {

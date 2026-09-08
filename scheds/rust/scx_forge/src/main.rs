@@ -797,11 +797,8 @@ impl<'a> Scheduler<'a> {
         let smt_siblings = topo.sibling_cpus();
         info!("SMT sibling CPUs: {:?}", smt_siblings);
         for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
-            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).map_err(|e| {
-                std::io::Error::other(
-                    format!("enable_sibling_cpu: {}", e),
-                )
-            })?;
+            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize)
+                .map_err(|e| std::io::Error::other(format!("enable_sibling_cpu: {}", e)))?;
         }
         Ok(())
     }
