@@ -7,10 +7,10 @@ pub mod bpf_skel;
 pub mod energy;
 pub use bpf_skel::types;
 
-use scx_utils::cli::TopologyArgs;
 pub use scx_utils::CoreType;
-use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::cli::TopologyArgs;
 use tracing::info;
 
 use clap::Parser;

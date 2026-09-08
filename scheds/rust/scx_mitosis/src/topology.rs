@@ -5,12 +5,12 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use scx_utils::{Cpumask, Topology};
 
 use crate::bpf_intf;
-use crate::bpf_skel::types::llc_cpumask;
 use crate::bpf_skel::OpenBpfSkel;
+use crate::bpf_skel::types::llc_cpumask;
 
 const MAX_LLCS: usize = bpf_intf::consts_MAX_LLCS as usize;
 const CPUMASK_LONG_ENTRIES: usize = bpf_intf::consts_CPUMASK_LONG_ENTRIES as usize;

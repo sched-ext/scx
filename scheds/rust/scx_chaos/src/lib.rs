@@ -14,6 +14,7 @@ use log::warn;
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
+use scx_utils::Topology;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::compat::tracefs_mount;
@@ -24,23 +25,22 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
 
 use libbpf_rs::skel::Skel;
 use scx_arena::ArenaLib;
 use scx_p2dq::types;
 use scx_utils::NR_CPU_IDS;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::libbpf_sys::bpf_program__set_autoattach;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::Link;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::libbpf_sys::bpf_program__set_autoattach;
 use log::debug;
 use log::info;
 use nix::unistd::Pid;
@@ -345,7 +345,9 @@ impl Builder<'_> {
                     .p2dq_config
                     .thermal_enabled = std::mem::MaybeUninit::new(true);
             } else {
-                debug!("Kernel does not support thermal pressure tracking (CONFIG_SCHED_HW_PRESSURE not enabled)");
+                debug!(
+                    "Kernel does not support thermal pressure tracking (CONFIG_SCHED_HW_PRESSURE not enabled)"
+                );
             }
         }
 
@@ -396,10 +398,11 @@ impl Builder<'_> {
             freq_array[i] = freq_array[i]
                 .checked_add(freq_array[i - 1])
                 .ok_or_else(|| {
-                    let err =
-                        concat!("frequencies overflowed! please ensure that frequencies sum to",
-                    " <=1. as these are floating point numbers, you may have to decrease by",
-                    " slightly more than you expect.");
+                    let err = concat!(
+                        "frequencies overflowed! please ensure that frequencies sum to",
+                        " <=1. as these are floating point numbers, you may have to decrease by",
+                        " slightly more than you expect."
+                    );
                     anyhow::anyhow!(err)
                 })?;
         }

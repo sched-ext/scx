@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,8 +10,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use scx_stats::prelude::*;
-use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_stats_derive::stat_doc;
 
 use crate::DistributionStats;
 

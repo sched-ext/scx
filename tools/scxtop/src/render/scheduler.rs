@@ -7,6 +7,7 @@ use crate::util::sanitize_nbsp;
 use crate::{AppTheme, EventData, ProcData, StatAggregation, VecStats, ViewState};
 use anyhow::Result;
 use num_format::{SystemLocale, ToFormattedString};
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Stylize;
 use ratatui::style::{Color, Modifier, Style};
@@ -15,7 +16,6 @@ use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Paragraph, RenderDirection,
     Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table, TableState,
 };
-use ratatui::Frame;
 use std::collections::{BTreeMap, HashSet};
 
 /// Parameters for rendering scheduler views

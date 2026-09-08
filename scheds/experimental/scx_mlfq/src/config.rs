@@ -17,9 +17,9 @@
 //! validated by `Config::validate()`. `ConfigBuilder` exists only to drive
 //! the validation contract from the unit tests.
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 
 /// Time units matching `enum mlfq_consts` in `src/bpf/intf.h`.
 const NSEC_PER_USEC: u64 = 1_000;
@@ -601,8 +601,8 @@ mod tests {
             mlfq_consts_MLFQ_Q2_SLICE_NS, mlfq_consts_MLFQ_Q3_SLICE_NS,
             mlfq_consts_MLFQ_RTDL_DRAIN_INTERVAL_NS, mlfq_consts_MLFQ_SAMEQ_PREEMPT_MIN_RUN_NS,
             mlfq_consts_MLFQ_SHORT_SLEEP_NS, mlfq_consts_MLFQ_SHORT_SLEEP_RATE_LIMIT_NS,
-            mlfq_consts_MLFQ_TREE_T_BOUND_NS, mlfq_consts_MLFQ_TREE_T_INT_NS,
-            mlfq_consts_MLFQ_T_H_NS, mlfq_consts_MLFQ_T_L_NS,
+            mlfq_consts_MLFQ_T_H_NS, mlfq_consts_MLFQ_T_L_NS, mlfq_consts_MLFQ_TREE_T_BOUND_NS,
+            mlfq_consts_MLFQ_TREE_T_INT_NS,
         };
 
         let cfg = Config::default();
@@ -708,10 +708,12 @@ mod tests {
     fn rejects_zero_quotas() {
         assert!(ConfigBuilder::default().q1_quota(0).build().is_err());
         assert!(ConfigBuilder::default().q2_quota(0).build().is_err());
-        assert!(ConfigBuilder::default()
-            .dispatch_max_batch(0)
-            .build()
-            .is_err());
+        assert!(
+            ConfigBuilder::default()
+                .dispatch_max_batch(0)
+                .build()
+                .is_err()
+        );
     }
 
     #[test]

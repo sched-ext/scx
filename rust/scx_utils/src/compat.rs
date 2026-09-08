@@ -3,14 +3,14 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use libbpf_rs::libbpf_sys::*;
 use libbpf_rs::{AsRawLibbpf, OpenProgramImpl, ProgramImpl};
 use log::{error, warn};
 use std::env;
-use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::c_void;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -922,13 +922,10 @@ mod tests {
             0x20000
         );
         // A low-32 mismatch on a >32-bit value is ABI drift; refuse.
-        assert!(super::recover_truncated_enum64_from(
-            table,
-            "scx_dsq_id_flags",
-            "SCX_DSQ_LOCAL",
-            3
-        )
-        .is_err());
+        assert!(
+            super::recover_truncated_enum64_from(table, "scx_dsq_id_flags", "SCX_DSQ_LOCAL", 3)
+                .is_err()
+        );
         // Unknown enumerators fail pessimistically (stale autogen table).
         assert!(
             super::recover_truncated_enum64_from(table, "scx_enq_flags", "SCX_ENQ_NEW", 7).is_err()

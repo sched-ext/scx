@@ -3,6 +3,29 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::APP;
+use crate::AppState;
+use crate::AppTheme;
+use crate::ComponentViewState;
+use crate::CpuData;
+use crate::CpuStatTracker;
+use crate::EventData;
+use crate::FilterItem;
+use crate::FilteredState;
+use crate::KprobeEvent;
+use crate::LICENSE;
+use crate::LlcData;
+use crate::MemStatSnapshot;
+use crate::NetworkStatSnapshot;
+use crate::NodeData;
+use crate::PerfEvent;
+use crate::PerfettoTraceManager;
+use crate::ProcData;
+use crate::ProfilingEvent;
+use crate::SCHED_NAME_PATH;
+use crate::ThreadData;
+use crate::VecStats;
+use crate::ViewState;
 use crate::available_kprobe_events;
 use crate::available_perf_events;
 use crate::bpf_intf;
@@ -10,12 +33,11 @@ use crate::bpf_prog_data::{BpfProgData, BpfProgStats};
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
-    get_bpf_program_columns, get_perf_top_columns, get_perf_top_columns_no_bpf,
+    Columns, get_bpf_program_columns, get_perf_top_columns, get_perf_top_columns_no_bpf,
     get_process_columns, get_process_columns_no_bpf, get_thread_columns, get_thread_columns_no_bpf,
-    Columns,
 };
-use crate::config::get_config_path;
 use crate::config::Config;
+use crate::config::get_config_path;
 use crate::get_default_events;
 use crate::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
 use crate::render::scheduler::{DsqSummaryParams, ProcessLatencyParams, SchedulerViewParams};
@@ -29,29 +51,6 @@ use crate::util::{
     check_perf_capability, default_scxtop_sched_ext_stats, format_hz, read_file_string,
     sanitize_nbsp, u32_to_i32,
 };
-use crate::AppState;
-use crate::AppTheme;
-use crate::ComponentViewState;
-use crate::CpuData;
-use crate::CpuStatTracker;
-use crate::EventData;
-use crate::FilterItem;
-use crate::FilteredState;
-use crate::KprobeEvent;
-use crate::LlcData;
-use crate::MemStatSnapshot;
-use crate::NetworkStatSnapshot;
-use crate::NodeData;
-use crate::PerfEvent;
-use crate::PerfettoTraceManager;
-use crate::ProcData;
-use crate::ProfilingEvent;
-use crate::ThreadData;
-use crate::VecStats;
-use crate::ViewState;
-use crate::APP;
-use crate::LICENSE;
-use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, KprobeAction, MangoAppAction, SchedCpuPerfSetAction,
@@ -61,7 +60,7 @@ use crate::{
 };
 use scx_utils::perf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
@@ -69,6 +68,7 @@ use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
+    Frame,
     layout::{Alignment, Direction, Layout, Margin, Rect},
     prelude::Stylize,
     style::{Color, Modifier, Style},
@@ -80,19 +80,18 @@ use ratatui::{
         Gauge, LineGauge, Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Sparkline, Table, TableState, Wrap,
     },
-    Frame,
 };
 use regex::Regex;
 use scx_stats::prelude::StatsClient;
+use scx_utils::Topology;
 use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
-use scx_utils::Topology;
 use serde_json::Value as JsonValue;
 use sysinfo::System;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc::UnboundedSender;
 
-use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

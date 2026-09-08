@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use crate::Action;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Convert scxtop Actions to MCP events
 /// Returns None for internal actions that shouldn't be streamed as events

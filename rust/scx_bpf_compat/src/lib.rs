@@ -9,8 +9,8 @@ use crate::bpf_skel::BpfSkelBuilder;
 use std::mem::MaybeUninit;
 
 use anyhow::Result;
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::ProgramType;
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use once_cell::sync::OnceCell;
 use scx_utils::compat::ksym_exists;
 

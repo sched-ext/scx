@@ -15,14 +15,14 @@ pub use bpf_intf::*;
 mod cpu_order;
 use scx_utils::init_libbpf_logging;
 mod stats;
-use std::ffi::c_int;
 use std::ffi::CStr;
+use std::ffi::c_int;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::str;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -36,17 +36,21 @@ use crossbeam::channel;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::Skel;
 use libc::c_char;
 use plain::Plain;
 use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
-use scx_utils::autopower::{fetch_power_profile, PowerProfile};
+use scx_utils::EnergyModel;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::TopologyArgs;
+use scx_utils::UserExitInfo;
+use scx_utils::autopower::{PowerProfile, fetch_power_profile};
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::ksym_exists;
@@ -57,10 +61,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::EnergyModel;
-use scx_utils::TopologyArgs;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
 use stats::SchedSamples;
 use stats::StatsReq;
@@ -407,9 +407,9 @@ impl Opts {
                 return None;
             } else {
                 info!(
-                "Pinned task slice mode is enabled ({} us). Pinned tasks will use per-CPU DSQs.",
-                pinned_slice
-            );
+                    "Pinned task slice mode is enabled ({} us). Pinned tasks will use per-CPU DSQs.",
+                    pinned_slice
+                );
             }
         }
 
@@ -610,7 +610,9 @@ impl<'a> Scheduler<'a> {
         // Initialize performance vs. CPU order table.
         let nr_pco_states: u8 = order.perf_cpu_order.len() as u8;
         if nr_pco_states > LAVD_PCO_STATE_MAX as u8 {
-            panic!("Generated performance vs. CPU order stats are too complex ({nr_pco_states}) to handle");
+            panic!(
+                "Generated performance vs. CPU order stats are too complex ({nr_pco_states}) to handle"
+            );
         }
 
         skel.maps.rodata_data.as_mut().unwrap().nr_pco_states = nr_pco_states;

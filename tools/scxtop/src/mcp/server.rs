@@ -84,8 +84,8 @@ impl McpServer {
     }
 
     pub fn setup_scheduler_resource(self) -> Self {
-        use crate::util::read_file_string;
         use crate::SCHED_NAME_PATH;
+        use crate::util::read_file_string;
 
         // Register scheduler://current resource
         self.resources

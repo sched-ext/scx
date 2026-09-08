@@ -5,7 +5,7 @@
 
 use crate::ClangInfo;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
@@ -14,7 +14,7 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::Level;
-use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
+use tracing_subscriber::{Layer, filter, layer::SubscriberExt};
 
 #[derive(Debug)]
 /// # Build helpers for sched_ext schedulers with Rust userspace component
@@ -531,12 +531,16 @@ mod tests {
                 &arch, &ver, &sha1,
             );
 
-            assert!(regex::Regex::new(r"^([1-9][0-9]*\.[0-9]+[a-z0-9-]*)$")
-                .unwrap()
-                .is_match(&ver));
-            assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
-                .unwrap()
-                .is_match(&sha1));
+            assert!(
+                regex::Regex::new(r"^([1-9][0-9]*\.[0-9]+[a-z0-9-]*)$")
+                    .unwrap()
+                    .is_match(&ver)
+            );
+            assert!(
+                regex::Regex::new(r"^[0-9a-z]{12}$")
+                    .unwrap()
+                    .is_match(&sha1)
+            );
         }
 
         assert!(found);

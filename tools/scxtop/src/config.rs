@@ -3,13 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::cli::TuiArgs;
-use crate::keymap::parse_action;
-use crate::keymap::parse_key;
 use crate::AppTheme;
 use crate::KeyMap;
 use crate::STATS_SOCKET_PATH;
 use crate::TRACE_FILE_PREFIX;
+use crate::cli::TuiArgs;
+use crate::keymap::parse_action;
+use crate::keymap::parse_key;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -835,14 +835,18 @@ mod tests {
         );
 
         // Verify active_keymap
-        assert!(loaded_config
-            .active_keymap
-            .get(&parse_key("i").unwrap())
-            .is_some_and(|action| *action == Action::Quit));
-        assert!(loaded_config
-            .active_keymap
-            .get(&parse_key("2").unwrap())
-            .is_some_and(|action| *action == Action::Enter));
+        assert!(
+            loaded_config
+                .active_keymap
+                .get(&parse_key("i").unwrap())
+                .is_some_and(|action| *action == Action::Quit)
+        );
+        assert!(
+            loaded_config
+                .active_keymap
+                .get(&parse_key("2").unwrap())
+                .is_some_and(|action| *action == Action::Enter)
+        );
     }
 
     #[test]
@@ -935,13 +939,17 @@ mod tests {
             "perf:cpu:instructions".to_string()
         );
 
-        assert!(config
-            .active_keymap
-            .get(&parse_key("i").unwrap())
-            .is_some_and(|action| *action == Action::Quit));
-        assert!(config
-            .active_keymap
-            .get(&parse_key("o").unwrap())
-            .is_some_and(|action| *action == Action::NextViewState));
+        assert!(
+            config
+                .active_keymap
+                .get(&parse_key("i").unwrap())
+                .is_some_and(|action| *action == Action::Quit)
+        );
+        assert!(
+            config
+                .active_keymap
+                .get(&parse_key("o").unwrap())
+                .is_some_and(|action| *action == Action::NextViewState)
+        );
     }
 }

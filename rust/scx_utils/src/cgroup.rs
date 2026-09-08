@@ -10,8 +10,8 @@
 //! covers `lib/cgroup_bw` (cpu.max); a scheduler that links it calls the
 //! helper below once between opening and loading its skeleton.
 
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 use libbpf_rs::OpenObject;
 
 /// Per-cgroup context map defined in `lib/cgroup_bw.bpf.c`.

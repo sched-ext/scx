@@ -47,7 +47,7 @@ pub use bpf_stats::BpfStatsCollector;
 pub use event_aggregator::{AggregatedStats, AggregationConfig, EventAggregator};
 pub use event_buffer::{BufferedEvent, EventBuffer, EventBufferStats, SharedEventBuffer};
 pub use event_control::{
-    create_event_control, AttachCallback, EventControl, SharedEventControl, StatsControlCommand,
+    AttachCallback, EventControl, SharedEventControl, StatsControlCommand, create_event_control,
 };
 pub use event_filter::EventFilter;
 pub use extended_analyzers::{
@@ -97,7 +97,7 @@ pub use perfetto_analyzers_scheduling::{
     LlcLocalityAnalyzer, LlcLocalityStats, PerDsqStats, RunqueueDepthAnalyzer, RunqueueDepthStats,
 };
 pub use perfetto_event_types::{
-    event_category, event_type_name, events_in_category, softirq_type_name, EventCategory,
+    EventCategory, event_category, event_type_name, events_in_category, softirq_type_name,
 };
 pub use perfetto_outlier_analyzer::{
     CpuUtilizationOutliers, LatencyOutliers, PerfettoOutlierAnalyzer, RuntimeOutliers,
@@ -115,20 +115,20 @@ pub use perfetto_query::{
     Aggregator, FieldFilter, FilterOperator, FilterValue, QueryBuilder, QueryEvent, QueryResult,
 };
 pub use perfetto_track_event_types::{
-    get_annotation_int, get_annotation_string, get_annotation_uint, Annotation, AnnotationValue,
-    InterruptEventType, InterruptTrackEvent, OncpuSliceEvent, ParsedTrackEvent,
-    PreemptionInstantEvent, ProcessLifecycleEvent, ProcessLifecycleType, TrackEventMetadata,
-    TrackEventType, WakeupInstantEvent,
+    Annotation, AnnotationValue, InterruptEventType, InterruptTrackEvent, OncpuSliceEvent,
+    ParsedTrackEvent, PreemptionInstantEvent, ProcessLifecycleEvent, ProcessLifecycleType,
+    TrackEventMetadata, TrackEventType, WakeupInstantEvent, get_annotation_int,
+    get_annotation_string, get_annotation_uint,
 };
 pub use prompts::McpPrompts;
 pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 pub use resources::McpResources;
 pub use server::{McpServer, McpServerConfig};
-pub use shared_state::{create_shared_stats, SharedStats, SharedStatsHandle};
+pub use shared_state::{SharedStats, SharedStatsHandle, create_shared_stats};
 pub use stats_client::SharedStatsClient;
 pub use subscription_manager::{SharedSubscriptionManager, SubscriptionManager, SubscriptionStats};
 pub use tools::McpTools;
 pub use waker_wakee_analyzer::{
-    extract_wakee_run_info, extract_wakeup_info, BidirectionalRelationship, LatencyPercentiles,
-    RelationshipStats, RelationshipsByPid, WakerWakeeAnalyzer, WakerWakeeSummary,
+    BidirectionalRelationship, LatencyPercentiles, RelationshipStats, RelationshipsByPid,
+    WakerWakeeAnalyzer, WakerWakeeSummary, extract_wakee_run_info, extract_wakeup_info,
 };

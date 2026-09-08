@@ -16,9 +16,9 @@ use std::mem::MaybeUninit;
 use std::ops::Sub;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
@@ -26,29 +26,38 @@ use std::time::Instant;
 use inotify::{Inotify, WatchMask};
 use std::os::unix::io::AsRawFd;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::Receiver;
 use crossbeam::select;
 use lazy_static::lazy_static;
-use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::libbpf_sys;
 use nix::sched::CpuSet;
-use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
+use nvml_wrapper::error::NvmlError;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use scx_layered::alloc::{unified_alloc, LayerAlloc, LayerDemand};
+use scx_layered::alloc::{LayerAlloc, LayerDemand, unified_alloc};
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
+use scx_utils::CoreType;
+use scx_utils::Cpumask;
+use scx_utils::Llc;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NetDev;
+use scx_utils::Topology;
+use scx_utils::TopologyArgs;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -62,15 +71,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
-use scx_utils::Cpumask;
-use scx_utils::Llc;
-use scx_utils::NetDev;
-use scx_utils::Topology;
-use scx_utils::TopologyArgs;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NR_CPU_IDS;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -3867,9 +3867,7 @@ impl<'a> Scheduler<'a> {
                     let nr = cpus_to_free.weight();
                     trace!(
                         "[{}] freeing CPUs on node {}: {}",
-                        layer.name,
-                        n,
-                        &cpus_to_free
+                        layer.name, n, &cpus_to_free
                     );
                     layer.cpus &= &cpus_to_free.not();
                     layer.nr_cpus -= nr;
@@ -4753,7 +4751,9 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
             let high_freq_matcher_cnt = system_cpu_util_below_cnt + dsq_insert_below_cnt;
             if high_freq_matcher_cnt > 0 {
                 if hint_equals_cnt != 1 {
-                    bail!("High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals");
+                    bail!(
+                        "High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals"
+                    );
                 }
                 if system_cpu_util_below_cnt > 1 {
                     bail!("Only 1 SystemCpuUtilBelow match permitted per AND block");
@@ -4763,7 +4763,9 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                 }
                 if ands.len() != hint_equals_cnt + system_cpu_util_below_cnt + dsq_insert_below_cnt
                 {
-                    bail!("High-frequency matchers must be used only with HintEquals (no other matchers)");
+                    bail!(
+                        "High-frequency matchers must be used only with HintEquals (no other matchers)"
+                    );
                 }
             } else if hint_equals_cnt == 1 && ands.len() != 1 {
                 bail!("HintEquals match cannot be in conjunction with other matches");
@@ -5201,7 +5203,10 @@ fn main(opts: Opts) -> Result<()> {
         }
 
         if common.allow_node_aligned.is_some() {
-            warn!("Layer {} has deprecated flag \"allow_node_aligned\", node-aligned tasks are now always dispatched on layer DSQs", &spec.name);
+            warn!(
+                "Layer {} has deprecated flag \"allow_node_aligned\", node-aligned tasks are now always dispatched on layer DSQs",
+                &spec.name
+            );
         }
     }
 

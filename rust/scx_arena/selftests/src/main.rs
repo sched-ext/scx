@@ -7,9 +7,9 @@ pub use bpf_skel::*;
 
 use std::mem::MaybeUninit;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 
 use std::ffi::c_ulong;
 use std::ffi::c_void;
@@ -21,20 +21,20 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use scx_utils::init_libbpf_logging;
 use scx_utils::Core;
 use scx_utils::Llc;
-use scx_utils::Topology;
 use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::init_libbpf_logging;
 
 use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
 
 use libbpf_rs::libbpf_sys;
 
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::SkelBuilder;
 
 const BPF_STDOUT: u32 = 1;
 const BPF_STDERR: u32 = 2;

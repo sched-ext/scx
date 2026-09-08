@@ -792,10 +792,12 @@ mod tests {
                 "mcrpxy-webNR".to_string()
             )]])
         );
-        assert!(allotment_spec
-            .subcells
-            .iter()
-            .all(|spec| spec.name != "mcrpxy-webNR1" && spec.name != "mcrpxy-webNR2"));
+        assert!(
+            allotment_spec
+                .subcells
+                .iter()
+                .all(|spec| spec.name != "mcrpxy-webNR1" && spec.name != "mcrpxy-webNR2")
+        );
     }
 
     #[test]

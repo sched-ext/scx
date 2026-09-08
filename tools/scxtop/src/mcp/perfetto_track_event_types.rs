@@ -14,9 +14,9 @@
 //! - Sched-ext metadata (layer_id, dsq_id)
 //! - Compound delay tracking
 
-use perfetto_protos::debug_annotation::debug_annotation;
 use perfetto_protos::debug_annotation::DebugAnnotation;
-use perfetto_protos::track_event::{track_event, TrackEvent};
+use perfetto_protos::debug_annotation::debug_annotation;
+use perfetto_protos::track_event::{TrackEvent, track_event};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

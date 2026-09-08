@@ -4,9 +4,9 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use libbpf_rs::query;
 use libbpf_rs::MapHandle;
 use libbpf_rs::OpenMapMut;
+use libbpf_rs::query;
 use std::os::unix::io::AsFd;
 
 pub fn attach_to_existing_map(

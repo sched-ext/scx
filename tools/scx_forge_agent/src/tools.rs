@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use reqwest::header::CONTENT_TYPE;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MAX_READ_BYTES: usize = 200_000;
 const MAX_SCHED_READ_BYTES: usize = 50_000;

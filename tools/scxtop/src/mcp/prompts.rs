@@ -4,8 +4,8 @@
 // GNU General Public License version 2.
 
 use super::protocol::{McpPrompt, McpPromptArgument};
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 
 pub struct McpPrompts {}
 

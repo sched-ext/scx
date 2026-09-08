@@ -5,8 +5,8 @@
 use std::mem::MaybeUninit;
 
 use anyhow::Result;
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::MapCore;
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 
 use crate::bpf_skel::*;
 use crate::tuning::{OscillatorState, TuningKnobs};
@@ -572,11 +572,7 @@ impl<'a> Scheduler<'a> {
         {
             Ok(Some(bytes)) if bytes.len() >= 4 => {
                 let v = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                if v == u32::MAX {
-                    0
-                } else {
-                    v
-                }
+                if v == u32::MAX { 0 } else { v }
             }
             _ => 0,
         }

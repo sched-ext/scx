@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use libbpf_rs::{set_print, PrintLevel};
+use libbpf_rs::{PrintLevel, set_print};
 
 fn print_to_log(level: PrintLevel, msg: String) {
     match level {

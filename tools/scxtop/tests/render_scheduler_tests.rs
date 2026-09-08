@@ -4,11 +4,11 @@
 // GNU General Public License version 2.
 
 use num_format::SystemLocale;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::widgets::TableState;
-use ratatui::Terminal;
 use scxtop::render::scheduler::{DsqSummaryParams, ProcessLatencyParams, SchedulerViewParams};
-use scxtop::{render::SchedulerRenderer, AppTheme, EventData, ProcData, ViewState};
+use scxtop::{AppTheme, EventData, ProcData, ViewState, render::SchedulerRenderer};
 use std::collections::BTreeMap;
 
 // Helper function to create test DSQ data

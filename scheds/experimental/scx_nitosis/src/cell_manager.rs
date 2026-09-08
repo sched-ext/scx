@@ -16,7 +16,7 @@ use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use inotify::{Inotify, WatchMask};
 use scx_utils::Cpumask;
 use tracing::{debug, info};
@@ -2633,9 +2633,10 @@ mod tests {
         assert_eq!(mgr.cell_count(), 2);
         assert!(mgr.find_cell_by_name("container-a").is_some());
         assert!(mgr.find_cell_by_name("container-b").is_some());
-        assert!(mgr
-            .find_cell_by_name("systemd-workaround.service")
-            .is_none());
+        assert!(
+            mgr.find_cell_by_name("systemd-workaround.service")
+                .is_none()
+        );
     }
 
     #[test]

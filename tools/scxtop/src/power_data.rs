@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -259,7 +259,9 @@ impl MsrReader {
                     match File::open(format!("/dev/cpu/{cpu_id}/msr")) {
                         Ok(file) => file,
                         Err(e) => {
-                            return Err(anyhow!("Cannot access MSR device /dev/cpu/{cpu_id}/msr: {e}. MSR access requires elevated privileges or proper kernel module configuration."));
+                            return Err(anyhow!(
+                                "Cannot access MSR device /dev/cpu/{cpu_id}/msr: {e}. MSR access requires elevated privileges or proper kernel module configuration."
+                            ));
                         }
                     }
                 }

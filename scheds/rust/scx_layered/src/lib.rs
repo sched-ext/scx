@@ -17,8 +17,8 @@ unsafe impl Plain for bpf_intf::refresh_node_ctx_arg {}
 
 use std::collections::BTreeMap;
 
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 pub use config::LayerCommon;
 pub use config::LayerConfig;
 pub use config::LayerKind;
@@ -28,9 +28,9 @@ pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
 use scx_utils::Core;
 use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::NR_CPU_IDS;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::Topology;
 use std::sync::Arc;
 use tracing::info;
 
@@ -384,8 +384,8 @@ impl CpuPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scx_utils::testutils::{make_het_test_topo, make_test_topo, mask_from_bits};
     use scx_utils::Llc;
+    use scx_utils::testutils::{make_het_test_topo, make_test_topo, mask_from_bits};
 
     // 1N: 1 node, 2 LLCs, 4 cores/LLC, 2 HTs/core = 16 CPUs
     //   LLC0: cores 0-3 (cpus 0-7), LLC1: cores 4-7 (cpus 8-15)

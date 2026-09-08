@@ -9,8 +9,8 @@
 //! filtering, aggregation, and cross-event correlation.
 
 use super::perfetto_parser::PerfettoTrace;
-use perfetto_protos::ftrace_event::ftrace_event;
 use perfetto_protos::ftrace_event::FtraceEvent;
+use perfetto_protos::ftrace_event::ftrace_event;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

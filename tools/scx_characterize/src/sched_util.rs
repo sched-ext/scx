@@ -7,7 +7,7 @@ use crate::extract::ExtractSchedUtilOpts;
 use crate::process::PerfSchedScriptRecord;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -1130,9 +1130,10 @@ mod tests {
         let err = agg
             .finalize(trace_end_ns, cpu_count, opts.window_ms)
             .expect_err("expected overlapping categories to be rejected");
-        assert!(err
-            .to_string()
-            .contains("sched util categories are not mutually exclusive"));
+        assert!(
+            err.to_string()
+                .contains("sched util categories are not mutually exclusive")
+        );
 
         Ok(())
     }

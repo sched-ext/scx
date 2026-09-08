@@ -11,12 +11,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 use std::{error::Error, fmt};
 
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 
 use crate::color::Style;
 use crate::config::ModelConfig;

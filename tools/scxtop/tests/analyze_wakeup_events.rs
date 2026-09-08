@@ -179,7 +179,13 @@ fn analyze_wakeup_events() {
         {
             eprintln!(
                 "  {}: Instant@{} ns (track {:?}) → SliceBegin@{} ns (track {:?}) = {} ns ({:.2} µs)",
-                i+1, instant_ts, instant_track, slice_ts, slice_track, latency, *latency as f64 / 1000.0
+                i + 1,
+                instant_ts,
+                instant_track,
+                slice_ts,
+                slice_track,
+                latency,
+                *latency as f64 / 1000.0
             );
         }
     }

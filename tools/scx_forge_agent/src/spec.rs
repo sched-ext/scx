@@ -431,11 +431,12 @@ trace_events = []
         )
         .unwrap();
 
-        assert!(spec
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("[tracing].trace_events must not be empty when tracing is enabled"));
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("[tracing].trace_events must not be empty when tracing is enabled")
+        );
 
         let disabled: Spec = toml::from_str(
             r#"

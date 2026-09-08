@@ -1,7 +1,7 @@
 use anyhow::Result;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{info, warn};
-use nix::sys::resource::{getrlimit, setrlimit, Resource, RLIM_INFINITY};
+use nix::sys::resource::{RLIM_INFINITY, Resource, getrlimit, setrlimit};
 use scx_stats::prelude::*;
 use serde::Deserialize;
 use std::path::Path;

@@ -3,9 +3,9 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use blazesym::Pid;
 use blazesym::symbolize::source::{Kernel, Process, Source};
 use blazesym::symbolize::{Input, Sym, Symbolizer};
-use blazesym::Pid;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 

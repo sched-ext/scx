@@ -4,8 +4,19 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
+use scxtop::Action;
+use scxtop::App;
+use scxtop::CpuStatTracker;
+use scxtop::Event;
+use scxtop::Key;
+use scxtop::KeyMap;
+use scxtop::MemStatSnapshot;
+use scxtop::PerfettoTraceManager;
+use scxtop::SCHED_NAME_PATH;
+use scxtop::SystemStatAction;
+use scxtop::Tui;
 use scxtop::bpf_skel::types::bpf_event;
-use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
+use scxtop::cli::{Cli, Commands, TraceArgs, TuiArgs, generate_completions};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
 use scxtop::layered_util;
@@ -16,33 +27,22 @@ use scxtop::util::{
     check_bpf_capability, get_capability_warning_message, get_clock_value, is_root,
     read_file_string,
 };
-use scxtop::Action;
-use scxtop::App;
-use scxtop::CpuStatTracker;
-use scxtop::Event;
-use scxtop::Key;
-use scxtop::KeyMap;
-use scxtop::MemStatSnapshot;
-use scxtop::PerfettoTraceManager;
-use scxtop::SystemStatAction;
-use scxtop::Tui;
-use scxtop::SCHED_NAME_PATH;
-use scxtop::{available_kprobe_events, UpdateColVisibilityAction};
-use scxtop::{bpf_skel::*, AppState};
+use scxtop::{AppState, bpf_skel::*};
+use scxtop::{UpdateColVisibilityAction, available_kprobe_events};
 
+use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use futures::future::join_all;
-use libbpf_rs::libbpf_sys;
-use libbpf_rs::num_possible_cpus;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::Link;
 use libbpf_rs::MapCore;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::UprobeOpts;
+use libbpf_rs::libbpf_sys;
+use libbpf_rs::num_possible_cpus;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::SkelBuilder;
 use log::debug;
 use log::info;
 use ratatui::crossterm::event::{KeyCode::Char, KeyEvent};
@@ -55,9 +55,9 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::mpsc;
@@ -1245,7 +1245,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
 fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
     use scx_utils::Topology;
-    use scxtop::mcp::{events::action_to_mcp_event, McpServer, McpServerConfig};
+    use scxtop::mcp::{McpServer, McpServerConfig, events::action_to_mcp_event};
     use std::sync::Arc;
 
     // Set up logging to stderr (important: not stdout, which is used for MCP protocol)

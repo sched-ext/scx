@@ -120,9 +120,9 @@ where
             .map_err(|_| anyhow::anyhow!("failed to allocate"))
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) { unsafe {
-        self.alloc.lock().unwrap().0.dealloc(ptr, layout)
-    }}
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { self.alloc.lock().unwrap().0.dealloc(ptr, layout) }
+    }
 }
 
 /// Helper to call an allocate program with the correct arguments.

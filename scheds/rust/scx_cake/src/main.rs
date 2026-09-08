@@ -12,9 +12,9 @@ pub use bpf_intf::*;
 
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -25,6 +25,9 @@ use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use log::info;
 use log::warn;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::scx_ops_attach;
@@ -33,9 +36,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 
 const SCHEDULER_NAME: &str = "scx_cake";
 
@@ -605,7 +605,18 @@ impl<'a> Scheduler<'a> {
                 .to_string();
                 info!(
                     "   BLACKBOX wait {:.2} ms  {} pid {} kind {} target cpu{} caller cpu{} waker {} ran_on cpu{}  seats {:#018x} core_free {:#018x} thread_free {:#018x} idle {:#018x}",
-                    b.wait_ns as f64 / 1e6, comm, b.pid, b.kind, b.target, b.caller, b.waker_pid, b.ran_on, b.seats, b.core_free, b.thread_free, b.idle_word
+                    b.wait_ns as f64 / 1e6,
+                    comm,
+                    b.pid,
+                    b.kind,
+                    b.target,
+                    b.caller,
+                    b.waker_pid,
+                    b.ran_on,
+                    b.seats,
+                    b.core_free,
+                    b.thread_free,
+                    b.idle_word
                 );
             }
         }

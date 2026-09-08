@@ -7,7 +7,7 @@
 //!
 
 use crate::topology::{NR_PARTITION_MAX_CORES, NR_PARTITION_MIN_CORES};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Args;
 
 /// Topology configuration arguments

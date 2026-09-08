@@ -3,8 +3,8 @@
 // Copyright (c) 2026 Meta Platforms
 
 use crate::BpfSkel;
-use libbpf_rs::skel::Skel;
 use libbpf_rs::ProgramType;
+use libbpf_rs::skel::Skel;
 use std::io::Read;
 use std::io::Write;
 

@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use crate::CpuStatTracker;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;

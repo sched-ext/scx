@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use anyhow::bail;
-use scx_chaos::run;
 use scx_chaos::Args;
+use scx_chaos::run;
 
 use clap::Parser;
 

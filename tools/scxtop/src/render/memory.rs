@@ -4,9 +4,9 @@
 // GNU General Public License version 2.
 
 use crate::columns::{
-    get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
+    Column, get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
     get_memory_summary_columns, get_pagefault_summary_columns, get_slab_columns,
-    get_swap_summary_columns, Column,
+    get_swap_summary_columns,
 };
 use crate::util::format_bytes;
 use crate::{Action, AppState, AppTheme, KeyMap, MemStatSnapshot};
@@ -15,7 +15,7 @@ use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::symbols::line::THICK;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, LineGauge, Row, Table};
-use ratatui::{layout::Rect, Frame};
+use ratatui::{Frame, layout::Rect};
 
 /// Renderer for memory views
 pub struct MemoryRenderer;

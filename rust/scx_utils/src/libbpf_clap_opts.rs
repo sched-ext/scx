@@ -6,8 +6,8 @@ use clap::Parser;
 use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 use libbpf_rs::libbpf_sys::size_t;
 
-use std::ffi::c_char;
 use std::ffi::CString;
+use std::ffi::c_char;
 use std::mem;
 
 #[derive(Debug, Clone, Parser)]

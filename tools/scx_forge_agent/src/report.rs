@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Optimization run report: per-round history table, markdown and JSON renderers.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::usage::Usage;
 

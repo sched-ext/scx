@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::misc::read_from_file;
 use crate::Cpumask;
+use crate::misc::read_from_file;
 use anyhow::Result;
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]

@@ -22,13 +22,13 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cargo_program;
 use crate::color::Style;
 use crate::interrupt;
 use crate::progress::ProgressSpinner;
-use crate::spec::{Spec, METRIC_NAME};
+use crate::spec::{METRIC_NAME, Spec};
 use crate::sudo::Sudo;
 
 const SCX_STATE_PATH: &str = "/sys/kernel/sched_ext/state";
@@ -121,7 +121,7 @@ fn cargo_build(
             return (
                 false,
                 format!("spawn {} build: {e}", cargo.to_string_lossy()),
-            )
+            );
         }
     };
     let pid = child.id() as i32;
@@ -149,7 +149,7 @@ fn cargo_build(
                     return (
                         false,
                         format!("cargo build interrupted; collect output: {e}"),
-                    )
+                    );
                 }
             };
             let mut s = String::from("cargo build interrupted by Ctrl-C\n");
@@ -164,7 +164,7 @@ fn cargo_build(
                 return (
                     false,
                     format!("poll {} build: {e}", cargo.to_string_lossy()),
-                )
+                );
             }
         }
     }
@@ -174,7 +174,7 @@ fn cargo_build(
             return (
                 false,
                 format!("collect {} build output: {e}", cargo.to_string_lossy()),
-            )
+            );
         }
     };
     let mut s = String::from_utf8_lossy(&out.stdout).to_string();
@@ -306,17 +306,21 @@ fn sorted_counts(map: &HashMap<String, u64>) -> Vec<(&String, &u64)> {
 }
 
 fn event_counts_json(events: &HashMap<String, u64>) -> Value {
-    json!(sorted_counts(events)
-        .into_iter()
-        .map(|(event, count)| json!({"event": event, "count": count}))
-        .collect::<Vec<_>>())
+    json!(
+        sorted_counts(events)
+            .into_iter()
+            .map(|(event, count)| json!({"event": event, "count": count}))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn event_rates_json(events: &HashMap<String, u64>, window: Option<f64>) -> Value {
-    json!(sorted_counts(events)
-        .into_iter()
-        .map(|(event, count)| json!({"event": event, "per_sec": rate_value(*count, window)}))
-        .collect::<Vec<_>>())
+    json!(
+        sorted_counts(events)
+            .into_iter()
+            .map(|(event, count)| json!({"event": event, "per_sec": rate_value(*count, window)}))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn cpu_event_rate_summary(stats: &TraceStats, window: Option<f64>, limit: usize) -> Value {
@@ -512,7 +516,7 @@ fn summarize_trace(sudo: &Sudo, trace_path: &Path, log_path: &Path, events: &[St
                 "perf_data": trace_path.display().to_string(),
                 "error": format!("create perf script report {}: {e}", report_path.display()),
                 "log_tail": tail(&read_lossy(log_path), 1000),
-            })
+            });
         }
     };
     let report_err = match report.try_clone() {
@@ -524,7 +528,7 @@ fn summarize_trace(sudo: &Sudo, trace_path: &Path, log_path: &Path, events: &[St
                 "perf_data": trace_path.display().to_string(),
                 "error": format!("clone perf script report handle: {e}"),
                 "log_tail": tail(&read_lossy(log_path), 1000),
-            })
+            });
         }
     };
     let args = vec![
@@ -562,7 +566,7 @@ fn summarize_trace(sudo: &Sudo, trace_path: &Path, log_path: &Path, events: &[St
                 "perf_script": report_path.display().to_string(),
                 "error": format!("open perf script report: {e}"),
                 "log_tail": tail(&read_lossy(log_path), 1000),
-            })
+            });
         }
     };
     let mut stats = TraceStats::default();
@@ -1345,10 +1349,12 @@ mod tests {
         );
         assert!(!summary.as_object().unwrap().contains_key("sched_switch"));
         assert!(!summary.as_object().unwrap().contains_key("top_switch_cpu"));
-        assert!(!summary
-            .as_object()
-            .unwrap()
-            .contains_key("top_cpu_event_rates"));
+        assert!(
+            !summary
+                .as_object()
+                .unwrap()
+                .contains_key("top_cpu_event_rates")
+        );
         assert_eq!(summary["cpu_event_rate_summary"]["cpus_observed"], json!(4));
         assert_eq!(
             summary["cpu_event_rate_summary"]["median_events_per_sec"],

@@ -4,12 +4,12 @@
 // GNU General Public License version 2.
 
 use num_format::SystemLocale;
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use scxtop::{
+    AppTheme, EventData, KeyMap,
     network_stats::{InterfaceStats, NetworkStatSnapshot},
     render::NetworkRenderer,
-    AppTheme, EventData, KeyMap,
 };
 use std::collections::BTreeMap;
 

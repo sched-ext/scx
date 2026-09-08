@@ -96,8 +96,8 @@ use std::time::SystemTime;
 use anyhow::Result;
 use bpf::*;
 use libbpf_rs::OpenObject;
-use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::UserExitInfo;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 
 // Maximum time slice (in nanoseconds) that a task can use before it is re-enqueued.
 const SLICE_NS: u64 = 5_000_000;

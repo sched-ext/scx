@@ -33,8 +33,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1112,11 +1112,7 @@ fn classify_attempt(summary: &str, diff: &str) -> AttemptTags {
 }
 
 fn normalized_improvement(goal: &str, delta: f64) -> f64 {
-    if goal == "minimize" {
-        -delta
-    } else {
-        delta
-    }
+    if goal == "minimize" { -delta } else { delta }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2015,7 +2011,8 @@ async fn optimize_loop(
     if !base.is_complete() {
         anyhow::bail!(
             "baseline does not build/attach/measure (stage={}); fix the scheduler before optimizing.\nerrors: {:?}",
-            base.stage, base.errors
+            base.stage,
+            base.errors
         );
     }
     // The baseline build produced the binary, so capture its --help now: both
@@ -2362,11 +2359,11 @@ async fn optimize_loop(
                         if api_tries < MAX_API_ERROR_RETRIES {
                             api_tries += 1;
                             agent_warn(
-                                    stderr_color,
-                                    format!(
-                                        "API error before edit; retrying round attempt {api_tries}/{MAX_API_ERROR_RETRIES}: {msg}"
-                                    ),
-                                );
+                                stderr_color,
+                                format!(
+                                    "API error before edit; retrying round attempt {api_tries}/{MAX_API_ERROR_RETRIES}: {msg}"
+                                ),
+                            );
                             continue;
                         }
                         summary = format!("api error: {msg}");

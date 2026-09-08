@@ -1,9 +1,9 @@
 use crate::StatsErrno;
 use crate::StatsRequest;
 use crate::StatsResponse;
+use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use anyhow::Result;
 use log::trace;
 use serde::Deserialize;
 use std::io::BufRead;

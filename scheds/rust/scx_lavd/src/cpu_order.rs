@@ -6,17 +6,17 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::anyhow;
 use anyhow::Result;
-use itertools::iproduct;
+use anyhow::anyhow;
 use itertools::Itertools;
+use itertools::iproduct;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::EnergyModel;
+use scx_utils::NR_CPU_IDS;
 use scx_utils::PerfDomain;
 use scx_utils::PerfState;
 use scx_utils::Topology;
-use scx_utils::NR_CPU_IDS;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;

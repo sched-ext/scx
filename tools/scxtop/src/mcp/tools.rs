@@ -3,13 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use super::SharedAnalyzerControl;
 use super::memory_aware_limits::MemoryAwareLimits;
 use super::perf_profiling::{PerfProfilingConfig, SharedPerfProfiler};
 use super::protocol::McpTool;
-use super::SharedAnalyzerControl;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use perfetto_protos::ftrace_event::ftrace_event;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 

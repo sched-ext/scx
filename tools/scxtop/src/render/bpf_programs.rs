@@ -3,17 +3,17 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::AppTheme;
 use crate::bpf_prog_data::{BpfProgData, BpfProgStats, SchedExtOpType};
 use crate::columns::Columns;
 use crate::symbol_data::SymbolSample;
-use crate::AppTheme;
 use anyhow::Result;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::bar::NINE_LEVELS;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Sparkline, Table, TableState};
-use ratatui::Frame;
 use std::collections::VecDeque;
 
 /// Parameters for rendering BPF programs list

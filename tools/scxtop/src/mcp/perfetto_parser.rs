@@ -3,13 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use perfetto_protos::{
-    ftrace_event::{ftrace_event, FtraceEvent},
+    ftrace_event::{FtraceEvent, ftrace_event},
     ftrace_event_bundle::ftrace_event_bundle::CompactSched,
     sys_stats::SysStats,
     trace::Trace,
-    trace_packet::{trace_packet, TracePacket},
+    trace_packet::{TracePacket, trace_packet},
     track_event::TrackEvent,
 };
 use protobuf::Message;

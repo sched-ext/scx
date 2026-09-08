@@ -69,15 +69,15 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
+use crate::Cpumask;
 use crate::compat::ROOT_PREFIX;
 use crate::cpumask::read_cpulist;
 use crate::misc::find_best_split_size;
 use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
 use crate::misc::read_from_file;
-use crate::Cpumask;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use glob::glob;
 use log::info;
 use log::warn;
@@ -89,7 +89,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
-use crate::gpu::{create_gpus, Gpu, GpuIndex};
+use crate::gpu::{Gpu, GpuIndex, create_gpus};
 
 lazy_static::lazy_static! {
     /// The maximum possible number of CPU IDs in the system. As mentioned
@@ -451,11 +451,7 @@ impl Topology {
                     let nr_set: usize = cpu_ids.iter().filter(|&&c| cpumask.test_cpu(c)).count();
 
                     let ch = if nr_cpus == 1 {
-                        if nr_set > 0 {
-                            '█'
-                        } else {
-                            '░'
-                        }
+                        if nr_set > 0 { '█' } else { '░' }
                     } else if nr_cpus == 2 {
                         let first_set = cpumask.test_cpu(cpu_ids[0]);
                         let second_set = cpumask.test_cpu(cpu_ids[1]);

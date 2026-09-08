@@ -1778,7 +1778,7 @@ mod tests {
         let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
 
         assert_eq!(allocs[0].total(), 40); // P: demand-capped
-                                           // Both spread layers get equal share of bottleneck.
+        // Both spread layers get equal share of bottleneck.
         assert_eq!(allocs[1].unpinned[0], 4);
         assert_eq!(allocs[1].unpinned[1], 4);
         assert_eq!(allocs[1].total(), 8);

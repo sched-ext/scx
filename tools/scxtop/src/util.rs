@@ -5,8 +5,8 @@
 
 use crate::bpf_intf;
 use anyhow::Result;
-use nix::time::{clock_gettime, ClockId};
-use nix::unistd::{getuid, Uid};
+use nix::time::{ClockId, clock_gettime};
+use nix::unistd::{Uid, getuid};
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;

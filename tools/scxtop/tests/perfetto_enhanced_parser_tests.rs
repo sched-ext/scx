@@ -6,8 +6,8 @@
 //! Tests for Phase 1: Enhanced Parser Infrastructure
 
 use scxtop::mcp::{
-    event_category, event_type_name, CompatibilityDetector, EventCategory, PerfettoTrace,
-    TraceCapabilities, TraceSource,
+    CompatibilityDetector, EventCategory, PerfettoTrace, TraceCapabilities, TraceSource,
+    event_category, event_type_name,
 };
 use std::path::Path;
 

@@ -4,11 +4,11 @@
 // GNU General Public License version 2.
 
 use super::protocol::{McpReadResourceResult, McpResource, McpResourceContent};
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 type ResourceHandler = Box<dyn Fn() -> Result<Value> + Send + Sync>;
 

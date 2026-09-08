@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")

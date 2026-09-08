@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, Result};
-use libbpf_rs::{btf, query::ProgInfoIter, ProgramType};
+use anyhow::{Result, anyhow};
+use libbpf_rs::{ProgramType, btf, query::ProgInfoIter};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, VecDeque};

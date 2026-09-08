@@ -20,17 +20,17 @@ use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use clap::Parser;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
@@ -38,6 +38,11 @@ use libbpf_rs::ProgramInput;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::eventfd::EventFd;
 use scx_stats::prelude::*;
+use scx_utils::Cpumask;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::Topology;
+use scx_utils::TopologyArgs;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -48,11 +53,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::TopologyArgs;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPUS_POSSIBLE;
 use tracing::{debug, info, trace, warn};
 use tracing_subscriber::filter::EnvFilter;
 
@@ -1849,7 +1849,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_subcell_assignments, CpuAssignment, Cpumask, Opts};
+    use super::{CpuAssignment, Cpumask, Opts, validate_subcell_assignments};
     use clap::Parser;
 
     fn cpumask(cpus: &[usize]) -> Cpumask {

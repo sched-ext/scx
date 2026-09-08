@@ -143,10 +143,12 @@ fn test_tool_query_stats_invalid_type() {
 
     let result = tools.call(&params);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Unknown stat_type"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown stat_type")
+    );
 }
 
 #[test]
@@ -427,14 +429,18 @@ fn test_detect_outliers_schema_categories() {
     let category_enum = &schema["properties"]["category"]["enum"];
 
     // Verify all category options are present
-    assert!(category_enum
-        .as_array()
-        .unwrap()
-        .contains(&json!("latency")));
-    assert!(category_enum
-        .as_array()
-        .unwrap()
-        .contains(&json!("runtime")));
+    assert!(
+        category_enum
+            .as_array()
+            .unwrap()
+            .contains(&json!("latency"))
+    );
+    assert!(
+        category_enum
+            .as_array()
+            .unwrap()
+            .contains(&json!("runtime"))
+    );
     assert!(category_enum.as_array().unwrap().contains(&json!("cpu")));
     assert!(category_enum.as_array().unwrap().contains(&json!("all")));
 }
@@ -457,8 +463,10 @@ fn test_detect_outliers_schema_methods() {
     assert!(method_enum.as_array().unwrap().contains(&json!("IQR")));
     assert!(method_enum.as_array().unwrap().contains(&json!("MAD")));
     assert!(method_enum.as_array().unwrap().contains(&json!("StdDev")));
-    assert!(method_enum
-        .as_array()
-        .unwrap()
-        .contains(&json!("Percentile")));
+    assert!(
+        method_enum
+            .as_array()
+            .unwrap()
+            .contains(&json!("Percentile"))
+    );
 }

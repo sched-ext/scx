@@ -35,15 +35,15 @@ use anyhow::{Context, Result};
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use log::{info, warn};
-use scx_utils::get_primary_cpus;
 use scx_utils::Powermode;
 use scx_utils::Topology;
+use scx_utils::get_primary_cpus;
 
 use crate::bpf_intf::mlfq_bitmap;
 use crate::bpf_intf::mlfq_consts_MLFQ_BITMAP_WORDS;
 use crate::bpf_intf::mlfq_consts_MLFQ_MAX_CPUS;
-use crate::bpf_intf::mlfq_consts_MLFQ_MAX_LLCS;
 use crate::bpf_intf::mlfq_consts_MLFQ_MAX_LLC_CPUS;
+use crate::bpf_intf::mlfq_consts_MLFQ_MAX_LLCS;
 use crate::bpf_intf::mlfq_llc_cpu_list;
 
 /// Compile-time CPU bound; must match `MLFQ_MAX_CPUS` in `src/bpf/intf.h`.

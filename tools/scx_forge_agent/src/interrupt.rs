@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Error;

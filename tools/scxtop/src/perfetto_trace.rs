@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 use procfs::process::Process as ProcProcess;
-use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use scx_utils::scx_enums;
 
 use std::collections::{BTreeMap, HashMap};
@@ -27,29 +27,29 @@ use crate::{
 
 use perfetto_protos::{
     builtin_clock::BuiltinClock,
-    clock_snapshot::{clock_snapshot::Clock, ClockSnapshot},
-    counter_descriptor::{counter_descriptor::Unit::UNIT_COUNT, CounterDescriptor},
+    clock_snapshot::{ClockSnapshot, clock_snapshot::Clock},
+    counter_descriptor::{CounterDescriptor, counter_descriptor::Unit::UNIT_COUNT},
     cpuhp::{CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent},
-    ftrace_event::{ftrace_event, FtraceEvent},
+    ftrace_event::{FtraceEvent, ftrace_event},
     ftrace_event_bundle::FtraceEventBundle,
-    generic::{kprobe_event::KprobeType, KprobeEvent},
+    generic::{KprobeEvent, kprobe_event::KprobeType},
     gpu_mem::GpuMemTotalFtraceEvent,
     ipi::IpiRaiseFtraceEvent,
     irq::{SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent},
     process_descriptor::ProcessDescriptor,
-    process_tree::{process_tree::Process, ProcessTree},
+    process_tree::{ProcessTree, process_tree::Process},
     sched::{
         SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
         SchedProcessForkFtraceEvent, SchedProcessHangFtraceEvent, SchedProcessWaitFtraceEvent,
         SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
     },
-    sys_stats::{sys_stats::CpuTimes, sys_stats::MeminfoValue, SysStats},
+    sys_stats::{SysStats, sys_stats::CpuTimes, sys_stats::MeminfoValue},
     sys_stats_counters::MeminfoCounters,
     thread_descriptor::ThreadDescriptor,
     trace::Trace,
-    trace_packet::{trace_packet, TracePacket},
-    track_descriptor::{track_descriptor::Static_or_dynamic_name, TrackDescriptor},
-    track_event::{track_event, TrackEvent},
+    trace_packet::{TracePacket, trace_packet},
+    track_descriptor::{TrackDescriptor, track_descriptor::Static_or_dynamic_name},
+    track_event::{TrackEvent, track_event},
 };
 use protobuf::{EnumOrUnknown, Message, SpecialFields};
 

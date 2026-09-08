@@ -3,10 +3,10 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::Context;
 use crate::bpf::{BpfSkel, BpfSkelBuilder};
 use crate::bpf_intf::hints_event;
-use crate::Context;
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapHandle, OpenObject, RingBufferBuilder};

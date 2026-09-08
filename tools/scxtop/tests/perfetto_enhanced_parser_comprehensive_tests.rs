@@ -6,8 +6,8 @@
 //! Comprehensive tests for Phase 1 enhanced parser - edge cases, performance, compatibility
 
 use scxtop::mcp::{
-    events_in_category, softirq_type_name, CompatibilityDetector, EventCategory, PerfettoTrace,
-    TraceCapabilities, TraceSource,
+    CompatibilityDetector, EventCategory, PerfettoTrace, TraceCapabilities, TraceSource,
+    events_in_category, softirq_type_name,
 };
 use std::path::Path;
 

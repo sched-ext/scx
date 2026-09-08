@@ -3,13 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::bpf_prog_data::BpfProgData;
-use crate::symbol_data::SymbolSample;
-use crate::util::{format_bytes, format_percentage};
 use crate::MemStatSnapshot;
 use crate::ProcData;
 use crate::ThreadData;
 use crate::VecStats;
+use crate::bpf_prog_data::BpfProgData;
+use crate::symbol_data::SymbolSample;
+use crate::util::{format_bytes, format_percentage};
 use ratatui::prelude::Constraint;
 use std::collections::HashMap;
 

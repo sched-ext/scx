@@ -9,7 +9,7 @@
 //! grows fast); `completion` is the cumulative output tokens. `cache_read` /
 //! `cache_creation` are shown only when nonzero (prompt-cache hits/writes).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Usage {

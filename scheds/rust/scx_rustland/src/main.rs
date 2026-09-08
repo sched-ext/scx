@@ -24,9 +24,9 @@ use log::info;
 use log::warn;
 use procfs::process::Process;
 use scx_stats::prelude::*;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
-use scx_utils::UserExitInfo;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "RustLand";

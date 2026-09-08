@@ -613,7 +613,9 @@ impl VmSettings {
     // Restore all the previous sysctl vm settings.
     fn restore(&self) -> Result<(), String> {
         let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
-        let value = self.saved_compact_unevictable_allowed.load(Ordering::Relaxed);
+        let value = self
+            .saved_compact_unevictable_allowed
+            .load(Ordering::Relaxed);
         self.write_procfs(compact_unevictable_allowed, value)?;
 
         Ok(())

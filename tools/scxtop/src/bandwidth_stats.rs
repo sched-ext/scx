@@ -9,7 +9,7 @@
 //! Reads counters from `/sys/fs/resctrl/mon_data/mon_L3_<id>/` and derives
 //! bytes-per-second rates from tick-to-tick deltas.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
