@@ -235,7 +235,6 @@ impl<'cb> BpfScheduler<'cb> {
         //
         // Use of a `str` whose contents are not valid UTF-8 is undefined behavior.
         fn callback(data: &[u8]) -> i32 {
-            #[allow(static_mut_refs)]
             unsafe {
                 // SAFETY: copying from the BPF ring buffer to BUF is safe, since the size of BUF
                 // is exactly the size of QueuedTask and the callback operates in chunks of
@@ -243,7 +242,7 @@ impl<'cb> BpfScheduler<'cb> {
                 // guaranteed by the error code returned by this callback (see below). From a
                 // thread-safety perspective this is also correct, assuming the caller is a
                 // single-thread process (as it is for now).
-                BUF.0.copy_from_slice(data);
+                (*(&raw mut BUF.0)).copy_from_slice(data);
             }
 
             // Return 0 to indicate successful completion of the copy.
@@ -517,7 +516,6 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
-    #[allow(static_mut_refs)]
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         let bss_data = self.skel.maps.bss_data.as_mut().unwrap();
         
@@ -530,7 +528,8 @@ impl<'cb> BpfScheduler<'cb> {
             }
             1 => {
                 // A valid task is received, convert data to a proper task struct.
-                let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
+                let task =
+                    unsafe { EnqueuedMessage::from_bytes(&*(&raw const BUF.0)).to_queued_task() };
                 bss_data.nr_queued = bss_data.nr_queued.saturating_sub(1);
 
                 Ok(Some(task))
