@@ -1146,7 +1146,7 @@ impl<'a> Scheduler<'a> {
             return;
         }
 
-        let gen = self.model.generation + 1;
+        let new_gen = self.model.generation + 1;
         /*
          * A tree fit on the behavior of a handful of tasks would
          * over-fit them, so the publish requires at least
@@ -1157,7 +1157,7 @@ impl<'a> Scheduler<'a> {
         if res.nr_pids_train < MLFQ_TREE_MIN_PIDS {
             log::info!(
                 "MLFQ tree gen {} rejected: fit slice has only {} distinct pids (< {} required), keeping the previous model",
-                gen, res.nr_pids_train, MLFQ_TREE_MIN_PIDS
+                new_gen, res.nr_pids_train, MLFQ_TREE_MIN_PIDS
             );
             return;
         }
@@ -1169,7 +1169,7 @@ impl<'a> Scheduler<'a> {
         if !mlfq_tree::should_publish(res.mae_tree, res.mae_ema, res.corr, published_corr) {
             log::info!(
                 "MLFQ tree gen {} rejected: holdout MAE_tree={:.1}us > MAE_ema={:.1}us or corr {:.3} below floor 0.30 or not above published {:.3}, keeping the previous model",
-                gen,
+                new_gen,
                 res.mae_tree / 1e3,
                 res.mae_ema / 1e3,
                 res.corr,
@@ -1178,13 +1178,13 @@ impl<'a> Scheduler<'a> {
             return;
         }
 
-        if let Err(e) = self.publish_tree(&res.tree, gen) {
+        if let Err(e) = self.publish_tree(&res.tree, new_gen) {
             log::warn!("MLFQ tree publish failed, keeping the previous model: {e:#}");
             return;
         }
 
         self.model = ModelMeta {
-            generation: gen,
+            generation: new_gen,
             nr_samples: res.nr_train,
             nr_nodes: res.tree.nodes.len(),
             mae_tree_us: (res.mae_tree / 1e3).round() as u64,
@@ -1193,7 +1193,7 @@ impl<'a> Scheduler<'a> {
         };
         info!(
             "MLFQ tree model gen {}, nodes {}, fit {} samples (holdout {}), MAE_tree={}us MAE_ema={}us corr={:.3}",
-            gen,
+            new_gen,
             res.tree.nodes.len(),
             res.nr_train,
             res.holdout_len,
@@ -1222,7 +1222,7 @@ impl<'a> Scheduler<'a> {
     /// theoretical race is one mispredicted burst, which the queue-band
     /// nets absorb. The walk masks every index to the buffer bound, so
     /// it is never a memory-safety issue.
-    fn publish_tree(&mut self, tree: &mlfq_tree::SerializedTree, gen: u64) -> Result<()> {
+    fn publish_tree(&mut self, tree: &mlfq_tree::SerializedTree, new_gen: u64) -> Result<()> {
         let old_meta = {
             let bss = self
                 .skel
@@ -1234,8 +1234,8 @@ impl<'a> Scheduler<'a> {
         };
         let old_gen = old_meta >> crate::bpf_intf::MLFQ_TREE_META_GENERATION_SHIFT;
         // Monotonic generation check: new gen must exceed old, fail otherwise.
-        if gen <= old_gen && old_gen != 0 {
-            anyhow::bail!("monotonic gen violation: new {} <= old {}", gen, old_gen);
+        if new_gen <= old_gen && old_gen != 0 {
+            anyhow::bail!("monotonic gen violation: new {} <= old {}", new_gen, old_gen);
         }
         let old_active = (old_meta >> 1) & 1;
         let new_active = 1 - old_active;
@@ -1264,7 +1264,7 @@ impl<'a> Scheduler<'a> {
                 .bss_data
                 .as_mut()
                 .expect("bss_data missing, the BPF object has no .bss section");
-            bss.mlfq_tree_ctrl.meta = mlfq_tree::tree_meta(gen, tree.nodes.len(), new_active);
+            bss.mlfq_tree_ctrl.meta = mlfq_tree::tree_meta(new_gen, tree.nodes.len(), new_active);
         }
         Ok(())
     }

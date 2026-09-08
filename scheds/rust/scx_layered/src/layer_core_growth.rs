@@ -773,9 +773,9 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![0]);
+        assert_eq!(generator.node_order(), vec![0]);
     }
 
     #[test]
@@ -784,9 +784,9 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![0, 1]);
+        assert_eq!(generator.node_order(), vec![0, 1]);
     }
 
     #[test]
@@ -795,9 +795,9 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1, 0])];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1, 0]);
+        assert_eq!(generator.node_order(), vec![1, 0]);
     }
 
     #[test]
@@ -807,9 +807,9 @@ mod tests {
         // Spec only mentions node 1; hard limit, no appending.
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1])];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1]);
+        assert_eq!(generator.node_order(), vec![1]);
     }
 
     fn topo_4n() -> Arc<Topology> {
@@ -823,9 +823,9 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1, 0]);
+        assert_eq!(generator.node_order(), vec![1, 0]);
     }
 
     #[test]
@@ -834,9 +834,9 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![2, 3, 0, 1]);
+        assert_eq!(generator.node_order(), vec![2, 3, 0, 1]);
     }
 
     #[test]
@@ -846,9 +846,9 @@ mod tests {
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
         // layer_idx=5, 5 % 4 = 1
-        let gen = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
+        assert_eq!(generator.node_order(), vec![1, 2, 3, 0]);
     }
 
     #[test]
@@ -858,9 +858,9 @@ mod tests {
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1, 0])];
         let cpusets = BTreeSet::new();
         // Even with layer_idx=1, spec_nodes should be returned unchanged.
-        let gen = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1, 0]);
+        assert_eq!(generator.node_order(), vec![1, 0]);
     }
 
     #[test]
@@ -874,9 +874,9 @@ mod tests {
             test_spec(LayerGrowthAlgo::Linear),
         ];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1, 0]);
+        assert_eq!(generator.node_order(), vec![1, 0]);
     }
 
     #[test]
@@ -894,9 +894,9 @@ mod tests {
             test_spec(LayerGrowthAlgo::Linear),
         ];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![3, 1, 2, 0]);
+        assert_eq!(generator.node_order(), vec![3, 1, 2, 0]);
     }
 
     #[test]
@@ -914,9 +914,9 @@ mod tests {
             test_spec(LayerGrowthAlgo::Linear),
         ];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![2, 3, 1, 0]);
+        assert_eq!(generator.node_order(), vec![2, 3, 1, 0]);
     }
 
     #[test]
@@ -931,9 +931,9 @@ mod tests {
             test_spec(LayerGrowthAlgo::Linear),
         ];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
 
-        assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
+        assert_eq!(generator.node_order(), vec![1, 2, 3, 0]);
     }
 
     // --- node_groups ---
@@ -954,8 +954,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![0]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![0]]);
     }
 
     // G02: Sticky on 4 NUMA, no spec — strict tiers in node order.
@@ -965,8 +965,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G03: Sticky on 4 NUMA, layer_idx=2 — rotation preserved per-tier.
@@ -976,8 +976,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![2, 3, 0, 1]));
+        let generator = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![2, 3, 0, 1]));
     }
 
     // G04: Sticky on 4 NUMA, layer_idx=5 — rotation wraps (5 % 4 = 1).
@@ -987,8 +987,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![1, 2, 3, 0]));
+        let generator = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![1, 2, 3, 0]));
     }
 
     // G05: Sticky with spec_nodes=[1] — hard limit, single tier on N1.
@@ -998,8 +998,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Sticky, vec![1])];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![1]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![1]]);
     }
 
     // G06: Sticky with spec_nodes=[1,3] — strict tiers preserved (design).
@@ -1009,8 +1009,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Sticky, vec![1, 3])];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![1], vec![3]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![1], vec![3]]);
     }
 
     // G07-G09: Linear, Reverse, Random — strict tiers.
@@ -1020,8 +1020,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1030,8 +1030,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Reverse)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1040,8 +1040,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Random)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G10: Topo with spec_nodes=[0,2] — strict tiers respecting hard limit.
@@ -1051,8 +1051,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Topo, vec![0, 2])];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![0], vec![2]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![0], vec![2]]);
     }
 
     // G11: Topo without spec_nodes — default strict tiers.
@@ -1062,8 +1062,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Topo)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G12-G14: BigLittle, LittleBig, RandomTopo — strict tiers.
@@ -1073,8 +1073,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::BigLittle)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1083,8 +1083,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::LittleBig)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1093,8 +1093,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::RandomTopo)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G15-G17: CpuSetSpread variants — strict tiers.
@@ -1104,8 +1104,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::CpuSetSpread)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1114,8 +1114,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::CpuSetSpreadReverse)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1124,8 +1124,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::CpuSetSpreadRandom)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G18: StickyDynamic — strict tiers (delegates to grow_sticky internally).
@@ -1135,8 +1135,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::StickyDynamic)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G19-G21: NodeSpread* — strict tiers (groups irrelevant; spread:bool path).
@@ -1146,8 +1146,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::NodeSpread)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1156,8 +1156,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::NodeSpreadReverse)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     #[test]
@@ -1166,8 +1166,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::NodeSpreadRandom)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), strict(vec![0, 1, 2, 3]));
     }
 
     // G22: claim_rank deprioritization carries through to tiers.
@@ -1182,9 +1182,9 @@ mod tests {
             test_spec(LayerGrowthAlgo::Linear),
         ];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
         // Same expected ordering as node_order, lifted to one-per-tier.
-        assert_eq!(gen.node_groups(), strict(vec![3, 1, 2, 0]));
+        assert_eq!(generator.node_groups(), strict(vec![3, 1, 2, 0]));
     }
 
     // G23: RoundRobin on 1 NUMA — single tier, single node (degenerate).
@@ -1194,8 +1194,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::RoundRobin)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![0]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![0]]);
     }
 
     // G24: RoundRobin on 4 NUMA — single tier with all nodes.
@@ -1205,8 +1205,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::RoundRobin)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![0, 1, 2, 3]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![0, 1, 2, 3]]);
     }
 
     // G25: RoundRobin with spec_nodes=[2] — single tier, single node.
@@ -1216,8 +1216,8 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::RoundRobin, vec![2])];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![2]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![2]]);
     }
 
     // G26: RoundRobin with spec_nodes=[0,2] — single tier, restricted.
@@ -1230,8 +1230,8 @@ mod tests {
             vec![0, 2],
         )];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
-        assert_eq!(gen.node_groups(), vec![vec![0, 2]]);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(generator.node_groups(), vec![vec![0, 2]]);
     }
 
     // G27: RoundRobin layer_idx=7 — post-rotation, still single tier.
@@ -1241,9 +1241,9 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::RoundRobin)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 7, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 7, &topo, &cpusets);
         // 7 % 4 = 3, rotation produces [3, 0, 1, 2].
-        assert_eq!(gen.node_groups(), vec![vec![3, 0, 1, 2]]);
+        assert_eq!(generator.node_groups(), vec![vec![3, 0, 1, 2]]);
     }
 
     // --- node_core_seqs ---
@@ -1254,10 +1254,10 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
         // 1N has 8 cores: all in node 0.
-        let ids = gen.node_core_seqs(0);
+        let ids = generator.node_core_seqs(0);
         assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
@@ -1267,10 +1267,10 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
-        let node0 = gen.node_core_seqs(0);
-        let node1 = gen.node_core_seqs(1);
+        let node0 = generator.node_core_seqs(0);
+        let node1 = generator.node_core_seqs(1);
 
         // Node 0: cores 0-7, Node 1: cores 8-15.
         assert_eq!(node0, vec![0, 1, 2, 3, 4, 5, 6, 7]);
@@ -1290,11 +1290,11 @@ mod tests {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
         // With 1 layer, chunk = 8, offset = 0 → no rotation.
         let mut v = vec![0, 1, 2, 3, 4, 5, 6, 7];
-        gen.rotate_node_layer_offset(&mut v);
+        generator.rotate_node_layer_offset(&mut v);
         assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
@@ -1307,12 +1307,12 @@ mod tests {
             test_spec(LayerGrowthAlgo::Linear),
         ];
         let cpusets = BTreeSet::new();
-        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+        let generator = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
 
         // Layer idx=1, 2 layers, 8 cores in node → chunk = ceil(8/2) = 4.
         // rotate_right(4).
         let mut v = vec![0, 1, 2, 3, 4, 5, 6, 7];
-        gen.rotate_node_layer_offset(&mut v);
+        generator.rotate_node_layer_offset(&mut v);
         assert_eq!(v, vec![4, 5, 6, 7, 0, 1, 2, 3]);
     }
 }
