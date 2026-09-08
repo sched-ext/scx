@@ -206,11 +206,10 @@ fn boxed_io_error<'a>(
 ) -> Option<&'a std::io::Error> {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(e) = cur {
-        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
-            if ioe.raw_os_error().is_some() {
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>()
+            && ioe.raw_os_error().is_some() {
                 return Some(ioe);
             }
-        }
         cur = e.source();
     }
     None
@@ -501,11 +500,10 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc
         );
         // Remove a stale socket file left by a previous run before
         // binding, so the bind cannot fail on the leftover path.
-        if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH) {
-            if meta.file_type().is_socket() {
+        if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH)
+            && meta.file_type().is_socket() {
                 let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
             }
-        }
 
         let listener = match UnixListener::bind(UNIX_SOCKET_PATH) {
             Ok(l) => l,
@@ -614,8 +612,7 @@ mod tests {
         // Any other or errno-less error is conservatively not a sandbox
         // failure.
         assert!(!sandbox_failure(&std::io::Error::from_raw_os_error(110)));
-        assert!(!sandbox_failure(&std::io::Error::new(
-            std::io::ErrorKind::Other,
+        assert!(!sandbox_failure(&std::io::Error::other(
             "no errno"
         )));
     }
@@ -669,7 +666,7 @@ mod tests {
         // An io::Error without an errno (a custom error payload) yields
         // None, so the classification stays off rather than guessing.
         let no_errno: Box<dyn std::error::Error + Send + Sync + 'static> =
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "no errno"));
+            Box::new(std::io::Error::other("no errno"));
         assert!(boxed_io_error(no_errno.as_ref()).is_none());
 
         // A non-io error with no io::Error in the source chain yields

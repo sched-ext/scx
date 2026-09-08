@@ -808,11 +808,10 @@ pub fn should_publish(mae_tree: f64, mae_ema: f64, corr: f64, published_corr: Op
     if corr < 0.30 {
         return false;
     }
-    if let Some(pc) = published_corr {
-        if corr <= pc + 1e-9 {
+    if let Some(pc) = published_corr
+        && corr <= pc + 1e-9 {
             return false;
         }
-    }
     true
 }
 

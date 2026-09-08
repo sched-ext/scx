@@ -278,11 +278,10 @@ fn llc_size_bytes(cache_path: &Path) -> Option<u64> {
         let id = std::fs::read_to_string(dir.join("id"))
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-        if let Some(llc_id) = llc_id {
-            if id.is_some() && id != Some(llc_id) {
+        if let Some(llc_id) = llc_id
+            && id.is_some() && id != Some(llc_id) {
                 continue;
             }
-        }
         let Some(size) = std::fs::read_to_string(dir.join("size"))
             .ok()
             .and_then(|s| parse_cache_size(&s))
@@ -845,7 +844,7 @@ mod tests {
     fn bitmap_words_count_matches_bpf_constant() {
         assert_eq!(
             mlfq_consts_MLFQ_BITMAP_WORDS,
-            (crate::bpf_intf::mlfq_consts_MLFQ_MAX_CPUS + 63) / 64
+            crate::bpf_intf::mlfq_consts_MLFQ_MAX_CPUS.div_ceil(64)
         );
     }
 
