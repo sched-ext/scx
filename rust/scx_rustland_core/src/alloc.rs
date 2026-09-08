@@ -142,7 +142,7 @@ impl Node {
     }
 
     fn is_empty(list: *const Node) -> bool {
-        unsafe { (*list).next as *const Node == list }
+        unsafe { std::ptr::eq((*list).next, list) }
     }
 }
 
