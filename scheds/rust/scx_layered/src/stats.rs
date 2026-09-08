@@ -568,8 +568,8 @@ impl LayerStats {
                 .iter()
                 .zip(self.llc_lats.iter())
                 .enumerate()
-                .filter(|(i, (&frac, _))| {
-                    let nr_cpus = self.nr_llc_cpus.get(*i).copied().unwrap_or(0);
+                .filter(|&(i, (&frac, _))| {
+                    let nr_cpus = self.nr_llc_cpus.get(i).copied().unwrap_or(0);
                     nr_cpus > 0 || frac > 0.0
                 })
                 .map(|(i, (&frac, &lat))| (i, frac, lat))

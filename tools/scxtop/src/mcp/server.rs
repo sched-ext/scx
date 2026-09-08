@@ -304,7 +304,7 @@ impl McpServer {
         let topology_llc = self.topology.clone();
         self.resources
             .register_handler("stats://aggregated/llc".to_string(), move || {
-                if let (Some(ref stats), Some(ref topo)) = (&shared_stats_llc, &topology_llc) {
+                if let (Some(stats), Some(topo)) = (&shared_stats_llc, &topology_llc) {
                     // Enable tracking on first access
                     if let Ok(mut stats_write) = stats.write() {
                         stats_write.enable_tracking();
@@ -331,7 +331,7 @@ impl McpServer {
         let topology_node = self.topology.clone();
         self.resources
             .register_handler("stats://aggregated/node".to_string(), move || {
-                if let (Some(ref stats), Some(ref topo)) = (&shared_stats_node, &topology_node) {
+                if let (Some(stats), Some(topo)) = (&shared_stats_node, &topology_node) {
                     // Enable tracking on first access
                     if let Ok(mut stats_write) = stats.write() {
                         stats_write.enable_tracking();
