@@ -141,11 +141,10 @@ impl<'a> Scheduler<'a> {
 
         // Process the domain of primary CPUs.
         let mut domain = Cpumask::from_str(&opts.primary_domain)?;
-        if domain.is_empty() {
-            if let Some(cpu) = cpus.last() {
+        if domain.is_empty()
+            && let Some(cpu) = cpus.last() {
                 domain = Cpumask::from_str(&format!("{:x}", 1 << cpu.id).to_string())?;
             }
-        }
         info!("primary CPU domain = 0x{:x}", domain);
 
         // Initialize BPF connector.
@@ -188,7 +187,7 @@ impl<'a> Scheduler<'a> {
             bail!("primary cpumask is empty");
         }
         let timer_cpu = timer_cpu.unwrap();
-        if let Err(e) = set_thread_affinity(&[timer_cpu as usize]) {
+        if let Err(e) = set_thread_affinity([timer_cpu]) {
             bail!("cannot set central CPU affinity: {}", e);
         }
 
@@ -271,11 +270,10 @@ impl<'a> Scheduler<'a> {
         }
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
-            if domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
+            if domain.test_cpu(cpu)
+                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
                     warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
                 }
-            }
         }
 
         Ok(())
