@@ -25,6 +25,12 @@ pub struct StatsClient {
     reader: Option<BufReader<UnixStream>>,
 }
 
+impl Default for StatsClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatsClient {
     pub fn new() -> Self {
         Self {
@@ -118,7 +124,7 @@ impl StatsClient {
         );
 
         if errno != 0 {
-            Err(anyhow!("{}", &resp).context(StatsErrno(errno)))?;
+            Err(anyhow!("{}", resp).context(StatsErrno(errno)))?;
         }
 
         Ok(serde_json::from_value(resp)?)

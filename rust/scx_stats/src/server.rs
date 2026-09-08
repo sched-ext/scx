@@ -88,7 +88,7 @@ impl<Req, Res> StatsOpenOps<Req, Res> {
 
 impl<Req, Res> std::ops::Drop for StatsOpenOps<Req, Res> {
     fn drop(&mut self) {
-        for (_, (ops, _, ch)) in self.map.iter_mut() {
+        for (ops, _, ch) in self.map.values_mut() {
             if let Some(close) = ops.lock().unwrap().close.take() {
                 close((&ch.req, &ch.res));
             }
@@ -170,6 +170,16 @@ where
     top: Option<String>,
     meta: BTreeMap<String, StatsMeta>,
     ops: BTreeMap<String, Arc<Mutex<StatsOps<Req, Res>>>>,
+}
+
+impl<Req, Res> Default for StatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+ {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<Req, Res> StatsServerData<Req, Res>
@@ -447,7 +457,7 @@ where
                         Some(e) if e.0 != 0 => e.0,
                         _ => libc::EINVAL,
                     };
-                    Self::build_resp(errno, &format!("{:?}", &e))?
+                    Self::build_resp(errno, &format!("{:?}", e))?
                 }
             };
 
@@ -641,11 +651,10 @@ where
         }
 
         let res = std::fs::remove_file(path);
-        if let std::io::Result::Err(e) = &res {
-            if e.kind() != std::io::ErrorKind::NotFound {
+        if let std::io::Result::Err(e) = &res
+            && e.kind() != std::io::ErrorKind::NotFound {
                 res.with_context(|| format!("deleting {path:?}"))?;
             }
-        }
 
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {path:?}"))?;

@@ -164,8 +164,8 @@ impl StatsData {
 
     pub fn new(ty: &Type, paths: &mut BTreeMap<String, Path>) -> syn::Result<Self> {
         let kind = StatsKind::new(ty, paths)?;
-        if let StatsKind::Struct(_) = &kind {
-            if let Type::Path(path) = ty {
+        if let StatsKind::Struct(_) = &kind
+            && let Type::Path(path) = ty {
                 if let Some(ar) = Self::new_array(&path.path, paths)? {
                     return Ok(ar);
                 }
@@ -173,7 +173,6 @@ impl StatsData {
                     return Ok(dict);
                 }
             }
-        }
         Ok(Self::Datum(kind))
     }
 }

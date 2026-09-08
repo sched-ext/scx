@@ -74,15 +74,15 @@ fn main() {
     let (tx, rx) = server.channels();
     spawn(move || {
         while let Ok(id) = rx.recv() {
-            if let Err(e) = tx.send(format!("hello {:?}", &id)) {
+            if let Err(e) = tx.send(format!("hello {:?}", id)) {
                 warn!("Server channel errored ({:?})", e);
                 break;
             }
         }
     });
 
-    info!("Server listening. Run `client {:?}`.", &path);
-    info!("Use `socat - UNIX-CONNECT:{:?}` for raw connection.", &path);
+    info!("Server listening. Run `client {:?}`.", path);
+    info!("Use `socat - UNIX-CONNECT:{:?}` for raw connection.", path);
     info!("Press any key to exit.");
 
     let mut buf: [u8; 1] = [0];
