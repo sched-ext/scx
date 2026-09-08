@@ -258,7 +258,7 @@ impl Topology {
         let mut topo_cores = BTreeMap::new();
         let mut topo_cpus = BTreeMap::new();
 
-        for (_node_id, node) in nodes.iter_mut() {
+        for node in nodes.values_mut() {
             let mut node_cores = BTreeMap::new();
             let mut node_cpus = BTreeMap::new();
 
@@ -434,7 +434,7 @@ impl Topology {
             for llc in node.llcs.values() {
                 let mut seg = String::new();
                 let nr_cores = llc.cores.len();
-                let nr_groups = (nr_cores + 7) / 8;
+                let nr_groups = nr_cores.div_ceil(8);
                 let base = nr_cores / nr_groups;
                 let rem = nr_cores % nr_groups;
                 // First `rem` groups get base+1, rest get base
@@ -811,7 +811,7 @@ fn get_capacity_source() -> Option<CapacitySource> {
     'outer: for src in sources {
         let path_str = [prefix.clone(), src.to_string()].join("/");
         let path = Path::new(&path_str);
-        raw_capacity = read_from_file(&path).unwrap_or(0_usize);
+        raw_capacity = read_from_file(path).unwrap_or(0_usize);
         if raw_capacity > 0 {
             // It would be an okay source...
             suffix = src;
@@ -896,7 +896,7 @@ fn replace_with_virt_llcs(
 
     // First pass: determine core to partition mapping, partition to
     // kernel_id mapping, and total partitions needed
-    for (_llc_id, llc) in node.llcs.iter() {
+    for llc in node.llcs.values() {
         // Group cores by type (big/little) to partition separately
         let mut cores_by_type: BTreeMap<bool, Vec<usize>> = BTreeMap::new();
 
@@ -904,11 +904,11 @@ fn replace_with_virt_llcs(
             let core_type = core.core_type == CoreType::Little;
             cores_by_type
                 .entry(core_type)
-                .or_insert(Vec::new())
+                .or_default()
                 .push(*core_id);
         }
 
-        for (_core_type, core_ids) in cores_by_type.iter() {
+        for core_ids in cores_by_type.values() {
             let num_cores_in_bucket = core_ids.len();
 
             // Find optimal partition size within specified range
@@ -946,10 +946,10 @@ fn replace_with_virt_llcs(
     }
 
     // Second pass: move cores to the appropriate new LLC based on partition
-    for (_llc_id, llc) in node.llcs.iter_mut() {
+    for llc in node.llcs.values_mut() {
         for (core_id, core) in llc.cores.iter() {
-            if let Some(&target_partition_id) = core_to_partition.get(core_id) {
-                if let Some(target_llc) = virt_llcs.get_mut(&target_partition_id) {
+            if let Some(&target_partition_id) = core_to_partition.get(core_id)
+                && let Some(target_llc) = virt_llcs.get_mut(&target_partition_id) {
                     let target_llc_mut = Arc::get_mut(target_llc).unwrap();
 
                     // Clone core and update its LLC ID to match new partition
@@ -972,7 +972,6 @@ fn replace_with_virt_llcs(
                     // Add the updated core to the virtual LLC
                     target_llc_mut.cores.insert(*core_id, Arc::new(new_core));
                 }
-            }
         }
     }
 

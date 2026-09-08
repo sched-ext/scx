@@ -8,15 +8,14 @@ use std::fmt::Write;
 lazy_static::lazy_static! {
     static ref GIT_VERSION: String = {
         let mut ver = String::new();
-        if let Some(sha) = option_env!("SCX_GIT_SHA") {
-            if !sha.is_empty() {
+        if let Some(sha) = option_env!("SCX_GIT_SHA")
+            && !sha.is_empty() {
                 ver += "g";
                 ver += sha;
                 if option_env!("SCX_GIT_DIRTY").is_some() {
                     ver += "-dirty";
                 }
             }
-        }
         ver
     };
     static ref BUILD_TAG: String = {
@@ -31,10 +30,10 @@ lazy_static::lazy_static! {
 pub fn full_version(semver: &str) -> String {
     let mut ver = semver.to_string();
     if !GIT_VERSION.is_empty() {
-        write!(ver, "-{}", &*GIT_VERSION).unwrap();
+        write!(ver, "-{}", *GIT_VERSION).unwrap();
     }
     if !BUILD_TAG.is_empty() {
-        write!(ver, " {}", &*BUILD_TAG).unwrap();
+        write!(ver, " {}", *BUILD_TAG).unwrap();
     }
     ver
 }
@@ -43,10 +42,10 @@ pub fn ops_version_suffix(semver: &str) -> String {
     let mut ver = String::from("_");
     ver.push_str(semver);
     if !GIT_VERSION.is_empty() {
-        write!(ver, "_{}", &*GIT_VERSION).unwrap();
+        write!(ver, "_{}", *GIT_VERSION).unwrap();
     }
     if !BUILD_TAG.is_empty() {
-        write!(ver, "_{}", &*BUILD_TAG).unwrap();
+        write!(ver, "_{}", *BUILD_TAG).unwrap();
     }
     ver = ver
         .chars()

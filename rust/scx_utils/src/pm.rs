@@ -98,11 +98,10 @@ where
         let name = name.to_string_lossy();
         if let Some(rest) = name.strip_prefix("package_") {
             let parts: Vec<&str> = rest.split("_die_").collect();
-            if parts.len() == 2 {
-                if let (Ok(pkg), Ok(die)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+            if parts.len() == 2
+                && let (Ok(pkg), Ok(die)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
                     f(pkg, die)?;
                 }
-            }
         }
     }
     Ok(())

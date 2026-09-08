@@ -11,6 +11,7 @@ use std::ffi::c_char;
 use std::mem;
 
 #[derive(Debug, Clone, Parser)]
+#[derive(Default)]
 pub struct LibbpfOpts {
     /// Parse map definitions non-strictly, allowing extra attributes/data.
     #[clap(long)]
@@ -48,17 +49,6 @@ pub struct LibbpfOpts {
     pub bpf_token_path: Option<String>,
 }
 
-impl Default for LibbpfOpts {
-    fn default() -> Self {
-        Self {
-            relaxed_maps: None,
-            pin_root_path: None,
-            kconfig: None,
-            btf_custom_path: None,
-            bpf_token_path: None,
-        }
-    }
-}
 
 impl LibbpfOpts {
     /// Helper method to convert `LibbpfOpts` into an `Option<bpf_object_open_opts>`.

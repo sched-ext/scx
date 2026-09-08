@@ -147,7 +147,7 @@ impl EnergyModel {
     pub fn perf_total(&self) -> usize {
         let mut total = 0;
 
-        for (_, pd) in self.perf_doms.iter() {
+        for pd in self.perf_doms.values() {
             total += pd.perf_total();
         }
 
@@ -216,10 +216,10 @@ impl PerfState {
 
 impl fmt::Display for EnergyModel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (_, pd) in self.perf_doms.iter() {
+        for pd in self.perf_doms.values() {
             writeln!(f, "{pd:#}")?;
         }
-        for (_, eq_pd) in self.eq_perf_doms.iter() {
+        for eq_pd in self.eq_perf_doms.values() {
             writeln!(f, "{eq_pd:#}")?;
         }
         Ok(())
@@ -230,7 +230,7 @@ impl fmt::Display for PerfDomain {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "# perf domain: {:#}, cpus: {:#}", self.id, self.span)?;
         writeln!(f, "cost, frequency, inefficient, performance, power")?;
-        for (_, ps) in self.perf_table.iter() {
+        for ps in self.perf_table.values() {
             writeln!(f, "{ps:#}")?;
         }
         Ok(())
@@ -248,7 +248,7 @@ impl fmt::Display for EqPerfDomain {
             pd_ids.join(",")
         )?;
         writeln!(f, "cost, frequency, inefficient, performance, power")?;
-        for (_, ps) in self.perf_table.iter() {
+        for ps in self.perf_table.values() {
             writeln!(f, "{ps:#}")?;
         }
         Ok(())

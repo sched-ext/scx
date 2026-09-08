@@ -137,7 +137,7 @@ impl Cpumask {
                 .strip_prefix("0x")
                 .unwrap_or(cpumask)
                 .replace('_', "");
-            if tmp_str.len() % 2 != 0 {
+            if !tmp_str.len().is_multiple_of(2) {
                 tmp_str = "0".to_string() + &tmp_str;
             }
             tmp_str
