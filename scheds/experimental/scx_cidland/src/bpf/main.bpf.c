@@ -2175,6 +2175,107 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 }
 
 /*
+ * @from gives up the CPU, sched_yield().
+ *
+ * This is yield_task_fair():
+ *
+ *	if (unlikely(rq->nr_running == 1))
+ *		return;
+ *	...
+ *	update_curr(cfs_rq);
+ *	...
+ *	if (entity_eligible(cfs_rq, se)) {
+ *		se->vruntime = se->deadline;
+ *		update_deadline(cfs_rq, se);
+ *	}
+ *
+ * What a yield costs is the rest of the request the task is in the middle
+ * of. Its vruntime is moved up to the deadline it was issued, as if it had
+ * run the whole of it, and a deadline is reissued from there. That puts it
+ * behind the pack it is in rather than at the back of the queue or nowhere
+ * at all: a task that yields in a loop is charged for every request it
+ * does not use and falls behind at exactly the rate that says so, and one
+ * that yields once has given up one turn.
+ *
+ * fair.c guards the forfeit with the eligibility test and says why: under
+ * core scheduling an ineligible task can be picked, and one that yields
+ * every time it is picked would run its vruntime away. The same guard is
+ * kept here for the same reason.
+ *
+ * The slice goes with it. Without this op the kernel zeroes it,
+ *
+ *	if (SCX_HAS_OP(sch, yield))
+ *		SCX_CALL_OP_2TASKS_RET(sch, yield, rq, p, NULL);
+ *	else
+ *		scx_set_task_slice(p, 0);
+ *
+ * so installing one takes that over. It is not decoration: a task whose
+ * slice is still standing is one the pick hands straight back, and the
+ * yield would forfeit a request and change nothing about who runs.
+ * yield_task_scx() has already called scx_task_slice_ended(), which drops
+ * the %SCX_TASK_PROTECTED that would otherwise refuse the write.
+ *
+ * @to is a directed yield, yield_to(), and it is refused. fair.c honours
+ * one with set_next_buddy(), which pick_next_entity() reads under
+ * PICK_BUDDY; there is no buddy here and nothing that would read one.
+ * Charging the caller a request for a request that will not be honoured
+ * buys nothing, so a directed yield does nothing at all - yield_to() reads
+ * false as "not implemented" and skips even the schedule() it would
+ * otherwise make, leaving the caller free to try another target.
+ */
+bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
+		    struct task_struct *to)
+{
+	s32 cid = scx_bpf_this_cid();
+	struct task_ctx *tctx;
+	u64 now;
+
+	TOUCH_ARENA();
+
+	if (to)
+		return false;
+
+	scx_bpf_task_set_slice(from, 0);
+
+	tctx = try_lookup_task_ctx(from);
+	if (!tctx || !cid_valid(cid))
+		return false;
+
+	/*
+	 * Nothing else can run here, so there is nobody the forfeit would
+	 * hand the CPU to. This is fair.c's rq->nr_running == 1, counting
+	 * both of the places a runnable task of this cid waits in.
+	 */
+	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid)) &&
+	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL))
+		return false;
+
+	/*
+	 * update_curr(), which leaves a deadline ahead of the vruntime
+	 * whether or not the one it was issued has been consumed, and the
+	 * cid's published view of what it is running up to date with both.
+	 * The reference read below is then exact rather than projected.
+	 */
+	now = bpf_ktime_get_ns();
+	keep_charge(from, cid, now);
+
+	if (time_after(tctx->vruntime, cid_vref_place(cid, now)))
+		return false;
+
+	tctx->vruntime = tctx->deadline;
+
+	/*
+	 * The jump is service as far as the pack is concerned, the way
+	 * avg_vruntime() folds curr in at whatever vruntime it is carrying,
+	 * and it is a consumed request as far as the deadline is concerned.
+	 * Both are what this second settle-up is for.
+	 */
+	keep_charge(from, cid, now);
+
+	return false;
+}
+
+/*
  * Is @p, queued on @src_cid, still cache hot there as far as @dst_cid is
  * concerned?
  *
@@ -3058,6 +3159,7 @@ SCX_OPS_CID_DEFINE(cidland_ops,
 		   .select_cid		= (void *)cidland_select_cid,
 		   .enqueue		= (void *)cidland_enqueue,
 		   .tick		= (void *)cidland_tick,
+		   .yield		= (void *)cidland_yield,
 		   .dispatch		= (void *)cidland_dispatch,
 		   .runnable		= (void *)cidland_runnable,
 		   .quiescent		= (void *)cidland_quiescent,
