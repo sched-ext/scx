@@ -850,11 +850,10 @@ impl CpuTopology {
         while frontier.len() < target.max(1) {
             let mut best: Option<(usize, f64)> = None;
             for (i, node) in frontier.iter().enumerate() {
-                if let DomainNode::Cut { phi, .. } = node {
-                    if best.map_or(true, |(_, bp)| *phi < bp) {
+                if let DomainNode::Cut { phi, .. } = node
+                    && best.is_none_or(|(_, bp)| *phi < bp) {
                         best = Some((i, *phi));
                     }
-                }
             }
             let Some((idx, _)) = best else { break }; // no cuts left to split
             let node = frontier[idx];
@@ -1533,7 +1532,7 @@ mod t2_cut_tests {
         // CPUs 2 and 3 are the same sibling L2 pair: identical crossing price from 0.
         assert_eq!(m[0 * n + 2], m[0 * n + 3]);
         // Symmetric.
-        assert_eq!(m[0 * n + 4], m[4 * n + 0]);
+        assert_eq!(m[0 * n + 4], m[(4 * n)]);
     }
 
     #[test]

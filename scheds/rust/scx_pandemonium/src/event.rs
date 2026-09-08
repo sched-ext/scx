@@ -31,6 +31,12 @@ pub struct EventLog {
     len: usize,
 }
 
+impl Default for EventLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventLog {
     pub fn new() -> Self {
         Self {
