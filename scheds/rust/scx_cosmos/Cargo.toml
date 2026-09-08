@@ -3,6 +3,7 @@ name = "scx_cosmos"
 version = "1.1.6"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 edition = "2024"
+rust-version = "1.91"
 description = "Lightweight scheduler optimized for preserving task-to-CPU locality. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 

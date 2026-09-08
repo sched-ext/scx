@@ -122,7 +122,7 @@ scx
 - `bpftool`: Usually available in `linux-tools-common` or similar packages
 - `libelf`, `libz`, `libzstd`: For linking against libbpf
 - `pkg-config`: For finding system libraries
-- `Rust` toolchain: >=1.82
+- `Rust` toolchain: >=1.91
 
 The kernel has to be built with the following configuration:
 

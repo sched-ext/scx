@@ -3,6 +3,7 @@ name = "scx_forge"
 version = "1.1.2"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 edition = "2024"
+rust-version = "1.91"
 description = "AI scheduler-generation template for scx-forge-agent. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
