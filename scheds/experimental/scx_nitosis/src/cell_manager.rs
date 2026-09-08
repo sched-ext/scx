@@ -1028,11 +1028,12 @@ impl CellManager {
         let cpuset = Self::read_cpuset(path)
             .with_context(|| format!("reading cpuset for cgroup {}", path.display()))?;
         if let Some(ref mask) = cpuset {
+            let cpuset_path = path.join("cpuset.cpus");
             debug!(
                 "Cell {} has cpuset: {} (from {})",
                 cell_id,
                 mask.to_cpulist(),
-                path.join("cpuset.cpus").display()
+                cpuset_path.display()
             );
         }
 

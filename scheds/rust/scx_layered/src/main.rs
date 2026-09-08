@@ -2593,11 +2593,10 @@ impl<'a> Scheduler<'a> {
             }
             pmap.sys_end = order.len() as u32;
 
+            let order_vec: Vec<_> = order.iter().map(|(n, d)| (*n, *d)).collect();
             debug!(
                 "NODE[{}] prox_map[{}]: {:?}",
-                node_id,
-                pmap.sys_end,
-                &order.iter().map(|(n, d)| (*n, *d)).collect::<Vec<_>>()
+                node_id, pmap.sys_end, order_vec
             );
 
             skel.maps.node_data.update(
