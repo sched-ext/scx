@@ -798,8 +798,7 @@ impl<'a> Scheduler<'a> {
         info!("SMT sibling CPUs: {:?}", smt_siblings);
         for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
             Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                std::io::Error::other(
                     format!("enable_sibling_cpu: {}", e),
                 )
             })?;
