@@ -72,9 +72,10 @@ const volatile bool no_wake_sync;
 const volatile u64 slice_ns = 700000ULL;
 
 /*
- * Maximum lag, in virtual time, that a task can carry across a sleep.
+ * Timing granularity, TICK_NSEC. The kernel's HZ is not visible from
+ * here, so user space passes it; 1000000 is HZ=1000.
  */
-const volatile u64 slice_lag = 20000000ULL;
+const volatile u64 tick_ns = 1000000ULL;
 
 /*
  * A task that ran within this long on its CPU is still cache hot there and
@@ -1196,6 +1197,35 @@ static u64 scale_by_dl_weight(const struct task_struct *p,
 		weight = MIN_DL_WEIGHT;
 
 	return value * NICE_0_WEIGHT / weight;
+}
+
+/*
+ * Bound on the lag a task can carry, in virtual time. This is the one
+ * entity_lag() clamps to:
+ *
+ *	u64 max_slice = cfs_rq_max_slice(cfs_rq) + TICK_NSEC;
+ *	limit = calc_delta_fair(max_slice, se);
+ *	return clamp(vlag, -limit, limit);
+ *
+ * EEVDF's steady state bound, -r_max < lag < max(r_max, q), where r_max
+ * is the largest request on the queue and q the timing granularity.
+ *
+ * cfs_rq_max_slice() walks the queue for that largest request; there is
+ * no equivalent to walk here, so the largest of this task's own and the
+ * default stands in for it. The two agree unless some other task on the
+ * cid asked for more than the default, in which case the bound is the
+ * tighter of the two, which errs the safe way.
+ */
+static u64 task_request(const struct task_struct *p);
+
+static u64 lag_limit(const struct task_struct *p, const struct task_ctx *tctx)
+{
+	u64 request = task_request(p);
+
+	if (request < slice_ns)
+		request = slice_ns;
+
+	return scale_by_dl_weight(p, tctx, request + tick_ns);
 }
 
 /*
@@ -2548,7 +2578,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
 	if (cid_valid(cid)) {
-		limit = scale_by_dl_weight(p, tctx, slice_lag);
+		limit = lag_limit(p, tctx);
 		lag = (s64)(cid_vref_place(cid, bpf_ktime_get_ns()) -
 			    tctx->vruntime);
 		if (lag > limit)
@@ -2617,7 +2647,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * far it is placed from the pack it joins.
 	 */
 	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
-		s64 limit = scale_by_dl_weight(p, tctx, slice_lag);
+		s64 limit = lag_limit(p, tctx);
 		s64 lag = (s64)(cid_vref_place(tctx->vcid, tctx->last_run_at) -
 				tctx->vruntime);
 

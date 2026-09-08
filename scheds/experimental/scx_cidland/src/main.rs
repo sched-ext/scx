@@ -98,15 +98,6 @@ struct Opts {
     #[clap(short = 's', long, default_value = "700")]
     slice_us: u64,
 
-    /// Maximum lag, in microseconds of virtual time, that a task can carry across a sleep.
-    ///
-    /// This bounds both the credit a task can bring back from a sleep and the debt it can
-    /// carry after consuming more than its share: an over-served task waits for the system
-    /// vruntime to cover the debt before it runs again, and under heavy load that reference
-    /// moves slowly. EEVDF bounds the lag to twice the base slice (max(2 * slice, tick)).
-    #[clap(short = 'l', long, default_value = "2000")]
-    slice_lag_us: u64,
-
     /// Time, in microseconds, that a task stays cache hot on the CPU it last ran on.
     ///
     /// A task that stopped running within this long is left alone by the idle CPUs
@@ -273,6 +264,29 @@ struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
 }
 
+/// Return TICK_NSEC, the kernel's timing granularity.
+///
+/// The coarse clocks are updated from the timer interrupt and nowhere else, so
+/// what clock_getres() reports for one is the tick period: 1ms on a HZ=1000
+/// kernel, 4ms on HZ=250. This is the bound EEVDF puts on the lag a task
+/// carries, see entity_lag(), and CONFIG_HZ is not otherwise readable without
+/// a kernel config that may not be mounted.
+fn tick_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+
+    let ret = unsafe { libc::clock_getres(libc::CLOCK_MONOTONIC_COARSE, &mut ts) };
+    if ret == 0 && ts.tv_sec == 0 && ts.tv_nsec > 0 {
+        return ts.tv_nsec as u64;
+    }
+
+    warn!("could not read the tick period, assuming HZ=1000");
+
+    1_000_000
+}
+
 /// Assign sorted, descending CPU capacities to tiers.
 ///
 /// Each capacity is compared with the fastest CPU in the current tier rather
@@ -333,6 +347,11 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION")),
             if smt_enabled { "SMT on" } else { "SMT off" }
         );
+        info!(
+            "tick: {} us (HZ={})",
+            tick_ns() / 1000,
+            1_000_000_000 / tick_ns()
+        );
 
         // Print command line.
         info!(
@@ -367,7 +386,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
-        rodata.slice_lag = opts.slice_lag_us * 1000;
+        rodata.tick_ns = tick_ns();
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.balance_sample = opts.balance_sample;
         rodata.cache_nice_tries = opts.cache_nice_tries;
