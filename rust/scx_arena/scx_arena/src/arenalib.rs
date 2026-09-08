@@ -42,7 +42,7 @@ pub struct ArenaLib {
 
 impl ArenaLib {
     /// Maximum CPU mask size, derived from MAX_CPU_SUPPORTED.
-    const MAX_CPU_ARRSZ: usize = (MAX_CPU_SUPPORTED + 63) / 64;
+    const MAX_CPU_ARRSZ: usize = MAX_CPU_SUPPORTED.div_ceil(64);
 
     /// Amount of pages allocated at once form the BPF map. by the static stack allocator.
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 8;
@@ -55,7 +55,7 @@ impl ArenaLib {
                 c_name.as_ptr(),
             )
         };
-        if ptr as u64 == 0 as u64 {
+        if ptr as u64 == 0_u64 {
             bail!("No program with name {} found in object", name);
         }
 
@@ -67,7 +67,7 @@ impl ArenaLib {
         // Reach into the object and get the fd of the program
         // Get the fd of the test program to run
 
-        return Ok(output.return_value as i32);
+        Ok(output.return_value as i32)
     }
 
     /// Set up basic library state.
@@ -105,7 +105,7 @@ impl ArenaLib {
         };
 
         // Exclude memory-only NUMA nodes
-        if mask.into_iter().all(|&b| b == 0) {
+        if mask.iter().all(|&b| b == 0) {
             return Ok(());
         }
 
