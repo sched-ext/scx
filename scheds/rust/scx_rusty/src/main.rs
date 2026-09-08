@@ -327,7 +327,7 @@ impl StatsCtx {
                 .bpf_stats
                 .iter()
                 .zip(rhs.bpf_stats.iter())
-                .map(|(lhs, rhs)| sub_or_zero(&lhs, &rhs))
+                .map(|(lhs, rhs)| sub_or_zero(lhs, rhs))
                 .collect(),
             time_used: self.time_used - rhs.time_used,
         }
@@ -531,7 +531,7 @@ impl<'a> Scheduler<'a> {
             slice_us: self.tuner.slice_ns / 1000,
 
             cpu_busy,
-            load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
+            load: node_stats.values().map(|v| v.load).sum::<f64>(),
             nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
 
             task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
@@ -582,7 +582,7 @@ impl<'a> Scheduler<'a> {
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
 
-        self.skel.maps.stats.value_size() as usize;
+        self.skel.maps.stats.value_size();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
