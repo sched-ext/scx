@@ -156,6 +156,15 @@ struct Opts {
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
+    /// Ignore the cpu controller: schedule on the nice levels alone.
+    ///
+    /// By default a task's weight is its nice weight scaled by the cpu.weight
+    /// of the cgroup it is in and of the cgroups that one sits under. This
+    /// unhooks the scheduler from the cpu controller entirely, which is also
+    /// what happens on a kernel built without CONFIG_EXT_GROUP_SCHED.
+    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    disable_cgroups: bool,
+
     /// Report every CPU at the same capacity, collapsing the capacity tiers.
     ///
     /// The capacity is guessed from ACPI CPPC or cpufreq, which separates the
@@ -326,6 +335,21 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
 
+        // Honor cpu.weight, unless it was turned off or the kernel has no cpu
+        // controller support for sched_ext to hook into. Detaching the
+        // callbacks from the struct_ops keeps the kernel from delivering them
+        // at all, and lets the scheduler load on a kernel whose
+        // sched_ext_ops_cid has no cpuctl_* members to bind them to.
+        let cgroup_enabled = !opts.disable_cgroups
+            && compat::struct_has_field("sched_ext_ops_cid", "cpuctl_set_weight").unwrap_or(false);
+        if !cgroup_enabled {
+            let ops = skel.struct_ops.cidland_ops_mut();
+            ops.cpuctl_init = std::ptr::null_mut();
+            ops.cpuctl_set_weight = std::ptr::null_mut();
+            ops.cpuctl_move = std::ptr::null_mut();
+            info!("cgroup weights: off");
+        }
+
         // Override default BPF scheduling parameters.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
@@ -334,6 +358,7 @@ impl<'a> Scheduler<'a> {
         rodata.balance_sample = opts.balance_sample;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
+        rodata.cgroup_enabled = cgroup_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;

@@ -64,6 +64,17 @@ uses, translated to cid space:
    only takes from a queue that is clearly deeper than its own, the equivalent
    of `imbalance_pct`.
 
+ - **cgroup weights.** A task's weight is its nice weight scaled by the
+   `cpu.weight` of the cgroup it is in and of the cgroups that one sits under,
+   so a service in a slice given ten times its siblings' weight is worth ten of
+   the same service in a default slice. This is a per-task weight rather than a
+   share of the machine handed to a cgroup and divided among its members, which
+   is what `fair.c` gives: two tasks in a cgroup of twice the weight get twice
+   the CPU each here, where `fair.c` would give them twice between them. Doing
+   it `fair.c`'s way needs the weight of the runnable siblings at every level of
+   the hierarchy, a count on a cacheline shared by every CPU that wakes a task.
+   `--disable-cgroups` ignores the cpu controller entirely.
+
  - **Asymmetric capacity.** On systems with CPUs of different capacity (e.g.
    P-cores and E-cores), capacities within 5% of the fastest CPU in a tier are
    coalesced by default, so marginal differences do not create a strict
