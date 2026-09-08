@@ -61,6 +61,7 @@ impl<
 pub trait StatsCloser<Req, Res>: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send {}
 impl<Req, Res, T: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send> StatsCloser<Req, Res> for T {}
 
+#[allow(clippy::type_complexity)]
 pub struct StatsOps<Req, Res> {
     pub open: Box<dyn StatsOpener<Req, Res>>,
     pub close: Option<Box<dyn StatsCloser<Req, Res>>>,

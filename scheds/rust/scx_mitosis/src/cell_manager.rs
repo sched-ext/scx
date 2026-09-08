@@ -927,6 +927,7 @@ impl CellManager {
     /// Rather than processing individual events, we simply check if any events occurred
     /// and then rescan the directory to reconcile state. This is simpler and handles
     /// edge cases like inotify queue overflow gracefully.
+    #[allow(clippy::type_complexity)]
     pub fn process_events(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
         let mut buffer = [0; 1024];
         let mut has_events = false;

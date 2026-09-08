@@ -318,6 +318,8 @@ pub struct SchedSamples {
 }
 
 #[derive(Debug)]
+// Renaming the *Req variants is an API decision for the scheduler author.
+#[allow(clippy::enum_variant_names)]
 pub enum StatsReq {
     NewSampler(ThreadId),
     SysStatsReq {

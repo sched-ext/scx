@@ -506,6 +506,7 @@ struct EnergyModelOptimizer<'a> {
     perf_cpu_order: RefCell<BTreeMap<usize, PerfCpuOrder>>,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct PDS<'a> {
     pd: &'a PerfDomain,

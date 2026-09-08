@@ -225,6 +225,7 @@ fn terminate_process_group(child: &mut Child, pid: i32) {
 /// Spawn `cmd` with `stdin_payload` piped in, stream stdout line-by-line, call
 /// `on_event` for each JSON line (echoing raw lines to stderr when verbose), and
 /// return the exit status plus captured stderr.
+#[allow(clippy::too_many_arguments)]
 fn run_streaming(
     mut cmd: Command,
     label: &str,

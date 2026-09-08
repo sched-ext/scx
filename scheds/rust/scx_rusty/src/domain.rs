@@ -15,6 +15,9 @@ use std::sync::Mutex;
 pub struct Domain {
     id: usize,
     mask: Cpumask,
+    // The raw pointer makes this !Send/!Sync; sharing is intentional and the
+    // pointee lives in mmapped BPF memory. Proper fix is a Send newtype.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub ctx: Arc<Mutex<Option<*mut types::dom_ctx>>>,
 }
 
