@@ -1,7 +1,7 @@
 [package]
 name = "scx_pandemonium"
 version = "5.20.0"
-edition = "2021"
+edition = "2024"
 description = "An adaptive sched_ext scheduler: CoDel sojourn ordering, effective-resistance distance pricing and knobs derived each second from measured per-CPU queue behaviour"
 license = "GPL-2.0-only"
 
