@@ -222,6 +222,7 @@ struct cid_ctx {
 	u64 curr_request;	/* request for which it was picked */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
+	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
 };
 
 /*
@@ -1748,10 +1749,28 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * of the node is idle too, nothing would ever look at it. Kick
 	 * @prev_cid, which either wakes it or interrupts what it is running
 	 * for this task, see kick_queued_cid().
+	 *
+	 * SCX_ENQ_LAST is the runnable task ops.dispatch() just displaced. If
+	 * it is the only waiter, the queue can exist for less than a tick: the
+	 * selected task blocks, @prev_cid takes its waiter back, and an idle cid
+	 * never observes the transient imbalance. Tell one idle peer at enqueue
+	 * time. It is also told to ignore hotness for this pull, since otherwise
+	 * the one guaranteed dispatch can reject the waiter and go idle again.
+	 * Restrict this to a depth of one: deeper queues survive until the tick
+	 * path notices them, and wakeup-heavy loads should not pay an idle scan
+	 * and a cache-cold migration on every enqueue.
 	 */
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), task_request(p), dl,
 				 enq_flags);
 	cid_queued_set(prev_cid);
+	if ((enq_flags & SCX_ENQ_LAST) &&
+	    scx_bpf_dsq_nr_queued(cid_dsq(prev_cid)) == 1) {
+		cid = idle_peer_cid(p, prev_cid);
+		if (cid >= 0 && cid != prev_cid) {
+			WRITE_ONCE(cid_ctx(cid)->force_steal, 1);
+			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+		}
+	}
 	kick_queued_cid(prev_cid, tctx, dl, now);
 }
 
@@ -1992,12 +2011,22 @@ static bool try_steal_task(s32 dst_cid, bool has_prev)
 	bool own = cid_queued_test(dst_cid) &&
 		   __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
 	bool busy = own || has_prev;
+	bool force_steal = !busy && READ_ONCE(cctx->force_steal);
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
 	u64 now = bpf_ktime_get_ns();
 	u32 start, own_nr = 0;
 	s32 src = -1;
+
+	/*
+	 * The kick that set this bought one dispatch, and it is spent here
+	 * whatever that dispatch finds: the waiter it was sent for is often
+	 * taken back by its own cid first, and a permission outliving that
+	 * would fire on an unrelated scan later on.
+	 */
+	if (force_steal)
+		WRITE_ONCE(cctx->force_steal, 0);
 
 	if (busy) {
 		if (time_before(now, cctx->last_balance_at + slice_ns))
@@ -2019,7 +2048,9 @@ static bool try_steal_task(s32 dst_cid, bool has_prev)
 		bpf_arena_for(t, 0, nr_tiers - topo->tier - 1) {
 			src = steal_from_range(dst_cid, nr_tiers - 1 - t, node_base,
 					       node_nr, node_base, now,
-					       failed <= cache_nice_tries, 0, 0xff);
+					       !force_steal &&
+					       failed <= cache_nice_tries,
+					       0, 0xff);
 			if (src >= 0) {
 				cctx->nr_balance_failed = 0;
 				goto pick;
@@ -2044,10 +2075,12 @@ static bool try_steal_task(s32 dst_cid, bool has_prev)
 		 */
 		src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
 				       start + 1, now,
-				       failed <= cache_nice_tries, 0, 0xff);
+				       !force_steal && failed <= cache_nice_tries,
+				       0, 0xff);
 		if (src < 0 && node_nr > topo->llc_nr)
 			src = steal_from_range(dst_cid, -1, node_base, node_nr,
 					       start + 1, now,
+					       !force_steal &&
 					       failed <= cache_nice_tries + 1,
 					       0, 0xff);
 
