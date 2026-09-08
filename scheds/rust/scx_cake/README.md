@@ -48,11 +48,17 @@ results stand: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 | **Stop** | <kbd>Ctrl</kbd>+<kbd>C</kbd> detaches it; the default scheduler resumes immediately |
 | **If evicted** | the exit reason lands in `dmesg` (grep `sched_ext`) |
 
-The binary takes `-v` and `-V` and nothing else — that is the point.
-(`intf.h` carries no policy switches and no cflag inputs; the loader
-measures the host's topology at attach, so one binary fits any machine.
-Experiments are A/B'd as two git commits, never a build flag — see
-[`DESIGN.md`](./DESIGN.md).)
+Run without options for the default policy. Use `-v` for diagnostics, `-V`
+for the version, or `--print-topology` to inspect the host without attaching.
+`--help` lists the supported construct overrides (`--toggle NAME=0|1`).
+The loader measures topology at startup; no build-host topology is baked in.
+
+Stale options from `scx_loader` or another launcher, such as `--profile gaming`,
+`--profile=performance`, or `-p powersave`, produce a warning and are ignored
+along with their values. Supported options still apply; otherwise Cake uses
+its default policy. Unknown or malformed toggle specifications are also
+warned about and ignored. Missing values for supported options (for example,
+a bare `--toggle`) remain command-line errors.
 
 ## How it works
 
