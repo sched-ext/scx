@@ -209,14 +209,12 @@ impl<'a> Scheduler<'a> {
             let mut vip = 0u32;
             if let Ok(rd) = std::fs::read_dir("/proc") {
                 for e in rd.flatten() {
-                    if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
-                        if comm.starts_with("FPSAimTrainer") {
-                            if let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
+                    if let Ok(comm) = std::fs::read_to_string(e.path().join("comm"))
+                        && comm.starts_with("FPSAimTrainer")
+                            && let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
                                 vip = pid;
                                 break;
                             }
-                        }
-                    }
                 }
             }
             rodata.cake_vip_tgid = vip;
