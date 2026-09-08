@@ -1,106 +1,229 @@
-# scx_cake — model of operation
+# scx_cake design
 
-This describes Cake's scheduling policy, hardware fallbacks, and known limits.
+This document describes the scheduling policy in this checkout.
+See [README.md](./README.md) for commands, flags and toggle defaults.
+Historical experiments in `STATE.md` may describe different behavior.
 
-## Queue ownership and admission
+## The basic idea
 
-Cake creates one virtual-time DSQ per CPU and one wake DSQ per LLC. Kernel
-local DSQs receive direct admissions. Hosts with present CPU IDs beyond the
-64-bit placement mask collapse wake pools to one domain; the loader reports
-this fallback. CPU-ID span and online capacity are distinct quantities.
+Cake tries to serve waiting tasks promptly without moving them away from useful
+cache data unnecessarily. It uses task activity, CPU availability and hardware
+topology. It does not identify games by name.
 
-Kernel idle masks provide candidate CPUs. An atomic idle claim establishes
-idle admission; a snapshot, queue count, or peek does not reserve a CPU or
-task. Only a successful DSQ move establishes that dispatch consumed work.
-Affinity remains a hard constraint. IRQ, cache, seat, and platform-rank
-information express preferences and cannot guarantee an uninterrupted run.
+A **CPU** here is a logical CPU. **SMT siblings** share a physical core.
+An **LLC** is a last-level cache shared by a group of CPUs.
+A **DSQ** is a dispatch queue provided by `sched_ext`.
 
-## Placement
+Cake uses three kinds of queue:
 
-select_cpu considers an inferred serial handoff, a stage task's seat,
-cache-warm home admission, and a claimed idle choice. Serial handoff requires
-an idle count of at least 75% of the CPU-ID span, eligible empty queues, and
-an occupant estimated to be yielding. Sparse IDs/offline headroom can therefore
-suppress this path.
+| Queue | Purpose |
+|---|---|
+| Kernel-local queue | Work admitted directly to a particular CPU, or moved there by dispatch |
+| CPU-owner queue | Work associated with one CPU; other eligible CPUs can steal it |
+| LLC wake pool | Shared work that CPUs near the same cache can serve |
 
-Cold choices prefer whole idle cores, unheld seats, cleaner IRQ targets, and
-platform rank. Home admission and seat retakes also inspect SMT interference.
-Noisy CPUs remain usable when cleaner eligible capacity is unavailable.
-Failed placement leaves enqueue responsible for routing the task.
+The default is one wake pool per LLC when the topology fits. Hardware fallbacks
+and `g89=0` use one shared wake pool.
 
-Seats associate a task with a logical CPU using serialized ownership changes.
-Task storage retains placement history; it is not a reservation of both SMT
-threads. Stage classification uses mean burst duration of at least 64 us,
-without a negative-nice shortcut. Diagnostic/probe paths are optional.
+## Where work goes
 
-## Enqueue and dispatch
+The diagram shows possible routes. It groups decisions rather than showing
+every condition in the callbacks. Affinity restrictions apply throughout.
 
-Kthread wakes use idle local admission where possible; unbound wakes without
-an idle target can enter a wake pool. Pinned work remains constrained to its
-allowed CPU. Starved unpinned wakes normally enter their LLC wake pool;
-self-enqueue races use the owner queue. A wake behind a served peer may claim
-an idle CPU directly before falling back to the pool. Forced reenqueue also
-uses the pool. Other continuations use their owner queue.
+```mermaid
+flowchart TD
+    W["Task wakes"] --> S["select_cpu: handoff, seat, warm CPU or idle claim"]
+    S --> D{"Direct placement selected?"}
+    D -->|Yes| L["Kernel-local CPU queue"]
+    D -->|No| E["enqueue: choose a route"]
+    R["Slice expiry or forced requeue"] --> E
+    E -->|Eligible direct admission| L
+    E -->|Owner service| O["CPU-owner queue"]
+    E -->|Shared service| P["LLC wake pool"]
+    O --> X["dispatch: find work this CPU may run"]
+    P --> X
+    X -->|Successful queue move| L
+    L --> C["CPU runs the task"]
+```
 
-Notifications seek eligible capacity and may preempt a suitable occupant.
-Affinity-compatible idle CPUs can receive forwarded kicks when the current
-CPU cannot consume the pool head. A held seat with no owner work can decline
-service and kick an idle, unheld, affinity-compatible CPU on its LLC; wall
-escalation prevents this decline for an overdue pool head.
+### CPU selection
 
-Dispatch first checks a remote offer, then orders its owner queue and local
-wake pool by virtual time and pool service age. It attempts both before
-stealing from owner queues and checking foreign wake pools. A previous task
-can receive a renewed slice when the search finds no consumable work.
+Selection considers an eligible serial handoff, a returning stage task's seat,
+a cache-warm home CPU, and other idle CPUs.
 
-Queue marks and remote offers are advisory: delayed publication can leave
-work temporarily undiscovered by another LLC. These protocols do not
-guarantee immediate service across LLCs.
-The 24 ms pool escalation is a policy threshold, not a universal wait bound.
+- A serial handoff can keep communicating tasks together when the local queues
+  are empty and the current task is expected to yield soon.
+- A **seat** associates a pipeline-stage task with a logical CPU. A returning
+  holder can displace an eligible non-stage occupant. It cannot displace every
+  class of task or override affinity.
+- Warm placement preserves useful cache data when the CPU is eligible.
+- Other choices prefer whole idle cores, suitable unheld seats, cleaner
+  interrupt targets and platform core rankings.
 
-## Service accounting
+A **stage task** has an estimated mean burst of at least 64 microseconds.
+This is an activity classification, not recognition of a game or render thread.
+Task storage keeps placement history. A seat is neither an exclusive reservation
+nor ownership of both SMT siblings.
 
-Starvation classification compares lifetime mean wait with lifetime mean run
-using fixed 16-bit time quantization and 64-bit products. Large lifetime
-counters can overflow those products. This does not measure the current
-wake's delay in isolation.
+An idle-mask snapshot is only a candidate list. A successful atomic idle claim
+establishes idle admission. Serial handoffs and seat retakes have their own
+eligibility rules and can place behind a current occupant.
 
-For runtime r, task age a, and switch-count denominator n, the slice is
-the minimum of 2 * floor(r / n), floor(a / (2 * n)), and 1.5 ms, then
-floored by the startup handoff estimate. The implementation shares one divide.
-This is an execution budget, not a guarantee of exact preemption timing.
+### Enqueue
 
-Stopping charges executed runtime using reciprocal task weights. Wake keys
-and the shared frontier order service; peer capping limits frontier advance
-from low-weight occupants. There is no frame-clock sampling loop.
+If selection did not insert the task directly, enqueue handles it:
 
-## Loader and topology
+- Kernel-thread wakes can use direct local admission. An unpinned kernel-thread
+  wake with no idle target can use the pool when `g86=1`.
+- Unpinned wakes whose estimated mean wait exceeds twice their mean CPU burst
+  normally enter the pool. A wake racing with its own switch-out stays in its
+  owner queue. The comparison uses quantized lifetime counters.
+- A wake behind a well-served occupant can try direct idle admission, then
+  fall back to the pool.
+- Forced requeues and displaced seat occupants can enter a pool.
+- Ordinary continuations stay in their owner queue. Pinned tasks remain
+  restricted to their allowed CPU.
 
-Startup discovers possible/present/online CPUs, SMT siblings, dense LLC IDs,
-and complete platform capacity/preferred-core hints. Rank hints are ordinal,
-not measured speed ratios. Missing, equal, or unsupported hints retain valid
-fallback placement. Maximum frequency is reporting information.
+Notifications can kick an eligible CPU or request preemption.
+A kick does not guarantee that a task starts immediately.
 
-The loader monitors IRQ handler-time shares with a 1–16 second polling
-interval. Four manually attached IRQ/softirq tracepoints maintain live depth;
-exit attaches before entry, with paired failure handling. Tick look-ahead is
-an additional advisory signal when the startup probe succeeds.
+### Dispatch
 
-After privileged setup, the loader drops its calling thread's capabilities
-and restores process inspection. Requested topology restarts re-execute the
-loader. Debug/probe telemetry is distinct from release performance evidence.
+Dispatch first tries an offered task from another LLC. It then considers the
+CPU-owner queue and local wake pool. Virtual runtime and how long the pool has
+gone unserved determine which is tried first; a failed move can try the other.
 
-## Construct names in source comments
+A held seat with an empty owner queue may defer service to another eligible,
+idle, unheld CPU on the same LLC. Overdue pool work can override this deferral.
 
-The source retains these identifiers for diagnosis and historical references.
-`--help` lists the supported toggles and their defaults.
+If local service fails, Cake can forward a kick to an eligible CPU, steal from
+other owner queues and check other LLC pools. If no work is found, a runnable
+previous task may receive a renewed slice. Only a successful queue move proves
+that dispatch consumed work; counts, marks and peeks are advisory.
+
+## Hardware discovery and fallbacks
+
+The loader reads possible/present CPU IDs, online topology, SMT siblings and
+LLC membership at startup. The build does not bake in its host's topology.
+
+```mermaid
+flowchart TD
+    T["Read CPU topology"] --> B{"Possible CPU-ID span exceeds 1024?"}
+    B -->|Yes| F["Refuse startup: compiled limit exceeded"]
+    B -->|No| N{"Present CPU IDs all below 64?"}
+    N -->|No| G["Kernel idle selection and one wake pool"]
+    N -->|Yes| Q{"g89 enabled and no more than 16 LLCs?"}
+    Q -->|Yes| M["One wake pool per LLC"]
+    Q -->|No| U["One shared wake pool"]
+```
+
+CPU-ID span is different from online CPU count: sparse numbering and possible
+offline CPUs can increase the span. Wide present-ID layouts disable the narrow
+claim, seat and per-LLC pool paths. Cache-aware steal tables cover CPU IDs below
+128; wider layouts use the generic ring walk.
+
+Core rankings use complete capacity data, then available complete preferred-core
+hints. Missing information does not rank unknown cores below known ones.
+Rankings are preferences, not measured speed ratios. Advertised maximum frequency
+is reporting information. Narrow placement can use these rankings; wide
+placement retains the kernel fallback.
+
+`llcsplit=1` is a test scaffold. It divides the host's core IDs into two groups
+while keeping SMT siblings together. It changes the topology given to the
+policy, not the hardware or the cost of communicating between caches.
+
+## Interrupt-aware placement
+
+Cake prefers CPUs with less interrupt work, while keeping noisy CPUs usable
+when suitable cleaner capacity is unavailable.
+
+| Signal | How Cake obtains it |
+|---|---|
+| Sustained interrupt load | Sample handler-time shares at a 1–16 second interval |
+| A handler running now | Paired IRQ/softirq entry and exit hooks track depth |
+| An imminent timer tick | Compare tick information with a usable startup wake-hop estimate |
+
+These are placement hints. They cannot guarantee an interrupt-free run.
+The loader attaches each exit hook before its matching entry hook and handles
+partial attachment failures.
+
+## CPU time and fairness
+
+Virtual runtime tracks charged CPU service using reciprocal nice-level weights.
+Wake keys and a shared frontier order service; a peer check limits unusual
+frontier advances. This does not mean tasks always run in strict global
+virtual-runtime order.
+
+For the adaptive task slice, all times below are in nanoseconds:
+
+```text
+runtime = task's accumulated CPU runtime
+age     = current time - task creation time
+n       = voluntary switch count | 1
+
+slice = max(1464,
+            min(2 * floor(runtime / n),
+                floor(age / (2 * n)),
+                1500000))
+```
+
+The `| 1` operation makes the denominator odd and nonzero. The implementation
+computes the same result with one division.
+
+The adaptive floor is fixed at **1,464 ns** and the cap is **1.5 ms**.
+Some paths, including local kernel-thread wake admission, use the fixed
+**3 ms** slice instead. A slice is an execution budget, not an exact promise
+about preemption timing.
+
+The startup handoff probe does not set the slice floor. Its usable p99 estimate
+helps tick look-ahead. There is no display or game frame-clock sampling loop.
+
+## Settings and lifecycle
+
+[README.md](./README.md#toggle-settings) lists the supported settings. The
+source retains these construct names:
 
 | Identifier | Meaning |
 |---|---|
-| G85 | Seat ownership rules: avoid placing unrelated work on another task's held CPU when suitable alternatives exist |
-| G86 | Retry idle claims and allow eligible kernel-thread wakes to use the shared pool |
-| G87 | Use the waiting task's own slice to size wakeup protection and pinned-wake preemption margins |
-| G88 | Track CPUs sharing an LLC; `llcsplit` is an optional synthetic-topology test scaffold |
-| G89 | Per-LLC wake pools and locality-aware selection, notification and stealing |
+| G85 | Seat ownership rules |
+| G86 | Idle-claim retry and kernel-thread pool fallback |
+| G87 | Wakee-sized protection and preemption margins |
+| G88 | LLC topology tracking; historical identifier, not a toggle |
+| G89 | Per-LLC pools and locality-aware routing |
 
-Earlier section references refer to the historical notes in `STATE.md`.
+The loader sets toggles before loading BPF. They cannot be changed in place.
+`probe` adds instrumentation; `-v` adds logging. They are independent.
+
+Unknown launcher options are warned about and ignored. Valid options still
+apply. The README explains invalid values and inspection-mode exceptions.
+
+After privileged setup, the loader drops its calling thread's capabilities.
+A kernel-requested restart re-executes the binary with its original arguments.
+Ctrl+C requests shutdown; the polling loop releases the scheduler link, returning
+service to the default kernel scheduler. Cake requests a five-second
+runnable-stall watchdog.
+
+## Starvation fallback (24 ms)
+
+`WAKE_STARVE_WALL_NS` is a fixed 24 ms policy threshold. Each wake pool keeps a
+service timestamp, refreshed when it is served or observed empty. If that
+timestamp is more than 24 ms old, dispatch can prioritize the pool, override
+seat deferral and let another LLC help serve it.
+
+Normal dispatch can serve tasks much sooner. This check does not measure each
+task's waiting time, arm a timer or guarantee service within 24 ms.
+Historical notes relate the value to eight 3 ms slices; it is not calculated
+from current task behavior or hardware. Those notes do not establish that
+24 ms is the best threshold for the current policy.
+
+## Known limits
+
+- Lifetime wait/run comparison products can overflow at large counter values.
+  This classification does not measure the current wake's delay alone.
+- Delayed queue-mark or remote-offer publication can delay cross-LLC service.
+- Serial-handoff eligibility uses CPU-ID span rather than online CPU count.
+- The fixed starvation threshold has the limits described above.
+- Tests and kernel-verifier acceptance do not establish performance on every
+  workload, topology or kernel.
+
+Use the current code and retained measurements for claims about a specific build.
