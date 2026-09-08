@@ -48,7 +48,7 @@ impl ClangInfo {
         let output = Command::new(&clang)
             .args(clang_args)
             .output()
-            .with_context(|| format!("Failed to run \"{} --version\"", &clang))?;
+            .with_context(|| format!("Failed to run \"{} --version\"", clang))?;
 
         let stdout = String::from_utf8(output.stdout)?;
         let (mut ver, mut arch) = (None, None);
@@ -76,14 +76,14 @@ impl ClangInfo {
         if version_compare::compare(&ver, "16") == Ok(version_compare::Cmp::Lt) {
             bail!(
                 "clang < 16 loses high 32 bits of 64 bit enums when compiling BPF ({:?} ver={:?})",
-                &clang,
-                &ver
+                clang,
+                ver
             );
         }
         if version_compare::compare(&ver, "17") == Ok(version_compare::Cmp::Lt) {
             println!(
                 "cargo:warning=clang >= 17 recommended ({:?} ver={:?})",
-                &clang, &ver
+                clang, ver
             );
         }
 
@@ -165,7 +165,7 @@ impl ClangInfo {
             .into_iter()
             .map(|x| x.into())
             .collect();
-        cflags.push(format!("-D__TARGET_ARCH_{}", &kernel_target));
+        cflags.push(format!("-D__TARGET_ARCH_{}", kernel_target));
         cflags.push("-mcpu=v3".into());
         cflags.push(format!("-m{endian}-endian"));
         cflags.append(

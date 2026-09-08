@@ -212,7 +212,7 @@ impl BpfBuilder {
             .to_str()
             .ok_or(anyhow!(
                 "{:?}/scx_utils-bph_h can't be converted to str",
-                &out_dir
+                out_dir
             ))?
             .to_string();
         Self::install_bpf_h(&bpf_h)?;
@@ -231,11 +231,11 @@ impl BpfBuilder {
 
         cflags.push(format!(
             "-I{}/arch/{}",
-            &bpf_h,
-            &clang.kernel_target().unwrap()
+            bpf_h,
+            clang.kernel_target().unwrap()
         ));
-        cflags.push(format!("-I{}", &bpf_h));
-        cflags.push(format!("-I{}/bpf-compat", &bpf_h));
+        cflags.push(format!("-I{}", bpf_h));
+        cflags.push(format!("-I{}/bpf-compat", bpf_h));
 
         cflags.append(&mut match env::var("BPF_EXTRA_CFLAGS_POST_INCL") {
             Ok(v) => v.split_whitespace().map(|x| x.into()).collect(),
@@ -261,7 +261,7 @@ impl BpfBuilder {
         // for target architecture-specific optimizations in BPF code.
         cflags.push(format!("-D__SCX_TARGET_ARCH_{}", clang.kernel_target()?));
 
-        println!("scx_utils:clang={:?} {:?}", &clang, &cflags);
+        println!("scx_utils:clang={:?} {:?}", clang, cflags);
 
         Ok(Self {
             clang,
@@ -293,7 +293,7 @@ impl BpfBuilder {
         self
     }
 
-    fn input_insert_deps(&self, deps: &mut BTreeSet<String>) -> () {
+    fn input_insert_deps(&self, deps: &mut BTreeSet<String>) {
         let (input, _) = match &self.intf_input_output {
             Some(pair) => pair,
             None => return,
@@ -480,10 +480,10 @@ where
     let subscriber = tracing_subscriber::registry().with(fmt.with_filter(filter));
 
     // Execute the closure with a tracing guard
-    Ok({
+    {
         let _guard = tracing::subscriber::set_default(subscriber);
         f()
-    }?)
+    }
 }
 
 #[cfg(test)]
@@ -528,7 +528,7 @@ mod tests {
                 sscanf!(file_name_str, "arch/{String}/vmlinux-v{String}-g{String}.h").unwrap();
             println!(
                 "vmlinux.h: arch={:?} ver={:?} sha1={:?}",
-                &arch, &ver, &sha1,
+                arch, ver, sha1,
             );
 
             assert!(
