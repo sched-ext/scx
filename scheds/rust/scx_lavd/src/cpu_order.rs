@@ -506,13 +506,13 @@ struct EnergyModelOptimizer<'a> {
     perf_cpu_order: RefCell<BTreeMap<usize, PerfCpuOrder>>,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct PDS<'a> {
     pd: &'a PerfDomain,
     ps: &'a PerfState,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct PDCpu<'a> {
     pd: &'a PerfDomain, // performance domain
     cpu_vid: usize,     // virtual ID of a CPU on the performance domain
@@ -1226,21 +1226,9 @@ impl<'a> PDS<'_> {
     }
 }
 
-impl PartialEq for PDS<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.pd == other.pd && self.ps == other.ps
-    }
-}
-
 impl<'a> PDCpu<'_> {
     fn new(pd: &'a PerfDomain, cpu_vid: usize) -> PDCpu<'a> {
         PDCpu { pd, cpu_vid }
-    }
-}
-
-impl PartialEq for PDCpu<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.pd == other.pd && self.cpu_vid == other.cpu_vid
     }
 }
 
