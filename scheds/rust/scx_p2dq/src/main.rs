@@ -449,8 +449,8 @@ fn main(opts: CliOpts) -> Result<()> {
                 } else {
                     get_uncore_max_freq_khz(pkg, die)?
                 };
-                if let Ok(orig) = get_uncore_max_freq_khz(pkg, die) {
-                    if orig != freq_khz {
+                if let Ok(orig) = get_uncore_max_freq_khz(pkg, die)
+                    && orig != freq_khz {
                         info!(
                             "Setting max uncore frequency for package {} die {} to {} MHz",
                             pkg,
@@ -460,7 +460,6 @@ fn main(opts: CliOpts) -> Result<()> {
                         orig_uncore_freqs.push((pkg, die, orig));
                         set_uncore_max_freq_khz(pkg, die, freq_khz)?;
                     }
-                }
                 Ok(())
             });
         }
@@ -474,15 +473,14 @@ fn main(opts: CliOpts) -> Result<()> {
             "performance"
         };
         for cpu in TOPO.all_cpus.values() {
-            if let Ok(orig) = get_epp(cpu.id) {
-                if orig != target_epp {
+            if let Ok(orig) = get_epp(cpu.id)
+                && orig != target_epp {
                     if orig_epps.is_empty() {
                         info!("Setting EPP to {} for all CPUs", target_epp);
                     }
                     orig_epps.push((cpu.id, orig));
                     let _ = set_epp(cpu.id, target_epp);
                 }
-            }
         }
     }
 
