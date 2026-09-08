@@ -472,7 +472,7 @@ impl DynamicThresholdState {
             // Rate in stable band (considering hysteresis).
             if self.adjustment_direction.is_some() {
                 // We were adjusting; check if we should stop.
-                if rate >= DYNAMIC_THRESHOLD_RATE_LOW && rate <= DYNAMIC_THRESHOLD_RATE_HIGH {
+                if (DYNAMIC_THRESHOLD_RATE_LOW..=DYNAMIC_THRESHOLD_RATE_HIGH).contains(&rate) {
                     None // Back in target band, stop adjusting.
                 } else {
                     self.adjustment_direction // Continue current direction.
@@ -759,11 +759,10 @@ impl<'a> Scheduler<'a> {
         let mut perf_available = true;
         let sticky_counter_idx = if opts.perf_config.event_id > 0 { 1 } else { 0 };
         for cpu in 0..nr_cpus {
-            if opts.perf_config.event_id > 0 {
-                if let Err(e) =
+            if opts.perf_config.event_id > 0
+                && let Err(e) =
                     setup_perf_events(&skel.maps.scx_pmu_map, cpu as i32, &opts.perf_config, 0)
-                {
-                    if cpu == 0 {
+                    && cpu == 0 {
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
                             warn!("Performance counters not available on this CPU architecture");
@@ -777,16 +776,14 @@ impl<'a> Scheduler<'a> {
                         perf_available = false;
                         break;
                     }
-                }
-            }
-            if opts.perf_sticky.event_id > 0 {
-                if let Err(e) = setup_perf_events(
+            if opts.perf_sticky.event_id > 0
+                && let Err(e) = setup_perf_events(
                     &skel.maps.scx_pmu_map,
                     cpu as i32,
                     &opts.perf_sticky,
                     sticky_counter_idx,
-                ) {
-                    if cpu == 0 {
+                )
+                    && cpu == 0 {
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
                             warn!("Performance counters not available on this CPU architecture");
@@ -800,8 +797,6 @@ impl<'a> Scheduler<'a> {
                         perf_available = false;
                         break;
                     }
-                }
-            }
         }
         if perf_available {
             info!("Performance counters configured successfully for all CPUs");
@@ -815,7 +810,7 @@ impl<'a> Scheduler<'a> {
                     info!("GPU{} -> node{}", nvml_id, gpu.node_id);
                 }
                 skel.maps.gpu_node_map.update(
-                    &(nvml_id as u32).to_ne_bytes(),
+                    &nvml_id.to_ne_bytes(),
                     &(gpu.node_id as u32).to_ne_bytes(),
                     MapFlags::ANY,
                 )?;

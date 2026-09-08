@@ -14,9 +14,7 @@ pub(crate) fn direct_gpu_processes(
 ) -> HashMap<u32, u32> {
     process_nodes
         .iter()
-        .filter_map(|(&tgid, nodes)| {
-            (nodes.len() == 1).then(|| (tgid, *nodes.iter().next().unwrap()))
-        })
+        .filter(|&(&_tgid, nodes)| nodes.len() == 1).map(|(&tgid, nodes)| (tgid, *nodes.iter().next().unwrap()))
         .collect()
 }
 
