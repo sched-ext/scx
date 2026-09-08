@@ -72,34 +72,35 @@ every core is busy, the core rule:
 
 | the task… | goes to… | because… |
 |---|---|---|
-| just **woke up** and is *waiting more than it runs* | one **shared waiting line** every core checks | the first core to free up anywhere picks it up. A well-served wake queues on its own core instead |
+| just **woke up** and is *waiting more than it runs* | a **shared wake queue** for its last-level cache (LLC) | nearby CPUs can serve it while keeping its data close. Eligible idle CPUs can also receive work directly |
 | **used up its turn** | **its own core's line** | its data is still hot in that cache; it loses nothing by waiting there |
 
-Four refinements exist specifically for games, each measured on a real one:
+Placement also considers cache warmth, available cores, and interrupt load:
 
 - **Keep a busy thread on its own core.** Linux's default idle-search
   prefers a wholly-free core over the task's own still-warm one; for a
   render thread that trade is backwards, so cake claims the old core first
   when free.
-- **Never queue behind an equally busy peer.** If the core a task wants is
-  held by another well-served task, it goes to the shared line instead.
-- **Bound the worst case pessimistically.** The turn-length cap reads the
-  frame clock (the display's measured refresh cadence) conservatively, so a
-  brief mis-measure can never widen it.
-- **Never hand a wake to a CPU that is busy with hardware** — next section.
+- **Avoid unnecessary waiting behind a busy peer.** An eligible wake can
+  claim an idle CPU or use the shared wake queue when its home CPU is busy.
+- **Adapt the time slice to the task.** Cake uses measured runtime and task
+  age to choose a slice, capped at 1.5 ms and floored by a startup handoff
+  estimate. It no longer samples a frame clock.
+- **Prefer CPUs with less interrupt work** when suitable alternatives exist
+  — next section.
 
 ### Interrupt-aware placement
 
 The kernel steers device interrupts — GPU, NVMe, network — onto specific
 cores ("sinks"). A task placed on one stops every time an interrupt fires.
-Cake vetoes those cores on three time scales, all measured, none
-configured:
+Cake uses three signals to prefer cleaner CPUs, while keeping noisy CPUs
+available when needed:
 
 | time scale | signal | how it is kept | on a hit |
 |---|---|---|---|
-| **average** | the CPU spends real *time* in interrupt handlers (time share, not event counts) | the loader re-measures on a 1–16 s cadence that slows as the set proves stable; the cut is the widest gap in the host's own sorted distribution — no Hz threshold, never a one-shot sample at attach | chronic sinks leave the placement set |
-| **this instant** | inside a handler right now | handler entry/exit tracepoints keep a per-CPU bit | the pick retries once toward any clean idle CPU |
-| **near future** | the next timer tick fires before the task could land | per-CPU next-tick time vs the measured wake-hop cost (the time for a wake to reach another CPU and start running) | that pick is refused |
+| **average** | time spent in interrupt handlers | the loader samples at a 1–16 s interval and separates unusually busy CPUs using the observed distribution | prefer eligible CPUs outside that group |
+| **this instant** | a handler is running now | entry/exit tracepoints track per-CPU interrupt depth | prefer an eligible CPU without active interrupt work |
+| **near future** | the next timer tick may arrive before the task lands | compare the next tick with the measured wake-hop time, when available | steer eligible choices away from imminent tick work |
 
 How this is measured: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 
@@ -107,37 +108,35 @@ How this is measured: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 
 ```mermaid
 flowchart TD
-    W([task wakes]) --> H{learned serial handoff,<br/>waker's queues empty?}
+    W([task wakes]) --> H{eligible serial handoff?}
     H -- yes --> WC[waker's CPU]
-    H -- no --> I{idle core found?}
-    I -- yes --> DD[run there now]
-    I -- no --> S{sync handoff or sleeper,<br/>waker's queues empty?}
-    S -- yes --> WC
-    S -- no --> P{own old CPU free-ish,<br/>task barely slept, or global<br/>queue backlogged?}
-    P -- yes --> PC[own previous CPU]
-    P -- no --> G[global wake queue —<br/>kick warmest idle CPU]
+    H -- no --> I{eligible idle CPU claimed?}
+    I -- yes --> DD[direct admission]
+    I -- no --> P{unpinned task<br/>waiting more than it runs?}
+    P -- yes --> G[local LLC wake queue]
+    P -- no --> PC[owner CPU queue]
 ```
 
-Every concrete target passes the chronic-sink and mid-handler vetoes first;
-the tick look-ahead additionally guards the idle pick, its retry, and the
-kicked sibling. Fairness comes from a per-task virtual-time clock: tasks
-that have consumed less CPU run first, weighted by nice level.
+This is the common path; affinity, seat ownership and forced requeues add
+exceptions described in [`DESIGN.md`](./DESIGN.md). Interrupt load guides
+placement, with eligible noisy CPUs still usable when necessary. Virtual
+runtime orders service using CPU time consumed and nice-level weights.
 
 ## The design in one page
 
 <details>
-<summary><b>Vocabulary — eight terms carry everything</b></summary>
+<summary><b>Scheduling terms</b></summary>
 <br>
 
 | term | meaning |
 |---|---|
-| **DSQ** | dispatch queue, sched_ext's queue primitive. One per CPU plus one global **wake queue** |
+| **DSQ** | dispatch queue, sched_ext's queue primitive. Cake uses owner queues and shared wake queues per LLC; wide CPU-ID spans fall back to one shared wake queue |
 | **vtime** | virtual runtime: CPU time consumed, weighted by priority. Lower = runs sooner |
 | **frontier** | the highest vtime reached — the fairness clock's "now" |
 | **sleeper vs peer** | vtime well behind the frontier = just slept, earned credit, fast service; at the frontier = ran all along, can wait |
-| **slice** | per-task turn length: twice its own measured burst, floored at one context-switch cost, capped at half a frame |
+| **slice** | a task's CPU time budget, based on its measured runtime and age, capped at 1.5 ms and floored by a startup handoff estimate |
 | **starved** | waiting longer than it runs, computed from counters the kernel already keeps. Cake's main discriminator |
-| **frame clock** | the display's real cadence, measured by voting on thread wake rates. Follows 60/144/240 Hz and VRR with no configuration |
+| **seat** | a CPU associated with a pipeline-stage task; placement avoids giving another task that CPU when a suitable alternative exists |
 | **sink** | a CPU the kernel steers device interrupts onto — see the veto table above |
 
 </details>
@@ -146,47 +145,34 @@ that have consumed less CPU run first, weighted by nice level.
 <summary><b>The rest of the mechanism — edge cases, preemption, dispatch</b></summary>
 <br>
 
-- a woken task stays on its old core when cache warmth outweighs the shared
-  line's speed;
-- a sleeping partner takes over its waker's core — two tasks ping-ponging a
-  message run fastest sharing one core;
-- the backlog gate exists because a saturated machine must not scatter
-  wakes — it would tear communicating pairs apart;
-- preemption has two opposite gates: claiming an empty-ish home may kick an
-  occupant only while it has barely started (under 1/32 of a frame slice)
-  and the wakee leads on fairness; with no idle CPU anywhere, an occupant
-  is kicked only once it has run a real fraction of a frame, is not a
-  pipeline stage, and the wakee's fairness clock is earlier;
-- expired tasks requeue on their own CPU and advertise via a per-CPU "may
-  hold work" mark. Dispatch drains own queue vs wake queue by earliest
-  vtime (with hysteresis so the global queue's lock isn't stampeded), then
-  ring-steals from neighbors, then keeps running what it has;
-- fairness accounting is nearly free: the turn charge is the delta of the
-  kernel's own `sum_exec_runtime`, weighted by a reciprocal table, and new
-  tasks start exactly at the frontier.
+- Cache-warm placement and serial handoffs preserve useful CPU locality.
+- Seat ownership protects pipeline stages while respecting task affinity.
+- Preemption considers the waiting task's slice and the current occupant's
+  service; a kick does not guarantee immediate execution.
+- Dispatch checks remote offers, its owner queue and its local wake pool,
+  then looks for eligible work in other queues.
+- Runtime accounting charges CPU time using reciprocal nice-level weights.
 
 </details>
 
-The mechanism-level version of all of this — every rule, threshold, and
-receipt — is [`DESIGN.md`](./DESIGN.md).
+Policy details, hardware fallbacks and known limits are in
+[`DESIGN.md`](./DESIGN.md).
 
-## Compared to other scx schedulers
-
-`scx_lavd`, `scx_bpfland`, and `scx_rusty` are mature, feature-rich
-schedulers built on heuristics and tracked state. Cake's bet: zero per-task
-state, zero tunables, one algorithm small enough to audit in an afternoon —
-adaptivity comes from classifying the current scheduling state, and the
-only learned state is one per-CPU three-bit handoff-confidence hint.
+Cake keeps per-task placement history and seat state, plus per-CPU queue
+and interrupt information. The default policy needs no profile selection;
+construct toggles support diagnosis and comparisons.
 
 ## Source tour
 
 | file | contents |
 |---|---|
-| `src/bpf/cake.bpf.c` | the scheduler — 8 callbacks, ~1.5k lines, about a third comments explaining the why |
-| `src/bpf/intf.h` | the constant surface: the `SLICE_NS` boot seed, frame-clock bands, and the IDs shared with the loader |
-| `src/main.rs` | the loader: attach, exit reporting, hardware probes, frame-clock publish, sink monitor |
-| [`STATE.md`](./STATE.md) | **start here** — current state, the experiment ledger, and the `§` rationale registry every source comment resolves to |
-| [`DESIGN.md`](./DESIGN.md) | the full design: every rule, constant, invariant |
+| `src/bpf/cake.bpf.c` | CPU selection, queues, dispatch, service accounting and task lifecycle |
+| `src/bpf/intf.h` | constants, topology limits and IDs shared with the loader |
+| `src/main.rs` | command-line parsing, hardware probes, attach/restart, IRQ monitoring and tests |
+| `src/core_performance.rs` | runtime core-capacity and preferred-core discovery |
+| `tests/cli.rs` | launcher argument regression tests without scheduler attachment |
+| [`DESIGN.md`](./DESIGN.md) | current policy, known limits and retained construct names |
+| [`STATE.md`](./STATE.md) | historical experiment notes and rationale; may describe older builds |
 | [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md) | how performance is measured and where results stand |
 | [`docs/`](./docs/README.md) | live investigations; the campaign gate log in [`docs/archive/`](./docs/archive/) |
 

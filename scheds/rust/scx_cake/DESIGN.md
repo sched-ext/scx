@@ -1,7 +1,6 @@
 # scx_cake — model of operation
 
-This describes the selected pool-direct nightly build. Experiment
-results, decisions, and open issues live in [STATE.md](./STATE.md).
+This describes Cake's scheduling policy, hardware fallbacks, and known limits.
 
 ## Queue ownership and admission
 
@@ -22,7 +21,7 @@ select_cpu considers an inferred serial handoff, a stage task's seat,
 cache-warm home admission, and a claimed idle choice. Serial handoff requires
 an idle count of at least 75% of the CPU-ID span, eligible empty queues, and
 an occupant estimated to be yielding. Sparse IDs/offline headroom can therefore
-suppress this path; the later online-capacity correction is not in this build.
+suppress this path.
 
 Cold choices prefer whole idle cores, unheld seats, cleaner IRQ targets, and
 platform rank. Home admission and seat retakes also inspect SMT interference.
@@ -54,18 +53,17 @@ wake pool by virtual time and pool service age. It attempts both before
 stealing from owner queues and checking foreign wake pools. A previous task
 can receive a renewed slice when the search finds no consumable work.
 
-Queue marks and remote offers remain advisory protocol state in this retained
-version. Deferred-publication models exposed dual-CCD gaps in those protocols;
-the pool-truth and remote-service replacements are parked experiments, not
-part of this candidate. See STATE.md for their evidence and limitations.
+Queue marks and remote offers are advisory: delayed publication can leave
+work temporarily undiscovered by another LLC. These protocols do not
+guarantee immediate service across LLCs.
 The 24 ms pool escalation is a policy threshold, not a universal wait bound.
 
 ## Service accounting
 
 Starvation classification compares lifetime mean wait with lifetime mean run
 using fixed 16-bit time quantization and 64-bit products. Large lifetime
-counters can overflow those products; the later arithmetic repair is not in
-this build. This does not measure the current wake's delay in isolation.
+counters can overflow those products. This does not measure the current
+wake's delay in isolation.
 
 For runtime r, task age a, and switch-count denominator n, the slice is
 the minimum of 2 * floor(r / n), floor(a / (2 * n)), and 1.5 ms, then
@@ -91,3 +89,18 @@ an additional advisory signal when the startup probe succeeds.
 After privileged setup, the loader drops its calling thread's capabilities
 and restores process inspection. Requested topology restarts re-execute the
 loader. Debug/probe telemetry is distinct from release performance evidence.
+
+## Construct names in source comments
+
+The source retains these identifiers for diagnosis and historical references.
+`--help` lists the supported toggles and their defaults.
+
+| Identifier | Meaning |
+|---|---|
+| G85 | Seat ownership rules: avoid placing unrelated work on another task's held CPU when suitable alternatives exist |
+| G86 | Retry idle claims and allow eligible kernel-thread wakes to use the shared pool |
+| G87 | Use the waiting task's own slice to size wakeup protection and pinned-wake preemption margins |
+| G88 | Track CPUs sharing an LLC; `llcsplit` is an optional synthetic-topology test scaffold |
+| G89 | Per-LLC wake pools and locality-aware selection, notification and stealing |
+
+Earlier section references refer to the historical notes in `STATE.md`.
