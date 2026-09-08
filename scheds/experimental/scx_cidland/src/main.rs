@@ -204,6 +204,20 @@ struct Opts {
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     no_eligibility: bool,
 
+    /// Interrupt a running task that is still owed service.
+    ///
+    /// The wakeup preemption normally leaves a running task alone until it has
+    /// had the share its pack owes it, so a woken task with an earlier deadline
+    /// waits for parity rather than for the slice to end. This drops that
+    /// protection: the woken task takes the CPU as soon as it is eligible
+    /// itself. Unlike --no-eligibility the woken task is still asked whether it
+    /// is owed service; only the task already running loses its protection.
+    ///
+    /// This is RUN_TO_PARITY off, in the sense the feature had when EEVDF was
+    /// merged. For comparing the two rules against each other.
+    #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
+    no_run_to_parity: bool,
+
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -364,6 +378,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
+        rodata.no_run_to_parity = opts.no_run_to_parity;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, with
