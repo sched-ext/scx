@@ -96,11 +96,10 @@ impl SubscriptionManager {
             }
 
             // Check rate limit
-            if let Some(limiter) = self.rate_limiters.get_mut(id) {
-                if !limiter.allow() {
+            if let Some(limiter) = self.rate_limiters.get_mut(id)
+                && !limiter.allow() {
                     continue;
                 }
-            }
 
             // Try to send
             if sub.sender.send(json.clone()).is_err() {

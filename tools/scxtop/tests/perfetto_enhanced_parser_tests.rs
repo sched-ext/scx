@@ -204,7 +204,7 @@ fn test_event_type_index_from_real_trace() {
         let sched_switch_events = index.get_events_by_type("sched_switch");
         println!("\nTotal sched_switch events: {}", sched_switch_events.len());
         assert!(
-            sched_switch_events.len() > 0,
+            !sched_switch_events.is_empty(),
             "Should have sched_switch events"
         );
     }

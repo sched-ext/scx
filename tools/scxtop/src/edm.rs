@@ -58,11 +58,10 @@ impl ActionHandler for EventDispatchManager {
     fn on_action(&mut self, action: &Action) -> Result<()> {
         for handler in &mut self.action_handlers {
             let result = handler.on_action(action);
-            if let Err(err) = result {
-                if let Some(action_error_callback) = &self.action_error_callback {
+            if let Err(err) = result
+                && let Some(action_error_callback) = &self.action_error_callback {
                     action_error_callback(err)?;
                 }
-            }
         }
         Ok(())
     }
@@ -72,11 +71,10 @@ impl BpfEventHandler for EventDispatchManager {
     fn on_event(&mut self, bpf_event: &bpf_event) -> Result<()> {
         for handler in &mut self.bpf_handlers {
             let result = handler.on_event(bpf_event);
-            if let Err(err) = result {
-                if let Some(bpf_error_callback) = &self.bpf_error_callback {
+            if let Err(err) = result
+                && let Some(bpf_error_callback) = &self.bpf_error_callback {
                     bpf_error_callback(err)?;
                 }
-            }
         }
         Ok(())
     }

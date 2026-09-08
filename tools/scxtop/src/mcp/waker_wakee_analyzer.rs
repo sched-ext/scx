@@ -241,8 +241,8 @@ impl WakerWakeeAnalyzer {
                 .or_insert(0) += 1;
 
             // Update LLC/NUMA affinity if topology available
-            if let Some(ref topo) = self.topology {
-                if let (Some(waker_cpu_info), Some(wakee_cpu_info)) = (
+            if let Some(ref topo) = self.topology
+                && let (Some(waker_cpu_info), Some(wakee_cpu_info)) = (
                     topo.all_cpus.get(&(wakeup.waker_cpu as usize)),
                     topo.all_cpus.get(&(wakee_cpu as usize)),
                 ) {
@@ -258,7 +258,6 @@ impl WakerWakeeAnalyzer {
                         stats.cross_node_count += 1;
                     }
                 }
-            }
 
             // Enforce max relationships limit
             self.enforce_relationship_limit();

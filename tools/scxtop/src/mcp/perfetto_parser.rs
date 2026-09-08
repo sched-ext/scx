@@ -358,13 +358,12 @@ impl PerfettoTrace {
 
                 // Debug annotation string values (field 29)
                 for ann_str in &interned_data.debug_annotation_string_values {
-                    if let (Some(iid), Some(str_val)) = (ann_str.iid, ann_str.str.as_ref()) {
-                        if let Ok(str_val_string) = String::from_utf8(str_val.clone()) {
+                    if let (Some(iid), Some(str_val)) = (ann_str.iid, ann_str.str.as_ref())
+                        && let Ok(str_val_string) = String::from_utf8(str_val.clone()) {
                             intern_tables
                                 .debug_annotation_string_values
                                 .insert(iid, str_val_string);
                         }
-                    }
                 }
             }
 
@@ -388,8 +387,8 @@ impl PerfettoTrace {
                     trace_packet::Data::TrackDescriptor(track_desc) => {
                         // Extract process information from TrackDescriptor
                         // (fallback for tools like wprof that don't emit ProcessTree)
-                        if let Some(process) = track_desc.process.as_ref() {
-                            if let Some(pid) = process.pid {
+                        if let Some(process) = track_desc.process.as_ref()
+                            && let Some(pid) = process.pid {
                                 // Only insert if not already present from ProcessTree
                                 processes.entry(pid).or_insert_with(|| ProcessInfo {
                                     pid,
@@ -397,11 +396,10 @@ impl PerfettoTrace {
                                     name: process.process_name.clone(),
                                 });
                             }
-                        }
 
                         // Extract thread information from TrackDescriptor
-                        if let Some(thread) = track_desc.thread.as_ref() {
-                            if let (Some(tid), Some(pid)) = (thread.tid, thread.pid) {
+                        if let Some(thread) = track_desc.thread.as_ref()
+                            && let (Some(tid), Some(pid)) = (thread.tid, thread.pid) {
                                 let key = ((pid as u64) << 32) | (tid as u64);
                                 threads.insert(
                                     key,
@@ -422,18 +420,17 @@ impl PerfettoTrace {
                                     track_uuid_to_thread.insert(uuid, (pid, tid));
                                 }
                             }
-                        }
 
                         // Check for DSQ track descriptors (sched_ext specific)
-                        if let Some(counter) = track_desc.counter.as_ref() {
-                            if let Some(unit_name) = &counter.unit_name {
+                        if let Some(counter) = track_desc.counter.as_ref()
+                            && let Some(unit_name) = &counter.unit_name {
                                 // DSQ tracks have unit names like "DSQ 0 latency ns" or "DSQ 0 nr_queued"
                                 if unit_name.contains("DSQ ") {
                                     let is_latency = unit_name.contains("latency");
                                     let is_nr_queued = unit_name.contains("nr_queued");
 
-                                    if is_latency || is_nr_queued {
-                                        if let Some(uuid) = track_desc.uuid {
+                                    if (is_latency || is_nr_queued)
+                                        && let Some(uuid) = track_desc.uuid {
                                             // Extract DSQ ID from the track name
                                             if let Some(name_str) =
                                                 &track_desc.static_or_dynamic_name
@@ -441,8 +438,7 @@ impl PerfettoTrace {
                                                 use perfetto_protos::track_descriptor::track_descriptor::Static_or_dynamic_name;
                                                 if let Static_or_dynamic_name::StaticName(name) =
                                                     name_str
-                                                {
-                                                    if let Some(dsq_id) =
+                                                    && let Some(dsq_id) =
                                                         extract_dsq_id_from_name(name)
                                                     {
                                                         has_scx_events = true;
@@ -464,26 +460,21 @@ impl PerfettoTrace {
                                                                 .insert(uuid, dsq_id);
                                                         }
                                                     }
-                                                }
                                             }
                                         }
-                                    }
                                 }
                             }
-                        }
 
                         // Check for topology metadata (scxtop embeds this as "scxtop_topo:{json}")
                         if let Some(name_str) = &track_desc.static_or_dynamic_name {
                             use perfetto_protos::track_descriptor::track_descriptor::Static_or_dynamic_name;
-                            if let Static_or_dynamic_name::StaticName(name) = name_str {
-                                if let Some(json_str) = name.strip_prefix("scxtop_topo:") {
-                                    if let Ok(topo) =
+                            if let Static_or_dynamic_name::StaticName(name) = name_str
+                                && let Some(json_str) = name.strip_prefix("scxtop_topo:")
+                                    && let Ok(topo) =
                                         serde_json::from_str::<TraceTopology>(json_str)
                                     {
                                         trace_topology = Some(topo);
                                     }
-                                }
-                            }
                         }
                     }
                     _ => {}
@@ -500,12 +491,11 @@ impl PerfettoTrace {
                         for event in &ftrace_bundle.event {
                             // Track timestamp range (skip zero timestamps
                             // from partially initialized events)
-                            if let Some(ts) = event.timestamp {
-                                if ts > 0 {
+                            if let Some(ts) = event.timestamp
+                                && ts > 0 {
                                     min_ts = min_ts.min(ts);
                                     max_ts = max_ts.max(ts);
                                 }
-                            }
 
                             // Add to per-CPU index
                             ftrace_events_by_cpu.entry(cpu).or_default().push(
@@ -523,12 +513,11 @@ impl PerfettoTrace {
 
                             // Track timestamp range from expanded events
                             for event_with_idx in &expanded_events {
-                                if let Some(ts) = event_with_idx.event.timestamp {
-                                    if ts > 0 {
+                                if let Some(ts) = event_with_idx.event.timestamp
+                                    && ts > 0 {
                                         min_ts = min_ts.min(ts);
                                         max_ts = max_ts.max(ts);
                                     }
-                                }
                             }
 
                             // Add expanded events to per-CPU index
@@ -558,14 +547,12 @@ impl PerfettoTrace {
                         {
                             // Resolve PID/TID from track_uuid if not in annotations
                             // This is needed for wprof traces where PID is in TrackDescriptor, not event
-                            if parsed_event.metadata.pid.is_none() {
-                                if let Some(uuid) = parsed_event.track_uuid {
-                                    if let Some(&(pid, tid)) = track_uuid_to_thread.get(&uuid) {
+                            if parsed_event.metadata.pid.is_none()
+                                && let Some(uuid) = parsed_event.track_uuid
+                                    && let Some(&(pid, tid)) = track_uuid_to_thread.get(&uuid) {
                                         parsed_event.metadata.pid = Some(pid);
                                         parsed_event.metadata.tid = Some(tid);
                                     }
-                                }
-                            }
 
                             let event_idx = track_events.len();
 
@@ -593,8 +580,8 @@ impl PerfettoTrace {
                         }
 
                         // Extract DSQ events using proper UUID matching
-                        if let Some(uuid) = track_event.track_uuid {
-                            if let Some(ts) = extract_track_event_timestamp(track_event) {
+                        if let Some(uuid) = track_event.track_uuid
+                            && let Some(ts) = extract_track_event_timestamp(track_event) {
                                 let ts_ns = ts * 1000; // Convert us to ns
                                 let value = extract_counter_value(track_event);
 
@@ -640,7 +627,6 @@ impl PerfettoTrace {
                                     }
                                 }
                             }
-                        }
                     }
                     trace_packet::Data::SysStats(sys_stat) => {
                         if let Some(ts) = packet.timestamp {
@@ -696,11 +682,10 @@ impl PerfettoTrace {
 
         for cpu_events in self.ftrace_events_by_cpu.values() {
             for event_with_idx in cpu_events {
-                if let Some(ts) = event_with_idx.event.timestamp {
-                    if ts >= start_ns && ts <= end_ns {
+                if let Some(ts) = event_with_idx.event.timestamp
+                    && ts >= start_ns && ts <= end_ns {
                         events.push(&event_with_idx.event);
                     }
-                }
             }
         }
 

@@ -14,13 +14,11 @@ impl MockTrace {
         let mut ts = 1_000_000_000u64;
 
         // Create diverse track events with different types
-        let categories = vec!["ONCPU", "WAKER", "WAKEE"];
-        let event_types = vec![
-            TrackEventType::SliceBegin,
+        let categories = ["ONCPU", "WAKER", "WAKEE"];
+        let event_types = [TrackEventType::SliceBegin,
             TrackEventType::SliceEnd,
             TrackEventType::Instant,
-            TrackEventType::Counter,
-        ];
+            TrackEventType::Counter];
 
         for i in 0..100 {
             let category = categories[i % categories.len()];

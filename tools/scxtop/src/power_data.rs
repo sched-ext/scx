@@ -174,11 +174,10 @@ impl MsrReader {
 
         for package_id in 0..package_count {
             // Find the first CPU in this package
-            if let Some(cpu_id) = self.find_first_cpu_in_package(package_id)? {
-                if let Ok(units) = self.read_rapl_units(cpu_id) {
+            if let Some(cpu_id) = self.find_first_cpu_in_package(package_id)?
+                && let Ok(units) = self.read_rapl_units(cpu_id) {
                     self.rapl_units.insert(package_id, units);
                 }
-            }
         }
 
         Ok(())
@@ -210,11 +209,10 @@ impl MsrReader {
             let topology_path =
                 format!("/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id");
             if let Ok(package_str) = fs::read_to_string(&topology_path) {
-                if let Ok(cpu_package_id) = package_str.trim().parse::<u32>() {
-                    if cpu_package_id == package_id {
+                if let Ok(cpu_package_id) = package_str.trim().parse::<u32>()
+                    && cpu_package_id == package_id {
                         return Ok(Some(cpu_id));
                     }
-                }
             } else {
                 break;
             }
@@ -739,11 +737,10 @@ impl PowerSnapshot {
         }
 
         // Always include the last point for current data
-        if let Some(last_point) = bounded_data.last() {
-            if sampled_points.last() != Some(&last_point) {
+        if let Some(last_point) = bounded_data.last()
+            && sampled_points.last() != Some(&last_point) {
                 sampled_points.push(last_point);
             }
-        }
 
         sampled_points
     }
@@ -800,8 +797,8 @@ impl PowerSnapshot {
 
     /// Get C-state delta percentage for a specific core and C-state
     pub fn get_cstate_percentage(&self, core_id: u32, cstate_name: &str) -> f64 {
-        if let Some(core_deltas) = self.cstate_deltas.get(&core_id) {
-            if let Some(cstate_delta) = core_deltas.get(cstate_name) {
+        if let Some(core_deltas) = self.cstate_deltas.get(&core_id)
+            && let Some(cstate_delta) = core_deltas.get(cstate_name) {
                 // Calculate total residency delta for this core
                 let total_residency_delta: u64 = core_deltas.values().map(|cs| cs.residency).sum();
 
@@ -809,18 +806,16 @@ impl PowerSnapshot {
                     return (cstate_delta.residency as f64 / total_residency_delta as f64) * 100.0;
                 }
             }
-        }
 
         // Fallback to static calculation if no deltas available
-        if let Some(core_data) = self.current.cores.get(&core_id) {
-            if let Some(cstate_info) = core_data.c_states.get(cstate_name) {
+        if let Some(core_data) = self.current.cores.get(&core_id)
+            && let Some(cstate_info) = core_data.c_states.get(cstate_name) {
                 let total_residency: u64 = core_data.c_states.values().map(|cs| cs.residency).sum();
 
                 if total_residency > 0 {
                     return (cstate_info.residency as f64 / total_residency as f64) * 100.0;
                 }
             }
-        }
 
         0.0
     }
@@ -1139,8 +1134,8 @@ impl PowerDataCollector {
         core_data.package_id = self.get_package_id(core_id)?;
 
         // Enhance with comprehensive RAPL data if available
-        if let Some(ref rapl_monitor) = self.rapl_monitor {
-            if let Ok(rapl_reading) = rapl_monitor
+        if let Some(ref rapl_monitor) = self.rapl_monitor
+            && let Ok(rapl_reading) = rapl_monitor
                 .msr_reader
                 .read_rapl_energy(core_data.package_id)
             {
@@ -1163,7 +1158,6 @@ impl PowerDataCollector {
                 core_data.psys_energy_uj = rapl_reading.psys_energy_uj;
                 core_data.l3_energy_uj = rapl_reading.l3_energy_uj;
             }
-        }
 
         Ok(core_data)
     }
@@ -1215,15 +1209,14 @@ impl PowerDataCollector {
                     || thermal_type.contains("coretemp")
                 {
                     let temp_path = format!("{}/thermal_zone{i}/temp", self.sysfs_thermal_path);
-                    if let Ok(temp_str) = fs::read_to_string(&temp_path) {
-                        if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+                    if let Ok(temp_str) = fs::read_to_string(&temp_path)
+                        && let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
                             let temp_celsius = temp_millicelsius / 1000.0;
                             // Sanity check: reasonable CPU temperature range
                             if (0.0..=150.0).contains(&temp_celsius) {
                                 return Ok(temp_celsius);
                             }
                         }
-                    }
                 }
             }
         }
@@ -1253,14 +1246,13 @@ impl PowerDataCollector {
         ];
 
         for path in &hwmon_paths {
-            if let Ok(temp_str) = fs::read_to_string(path) {
-                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+            if let Ok(temp_str) = fs::read_to_string(path)
+                && let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
                     let temp_celsius = temp_millicelsius / 1000.0;
                     if (0.0..=150.0).contains(&temp_celsius) {
                         return Ok(temp_celsius);
                     }
                 }
-            }
         }
 
         // Strategy 3: Try per-core temperature from coretemp with different numbering schemes
@@ -1271,14 +1263,13 @@ impl PowerDataCollector {
         ];
 
         for path in &alt_core_paths {
-            if let Ok(temp_str) = fs::read_to_string(path) {
-                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+            if let Ok(temp_str) = fs::read_to_string(path)
+                && let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
                     let temp_celsius = temp_millicelsius / 1000.0;
                     if (0.0..=150.0).contains(&temp_celsius) {
                         return Ok(temp_celsius);
                     }
                 }
-            }
         }
 
         // Strategy 4: Try CPU package temperature (shared across cores in package)
@@ -1294,14 +1285,13 @@ impl PowerDataCollector {
         ];
 
         for path in &package_temp_paths {
-            if let Ok(temp_str) = fs::read_to_string(path) {
-                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+            if let Ok(temp_str) = fs::read_to_string(path)
+                && let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
                     let temp_celsius = temp_millicelsius / 1000.0;
                     if (0.0..=150.0).contains(&temp_celsius) {
                         return Ok(temp_celsius);
                     }
                 }
-            }
         }
 
         // Strategy 5: Try to auto-discover available hwmon devices
@@ -1318,14 +1308,13 @@ impl PowerDataCollector {
                         // Try various temp inputs for this hwmon device
                         for temp_input in 1..=10 {
                             let temp_path = hwmon_path.join(format!("temp{temp_input}_input"));
-                            if let Ok(temp_str) = fs::read_to_string(&temp_path) {
-                                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+                            if let Ok(temp_str) = fs::read_to_string(&temp_path)
+                                && let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
                                     let temp_celsius = temp_millicelsius / 1000.0;
                                     if (0.0..=150.0).contains(&temp_celsius) {
                                         return Ok(temp_celsius);
                                     }
                                 }
-                            }
                         }
                     }
                 }
@@ -1405,8 +1394,8 @@ impl PowerDataCollector {
 
             // Check if this is a battery
             let type_path = supply_path.join("type");
-            if let Ok(supply_type) = fs::read_to_string(&type_path) {
-                if supply_type.trim() == "Battery" {
+            if let Ok(supply_type) = fs::read_to_string(&type_path)
+                && supply_type.trim() == "Battery" {
                     // Read battery information
                     let capacity_path = supply_path.join("capacity");
                     let status_path = supply_path.join("status");
@@ -1433,7 +1422,6 @@ impl PowerDataCollector {
 
                     return Ok((capacity, charging, remaining_time));
                 }
-            }
         }
 
         Err(anyhow!("No battery found"))
@@ -1441,13 +1429,11 @@ impl PowerDataCollector {
 
     fn collect_package_power(&mut self) -> Result<HashMap<u32, f64>> {
         // Priority 1: Try MSR-based RAPL if available
-        if let Some(ref mut rapl_monitor) = self.rapl_monitor {
-            if let Ok(msr_power_data) = rapl_monitor.collect_power_data() {
-                if !msr_power_data.is_empty() {
+        if let Some(ref mut rapl_monitor) = self.rapl_monitor
+            && let Ok(msr_power_data) = rapl_monitor.collect_power_data()
+                && !msr_power_data.is_empty() {
                     return Ok(msr_power_data);
                 }
-            }
-        }
 
         // Priority 2: Fallback to sysfs-based RAPL data
         let mut package_power = HashMap::new();
@@ -1469,9 +1455,9 @@ impl PowerDataCollector {
                     if let (Ok(energy_str), Ok(name_str)) = (
                         fs::read_to_string(&energy_path),
                         fs::read_to_string(&name_path),
-                    ) {
-                        if name_str.trim().starts_with("package-") {
-                            if let Ok(energy_uj) = energy_str.trim().parse::<u64>() {
+                    )
+                        && name_str.trim().starts_with("package-")
+                            && let Ok(energy_uj) = energy_str.trim().parse::<u64>() {
                                 // Extract package number from the path
                                 let package_id = package_name
                                     .chars()
@@ -1485,8 +1471,6 @@ impl PowerDataCollector {
                                 let power_watts = energy_uj as f64 / 1_000_000.0; // Convert to joules
                                 package_power.insert(package_id, power_watts);
                             }
-                        }
-                    }
                 }
             }
         }

@@ -380,16 +380,14 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                     links.push(link);
                 }
                 // v2 API variants (6.19+)
-                if compat::ksym_exists("scx_bpf_dsq_insert___v2")? {
-                    if let Ok(link) = skel.progs.scx_insert_v2.attach() {
+                if compat::ksym_exists("scx_bpf_dsq_insert___v2")?
+                    && let Ok(link) = skel.progs.scx_insert_v2.attach() {
                         links.push(link);
                     }
-                }
-                if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")? {
-                    if let Ok(link) = skel.progs.scx_insert_vtime_args.attach() {
+                if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")?
+                    && let Ok(link) = skel.progs.scx_insert_vtime_args.attach() {
                         links.push(link);
                     }
-                }
             } else {
                 if let Ok(link) = skel.progs.scx_dispatch.attach() {
                     links.push(link);
@@ -908,15 +906,14 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                             Ok(mut loaded_skel) => {
                                 // Populate the CPU-to-ringbuffer mapping after loading
                                 for (cpu_id, &rb_id) in rb_cpu_mapping.iter().enumerate() {
-                                    if cpu_id < cpu_cnt_pow2 {
-                                        if let Err(e) = loaded_skel.maps.data_rb_cpu_map.update(
+                                    if cpu_id < cpu_cnt_pow2
+                                        && let Err(e) = loaded_skel.maps.data_rb_cpu_map.update(
                                             &(cpu_id as u32).to_ne_bytes(),
                                             &rb_id.to_ne_bytes(),
                                             libbpf_rs::MapFlags::ANY,
                                         ) {
                                             capability_warnings.push(format!("Failed to set CPU {} -> ringbuf {}: {}", cpu_id, rb_id, e));
                                         }
-                                    }
                                 }
 
                                 let (skel_links, attach_warnings) = attach_progs(&mut loaded_skel)?;
@@ -1513,8 +1510,8 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                         }
 
                         // 3. Migration Analyzer
-                        if let Ok(mut analyzer) = ctx.migration_analyzer.try_lock() {
-                            if event_type == bpf_intf::event_type_SCHED_MIGRATE {
+                        if let Ok(mut analyzer) = ctx.migration_analyzer.try_lock()
+                            && event_type == bpf_intf::event_type_SCHED_MIGRATE {
                                 let migrate = &event.event.migrate;
                                 let json = serde_json::json!({
                                     "pid": migrate.pid, "from_cpu": event.cpu,
@@ -1522,7 +1519,6 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                 });
                                 analyzer.record_migration(&json, event.ts);
                             }
-                        }
 
                         // 4. Process Event History
                         if let Ok(mut history) = ctx.process_history.try_lock() {
@@ -1556,8 +1552,8 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                         }
 
                         // 7. Wakeup Chain Tracker
-                        if let Ok(mut tracker) = ctx.wakeup_tracker.try_lock() {
-                            if event_type == bpf_intf::event_type_SCHED_WAKEUP || event_type == bpf_intf::event_type_SCHED_WAKING {
+                        if let Ok(mut tracker) = ctx.wakeup_tracker.try_lock()
+                            && (event_type == bpf_intf::event_type_SCHED_WAKEUP || event_type == bpf_intf::event_type_SCHED_WAKING) {
                                 let (pid, waker_pid) = if event_type == bpf_intf::event_type_SCHED_WAKEUP {
                                     (event.event.wakeup.pid, event.event.wakeup.waker_pid)
                                 } else {
@@ -1568,11 +1564,10 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                 });
                                 tracker.record_wakeup(&json, event.ts);
                             }
-                        }
 
                         // 8. Softirq Analyzer
-                        if let Ok(mut analyzer) = ctx.softirq_analyzer.try_lock() {
-                            if event_type == bpf_intf::event_type_SOFTIRQ {
+                        if let Ok(mut analyzer) = ctx.softirq_analyzer.try_lock()
+                            && event_type == bpf_intf::event_type_SOFTIRQ {
                                 let softirq = &event.event.softirq;
                                 let json = serde_json::json!({
                                     "type": "softirq", "pid": softirq.pid, "softirq_nr": softirq.softirq_nr,
@@ -1580,7 +1575,6 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                 });
                                 analyzer.record_event(&json);
                             }
-                        }
 
                         // Dispatch to action channel
                         let mut edm = EventDispatchManager::new(None, None);
@@ -1839,8 +1833,8 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                             }
 
                             // Feed perf samples to profiler if it's collecting
-                            if let Some(ref profiler) = perf_profiler {
-                                if let Action::PerfSample(ref perf_sample) = action {
+                            if let Some(ref profiler) = perf_profiler
+                                && let Action::PerfSample(ref perf_sample) = action {
                                     use scxtop::mcp::RawSample;
                                     profiler.add_sample(RawSample {
                                         address: perf_sample.instruction_pointer,
@@ -1856,7 +1850,6 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                         },
                                     });
                                 }
-                            }
 
                             // Update app state
                             let _ = app.handle_action(&action);

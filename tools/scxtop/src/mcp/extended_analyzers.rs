@@ -168,8 +168,8 @@ impl DsqMonitor {
         if !self.enabled {
             return;
         }
-        if let Some(event_type) = json.get("type").and_then(|v| v.as_str()) {
-            if event_type == "sched_switch" {
+        if let Some(event_type) = json.get("type").and_then(|v| v.as_str())
+            && event_type == "sched_switch" {
                 // Extract DSQ info
                 if let Some(dsq_id) = json.get("next_dsq_id").and_then(|v| v.as_u64()) {
                     let stats = self.dsq_stats.entry(dsq_id).or_insert_with(|| DsqStats {
@@ -195,7 +195,6 @@ impl DsqMonitor {
                     }
                 }
             }
-        }
     }
 
     pub fn get_stats(&self, dsq_ids: Option<&[u64]>) -> Vec<DsqMonitorStats> {
@@ -446,8 +445,8 @@ impl WakeupChainTracker {
         if !self.enabled {
             return;
         }
-        if let Some(event_type) = json.get("type").and_then(|v| v.as_str()) {
-            if event_type == "sched_wakeup" || event_type == "sched_wakeup_new" {
+        if let Some(event_type) = json.get("type").and_then(|v| v.as_str())
+            && (event_type == "sched_wakeup" || event_type == "sched_wakeup_new") {
                 let waker_pid = json
                     .get("waker_pid")
                     .and_then(|v| v.as_u64())
@@ -475,7 +474,6 @@ impl WakeupChainTracker {
                     self.wakeups.entry(target_pid).or_default().push(event);
                 }
             }
-        }
     }
 
     pub fn trace_chain(&self, pid: u32, max_depth: usize) -> Vec<WakeupChain> {

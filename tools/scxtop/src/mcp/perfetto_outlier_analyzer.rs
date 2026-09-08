@@ -435,8 +435,8 @@ impl PerfettoOutlierAnalyzer {
 
         // Process wakeup events
         for wakeup in wakeup_events {
-            if let Some(wakee_pid) = self.extract_wakee_pid(wakeup) {
-                if let Some(wakeup_ts) = wakeup.timestamp {
+            if let Some(wakee_pid) = self.extract_wakee_pid(wakeup)
+                && let Some(wakeup_ts) = wakeup.timestamp {
                     // Find the first switch event for this PID after the wakeup timestamp
                     if let Some(switch_list) = switch_by_pid.get(&wakee_pid) {
                         // Binary search for first event after wakeup_ts
@@ -452,7 +452,6 @@ impl PerfettoOutlierAnalyzer {
                         }
                     }
                 }
-            }
         }
 
         process_latencies

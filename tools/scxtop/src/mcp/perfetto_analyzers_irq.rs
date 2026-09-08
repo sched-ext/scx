@@ -45,8 +45,7 @@ impl IrqHandlerAnalyzer {
                     Some(ftrace_event::Event::IrqHandlerExit(exit)) => {
                         if let (Some(irq), Some(exit_ts)) =
                             (exit.irq, event_with_idx.event.timestamp)
-                        {
-                            if let Some(mut entry_event) =
+                            && let Some(mut entry_event) =
                                 pending_entry.remove(&(cpu as u32, irq as u32))
                             {
                                 let duration = exit_ts - entry_event.entry_ts;
@@ -68,7 +67,6 @@ impl IrqHandlerAnalyzer {
                                 // Track per-CPU
                                 per_cpu_irq.entry(cpu as u32).or_default().push(entry_event);
                             }
-                        }
                     }
                     _ => {}
                 }
@@ -130,8 +128,8 @@ impl IpiAnalyzer {
                         }
                     }
                     Some(ftrace_event::Event::IpiExit(exit)) => {
-                        if let Some(exit_ts) = event_with_idx.event.timestamp {
-                            if let Some(mut entry_event) = pending_entry.remove(&(cpu as u32)) {
+                        if let Some(exit_ts) = event_with_idx.event.timestamp
+                            && let Some(mut entry_event) = pending_entry.remove(&(cpu as u32)) {
                                 let duration = exit_ts - entry_event.entry_ts;
                                 entry_event.exit_ts = Some(exit_ts);
                                 entry_event.duration_ns = Some(duration);
@@ -143,7 +141,6 @@ impl IpiAnalyzer {
                                     .push(entry_event.clone());
                                 ipi_events.push(entry_event);
                             }
-                        }
                     }
                     _ => {}
                 }

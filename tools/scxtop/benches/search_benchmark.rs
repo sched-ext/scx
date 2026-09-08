@@ -14,7 +14,7 @@ fn get_search() -> Vec<String> {
         .flat_map(|(subsystem, events)| {
             events
                 .into_iter()
-                .map(move |event| format!("{}:{}", &subsystem, &event))
+                .map(move |event| format!("{}:{}", subsystem, event))
         })
         .collect();
     available_perf_events_list.sort();

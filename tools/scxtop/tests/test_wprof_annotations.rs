@@ -57,7 +57,7 @@ impl MockTrace {
                 annotations,
                 metadata: TrackEventMetadata {
                     cpu: Some((i % 8) as u32),
-                    pid: Some((1000 + i) as i32),
+                    pid: Some(((1000 + i))),
                     ..Default::default()
                 },
             });
