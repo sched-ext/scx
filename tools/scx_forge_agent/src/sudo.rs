@@ -6,13 +6,16 @@
 //! Precedence:
 //!   1. already root            -> run directly, no sudo
 //!   2. `$SUDO_ASKPASS` set      -> `sudo -A` (use the caller's askpass)
-//!   3. `$SCX_SUDO_PASSWORD_FILE` -> generate an askpass shim that prints the
+//!   3. password file (from the spec via `resolve()`, or from
+//!      `$SCX_SUDO_PASSWORD_FILE`) -> generate an askpass shim that prints the
 //!      file's contents and use `sudo -A`; the password stays in the file and
-//!      never appears in argv or the process table
+//!      never appears in argv or the process table. The shim path is exported
+//!      to spawned sudo commands only (via `Command::env`), never to the
+//!      agent's own environment.
 //!   4. otherwise               -> `sudo -n` (passwordless / cached credentials)
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -32,6 +35,10 @@ impl Drop for TempShim {
 pub struct Sudo {
     /// e.g. `[]` (root), `["sudo", "-A"]`, or `["sudo", "-n"]`.
     prefix: Vec<String>,
+    /// Askpass shim exported to spawned sudo commands via `SUDO_ASKPASS`.
+    /// `None` when sudo is not used, or when the caller's own `SUDO_ASKPASS`
+    /// is inherited from the environment.
+    askpass: Option<PathBuf>,
     _shim: Option<TempShim>,
 }
 
@@ -41,22 +48,29 @@ fn shell_quote(s: &str) -> String {
 }
 
 impl Sudo {
-    /// Decide the sudo strategy from euid and the environment.
-    pub fn resolve() -> Result<Sudo> {
+    /// Decide the sudo strategy from euid, the environment, and an optional
+    /// password file resolved from the spec (takes precedence over
+    /// `$SCX_SUDO_PASSWORD_FILE`).
+    pub fn resolve(password_file: Option<&Path>) -> Result<Sudo> {
         if unsafe { libc::geteuid() } == 0 {
             return Ok(Sudo {
                 prefix: Vec::new(),
+                askpass: None,
                 _shim: None,
             });
         }
         if std::env::var_os("SUDO_ASKPASS").is_some() {
             return Ok(Sudo {
                 prefix: vec!["sudo".into(), "-A".into()],
+                askpass: None,
                 _shim: None,
             });
         }
-        if let Some(pass_file) = std::env::var_os("SCX_SUDO_PASSWORD_FILE") {
-            let pf = PathBuf::from(&pass_file);
+        let pass_file = password_file
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("SCX_SUDO_PASSWORD_FILE").map(PathBuf::from));
+        if let Some(pass_file) = pass_file {
+            let pf = pass_file;
             if !pf.is_file() {
                 anyhow::bail!("SCX_SUDO_PASSWORD_FILE not found: {}", pf.display());
             }
@@ -74,16 +88,24 @@ impl Sudo {
             .with_context(|| format!("write askpass shim {}", shim.display()))?;
             std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700))
                 .with_context(|| format!("chmod askpass shim {}", shim.display()))?;
-            std::env::set_var("SUDO_ASKPASS", &shim);
             return Ok(Sudo {
                 prefix: vec!["sudo".into(), "-A".into()],
+                askpass: Some(shim.clone()),
                 _shim: Some(TempShim { path: shim }),
             });
         }
         Ok(Sudo {
             prefix: vec!["sudo".into(), "-n".into()],
+            askpass: None,
             _shim: None,
         })
+    }
+
+    /// Export the askpass shim (if any) to a spawned sudo command.
+    fn apply_env(&self, c: &mut Command) {
+        if let Some(askpass) = &self.askpass {
+            c.env("SUDO_ASKPASS", askpass);
+        }
     }
 
     /// Build a `Command` running `program` (with `args`) as root.
@@ -97,6 +119,7 @@ impl Sudo {
             c.args(&self.prefix[1..]);
             c.arg(program);
             c.args(args);
+            self.apply_env(&mut c);
             c
         }
     }
@@ -107,11 +130,10 @@ impl Sudo {
         if self.prefix.is_empty() {
             return Ok(());
         }
-        let out = Command::new(&self.prefix[0])
-            .args(&self.prefix[1..])
-            .arg("-v")
-            .output()
-            .context("spawn sudo -v")?;
+        let mut c = Command::new(&self.prefix[0]);
+        c.args(&self.prefix[1..]).arg("-v");
+        self.apply_env(&mut c);
+        let out = c.output().context("spawn sudo -v")?;
         if out.status.success() {
             Ok(())
         } else {
