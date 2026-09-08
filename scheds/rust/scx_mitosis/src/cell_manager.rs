@@ -3374,8 +3374,8 @@ mod tests {
         // 10 / 3 = 3 each + 1 remainder
         let total: usize = targets.values().sum();
         assert_eq!(total, 10);
-        for (_, &count) in &targets {
-            assert!(count >= 3 && count <= 4);
+        for &count in targets.values() {
+            assert!((3..=4).contains(&count));
         }
     }
 
