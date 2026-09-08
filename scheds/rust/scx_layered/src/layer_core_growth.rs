@@ -141,11 +141,10 @@ fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>> {
     let mut result = BTreeSet::new();
 
     for entry in WalkDir::new("/sys/fs/cgroup").into_iter().flatten() {
-        if entry.file_name() == "cpuset.cpus.effective" {
-            if let Ok(content) = fs::read_to_string(entry.path()) {
+        if entry.file_name() == "cpuset.cpus.effective"
+            && let Ok(content) = fs::read_to_string(entry.path()) {
                 result.insert(parse_cpu_ranges(&content)?);
             }
-        }
     }
 
     Ok(result)

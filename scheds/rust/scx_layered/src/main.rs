@@ -1260,8 +1260,8 @@ impl Stats {
         if self.util_compensation {
             for (&cpu_id, cur_cpu_stat) in &cur_per_cpu_stats {
                 let cpu = cpu_id as usize;
-                if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id) {
-                    if let (
+                if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id)
+                    && let (
                         fb_procfs::CpuStat {
                             user_usec: Some(cu),
                             nice_usec: Some(cn),
@@ -1304,7 +1304,6 @@ impl Stats {
                             1.0
                         };
                     }
-                }
             }
         }
 
@@ -1729,11 +1728,10 @@ impl GpuTaskAffinitizer {
                 if let Some(kids) = self.pid_map.get(&pid) {
                     work.extend(kids);
                 }
-                if let Some(proc_) = self.sys.process(pid) {
-                    if let Some(tasks) = proc_.tasks() {
+                if let Some(proc_) = self.sys.process(pid)
+                    && let Some(tasks) = proc_.tasks() {
                         pids_and_tids.extend(tasks.iter().copied());
                     }
-                }
             }
         }
         pids_and_tids
@@ -1776,11 +1774,10 @@ impl GpuTaskAffinitizer {
         }
         let now = Instant::now();
 
-        if let Some(last_process_time) = self.last_process_time {
-            if (now - last_process_time) < self.poll_interval {
+        if let Some(last_process_time) = self.last_process_time
+            && (now - last_process_time) < self.poll_interval {
                 return;
             }
-        }
 
         match self.update_gpu_pids() {
             Ok(_) => {}
@@ -4807,8 +4804,8 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                 util_range,
                 ..
             } => {
-                if let Some((cpus_min, cpus_max)) = cpus_range {
-                    if cpus_min > cpus_max {
+                if let Some((cpus_min, cpus_max)) = cpus_range
+                    && cpus_min > cpus_max {
                         bail!(
                             "Spec {:?} has invalid cpus_range({}, {})",
                             spec.name,
@@ -4816,7 +4813,6 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                             cpus_max
                         );
                     }
-                }
                 if util_range.0 >= util_range.1 {
                     bail!(
                         "Spec {:?} has invalid util_range ({}, {})",
@@ -5654,8 +5650,8 @@ mod xnuma_tests {
     #[test]
     fn test_conservation_surplus_equals_deficit() {
         // Mathematical invariant: total surplus == total deficit in water-fill
-        let duty = vec![100.0, 30.0, 50.0];
-        let allocs = vec![96, 96, 96];
+        let duty = [100.0, 30.0, 50.0];
+        let allocs = [96, 96, 96];
 
         let total_duty: f64 = duty.iter().sum();
         let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
