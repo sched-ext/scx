@@ -98,7 +98,7 @@ impl SysStats {
             Self::format_header(w)?;
         }
 
-        let color = if self.mseq % 2 == 0 {
+        let color = if self.mseq.is_multiple_of(2) {
             "\x1b[90m" // Dark gray for even mseq
         } else {
             "\x1b[37m" // white for odd mseq
@@ -436,10 +436,8 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 
 pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<SchedSamples>(
-        &vec![
-            ("target".into(), "sched_samples".into()),
-            ("nr_samples".into(), nr_samples.to_string()),
-        ],
+        &[("target".into(), "sched_samples".into()),
+            ("nr_samples".into(), nr_samples.to_string())],
         Duration::from_secs(0),
         || shutdown.load(Ordering::Relaxed),
         |ts| {

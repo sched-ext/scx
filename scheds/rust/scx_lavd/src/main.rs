@@ -303,42 +303,42 @@ struct Opts {
 
 impl Opts {
     fn can_autopilot(&self) -> bool {
-        self.autopower == false
-            && self.performance == false
-            && self.powersave == false
-            && self.balanced == false
-            && self.no_core_compaction == false
+        !self.autopower
+            && !self.performance
+            && !self.powersave
+            && !self.balanced
+            && !self.no_core_compaction
     }
 
     fn can_autopower(&self) -> bool {
-        self.autopilot == false
-            && self.performance == false
-            && self.powersave == false
-            && self.balanced == false
-            && self.no_core_compaction == false
+        !self.autopilot
+            && !self.performance
+            && !self.powersave
+            && !self.balanced
+            && !self.no_core_compaction
     }
 
     fn can_performance(&self) -> bool {
-        self.autopilot == false
-            && self.autopower == false
-            && self.powersave == false
-            && self.balanced == false
+        !self.autopilot
+            && !self.autopower
+            && !self.powersave
+            && !self.balanced
     }
 
     fn can_balanced(&self) -> bool {
-        self.autopilot == false
-            && self.autopower == false
-            && self.performance == false
-            && self.powersave == false
-            && self.no_core_compaction == false
+        !self.autopilot
+            && !self.autopower
+            && !self.performance
+            && !self.powersave
+            && !self.no_core_compaction
     }
 
     fn can_powersave(&self) -> bool {
-        self.autopilot == false
-            && self.autopower == false
-            && self.performance == false
-            && self.balanced == false
-            && self.no_core_compaction == false
+        !self.autopilot
+            && !self.autopower
+            && !self.performance
+            && !self.balanced
+            && !self.no_core_compaction
     }
 
     fn proc(&mut self) -> Option<&mut Self> {
@@ -447,8 +447,8 @@ impl msg_task_ctx {
 
 impl introspec {
     fn new() -> Self {
-        let intrspc = unsafe { mem::MaybeUninit::<introspec>::zeroed().assume_init() };
-        intrspc
+        
+        unsafe { mem::MaybeUninit::<introspec>::zeroed().assume_init() }
     }
 }
 
@@ -490,14 +490,13 @@ impl<'a> Scheduler<'a> {
 
         // Enable futex tracing using ftrace if available. If the ftrace is not
         // available, use tracepoint, which is known to be slower than ftrace.
-        if !opts.no_futex_boost {
-            if Self::attach_futex_ftraces(&mut skel)? == false {
+        if !opts.no_futex_boost
+            && !Self::attach_futex_ftraces(&mut skel)? {
                 info!("Fail to attach futex ftraces. Try with tracepoints.");
-                if Self::attach_futex_tracepoints(&mut skel)? == false {
+                if !Self::attach_futex_tracepoints(&mut skel)? {
                     info!("Fail to attach futex tracepoints.");
                 }
             }
-        }
 
         // Initialize CPU topology with CLI arguments
         let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();
@@ -511,7 +510,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts, &order, debug_level);
+        Self::init_globals(&mut skel, opts, &order, debug_level);
 
         // Size the cpu.max per-(cgroup, LLC) map to this system's LLC count
         // before loading (a map's max_entries is fixed at load time).
@@ -551,7 +550,7 @@ impl<'a> Scheduler<'a> {
             ("futex_unlock_pi", &skel.progs.fexit_futex_unlock_pi),
         ];
 
-        if compat::tracer_available("function")? == false {
+        if !compat::tracer_available("function")? {
             info!("Ftrace is not enabled in the kernel.");
             return Ok(false);
         }
@@ -617,13 +616,13 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.as_mut().unwrap().nr_pco_states = nr_pco_states;
         for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {
-            Self::init_pco_tuple(skel, i, &pco);
+            Self::init_pco_tuple(skel, i, pco);
             info!("{:#}", pco);
         }
 
         let (_, last_pco) = order.perf_cpu_order.last_key_value().unwrap();
         for i in nr_pco_states..LAVD_PCO_STATE_MAX as u8 {
-            Self::init_pco_tuple(skel, i as usize, &last_pco);
+            Self::init_pco_tuple(skel, i as usize, last_pco);
         }
     }
 
@@ -836,7 +835,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_pc(x: u64, y: u64) -> f64 {
-        return 100. * x as f64 / y as f64;
+        100. * x as f64 / y as f64
     }
 
     fn get_power_mode(power_mode: i32) -> &'static str {
@@ -859,7 +858,7 @@ impl<'a> Scheduler<'a> {
 
         {
             let mut builder = libbpf_rs::RingBufferBuilder::new();
-            builder.add(&mut self.skel.maps.introspec_msg, move |data| {
+            builder.add(&self.skel.maps.introspec_msg, move |data| {
                 Scheduler::relay_introspec(data, &intrspc_tx)
             })?;
             let rb_mgr = builder.build()?;
@@ -1116,7 +1115,7 @@ fn main(mut opts: Opts) -> Result<()> {
             sys_stats_meta_name.as_str(),
             sched_sample_meta_name.as_str(),
         ];
-        stats::server_data(0).describe_meta(&mut std::io::stdout(), Some(&stats_meta_names))?;
+        stats::server_data(0).describe_meta(&mut std::io::stdout(), Some(stats_meta_names))?;
         return Ok(());
     }
 
