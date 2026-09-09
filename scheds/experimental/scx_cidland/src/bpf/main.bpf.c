@@ -896,10 +896,14 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
  * that cid's DSQ, ordered by deadline, until the waker blocks.
  *
  * This is wake_affine_idle(), which takes the waker's CPU when the waker
- * is the only runnable task on it (nr_running == 1), and it is consulted
- * only after the idle scan has failed, the way the kernel still runs
- * select_idle_sibling() on the CPU that wake_affine() returned: a CPU that
- * is really idle beats stacking on a busy one.
+ * is the only runnable task on it (nr_running == 1). It is consulted
+ * before the idle scan, the order wake_affine() and select_idle_sibling()
+ * run in: the affine target is chosen first and the scan runs around it.
+ * Consulting it only once the scan had failed split every pair of tasks
+ * that talk over a socket or a pipe across two CPUs, since a mostly idle
+ * machine always has one to offer, and cost each message an IPI and a
+ * cold cache: three times fair.c's migrations and twice its context
+ * switches on stress-ng --sock, for three quarters of its throughput.
  */
 static bool wake_affine_cid(const struct task_struct *p, s32 prev_cid,
 			    s32 this_cid, u64 wake_flags)
@@ -1910,6 +1914,21 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	}
 
 	/*
+	 * On a synchronous wakeup stack the wakee on the waker's cid, ahead
+	 * of the idle scan: wake_affine() picks the target before
+	 * select_idle_sibling() looks around it, and the waker is about to
+	 * sleep, so the CPU is free a moment later with the data the two
+	 * exchanged still in its cache. Sending the wakee to an idle CPU
+	 * instead splits every such pair across two CPUs and pays an IPI and
+	 * a cold cache on every message. Not as a direct dispatch, the local
+	 * DSQ is for a task that can run right away and the waker is still on
+	 * the CPU: the wakee goes through ops.enqueue() into that cid's
+	 * deadline-ordered DSQ and the CPU takes it once the waker blocks.
+	 */
+	if (wake_affine_cid(p, prev_cid, this_cid, wake_flags))
+		return this_cid;
+
+	/*
 	 * Try to find an idle cid and dispatch the task directly to it,
 	 * without bouncing it through ops.enqueue().
 	 */
@@ -1918,16 +1937,6 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 		direct_dispatch_local(p, tctx, cid);
 		return cid;
 	}
-
-	/*
-	 * Nothing is idle: on a synchronous wakeup stack the wakee on the
-	 * waker's cid. Not as a direct dispatch, the local DSQ is for a task
-	 * that can run right away and the waker is still on the CPU: the
-	 * wakee goes through ops.enqueue() into that cid's deadline-ordered
-	 * DSQ and the CPU takes it once the waker blocks.
-	 */
-	if (wake_affine_cid(p, prev_cid, this_cid, wake_flags))
-		return this_cid;
 
 	/*
 	 * A new task with no idle cid to go to is queued on the cid with the
