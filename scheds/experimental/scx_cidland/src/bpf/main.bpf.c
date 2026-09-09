@@ -2232,23 +2232,37 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 
 	TOUCH_ARENA();
 
-	if (to)
-		return false;
-
-	scx_bpf_task_set_slice(from, 0);
-
-	tctx = try_lookup_task_ctx(from);
-	if (!tctx || !cid_valid(cid))
+	if (to || !cid_valid(cid))
 		return false;
 
 	/*
 	 * Nothing else can run here, so there is nobody the forfeit would
-	 * hand the CPU to. This is fair.c's rq->nr_running == 1, counting
-	 * both of the places a runnable task of this cid waits in.
+	 * hand the CPU to. This is fair.c's rq->nr_running == 1:
+	 *
+	 *	if (unlikely(rq->nr_running == 1))
+	 *		return;
+	 *
+	 * and like it this returns before anything else, the slice included:
+	 * the schedule() a yield ends in then picks the same task back on the
+	 * cheap path. It also has to be about as cheap as fair.c's one load,
+	 * since a task that yields in a loop asks this millions of times a
+	 * second: the queued bitmap is that load, where a pair of DSQ queries
+	 * halved the yield rate of a task running alone. A task on the local
+	 * DSQ is not covered; it is the run-now fast path and is drained at
+	 * the next dispatch, a slice end away at most.
 	 */
-	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid)) &&
-	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL))
+	if (!cid_queued_test(cid) && !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL))
 		return false;
+
+	tctx = try_lookup_task_ctx(from);
+	if (!tctx)
+		return false;
+
+	/*
+	 * Without an ops.yield the kernel ends the slice itself; with one
+	 * that is this op's job, see yield_task_scx().
+	 */
+	scx_bpf_task_set_slice(from, 0);
 
 	/*
 	 * update_curr(), which leaves a deadline ahead of the vruntime
