@@ -1997,6 +1997,7 @@ static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
 			    u64 now)
 {
 	struct cid_ctx __arena *cctx;
+	bool owed;
 
 	if (no_wakeup_preempt || cid_idle_test(cid))
 		goto idle;
@@ -2004,11 +2005,9 @@ static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
 	cctx = cid_ctx(cid);
 
 	/*
-	 * Would a pick return the task just queued? It has to hold the
-	 * earlier of the two deadlines and to be owed service.
+	 * The queued task has to be owed service to be a candidate at all:
+	 * pick_eevdf() only ever looks at the eligible part of the tree.
 	 */
-	if (!time_before(dl, cctx->curr_dl))
-		goto idle;
 	if (!no_eligibility &&
 	    time_after(tctx->vruntime, cid_vref_place(cid, now)))
 		goto idle;
@@ -2019,7 +2018,21 @@ static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
 	 * has no protection left. This is the half of the pick that
 	 * RUN_TO_PARITY governed, and --no-run-to-parity drops it alone.
 	 */
-	if (!no_eligibility && !no_run_to_parity && curr_owed_service(cid, now))
+	owed = !no_eligibility && curr_owed_service(cid, now);
+	if (owed && !no_run_to_parity)
+		goto idle;
+
+	/*
+	 * Only a curr that is still owed service is in the running at all:
+	 *
+	 *	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
+	 *		curr = NULL;
+	 *
+	 * pick_eevdf() drops it before it looks at the tree, so a curr that
+	 * has had its share loses to the queued task whatever the deadlines
+	 * say. --no-eligibility keeps deciding on the deadlines alone.
+	 */
+	if ((owed || no_eligibility) && !time_before(dl, cctx->curr_dl))
 		goto idle;
 
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
@@ -2089,6 +2102,27 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	place_task(prev_cid, p, tctx, now);
+
+	/*
+	 * A task displaced while it is still curr keeps its vruntime and the
+	 * deadline it was picked with, see place_task(), and that deadline
+	 * can be the earlier one: the kick that displaced it was issued
+	 * because it is no longer owed service, not because it lost on the
+	 * deadline. pick_eevdf() would leave it in the tree and skip it as
+	 * ineligible. A DSQ takes its head, so it would be picked straight
+	 * back and the task that displaced it would wait for the tick.
+	 *
+	 * Reissue its deadline from where its vruntime has reached, which is
+	 * what update_deadline() does once a request is consumed. Charged
+	 * first, the way update_curr() runs ahead of it, so the new deadline
+	 * counts the service taken since the task was picked.
+	 */
+	if (!(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p) &&
+	    !no_eligibility && !curr_owed_service(prev_cid, now)) {
+		keep_charge(p, prev_cid, now);
+		tctx->deadline = 0;
+	}
+
 	dl = task_dl(p, tctx);
 
 	/*
