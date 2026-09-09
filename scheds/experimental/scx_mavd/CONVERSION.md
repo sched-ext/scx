@@ -656,11 +656,16 @@ from 105k to 89k, and returning the picker to lavd's inline helpers cost 4k
 and 3k of that back. Verified instructions per program on the measured
 objects:
 
-    lavd_select_cid      74,546
-    lavd_enqueue         91,512
-    lavd_dispatch       719,743
-    lavd_init_task      168,388
-    lavd_init            46,246
+    lavd_select_cid      74,705
+    lavd_enqueue         93,913
+    lavd_dispatch       720,425
+    lavd_init_task      163,698
+    lavd_init            44,723
+
+Measured on 2026-10-06 on the posted cid-sched kernel after the sync through
+d762220c6c41 ("scx_lavd: fix neighbor migration never firing on non-SMT
+machines"); the previous measurement read 74,546, 91,512, 719,743, 168,388
+and 46,246.
 
 Dispatch rose from 473k to 720k when the cleanup dropped the tests on
 lookups that can still return NULL, the effect above, and the last result
