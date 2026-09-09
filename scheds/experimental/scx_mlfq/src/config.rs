@@ -401,6 +401,9 @@ pub struct ConfigBuilder {
  * uses Config::default().
  */
 #[cfg(test)]
+// The builder exposes a setter for every tunable for completeness; the
+// binary and the tests currently wire only a subset of them.
+#[allow(dead_code)]
 impl ConfigBuilder {
     /// Set the Q1 (interactive) request size in nsecs.
     pub fn q1_slice_ns(mut self, v: u64) -> Self {
