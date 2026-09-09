@@ -125,6 +125,13 @@ const volatile bool no_eligibility;
 const volatile bool no_run_to_parity;
 
 /*
+ * Grant a task that is moved or queued again without having slept a
+ * whole new request, rather than what is left of the one it was in the
+ * middle of. This is PLACE_REL_DEADLINE off, see set_vruntime().
+ */
+const volatile bool no_place_rel_deadline;
+
+/*
  * Place tasks and test them for eligibility against the pack reference as
  * it stands, without the service the task running there has taken since
  * it was picked, see cid_vref_at().
@@ -1404,16 +1411,12 @@ static u64 task_request(const struct task_struct *p)
  *
  * A task queued again without having run for its whole request keeps the
  * deadline it was queued with, instead of being pushed a full request
- * further back for the fraction it did get. Every path that re-enqueues a
- * task today either has it consume the request first (its slice ran out)
- * or re-places its vruntime (a wakeup, a bounced direct dispatch), so
- * this changes nothing as it stands; a task interrupted partway through
- * its request is what needs it.
+ * further back for the fraction it did get.
  *
- * A re-placed vruntime drops the deadline. It is a position in the
- * virtual time of one cid and the packs drift apart, so a deadline
- * carried across would order the task against a reference it was never
- * measured on.
+ * A re-placed vruntime takes the deadline with it, see set_vruntime(): a
+ * deadline is a position in the virtual time of one cid and the packs
+ * drift apart, so what is carried is its distance from the vruntime, not
+ * the value, and only for a task that did not sleep.
  */
 static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
 {
@@ -1917,6 +1920,48 @@ static u64 cid_pack_weight(s32 cid)
 }
 
 /*
+ * Move @tctx's vruntime to @vruntime, where it has just been placed against
+ * a pack, and decide what becomes of its deadline.
+ *
+ * A task that slept gets a new request when it wakes: place_entity()
+ * issues a fresh deadline, and here the deadline is dropped so that
+ * task_dl() issues one from the new vruntime. A task that did not sleep,
+ * moved to another cid or queued again after a bounced dispatch or a
+ * preemption by a higher class, was partway through a request, and
+ * fair.c keeps what is left of it, PLACE_REL_DEADLINE: the deadline is
+ * stored relative to the vruntime on the way out of the runqueue,
+ *
+ *	if (sched_feat(PLACE_REL_DEADLINE) && !task_sleep) {
+ *		se->deadline -= se->vruntime;
+ *		se->rel_deadline = 1;
+ *	}
+ *
+ * and re-based on the way in,
+ *
+ *	if (sched_feat(PLACE_REL_DEADLINE) && se->rel_deadline) {
+ *		se->deadline += se->vruntime;
+ *		se->rel_deadline = 0;
+ *		return;
+ *	}
+ *
+ * Without it the task is granted a whole request wherever it lands and
+ * sorts behind tasks that were queued after it, once per migration. A
+ * deadline the vruntime has already reached is a consumed request, and
+ * is dropped either way, as update_deadline() would reissue it.
+ */
+static void set_vruntime(struct task_ctx *tctx, u64 vruntime, bool sleep)
+{
+	u64 rel = 0;
+
+	if (!sleep && !no_place_rel_deadline && tctx->deadline &&
+	    time_before(tctx->vruntime, tctx->deadline))
+		rel = tctx->deadline - tctx->vruntime;
+
+	tctx->vruntime = vruntime;
+	tctx->deadline = rel ? vruntime + rel : 0;
+}
+
+/*
  * Place @p on @cid: a task that is not running is put at the cid's
  * reference minus the lag it carries, the way place_entity() does, and
  * either way it becomes a member of @cid's reference.
@@ -1936,13 +1981,14 @@ static u64 cid_pack_weight(s32 cid)
  * placement, not a corner of one.
  */
 static void place_task(s32 cid, const struct task_struct *p,
-		       struct task_ctx *tctx, u64 now)
+		       struct task_ctx *tctx, u64 now, bool sleep)
 {
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
-		tctx->vruntime = cid_vref_place(cid, now);
+		u64 vruntime = cid_vref_place(cid, now);
+
 		if (cid_pack_weight(cid))
-			tctx->vruntime -= tctx->vlag;
-		tctx->deadline = 0;
+			vruntime -= tctx->vlag;
+		set_vruntime(tctx, vruntime, sleep);
 	}
 	vref_join(cid, p, tctx);
 }
@@ -1964,7 +2010,7 @@ static void place_task(s32 cid, const struct task_struct *p,
  */
 static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid)
 {
-	place_task(cid, p, tctx, bpf_ktime_get_ns());
+	place_task(cid, p, tctx, bpf_ktime_get_ns(), true);
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
 
@@ -2217,14 +2263,14 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	    (reenq_preempted(p, enq_flags) && p->scx.slice && !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid);
 		if (cid >= 0) {
-			place_task(cid, p, tctx, now);
+			place_task(cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
 			return;
 		}
 	}
 
-	place_task(prev_cid, p, tctx, now);
+	place_task(prev_cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
 
 	/*
 	 * A task displaced while it is still curr keeps its vruntime and the
@@ -2927,8 +2973,8 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 			lag = limit;
 		else if (lag < -limit)
 			lag = -limit;
-		tctx->vruntime = cid_vref_place(cid, tctx->last_run_at) - lag;
-		tctx->deadline = 0;
+		set_vruntime(tctx, cid_vref_place(cid, tctx->last_run_at) - lag,
+			     false);
 	}
 
 	/*

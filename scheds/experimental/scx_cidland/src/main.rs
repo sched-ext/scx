@@ -209,6 +209,20 @@ struct Opts {
     #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
     no_run_to_parity: bool,
 
+    /// Give a task a new request every time it is placed.
+    ///
+    /// A task that is moved to another CPU, or queued again without having
+    /// slept, normally keeps what is left of the request it was in the middle
+    /// of: its deadline is carried relative to its vruntime and re-based where
+    /// it lands. This grants it a whole new request instead, so it sorts
+    /// behind tasks that were queued after it. A task that slept gets a new
+    /// request either way.
+    ///
+    /// This is PLACE_REL_DEADLINE off. For comparing the two rules against
+    /// each other.
+    #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
+    no_place_rel_deadline: bool,
+
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -398,6 +412,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_run_to_parity = opts.no_run_to_parity;
+        rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, with
