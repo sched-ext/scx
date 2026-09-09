@@ -1533,7 +1533,7 @@ mod t2_cut_tests {
         // CPUs 2 and 3 are the same sibling L2 pair: identical crossing price from 0.
         assert_eq!(m[0 * n + 2], m[0 * n + 3]);
         // Symmetric.
-        assert_eq!(m[0 * n + 4], m[(4 * n)]);
+        assert_eq!(m[0 * n + 4], m[4 * n]);
     }
 
     #[test]
