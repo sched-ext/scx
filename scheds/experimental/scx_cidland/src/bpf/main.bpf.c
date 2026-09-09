@@ -200,6 +200,10 @@ struct task_ctx {
 	u64 vjoin_w;
 	u64 vjoin_v;
 	u64 cgw_gen;		/* the @cgrp_gen @cgw was taken at */
+	u64 wakee_decay_at;
+	u32 wakee_flips;
+	s32 last_wakee_pid;
+	s32 recent_used_cid;
 
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
@@ -887,32 +891,148 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	return cid >= 0 ? cid : -EBUSY;
 }
 
-/*
- * Return true if @p should be stacked on the waker's cid @this_cid.
- *
- * On a synchronous wakeup the waker is about to sleep, so its CPU is where
- * the data the two just exchanged stays hot. The waker is still on it,
- * though: @p is not going to run there right away, it is going to wait in
- * that cid's DSQ, ordered by deadline, until the waker blocks.
- *
- * This is wake_affine_idle(), which takes the waker's CPU when the waker
- * is the only runnable task on it (nr_running == 1). It is consulted
- * before the idle scan, the order wake_affine() and select_idle_sibling()
- * run in: the affine target is chosen first and the scan runs around it.
- * Consulting it only once the scan had failed split every pair of tasks
- * that talk over a socket or a pipe across two CPUs, since a mostly idle
- * machine always has one to offer, and cost each message an IPI and a
- * cold cache: three times fair.c's migrations and twice its context
- * switches on stress-ng --sock, for three quarters of its throughput.
- */
-static bool wake_affine_cid(const struct task_struct *p, s32 prev_cid,
-			    s32 this_cid, u64 wake_flags)
+#define WAKEE_DECAY_NS NSEC_PER_SEC
+
+/* The record_wakee() half of fair.c's wake-affinity heuristic. */
+static void record_wakee_cid(const struct task_struct *p,
+			     const struct task_struct *waker, u64 now)
 {
-	return !no_wake_sync && (wake_flags & SCX_WAKE_SYNC) &&
-	       cid_valid(this_cid) && cid_allowed(p, this_cid) &&
-	       cid_topo(this_cid)->llc_base == cid_topo(prev_cid)->llc_base &&
-	       !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) &&
-	       !cid_queued_test(this_cid);
+	struct task_ctx *wctx;
+
+	if (!waker)
+		return;
+	wctx = try_lookup_task_ctx(waker);
+	if (!wctx)
+		return;
+
+	if (time_after(now, wctx->wakee_decay_at + WAKEE_DECAY_NS)) {
+		wctx->wakee_flips >>= 1;
+		wctx->wakee_decay_at = now;
+	}
+
+	/* A pid is the closest BPF-storable identity to fair.c's task pointer. */
+	if (wctx->last_wakee_pid != p->pid) {
+		wctx->last_wakee_pid = p->pid;
+		wctx->wakee_flips++;
+	}
+}
+
+/* The wake_wide() half; cid LLC width stands in for sd_llc_size. */
+static bool wake_wide_cid(const struct task_struct *p,
+			  const struct task_struct *waker, s32 this_cid)
+{
+	struct task_ctx *wctx, *pctx;
+	u32 master, slave, factor;
+
+	if (!waker)
+		return false;
+	wctx = try_lookup_task_ctx(waker);
+	pctx = try_lookup_task_ctx(p);
+	if (!wctx || !pctx)
+		return false;
+
+	master = wctx->wakee_flips;
+	slave = pctx->wakee_flips;
+	factor = cid_topo(this_cid)->llc_nr;
+	if (master < slave) {
+		u32 tmp = master;
+
+		master = slave;
+		slave = tmp;
+	}
+
+	return slave >= factor && master >= slave * factor;
+}
+
+/*
+ * Pick the target around which the idle search should run.
+ *
+ * This is the WA_IDLE half of fair.c's wake_affine(). The effective-load
+ * half has no exact counterpart here: sched_ext tasks do not maintain the
+ * CFS load averages wake_affine_weight() compares. As in fair.c, affinity
+ * is only considered for a wakeup, when the waking cid is allowed and is
+ * in the previous cid's LLC.
+ *
+ * Returning @this_cid does not select it. select_idle_sibling_cid() below
+ * first looks for an idle target and previous cid, then scans around the
+ * target, and only the caller's final return stacks the wakee there. This
+ * distinction is what keeps wake_affine() ahead of select_idle_sibling()
+ * without skipping select_idle_sibling().
+ */
+static s32 wake_affine_cid(const struct task_struct *p, s32 prev_cid,
+			   s32 this_cid, u64 wake_flags)
+{
+	const struct task_struct *waker;
+	bool sync;
+	u64 now;
+
+	if (!(wake_flags & SCX_WAKE_TTWU) || !cid_valid(this_cid))
+		return prev_cid;
+
+	waker = (void *)bpf_get_current_task_btf();
+	now = bpf_ktime_get_ns();
+	record_wakee_cid(p, waker, now);
+
+	if (!cid_allowed(p, this_cid) || wake_wide_cid(p, waker, this_cid) ||
+	    cid_topo(this_cid)->llc_base != cid_topo(prev_cid)->llc_base)
+		return prev_cid;
+
+	/*
+	 * If this cid is idle the wakeup came from interrupt context. Keep an
+	 * idle previous cid when both are available, exactly as
+	 * wake_affine_idle() does.
+	 */
+	if (cid_idle_test(this_cid))
+		return cid_idle_test(prev_cid) ? prev_cid : this_cid;
+
+	sync = !no_wake_sync && (wake_flags & SCX_WAKE_SYNC) && waker &&
+	       !(waker->flags & PF_EXITING);
+
+	/*
+	 * There is no rq->nr_running available to BPF. A running cid with no
+	 * task in either of its queues is the equivalent of nr_running == 1.
+	 */
+	if (sync && !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) &&
+	    !cid_queued_test(this_cid))
+		return this_cid;
+
+	return prev_cid;
+}
+
+/*
+ * The front of select_idle_sibling(): try its computed @target first, then
+ * an idle cache-affine @prev_cid. pick_idle_cid() supplies the remaining
+ * whole-core and idle-cid scan around @target.
+ */
+static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
+				   s32 target)
+{
+	struct task_ctx *tctx;
+	s32 recent = -1;
+
+	if (cid_idle_test(target) && cid_allowed(p, target) &&
+	    task_fits_cid(p, target) && cid_idle_claim(target))
+		return target;
+
+	if (prev_cid != target &&
+	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
+	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
+	    task_fits_cid(p, prev_cid) && cid_idle_claim(prev_cid))
+		return prev_cid;
+
+	/* Check and rotate p->recent_used_cpu at the same point fair.c does. */
+	tctx = try_lookup_task_ctx(p);
+	if (tctx) {
+		recent = tctx->recent_used_cid;
+		tctx->recent_used_cid = prev_cid;
+	}
+	if (cid_valid(recent) && recent != prev_cid && recent != target &&
+	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
+	    cid_idle_test(recent) && cid_allowed(p, recent) &&
+	    task_fits_cid(p, recent) && cid_idle_claim(recent))
+		return recent;
+
+	return pick_idle_cid(p, target);
 }
 
 /*
@@ -1891,7 +2011,7 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 wake_flags)
 {
-	s32 cid, this_cid = scx_bpf_this_cid();
+	s32 cid, target, this_cid = scx_bpf_this_cid();
 	struct task_ctx *tctx;
 
 	TOUCH_ARENA();
@@ -1914,25 +2034,18 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	}
 
 	/*
-	 * On a synchronous wakeup stack the wakee on the waker's cid, ahead
-	 * of the idle scan: wake_affine() picks the target before
-	 * select_idle_sibling() looks around it, and the waker is about to
-	 * sleep, so the CPU is free a moment later with the data the two
-	 * exchanged still in its cache. Sending the wakee to an idle CPU
-	 * instead splits every such pair across two CPUs and pays an IPI and
-	 * a cold cache on every message. Not as a direct dispatch, the local
-	 * DSQ is for a task that can run right away and the waker is still on
-	 * the CPU: the wakee goes through ops.enqueue() into that cid's
-	 * deadline-ordered DSQ and the CPU takes it once the waker blocks.
+	 * Follow select_task_rq_fair()'s fast path: wake_affine() computes a
+	 * target, then select_idle_sibling() looks around that target. An
+	 * affine target is not itself a selection; if it is busy, an idle
+	 * previous cid or an idle sibling still wins.
 	 */
-	if (wake_affine_cid(p, prev_cid, this_cid, wake_flags))
-		return this_cid;
+	target = wake_affine_cid(p, prev_cid, this_cid, wake_flags);
 
 	/*
 	 * Try to find an idle cid and dispatch the task directly to it,
 	 * without bouncing it through ops.enqueue().
 	 */
-	cid = pick_idle_cid(p, prev_cid);
+	cid = select_idle_sibling_cid(p, prev_cid, target);
 	if (cid >= 0) {
 		direct_dispatch_local(p, tctx, cid);
 		return cid;
@@ -1948,7 +2061,8 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 			return cid;
 	}
 
-	return prev_cid;
+	/* select_idle_sibling() also returns its target when its scan fails. */
+	return target;
 }
 
 /*
@@ -2907,6 +3021,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->vruntime = 0;
 		tctx->deadline = 0;
 		tctx->vcid = -1;
+		tctx->recent_used_cid = -1;
 	}
 }
 
@@ -2920,6 +3035,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 	tctx->vcid = -1;
+	tctx->recent_used_cid = -1;
 
 	/*
 	 * @fork tells a task that is being created apart from one that was
