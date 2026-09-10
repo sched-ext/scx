@@ -3375,13 +3375,16 @@ queued:
 	 */
 	hrtick_start(cid, now);
 idle:
-	scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+	/* An op executing on @cid is itself proof that @cid is not idle. */
+	if (cid != scx_bpf_this_cid())
+		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 }
 
 void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct task_ctx *tctx;
+	bool displaced;
 	u64 dl, now;
 
 	TOUCH_ARENA();
@@ -3391,6 +3394,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	now = bpf_ktime_get_ns();
+	displaced = !(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p);
 
 	/*
 	 * An idle preferred destination asked @prev_cid for this running task.
@@ -3475,8 +3479,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * ops.stopping() has cleared it, so the task is tested on its own
 	 * vruntime against the reference, which is entity_eligible().
 	 */
-	if (!(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p) &&
-	    !no_eligibility &&
+	if (displaced && !no_eligibility &&
 	    time_after(tctx->vruntime, cid_vref_place(prev_cid, now)))
 		tctx->deadline = 0;
 
@@ -3512,7 +3515,9 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 		}
 	}
-	kick_queued_cid(prev_cid, p, tctx, dl, now);
+	/* fair.c does not run wakeup_preempt() from put_prev_entity(). */
+	if (!displaced)
+		kick_queued_cid(prev_cid, p, tctx, dl, now);
 }
 
 /*
