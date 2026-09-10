@@ -44,3 +44,16 @@ algorithm with minor changes and optimizations to be fully implemented in BPF.
 
 Given that the `scx_rustland` scheduling algorithm has been extensively tested,
 this scheduler can be considered ready for production use.
+
+## Shell completions
+
+Generate completions without starting the scheduler or requiring root:
+
+```sh
+scx_bpfland generate-completions --shell bash
+scx_bpfland generate-completions --shell zsh --output _scx_bpfland
+scx_bpfland generate-completions --shell fish --output scx_bpfland.fish
+```
+
+The shell defaults to `bash`. Omit `--output` to write to standard output.
+Install the generated file in your shell's completion directory.
