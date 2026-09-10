@@ -246,6 +246,7 @@ struct task_ctx {
 
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
+	bool direct_placed;	/* select_cid() already placed and joined it */
 };
 
 struct {
@@ -3208,7 +3209,10 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
  */
 static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid)
 {
+	/* ops.runnable() follows select_cid(), so refresh before spending lag. */
+	cgw_refresh(p, tctx);
 	place_task(cid, p, tctx, bpf_ktime_get_ns(), true);
+	tctx->direct_placed = true;
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
 
@@ -4317,6 +4321,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	bool direct_placed;
 
 	TOUCH_ARENA();
 
@@ -4324,6 +4329,8 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
+	direct_placed = tctx->direct_placed;
+	tctx->direct_placed = false;
 	cgw_refresh(p, tctx);
 
 	/*
@@ -4337,7 +4344,8 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	 * A task that had consumed its share before sleeping comes back
 	 * with no credit, while one that was still owed service keeps it.
 	 */
-	vref_leave(tctx);
+	if (!direct_placed)
+		vref_leave(tctx);
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
@@ -4491,6 +4499,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->delay_cid = -1;
 		tctx->recent_used_cid = -1;
 		tctx->dispatch_migrate_cid = -1;
+		tctx->direct_placed = false;
 	}
 }
 
