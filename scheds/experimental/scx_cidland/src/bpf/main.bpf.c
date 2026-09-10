@@ -4366,9 +4366,19 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 {
 	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	s32 cid = scx_bpf_task_cid(p);
+
+	TOUCH_ARENA();
 
 	if (tctx) {
-		tctx->vruntime = 0;
+		/*
+		 * ops.enable() is also called when a task switches back from a
+		 * higher scheduling class at run time. Place it at the current
+		 * pack reference instead of at the zero used during scheduler
+		 * startup; an old pack may have advanced arbitrarily far by then.
+		 */
+		tctx->vruntime = cid_valid(cid) ? cid_vref(cid) : 0;
+		tctx->vlag = 0;
 		tctx->deadline = 0;
 		tctx->vcid = -1;
 		tctx->delay_cid = -1;
