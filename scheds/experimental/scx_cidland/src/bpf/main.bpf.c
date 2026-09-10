@@ -604,6 +604,9 @@ static __always_inline bool cid_allowed(const struct task_struct *p, s32 cid)
 	return bpf_cpumask_test_cpu(cid_topo(cid)->cpu, p->cpus_ptr);
 }
 
+#define SCHED_BATCH	3
+#define SCHED_IDLE	5
+
 /*
  * Idle cid tracking.
  *
@@ -735,6 +738,24 @@ static void cid_idle_set(s32 cid)
 static bool cid_queued_test(s32 cid)
 {
 	return cid_valid(cid) && __cmask_test(cid, queued_cids);
+}
+
+/*
+ * fair.c's choose_sched_idle_rq(): a normal task may share a CPU whose
+ * runqueue contains only SCHED_IDLE work instead of waiting on a normal
+ * task elsewhere. Cidland cannot count policy classes in a remote DSQ, so
+ * recognize the exact cheap case: a SCHED_IDLE current with no waiter.
+ */
+static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (p->policy == SCHED_IDLE || !cid_valid(cid) || cid_idle_test(cid) ||
+	    cid_queued_test(cid))
+		return false;
+	cctx = cid_ctx(cid);
+
+	return cctx->curr_w && cctx->curr_idle;
 }
 
 static void cid_queued_set(s32 cid)
@@ -1772,7 +1793,7 @@ static s32 wake_affine_cid(const struct task_struct *p, s32 prev_cid,
  * whole-core and idle-cid scan around @target.
  */
 static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
-				   s32 target)
+				   s32 target, bool *direct)
 {
 	struct task_ctx *tctx;
 	s32 cid;
@@ -1781,18 +1802,30 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	if (cid_idle_test(target) && cid_allowed(p, target) &&
 	    task_fits_cid(p, target)) {
 		cid = claim_idle_cid(p, target);
-		if (cid >= 0)
+		if (cid >= 0) {
+			*direct = true;
 			return cid;
+		}
 	}
+	if (cid_allowed(p, target) && task_fits_cid(p, target) &&
+	    cid_sched_idle_target(p, target))
+		return target;
 
 	if (prev_cid != target &&
 	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
 	    task_fits_cid(p, prev_cid)) {
 		cid = claim_idle_cid(p, prev_cid);
-		if (cid >= 0)
+		if (cid >= 0) {
+			*direct = true;
 			return cid;
+		}
 	}
+	if (prev_cid != target &&
+	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
+	    cid_allowed(p, prev_cid) && task_fits_cid(p, prev_cid) &&
+	    cid_sched_idle_target(p, prev_cid))
+		return prev_cid;
 
 	/* Check and rotate p->recent_used_cpu at the same point fair.c does. */
 	tctx = try_lookup_task_ctx(p);
@@ -1805,11 +1838,22 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	    cid_idle_test(recent) && cid_allowed(p, recent) &&
 	    task_fits_cid(p, recent)) {
 		cid = claim_idle_cid(p, recent);
-		if (cid >= 0)
+		if (cid >= 0) {
+			*direct = true;
 			return cid;
+		}
 	}
+	if (cid_valid(recent) && recent != prev_cid && recent != target &&
+	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
+	    cid_allowed(p, recent) && task_fits_cid(p, recent) &&
+	    cid_sched_idle_target(p, recent))
+		return recent;
 
-	return pick_idle_cid(p, prev_cid, target);
+	cid = pick_idle_cid(p, prev_cid, target);
+	if (cid >= 0)
+		*direct = true;
+
+	return cid;
 }
 
 /*
@@ -1922,9 +1966,6 @@ static s32 idle_peer_cid(const struct task_struct *p, s32 cid)
  */
 #define MAX_RT_PRIO	100
 #define WEIGHT_IDLEPRIO	3
-#define SCHED_BATCH	3
-#define SCHED_IDLE	5
-
 static const u32 prio_to_weight[40] = {
  /* -20 */	88761,	71755,	56483,	46273,	36291,
  /* -15 */	29154,	23254,	18705,	14949,	11916,
@@ -3214,6 +3255,7 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 
 s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 wake_flags)
 {
+	bool direct = false;
 	s32 cid, target, this_cid = scx_bpf_this_cid();
 	struct task_ctx *tctx;
 
@@ -3248,9 +3290,10 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	 * Try to find an idle cid and dispatch the task directly to it,
 	 * without bouncing it through ops.enqueue().
 	 */
-	cid = select_idle_sibling_cid(p, prev_cid, target);
+	cid = select_idle_sibling_cid(p, prev_cid, target, &direct);
 	if (cid >= 0) {
-		direct_dispatch_local(p, tctx, cid);
+		if (direct)
+			direct_dispatch_local(p, tctx, cid);
 		return cid;
 	}
 
