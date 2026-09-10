@@ -86,15 +86,14 @@ struct Opts {
 
     /// Maximum scheduling slice duration in microseconds.
     ///
-    /// A slice is only ever acted on from the tick: update_curr_scx() charges
-    /// the time a task has run against it, and task_tick_scx() is the one
-    /// place that reschedules once it is spent, so the granularity of the
-    /// whole thing is 1/HZ no matter what is asked for here. A slice of
-    /// exactly one tick therefore buys two: the task is handed the CPU a few
-    /// microseconds after the tick that freed it, so at the next tick it is
-    /// those few microseconds short of its slice and runs a whole further
-    /// tick. Keep the default under a tick of a HZ=1000 kernel, at the
-    /// normalized_sysctl_sched_base_slice of fair.c.
+    /// The default is fair.c's normalized_sysctl_sched_base_slice. A task that
+    /// has company on its CPU is asked for the CPU when its request runs out,
+    /// by a timer armed for its deadline, see --no-hrtick, so the slice is
+    /// what it says whatever the kernel's HZ. Without the timer a slice is
+    /// only acted on from the tick, and one of exactly a tick buys two: the
+    /// task is handed the CPU a few microseconds after the tick that freed
+    /// it, so at the next tick it is those few microseconds short of its
+    /// slice and runs a whole further tick.
     #[clap(short = 's', long, default_value = "700")]
     slice_us: u64,
 
@@ -235,6 +234,15 @@ struct Opts {
     /// against each other.
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     no_delay_dequeue: bool,
+    /// Notice the end of a request at the tick after it, not when it happens.
+    ///
+    /// A request is normally ended on the spot by a timer armed for the
+    /// running task's deadline whenever it has company, the way HRTICK does
+    /// in fair.c. Without it a task holds the CPU until the tick that follows
+    /// the end of its request, up to a whole tick late, and a task waiting
+    /// behind it waits that long. For comparing the two against each other.
+    #[clap(short = 'H', long, action = clap::ArgAction::SetTrue)]
+    no_hrtick: bool,
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -426,6 +434,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_run_to_parity = opts.no_run_to_parity;
         rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
         rodata.no_delay_dequeue = opts.no_delay_dequeue;
+        rodata.no_hrtick = opts.no_hrtick;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, with
@@ -471,6 +480,14 @@ impl<'a> Scheduler<'a> {
             skel.struct_ops.cidland_ops_mut().flags
         );
 
+        // One hrtick per cid, over the same cid space the arena is sized
+        // for below. A map is sized before the program is loaded.
+        let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
+        skel.maps
+            .hrticks
+            .set_max_entries(nr_cpus as u32)
+            .context("sizing the hrtick map")?;
+
         // Load the BPF program for validation.
         let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei)?;
 
@@ -479,7 +496,6 @@ impl<'a> Scheduler<'a> {
         // only known once the kernel has built it, at attach, so this is in
         // cpu space and ops.init() translates. It has to happen between
         // load and attach: the tables must be in place before ops.init().
-        let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
         let mut args = types::cidland_arena_args {
             nr_cpus: nr_cpus as u64,
             nr_tiers,
@@ -518,6 +534,7 @@ impl<'a> Scheduler<'a> {
         Metrics {
             nr_steals: bss_data.nr_steals,
             nr_preempts: bss_data.nr_preempts,
+            nr_hrticks: bss_data.nr_hrticks,
         }
     }
 

@@ -119,6 +119,26 @@ be turned off on the command line to compare the two rules against each other.
    the CPU capacity is used to balance the load, never to discount the
    vruntime.
 
+ - **Deadlines on time.** A slice is only enforced from `task_tick_scx()`, so
+   a task whose request runs out between two ticks holds the CPU until the next
+   one, up to a whole tick late, and a task waiting behind it waits that long:
+   two hogs sharing a CPU ran 1000 us each at a 700 us slice, and a saturated
+   `schbench` had a median wakeup latency of ~900 us. `fair.c` has an hrtimer
+   for exactly this, `HRTICK`: `set_next_task_fair()` arms it at every pick
+   for the time the running task's vruntime takes to reach its deadline, when
+   it has company, `enqueue_task_fair()` arms it the moment a task joins a lone
+   runner, and when it fires `update_curr()` reissues the deadline and asks for
+   a reschedule. `sched_ext` has no hrtick, so this is a `bpf_timer` per CPU,
+   armed from the same three places, that kicks the CPU at the deadline if the
+   queue still holds something; the dispatch that follows is the pick. Ops run
+   with interrupts off, from where a timer is armed through an `irq_work` and
+   a self-IPI, so a timer already pending for no later than the deadline is
+   left to fire early and rearm itself from its callback, where that costs
+   nothing. The two hogs run 701 us each; the saturated `schbench` wakes in
+   6 us at the median, 707 us at the 99th, against 999 and 1698 before, and
+   `fair.c`'s 2 and 1618 at its 1.6 ms slice. `--no-hrtick` leaves the end
+   of a request to the tick.
+
 - **Wakeup preemption.** A task queued on a CPU with a deadline earlier than
    the one the CPU is running is a task that CPU would pick if it were asked
    again, so the CPU is interrupted for it rather than left to finish its
@@ -195,8 +215,9 @@ be turned off on the command line to compare the two rules against each other.
    two.
 
 Time slices are 700 us by default, `fair.c`'s
-`normalized_sysctl_sched_base_slice` and under a tick of a HZ=1000 kernel,
-which is what a slice is enforced from. A task can select its own slice with
+`normalized_sysctl_sched_base_slice`, and they end when they end: the hrtick
+asks the running task for the CPU at its deadline rather than at the tick that
+follows it, see above. A task can select its own slice with
 `sched_attr.sched_runtime` (subject to the kernel's limits), and setting it to
 zero restores the scheduler default. The slice bounds how long a task holds a
 CPU without being asked again rather than a turn it has to give up: at the end
@@ -227,12 +248,13 @@ that has not been done.
    lighter under-served one - a bounded latency skew, not a fairness leak,
    since the vruntime is charged either way.
 
- - **No second chance between a wakeup and the end of a slice.** `fair.c`
-   re-decides continuously: on every tick, enqueue and dequeue, with an hrtimer
-   armed at the exact moment a task's protection ends, and every wakeup that
-   does not preempt still clips the running task's protection. This decides
-   once, when the waking task is queued, and a slice that has been granted is
-   only noticed at the tick. `sched_ext` has no hrtick, so 1/HZ is the floor.
+ - **A wakeup that does not preempt leaves the running task's protection
+   whole.** `wakeup_preempt_fair()` clips it to one minimum slice ahead of the
+   reference on every wakeup that fails to preempt, `update_protect_slice()`,
+   and `PREEMPT_SHORT` lets a task asking for a shorter slice than the running
+   one preempt on eligibility alone. Here the running task keeps the protection
+   it was picked with until its deadline, which the hrtick now enforces on
+   time, and the question is asked once, when the waking task is queued.
 
  - **`sched_yield()` costs more than it does in `fair.c`.** The rule is the
    same, `yield_task_fair()`'s: nothing happens unless someone is queued to

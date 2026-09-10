@@ -63,11 +63,9 @@ const volatile bool cgroup_enabled = true;
 const volatile bool no_wake_sync;
 
 /*
- * Default time slice.
- *
- * Kept under one tick of a HZ=1000 kernel on purpose: a slice is only
- * acted on from task_tick_scx(), so one worth a whole tick buys two, see
- * the --slice-us option.
+ * Default time slice, fair.c's normalized_sysctl_sched_base_slice. Its end
+ * is enforced by the hrtick when the task has company, see hrtick_start(),
+ * and from task_tick_scx() otherwise.
  */
 const volatile u64 slice_ns = 700000ULL;
 
@@ -146,6 +144,13 @@ const volatile bool no_vref_update;
 const volatile bool no_delay_dequeue;
 
 /*
+ * Notice the end of a request at the tick that follows it rather than
+ * when it happens, without the timer fair.c runs as HRTICK, see
+ * hrtick_start().
+ */
+const volatile bool no_hrtick;
+
+/*
  * Number of other cids' queues a busy cid looks at on each dispatch for a
  * queue deeper than its own. 0 disables the sampling, leaving a busy cid
  * with its own queue only.
@@ -168,6 +173,7 @@ const volatile u32 balance_sample = 2;
  */
 volatile u64 nr_steals __hot_written;
 volatile u64 nr_preempts __hot_written;
+volatile u64 nr_hrticks __hot_written;
 
 /*
  * Scheduler's exit status.
@@ -261,6 +267,21 @@ struct {
 } cgrp_ctx_stor SEC(".maps");
 
 /*
+ * One hrtick per cid, see hrtick_start(). The map is sized to the cid
+ * space by user space before the program is loaded.
+ */
+struct hrtick {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct hrtick);
+	__uint(max_entries, 1);
+} hrticks SEC(".maps");
+
+/*
  * Bumped by ops.cpuctl_set_weight(), which expires every composed weight
  * cached anywhere, cgroup and task alike: one cpu.weight write changes the
  * weight of everything under that cgroup, and there is no walking down to
@@ -306,6 +327,7 @@ struct cid_ctx {
 	u64 curr_run_at;	/* when its service was last charged */
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
+	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
@@ -1669,6 +1691,169 @@ static bool curr_owed_service(s32 cid, u64 now)
 }
 
 /*
+ * Shortest an hrtick is armed for, the floor hrtick_start() in core.c
+ * applies to its own:
+ *
+ *	delta = max_t(s64, delay, 10000LL);
+ */
+#define HRTICK_MIN_NS	10000ULL
+
+/*
+ * Wall-clock time the task running on @cid needs to reach its deadline,
+ * read off @cid's published view of it, or 0 if it is there already or
+ * nothing is running.
+ *
+ * The view is read without a lock, from other cids too, and can be of a
+ * task picked after @now was taken: that task has consumed nothing yet.
+ */
+static s64 curr_dl_in(struct cid_ctx __arena *cctx, u64 now)
+{
+	u64 w = cctx->curr_w, run_at = cctx->curr_run_at, v;
+	s64 vdelta;
+
+	if (!w)
+		return 0;
+
+	if (time_before(now, run_at))
+		now = run_at;
+	v = cctx->curr_v + (now - run_at) * NICE_0_WEIGHT / w;
+	vdelta = (s64)(cctx->curr_dl - v);
+	if (vdelta <= 0)
+		return 0;
+
+	return (u64)vdelta * w / NICE_0_WEIGHT;
+}
+
+/*
+ * Arm @cid's hrtick for the deadline of the task running there, when it
+ * has company in the queue, or kick @cid if the deadline has passed.
+ *
+ * A request is only enforced from task_tick_scx(): a task whose request
+ * runs out between two ticks holds the CPU until the next one, up to a
+ * whole tick late, and a task that woke behind it and did not win the
+ * pick waits that long for its turn. Under a saturated schbench that was
+ * a wakeup latency of ~900 us at the median, at a request of 700 us, and
+ * shortening the request only buys the tick back at the cost of
+ * throughput. fair.c has an hrtimer for exactly this, HRTICK, which
+ * set_next_task_fair() arms at every pick for the time the running
+ * task's vruntime takes to reach its deadline, whenever it has company,
+ *
+ *	if (rq->cfs.h_nr_queued <= 1)
+ *		return;
+ *	vdelta = se->deadline - se->vruntime;
+ *	delta = (se->h_load.weight * vdelta) / NICE_0_LOAD;
+ *	hrtick_start(rq, delta);
+ *
+ * and enqueue_task_fair() arms, through hrtick_update(), the moment a
+ * task joins a lone runner. When it fires, task_tick_fair() runs
+ * update_curr(), which reissues the deadline and asks for a reschedule,
+ * and pick_eevdf() decides. A deadline already behind is a reschedule on
+ * the spot:
+ *
+ *	if ((s64)vdelta < 0) {
+ *		if (task_current_donor(rq, p))
+ *			resched_curr(rq);
+ *		return;
+ *	}
+ *
+ * sched_ext has no hrtick, so this is a bpf_timer per cid. It fires at
+ * the deadline and kicks the CPU if the cid still has something queued,
+ * which is the reschedule; the dispatch that follows asks keep_running(),
+ * which is the pick. Every op runs with interrupts off, and from there
+ * bpf_timer_start() cannot touch the hrtimer itself: it queues the arming
+ * to an irq_work of this CPU, which runs on the way out of the op. That
+ * is a self-IPI per arming, and why it is only armed with company, as
+ * fair.c does.
+ *
+ * The timer is not pinned. It queues on the CPU that arms it, this one
+ * when the pick does and the waker's when a wakeup does, and an idle CPU
+ * hands it to a busy one when it is armed again, so a CPU is not woken
+ * for a deadline that is not its own. It cannot be cancelled from an op
+ * either, so one left behind by a task that blocked fires once for
+ * nothing, and hrtick_fire() finds nothing running and lets it lapse.
+ */
+static void hrtick_start(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	struct hrtick *ht;
+	u32 key = cid;
+	s64 delta;
+	u64 at;
+
+	if (no_hrtick || !cctx->curr_w)
+		return;
+
+	delta = curr_dl_in(cctx, now);
+	if (!delta) {
+		scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
+		return;
+	}
+	if (delta < HRTICK_MIN_NS)
+		delta = HRTICK_MIN_NS;
+	at = now + delta;
+
+	/*
+	 * A timer still pending for no later than this is left alone: it
+	 * fires early for this task and hrtick_fire() arms it again for the
+	 * deadline from there, where that costs nothing. Moving it from here
+	 * is an irq_work and a self-IPI every time, and under perf bench
+	 * sched messaging that was one per context switch, 1.5 million of
+	 * them for 4000 that ever fired.
+	 */
+	if (time_before(now, cctx->hrtick_at) &&
+	    !time_after(cctx->hrtick_at, at + HRTICK_MIN_NS))
+		return;
+
+	ht = bpf_map_lookup_elem(&hrticks, &key);
+	if (!ht)
+		return;
+
+	cctx->hrtick_at = at;
+	bpf_timer_start(&ht->timer, at, BPF_F_TIMER_ABS);
+}
+
+/*
+ * @cid's hrtick fired. Ask the running task to give the CPU up if it has
+ * company and its deadline has come, hrtick() in core.c:
+ *
+ *	rq->donor->sched_class->task_tick(rq, rq->donor, 1);
+ *
+ * The timer was armed for the deadline of whatever was running when it
+ * was armed. If the cid has since picked something else, whose deadline
+ * is still ahead, this is that task's hrtick now: arm it again for that
+ * deadline, which can be done from here directly, interrupts being on.
+ */
+static int hrtick_fire(void *map, int *key, struct hrtick *ht)
+{
+	struct cid_ctx __arena *cctx;
+	s32 cid = *key;
+	s64 delta;
+	u64 now;
+
+	TOUCH_ARENA();
+
+	if (!cid_valid(cid))
+		return 0;
+
+	cctx = cid_ctx(cid);
+	if (!cctx->curr_w || !cid_queued_test(cid))
+		return 0;
+
+	now = bpf_ktime_get_ns();
+	delta = curr_dl_in(cctx, now);
+	if (delta > HRTICK_MIN_NS) {
+		cctx->hrtick_at = now + delta;
+		bpf_timer_start(&ht->timer, now + delta, BPF_F_TIMER_ABS);
+		return 0;
+	}
+
+	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
+	__sync_fetch_and_add(&nr_hrticks, 1);
+
+	return 0;
+}
+
+/*
  * Longest a task may hold a CPU across the end of its slice before the
  * queue gets its turn whatever the deadlines say, see keep_running().
  *
@@ -2369,10 +2554,13 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	struct task_struct *head;
 	bool owed, p_idle;
 
-	if (no_wakeup_preempt || cid_idle_test(cid))
+	if (cid_idle_test(cid))
 		goto idle;
 
 	cctx = cid_ctx(cid);
+
+	if (no_wakeup_preempt)
+		goto queued;
 
 	/*
 	 * A SCHED_IDLE task running is interrupted for anything else, and a
@@ -2385,7 +2573,7 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	if (cctx->curr_idle && !p_idle)
 		goto preempt;
 	if (p_idle || p->policy == SCHED_BATCH)
-		goto idle;
+		goto queued;
 
 	/*
 	 * The queued task has to be owed service to be a candidate at all:
@@ -2393,7 +2581,7 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	 */
 	if (!no_eligibility &&
 	    time_after(tctx->vruntime, cid_vref_place(cid, now)))
-		goto idle;
+		goto queued;
 
 	/*
 	 * Is the running task still owed service? Once it has run for a
@@ -2403,7 +2591,7 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	 */
 	owed = !no_eligibility && curr_owed_service(cid, now);
 	if (owed && !no_run_to_parity)
-		goto idle;
+		goto queued;
 
 	/*
 	 * Only a curr that is still owed service is in the running at all:
@@ -2416,7 +2604,7 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	 * say. --no-eligibility keeps deciding on the deadlines alone.
 	 */
 	if ((owed || no_eligibility) && !time_before(dl, cctx->curr_dl))
-		goto idle;
+		goto queued;
 
 	/*
 	 * The task is only worth interrupting the CPU for if it is what the
@@ -2442,13 +2630,22 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	 */
 	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
 	if (head && !time_before(dl, head->scx.dsq_vtime))
-		goto idle;
+		goto queued;
 
 preempt:
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
 	__sync_fetch_and_add(&nr_preempts, 1);
 
 	return;
+queued:
+	/*
+	 * The task waits behind the running one. See that the running one
+	 * is asked again when its deadline comes rather than at the tick
+	 * after it, hrtick_update():
+	 *
+	 *	hrtick_start_fair(rq, donor);
+	 */
+	hrtick_start(cid, now);
 idle:
 	scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 }
@@ -3104,6 +3301,8 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	if (has_prev) {
 		keep_charge(prev, cid, now);
 		scx_bpf_task_set_slice(prev, task_request(prev));
+		if (cid_queued_test(cid))
+			hrtick_start(cid, now);
 		return;
 	}
 
@@ -3282,6 +3481,15 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		cctx->curr_request = task_request(p);
 		cctx->curr_w = task_weight(p, tctx);
 		cctx->curr_idle = p->policy == SCHED_IDLE;
+
+		/*
+		 * A pick with company is given an hrtick, set_next_task_fair():
+		 *
+		 *	if (hrtick_enabled_fair(rq))
+		 *		hrtick_start_fair(rq, p);
+		 */
+		if (cid_queued_test(cid))
+			hrtick_start(cid, tctx->last_run_at);
 	}
 
 	/*
@@ -3532,6 +3740,7 @@ static void init_topology(void)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 {
+	struct hrtick *ht;
 	u32 cid;
 	int err;
 
@@ -3591,6 +3800,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 			return err;
 		}
 		cid_idle_set(cid);
+
+		ht = bpf_map_lookup_elem(&hrticks, &cid);
+		if (!ht) {
+			scx_bpf_error("no hrtick for cid %d", cid);
+			return -ENOENT;
+		}
+		err = bpf_timer_init(&ht->timer, &hrticks, CLOCK_MONOTONIC);
+		if (!err)
+			err = bpf_timer_set_callback(&ht->timer, hrtick_fire);
+		if (err) {
+			scx_bpf_error("failed to set up the hrtick of cid %d: %d", cid, err);
+			return err;
+		}
 	}
 
 	return 0;

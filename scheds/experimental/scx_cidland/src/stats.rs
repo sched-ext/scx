@@ -20,16 +20,20 @@ pub struct Metrics {
 
     #[stat(desc = "Running tasks interrupted for a woken task")]
     pub nr_preempts: u64,
+
+    #[stat(desc = "Running tasks asked to give the CPU up at their deadline")]
+    pub nr_hrticks: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] steals={} preempts={}",
+            "[{}] steals={} preempts={} hrticks={}",
             crate::SCHEDULER_NAME,
             self.nr_steals,
             self.nr_preempts,
+            self.nr_hrticks,
         )?;
         Ok(())
     }
@@ -38,6 +42,7 @@ impl Metrics {
         Self {
             nr_steals: self.nr_steals - rhs.nr_steals,
             nr_preempts: self.nr_preempts - rhs.nr_preempts,
+            nr_hrticks: self.nr_hrticks - rhs.nr_hrticks,
         }
     }
 }
