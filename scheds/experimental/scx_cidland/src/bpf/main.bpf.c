@@ -202,6 +202,7 @@ struct task_ctx {
 	u64 deadline;
 	u64 request;
 	s64 vlag;
+	u64 vw;			/* weight @vlag and @deadline are scaled to */
 	s32 vcid;
 	u32 cgw;		/* weight of its cgroup, see cgrp_weight() */
 	u64 vjoin_w;
@@ -1820,6 +1821,9 @@ static void vref_join(s32 cid, const struct task_struct *p, struct task_ctx *tct
  * leave and rejoin for the sums to mean anything. Leaving is done here;
  * both callers rejoin, one through place_task() and one directly.
  */
+static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
+			  bool dequeued);
+
 static void cgw_refresh(const struct task_struct *p, struct task_ctx *tctx)
 {
 	struct cgroup *cgrp;
@@ -1840,6 +1844,7 @@ static void cgw_refresh(const struct task_struct *p, struct task_ctx *tctx)
 
 	tctx->cgw = w;
 	tctx->deadline = 0;
+	reweight_task(p, tctx, false);
 	vref_leave(tctx);
 }
 
@@ -1994,6 +1999,65 @@ static void place_task(s32 cid, const struct task_struct *p,
 		set_vruntime(tctx, vruntime, sleep);
 	}
 	vref_join(cid, p, tctx);
+}
+
+/*
+ * Bring the task's lag and deadline over to a new weight.
+ *
+ * Both are distances in the task's own virtual time, which runs at
+ * NICE_0_WEIGHT / weight, so a change of weight changes what they are
+ * worth in service. reweight_eevdf() has rescale_entity() carry the two
+ * across:
+ *
+ *	se->vlag = div64_long(se->vlag * old_weight, weight);
+ *	...
+ *	if (se->rel_deadline)
+ *		se->deadline = div64_long(se->deadline * old_weight, weight);
+ *
+ * so that the lag stays the service it was, w * (V - v), and the deadline
+ * stays the request it was issued for, d' = v' + (d - v) * w / w'. Both
+ * are called for by the derivation above rescale_entity(), and nothing
+ * else about the task is. An entity that is on the runqueue is then
+ * placed again from the rescaled lag, v' = V - vl': its vruntime moved at
+ * the old rate for as long as it ran, and left where it is it would be
+ * off by the whole difference.
+ *
+ * @dequeued says the task was taken off the runqueue for the change and
+ * is about to be put back, which is how set_user_nice() and
+ * __setscheduler_params() do it: ops.quiescent() has just taken its lag,
+ * fresh, and the vruntime is placed from it here, since a running task's
+ * enqueue never reaches ops.enqueue(), see cidland_set_weight(). A queued
+ * task is placed once more by place_task() on the enqueue that follows,
+ * against the cid it lands on. A sleeping task is only rescaled, what it
+ * carries is spent when it wakes.
+ */
+static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
+			  bool dequeued)
+{
+	u64 w = task_weight(p, tctx), old = tctx->vw;
+	s32 cid;
+
+	if (w == old)
+		return;
+	tctx->vw = w;
+	if (!old)
+		return;
+
+	tctx->vlag = vdiv(tctx->vlag * (s64)old, w);
+	if (tctx->deadline && time_before(tctx->vruntime, tctx->deadline))
+		tctx->deadline = tctx->vruntime +
+				 (tctx->deadline - tctx->vruntime) * old / w;
+
+	if (!dequeued)
+		return;
+	cid = scx_bpf_task_cid((struct task_struct *)p);
+	if (cid_valid(cid)) {
+		u64 vruntime = cid_vref_place(cid, bpf_ktime_get_ns());
+
+		if (cid_pack_weight(cid))
+			vruntime -= tctx->vlag;
+		set_vruntime(tctx, vruntime, false);
+	}
 }
 
 /*
@@ -3110,6 +3174,35 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 	}
 }
 
+/*
+ * The task's weight changed: a nice level, or a policy switched to or from
+ * SCHED_IDLE. set_load_weight() gets here through reweight_task_scx() for
+ * the sched_ext class as it gets to reweight_task_fair() for the fair
+ * class, from inside the dequeue and enqueue set_user_nice() and
+ * __setscheduler_params() wrap the change in, with the new static_prio
+ * and policy already written, which is what task_weight() reads. @weight
+ * itself is on the cgroup scale and too coarse at the light end, see
+ * task_weight().
+ *
+ * A task that was on the runqueue has been dequeued for this, running or
+ * not: enqueue_task_scx() sends a restored curr straight to the local
+ * DSQ, so for a running task this is the only callback between the
+ * dequeue and ops.running() that sees the change at all. A sleeping task
+ * was not dequeued and is only rescaled.
+ */
+void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
+{
+	struct task_ctx *tctx;
+
+	TOUCH_ARENA();
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	reweight_task(p, tctx, p->on_rq);
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -3121,6 +3214,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 		return -ENOMEM;
 	tctx->vcid = -1;
 	tctx->recent_used_cid = -1;
+	tctx->vw = task_weight(p, tctx);
 
 	/*
 	 * @fork tells a task that is being created apart from one that was
@@ -3425,6 +3519,7 @@ SCX_OPS_CID_DEFINE(cidland_ops,
 		   .stopping		= (void *)cidland_stopping,
 		   .update_idle		= (void *)cidland_update_idle,
 		   .enable		= (void *)cidland_enable,
+		   .set_weight		= (void *)cidland_set_weight,
 		   .init_task		= (void *)cidland_init_task,
 		   .cpuctl_init		= (void *)cidland_cpuctl_init,
 		   .cpuctl_set_weight	= (void *)cidland_cpuctl_set_weight,
