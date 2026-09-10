@@ -47,9 +47,8 @@ u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
  */
 int __attribute__((noinline))
 classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
-	       u64 total_cap_sum, int nz_qlen, u64 mig_delta_factor)
+	       u64 total_cap_sum, u64 x_mig_delta)
 {
-	u64 x_mig_delta = 0;
 	u64 fair_share_invr = 0;
 	u64 stealer_threshold = 0;
 	u64 stealee_threshold = 0;
@@ -59,18 +58,12 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 
 	if (no_fast_lb && sys_stat.nr_active_cpdoms) {
 		u64 avg = total_load_invr / sys_stat.nr_active_cpdoms;
-		x_mig_delta = calc_mig_delta(avg, nz_qlen, mig_delta_factor);
 		stealer_threshold = avg - x_mig_delta;
 		stealee_threshold = avg + x_mig_delta;
 	} else if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
 		fair_share_invr = total_load_invr *
 			     cpdomc->cap_sum_active_cpus /
 			     total_cap_sum;
-
-		x_mig_delta = calc_mig_delta(
-				fair_share_invr, nz_qlen,
-				mig_delta_factor);
-
 		stealer_threshold = fair_share_invr - x_mig_delta;
 		stealee_threshold = fair_share_invr + x_mig_delta;
 	}
@@ -149,6 +142,8 @@ int plan_x_cpdom_migration(void)
 	u64 util;
 	u64 total_load_invr = 0;
 	u64 total_cap_sum = 0;
+	u64 min_cap_sum = U64_MAX;
+	u64 x_mig_delta = 0;
 	bool overflow_running = false;
 	int nz_qlen = 0;
 
@@ -190,6 +185,8 @@ int plan_x_cpdom_migration(void)
 		}
 		total_load_invr += cpdomc->load_invr;
 		total_cap_sum += cpdomc->cap_sum_active_cpus;
+		if (cpdomc->cap_sum_active_cpus < min_cap_sum)
+			min_cap_sum = cpdomc->cap_sum_active_cpus;
 	}
 
 	/*
@@ -205,10 +202,27 @@ int plan_x_cpdom_migration(void)
 	 * capacity-proportional targets. Each domain's target is its
 	 * fair share of total system load scaled by its capacity
 	 * proportion.
+	 *
+	 * The band around the target is the same width for every domain:
+	 * a fraction of the smallest active domain's fair share. The
+	 * smallest domain bounds how much load can be out of place, so
+	 * it sets the granularity of an imbalance. On a homogeneous
+	 * machine every fair share is the smallest, so nothing changes
+	 * there.
 	 */
 	u64 mig_delta_factor = 0;
 	if (mig_delta_pct > 0)
 		mig_delta_factor = (mig_delta_pct << LAVD_SHIFT) / 100;
+
+	if (no_fast_lb && sys_stat.nr_active_cpdoms) {
+		x_mig_delta = calc_mig_delta(
+				total_load_invr / sys_stat.nr_active_cpdoms,
+				nz_qlen, mig_delta_factor);
+	} else if (total_cap_sum > 0 && min_cap_sum != U64_MAX) {
+		x_mig_delta = calc_mig_delta(
+				total_load_invr * min_cap_sum / total_cap_sum,
+				nz_qlen, mig_delta_factor);
+	}
 
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
@@ -217,8 +231,7 @@ int plan_x_cpdom_migration(void)
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 
 		nr_stealee += classify_cpdom(cpdomc, total_load_invr,
-					     total_cap_sum, nz_qlen,
-					     mig_delta_factor);
+					     total_cap_sum, x_mig_delta);
 	}
 
 	if (nr_stealee == 0 && !overflow_running)
