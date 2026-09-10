@@ -2395,6 +2395,25 @@ static u64 cid_vref_place(s32 cid, u64 now)
 	return no_vref_update ? cid_vref(cid) : cid_vref_at(cid, now);
 }
 
+/* Return @p's current lag against @cid, clamped as entity_lag() does. */
+static s64 task_lag_at(const struct task_struct *p,
+		       const struct task_ctx *tctx, s32 cid, u64 now)
+{
+	s64 limit = (s64)lag_limit(p, tctx);
+	s64 lag;
+
+	if (!cid_valid(cid))
+		return tctx->vlag;
+
+	lag = (s64)(cid_vref_place(cid, now) - tctx->vruntime);
+	if (lag > limit)
+		lag = limit;
+	else if (lag < -limit)
+		lag = -limit;
+
+	return lag;
+}
+
 /*
  * Is the task running on @cid still owed service at @now?
  *
@@ -3018,6 +3037,13 @@ static void place_task(s32 cid, const struct task_struct *p,
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
 		u64 vruntime = cid_vref_place(cid, now);
 
+		/*
+		 * ops.quiescent() does not run when the kernel migrates a queued
+		 * task. Refresh its lag against the pack it is leaving instead of
+		 * reusing the value saved at its last sleep.
+		 */
+		if (!sleep && cid_valid(tctx->vcid))
+			tctx->vlag = task_lag_at(p, tctx, tctx->vcid, now);
 		delay_settle(tctx, now);
 		if (cid_pack_weight(cid))
 			vruntime -= tctx->vlag;
@@ -3064,6 +3090,9 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
 
 	if (w == old)
 		return;
+	if (dequeued && cid_valid(tctx->vcid))
+		tctx->vlag = task_lag_at(p, tctx, tctx->vcid,
+					 bpf_ktime_get_ns());
 	tctx->vw = w;
 	if (!old)
 		return;
@@ -4149,7 +4178,7 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct task_ctx *tctx;
-	s64 limit, lag;
+	s64 lag;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -4174,13 +4203,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
 	if (cid_valid(cid)) {
-		limit = lag_limit(p, tctx);
-		lag = (s64)(cid_vref_place(cid, bpf_ktime_get_ns()) -
-			    tctx->vruntime);
-		if (lag > limit)
-			lag = limit;
-		else if (lag < -limit)
-			lag = -limit;
+		lag = task_lag_at(p, tctx, cid, bpf_ktime_get_ns());
 		tctx->vlag = lag;
 	}
 	vref_leave(tctx);
@@ -4269,14 +4292,9 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * far it is placed from the pack it joins.
 	 */
 	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
-		s64 limit = lag_limit(p, tctx);
-		s64 lag = (s64)(cid_vref_place(tctx->vcid, tctx->last_run_at) -
-				tctx->vruntime);
+		s64 lag = task_lag_at(p, tctx, tctx->vcid,
+				      tctx->last_run_at);
 
-		if (lag > limit)
-			lag = limit;
-		else if (lag < -limit)
-			lag = -limit;
 		set_vruntime(tctx, cid_vref_place(cid, tctx->last_run_at) - lag,
 			     false);
 	}
