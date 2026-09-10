@@ -2404,15 +2404,18 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * back and the task that displaced it would wait for the tick.
 	 *
 	 * Reissue its deadline from where its vruntime has reached, which is
-	 * what update_deadline() does once a request is consumed. Charged
-	 * first, the way update_curr() runs ahead of it, so the new deadline
-	 * counts the service taken since the task was picked.
+	 * what update_deadline() does once a request is consumed. The
+	 * vruntime is current: a running task reaches ops.enqueue() from
+	 * put_prev_task_scx(), after ops.stopping() has charged the service
+	 * it took, and charging it again here counted its last run twice.
+	 * The published view of the cid is of no use for the same reason,
+	 * ops.stopping() has cleared it, so the task is tested on its own
+	 * vruntime against the reference, which is entity_eligible().
 	 */
 	if (!(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p) &&
-	    !no_eligibility && !curr_owed_service(prev_cid, now)) {
-		keep_charge(p, prev_cid, now);
+	    !no_eligibility &&
+	    time_after(tctx->vruntime, cid_vref_place(prev_cid, now)))
 		tctx->deadline = 0;
-	}
 
 	dl = task_dl(p, tctx);
 
