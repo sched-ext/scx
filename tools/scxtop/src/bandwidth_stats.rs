@@ -9,7 +9,7 @@
 //! Reads counters from `/sys/fs/resctrl/mon_data/mon_L3_<id>/` and derives
 //! bytes-per-second rates from tick-to-tick deltas.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -187,10 +187,8 @@ impl BandwidthStats {
                 reading.mbm_total_bps = to_bps(prev, cur, now.duration_since(prev_t).as_secs_f64());
             }
 
-            if *has_occupancy {
-                if let Ok(Some(occ)) = read_counter(&dom.path.join("llc_occupancy")) {
-                    reading.llc_occupancy_bytes = occ;
-                }
+            if *has_occupancy && let Ok(Some(occ)) = read_counter(&dom.path.join("llc_occupancy")) {
+                reading.llc_occupancy_bytes = occ;
             }
 
             dom.last_local = cur_local.or(dom.last_local);

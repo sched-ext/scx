@@ -16,9 +16,9 @@ use std::mem::MaybeUninit;
 use std::ops::Sub;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
@@ -26,29 +26,38 @@ use std::time::Instant;
 use inotify::{Inotify, WatchMask};
 use std::os::unix::io::AsRawFd;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::Receiver;
 use crossbeam::select;
 use lazy_static::lazy_static;
-use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::libbpf_sys;
 use nix::sched::CpuSet;
-use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
+use nvml_wrapper::error::NvmlError;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use scx_layered::alloc::{unified_alloc, LayerAlloc, LayerDemand};
+use scx_layered::alloc::{LayerAlloc, LayerDemand, unified_alloc};
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
+use scx_utils::CoreType;
+use scx_utils::Cpumask;
+use scx_utils::Llc;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NetDev;
+use scx_utils::Topology;
+use scx_utils::TopologyArgs;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -62,15 +71,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
-use scx_utils::Cpumask;
-use scx_utils::Llc;
-use scx_utils::NetDev;
-use scx_utils::Topology;
-use scx_utils::TopologyArgs;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NR_CPU_IDS;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -1260,8 +1260,8 @@ impl Stats {
         if self.util_compensation {
             for (&cpu_id, cur_cpu_stat) in &cur_per_cpu_stats {
                 let cpu = cpu_id as usize;
-                if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id) {
-                    if let (
+                if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id)
+                    && let (
                         fb_procfs::CpuStat {
                             user_usec: Some(cu),
                             nice_usec: Some(cn),
@@ -1285,25 +1285,23 @@ impl Stats {
                             ..
                         },
                     ) = (cur_cpu_stat, prev_cpu_stat)
-                    {
-                        let delta_total = cu.saturating_sub(*pu)
-                            + cn.saturating_sub(*pn)
-                            + cs.saturating_sub(*ps)
-                            + ci.saturating_sub(*pi)
-                            + cw.saturating_sub(*pw)
-                            + cq.saturating_sub(*pq)
-                            + cf.saturating_sub(*pf)
-                            + ct.saturating_sub(*pt);
-                        let overhead = cq.saturating_sub(*pq)
-                            + cf.saturating_sub(*pf)
-                            + ct.saturating_sub(*pt);
-                        let available = delta_total.saturating_sub(overhead);
-                        cpu_scales[cpu] = if available > 0 {
-                            (delta_total as f64 / available as f64).clamp(1.0, 20.0)
-                        } else {
-                            1.0
-                        };
-                    }
+                {
+                    let delta_total = cu.saturating_sub(*pu)
+                        + cn.saturating_sub(*pn)
+                        + cs.saturating_sub(*ps)
+                        + ci.saturating_sub(*pi)
+                        + cw.saturating_sub(*pw)
+                        + cq.saturating_sub(*pq)
+                        + cf.saturating_sub(*pf)
+                        + ct.saturating_sub(*pt);
+                    let overhead =
+                        cq.saturating_sub(*pq) + cf.saturating_sub(*pf) + ct.saturating_sub(*pt);
+                    let available = delta_total.saturating_sub(overhead);
+                    cpu_scales[cpu] = if available > 0 {
+                        (delta_total as f64 / available as f64).clamp(1.0, 20.0)
+                    } else {
+                        1.0
+                    };
                 }
             }
         }
@@ -1729,10 +1727,10 @@ impl GpuTaskAffinitizer {
                 if let Some(kids) = self.pid_map.get(&pid) {
                     work.extend(kids);
                 }
-                if let Some(proc_) = self.sys.process(pid) {
-                    if let Some(tasks) = proc_.tasks() {
-                        pids_and_tids.extend(tasks.iter().copied());
-                    }
+                if let Some(proc_) = self.sys.process(pid)
+                    && let Some(tasks) = proc_.tasks()
+                {
+                    pids_and_tids.extend(tasks.iter().copied());
                 }
             }
         }
@@ -1776,10 +1774,10 @@ impl GpuTaskAffinitizer {
         }
         let now = Instant::now();
 
-        if let Some(last_process_time) = self.last_process_time {
-            if (now - last_process_time) < self.poll_interval {
-                return;
-            }
+        if let Some(last_process_time) = self.last_process_time
+            && (now - last_process_time) < self.poll_interval
+        {
+            return;
         }
 
         match self.update_gpu_pids() {
@@ -2593,11 +2591,10 @@ impl<'a> Scheduler<'a> {
             }
             pmap.sys_end = order.len() as u32;
 
+            let order_vec: Vec<_> = order.iter().map(|(n, d)| (*n, *d)).collect();
             debug!(
                 "NODE[{}] prox_map[{}]: {:?}",
-                node_id,
-                pmap.sys_end,
-                &order.iter().map(|(n, d)| (*n, *d)).collect::<Vec<_>>()
+                node_id, pmap.sys_end, order_vec
             );
 
             skel.maps.node_data.update(
@@ -3868,9 +3865,7 @@ impl<'a> Scheduler<'a> {
                     let nr = cpus_to_free.weight();
                     trace!(
                         "[{}] freeing CPUs on node {}: {}",
-                        layer.name,
-                        n,
-                        &cpus_to_free
+                        layer.name, n, &cpus_to_free
                     );
                     layer.cpus &= &cpus_to_free.not();
                     layer.nr_cpus -= nr;
@@ -4754,7 +4749,9 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
             let high_freq_matcher_cnt = system_cpu_util_below_cnt + dsq_insert_below_cnt;
             if high_freq_matcher_cnt > 0 {
                 if hint_equals_cnt != 1 {
-                    bail!("High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals");
+                    bail!(
+                        "High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals"
+                    );
                 }
                 if system_cpu_util_below_cnt > 1 {
                     bail!("Only 1 SystemCpuUtilBelow match permitted per AND block");
@@ -4764,7 +4761,9 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                 }
                 if ands.len() != hint_equals_cnt + system_cpu_util_below_cnt + dsq_insert_below_cnt
                 {
-                    bail!("High-frequency matchers must be used only with HintEquals (no other matchers)");
+                    bail!(
+                        "High-frequency matchers must be used only with HintEquals (no other matchers)"
+                    );
                 }
             } else if hint_equals_cnt == 1 && ands.len() != 1 {
                 bail!("HintEquals match cannot be in conjunction with other matches");
@@ -4806,15 +4805,15 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                 util_range,
                 ..
             } => {
-                if let Some((cpus_min, cpus_max)) = cpus_range {
-                    if cpus_min > cpus_max {
-                        bail!(
-                            "Spec {:?} has invalid cpus_range({}, {})",
-                            spec.name,
-                            cpus_min,
-                            cpus_max
-                        );
-                    }
+                if let Some((cpus_min, cpus_max)) = cpus_range
+                    && cpus_min > cpus_max
+                {
+                    bail!(
+                        "Spec {:?} has invalid cpus_range({}, {})",
+                        spec.name,
+                        cpus_min,
+                        cpus_max
+                    );
                 }
                 if util_range.0 >= util_range.1 {
                     bail!(
@@ -5202,7 +5201,10 @@ fn main(opts: Opts) -> Result<()> {
         }
 
         if common.allow_node_aligned.is_some() {
-            warn!("Layer {} has deprecated flag \"allow_node_aligned\", node-aligned tasks are now always dispatched on layer DSQs", &spec.name);
+            warn!(
+                "Layer {} has deprecated flag \"allow_node_aligned\", node-aligned tasks are now always dispatched on layer DSQs",
+                &spec.name
+            );
         }
     }
 
@@ -5650,8 +5652,8 @@ mod xnuma_tests {
     #[test]
     fn test_conservation_surplus_equals_deficit() {
         // Mathematical invariant: total surplus == total deficit in water-fill
-        let duty = vec![100.0, 30.0, 50.0];
-        let allocs = vec![96, 96, 96];
+        let duty = [100.0, 30.0, 50.0];
+        let allocs = [96, 96, 96];
 
         let total_duty: f64 = duty.iter().sum();
         let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();

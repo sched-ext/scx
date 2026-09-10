@@ -8,12 +8,12 @@ use crate::util::{format_bits, format_bytes, sanitize_nbsp};
 use crate::{Action, AppState, AppTheme, KeyMap};
 use anyhow::Result;
 use num_format::{SystemLocale, ToFormattedString};
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::prelude::Stylize;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, BorderType, Cell, Chart, Dataset, Paragraph, Row, Table};
-use ratatui::Frame;
 
 /// Renderer for network views
 pub struct NetworkRenderer;

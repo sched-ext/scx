@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Optimization run report: per-round history table, markdown and JSON renderers.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::usage::Usage;
 
@@ -85,15 +85,15 @@ impl Report {
                 None => String::new(),
             }
         ));
-        if let (Some(start), Some(best)) = (self.start_value, self.best_value) {
-            if start != 0.0 {
-                let pct = if self.goal == "minimize" {
-                    (start - best) / start * 100.0
-                } else {
-                    (best - start) / start * 100.0
-                };
-                s.push_str(&format!("- Improvement over start: {pct:.2}%\n"));
-            }
+        if let (Some(start), Some(best)) = (self.start_value, self.best_value)
+            && start != 0.0
+        {
+            let pct = if self.goal == "minimize" {
+                (start - best) / start * 100.0
+            } else {
+                (best - start) / start * 100.0
+            };
+            s.push_str(&format!("- Improvement over start: {pct:.2}%\n"));
         }
         s.push('\n');
 

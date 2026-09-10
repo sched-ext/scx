@@ -6,6 +6,7 @@
 use crate::columns::Column;
 use crate::{AppTheme, FilteredState, ProcData, ThreadData};
 use anyhow::Result;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::Stylize;
 use ratatui::text::{Line, Span};
@@ -13,7 +14,6 @@ use ratatui::widgets::{
     Block, BorderType, Cell, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
     TableState,
 };
-use ratatui::Frame;
 use std::collections::BTreeMap;
 
 /// Renderer for process and thread tables

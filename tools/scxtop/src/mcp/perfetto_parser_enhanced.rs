@@ -5,7 +5,7 @@
 
 //! Enhanced perfetto trace parser with cross-tool compatibility and generic event indexing
 
-use super::perfetto_event_types::{event_category, EventCategory};
+use super::perfetto_event_types::{EventCategory, event_category};
 use super::perfetto_parser::{FtraceEventWithIndex, PerfettoTrace};
 use perfetto_protos::{ftrace_event::ftrace_event, trace::Trace};
 use serde::{Deserialize, Serialize};
@@ -419,12 +419,11 @@ impl CompatibilityDetector {
                 match data {
                     Data::TrackDescriptor(desc) => {
                         // Check for DSQ tracks (scxtop-specific)
-                        if let Some(counter) = desc.counter.as_ref() {
-                            if let Some(unit) = &counter.unit_name {
-                                if unit.contains("DSQ") {
-                                    has_dsq_tracks = true;
-                                }
-                            }
+                        if let Some(counter) = desc.counter.as_ref()
+                            && let Some(unit) = &counter.unit_name
+                            && unit.contains("DSQ")
+                        {
+                            has_dsq_tracks = true;
                         }
                     }
                     Data::ChromeMetadata(_) => {

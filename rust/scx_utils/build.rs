@@ -53,6 +53,7 @@ fn gen_bindings() {
         .allowlist_type("scx_exit_kind")
         .allowlist_type("scx_consts")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");
 
@@ -76,6 +77,7 @@ fn main() {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .prepend_enum_name(false)
         .derive_default(true)
+        .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");
 

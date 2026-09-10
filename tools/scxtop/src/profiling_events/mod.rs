@@ -12,11 +12,11 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 pub use cpu_util::CpuUtilEvent;
-pub use kprobe::{available_kprobe_events, KprobeEvent};
-pub use perf::{available_perf_events, PerfEvent};
+pub use kprobe::{KprobeEvent, available_kprobe_events};
+pub use perf::{PerfEvent, available_perf_events};
 
-use crate::profiling_events::cpu_util::CpuUtilMetric;
 use crate::CpuStatTracker;
+use crate::profiling_events::cpu_util::CpuUtilMetric;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProfilingEvent {

@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use reqwest::header::CONTENT_TYPE;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MAX_READ_BYTES: usize = 200_000;
 const MAX_SCHED_READ_BYTES: usize = 50_000;
@@ -385,7 +385,7 @@ fn cpu_cache_sizes_from_root(cpu_root: &Path) -> Result<String> {
         }
     }
 
-    entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    entries.sort_by_key(|a| (a.0, a.1));
     if entries.is_empty() {
         return Ok(format!(
             "path: {}\n(no CPU cache size files found)\n",
@@ -493,7 +493,7 @@ fn read_path(
     max_bytes: usize,
     refuse_large_unbounded: bool,
 ) -> Result<String> {
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("{label}: read {}", path.display()))?;
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
@@ -682,10 +682,10 @@ fn grep_dir(
                 .unwrap_or(&p)
                 .to_string_lossy()
                 .to_string();
-            if let Some(g) = glob {
-                if !rel.contains(g) {
-                    continue;
-                }
+            if let Some(g) = glob
+                && !rel.contains(g)
+            {
+                continue;
             }
             let shown = match prefix {
                 Some(prefix) => format!("{prefix}/{rel}"),

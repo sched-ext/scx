@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env::args;
 use std::io::Read;
-use std::thread::{current, spawn, ThreadId};
+use std::thread::{ThreadId, current, spawn};
 
 // Hacky definition sharing. See stats_def.rs.h.
 include!("stats_defs.rs.h");
@@ -74,15 +74,15 @@ fn main() {
     let (tx, rx) = server.channels();
     spawn(move || {
         while let Ok(id) = rx.recv() {
-            if let Err(e) = tx.send(format!("hello {:?}", &id)) {
+            if let Err(e) = tx.send(format!("hello {:?}", id)) {
                 warn!("Server channel errored ({:?})", e);
                 break;
             }
         }
     });
 
-    info!("Server listening. Run `client {:?}`.", &path);
-    info!("Use `socat - UNIX-CONNECT:{:?}` for raw connection.", &path);
+    info!("Server listening. Run `client {:?}`.", path);
+    info!("Use `socat - UNIX-CONNECT:{:?}` for raw connection.", path);
     info!("Press any key to exit.");
 
     let mut buf: [u8; 1] = [0];

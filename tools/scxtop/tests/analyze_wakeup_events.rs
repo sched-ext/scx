@@ -107,7 +107,7 @@ fn analyze_wakeup_events() {
 
     eprintln!("Total Instant Events: {}", instant_count);
     eprintln!("Instant events with track UUID: {}", instant_by_track.len());
-    eprintln!("");
+    eprintln!();
 
     // Look for wakeup patterns: instant followed by slice begin
     let mut wakeup_patterns = Vec::new();
@@ -143,7 +143,7 @@ fn analyze_wakeup_events() {
 
     eprintln!("=== Potential Wakeup Patterns (Instant → SliceBegin) ===");
     eprintln!("Found {} potential wakeup patterns", wakeup_patterns.len());
-    eprintln!("");
+    eprintln!();
 
     if !wakeup_patterns.is_empty() {
         // Calculate latency statistics
@@ -171,7 +171,7 @@ fn analyze_wakeup_events() {
         eprintln!("  P95:     {} ns ({:.2} µs)", p95, p95 as f64 / 1000.0);
         eprintln!("  P99:     {} ns ({:.2} µs)", p99, p99 as f64 / 1000.0);
         eprintln!("  Maximum: {} ns ({:.2} µs)", max, *max as f64 / 1000.0);
-        eprintln!("");
+        eprintln!();
 
         eprintln!("Sample wakeup patterns (first 10):");
         for (i, (instant_ts, slice_ts, latency, instant_track, slice_track)) in
@@ -179,12 +179,18 @@ fn analyze_wakeup_events() {
         {
             eprintln!(
                 "  {}: Instant@{} ns (track {:?}) → SliceBegin@{} ns (track {:?}) = {} ns ({:.2} µs)",
-                i+1, instant_ts, instant_track, slice_ts, slice_track, latency, *latency as f64 / 1000.0
+                i + 1,
+                instant_ts,
+                instant_track,
+                slice_ts,
+                slice_track,
+                latency,
+                *latency as f64 / 1000.0
             );
         }
     }
 
-    eprintln!("");
+    eprintln!();
     eprintln!("=== Detailed Instant Event Analysis ===");
 
     // Sample first 20 instant events with full details
@@ -206,7 +212,7 @@ fn analyze_wakeup_events() {
             eprintln!("    cpu: {:?}", event.metadata.cpu);
             eprintln!("    pid: {:?}", event.metadata.pid);
             eprintln!("    tid: {:?}", event.metadata.tid);
-            eprintln!("");
+            eprintln!();
 
             instant_samples += 1;
             if instant_samples >= 20 {

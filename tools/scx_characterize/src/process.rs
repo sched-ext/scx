@@ -4,11 +4,11 @@
 // GNU General Public License version 2.
 
 use crate::record::{
-    perf_binary, perf_script_output_exists, report_perf_script_stderr, PERF_MEM_DATA_FILE,
-    PERF_MEM_JSONL_FILE, PERF_MEM_SCRIPT_FIELDS, PERF_MEM_SCRIPT_FILE, PERF_SCHED_DATA_FILE,
-    PERF_SCHED_JSONL_FILE, PERF_SCHED_SCRIPT_FIELDS, PERF_SCHED_SCRIPT_FILE,
+    PERF_MEM_DATA_FILE, PERF_MEM_JSONL_FILE, PERF_MEM_SCRIPT_FIELDS, PERF_MEM_SCRIPT_FILE,
+    PERF_SCHED_DATA_FILE, PERF_SCHED_JSONL_FILE, PERF_SCHED_SCRIPT_FIELDS, PERF_SCHED_SCRIPT_FILE,
+    perf_binary, perf_script_output_exists, report_perf_script_stderr,
 };
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -373,13 +373,13 @@ fn run_processing(profile_dir: &Path, output_dir: &Path, verbose: bool) -> Resul
         jsonl_kind: "perf.sched.jsonl",
     };
     let hint_index = HintIndex::load_if_exists(profile_dir)?;
-    if let Some(hint_index) = hint_index.as_ref() {
-        if let Some(ordering_issues) = hint_index.ordering_issues.as_ref() {
-            ordering_issues.warn(
-                "hints.jsonl",
-                "Hint events will be sorted conservatively before annotation.",
-            );
-        }
+    if let Some(hint_index) = hint_index.as_ref()
+        && let Some(ordering_issues) = hint_index.ordering_issues.as_ref()
+    {
+        ordering_issues.warn(
+            "hints.jsonl",
+            "Hint events will be sorted conservatively before annotation.",
+        );
     }
     copy_hints_if_present(profile_dir, output_dir)?;
     if let Some(mem_perf_script_dst) =

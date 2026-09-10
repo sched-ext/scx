@@ -168,31 +168,30 @@ impl DsqMonitor {
         if !self.enabled {
             return;
         }
-        if let Some(event_type) = json.get("type").and_then(|v| v.as_str()) {
-            if event_type == "sched_switch" {
-                // Extract DSQ info
-                if let Some(dsq_id) = json.get("next_dsq_id").and_then(|v| v.as_u64()) {
-                    let stats = self.dsq_stats.entry(dsq_id).or_insert_with(|| DsqStats {
-                        enqueue_count: 0,
-                        dequeue_count: 0,
-                        total_latency_us: 0,
-                        latency_samples: Vec::new(),
-                        max_queue_length: 0,
-                        current_queue_length: 0,
-                    });
+        if let Some(event_type) = json.get("type").and_then(|v| v.as_str())
+            && event_type == "sched_switch"
+        {
+            // Extract DSQ info
+            if let Some(dsq_id) = json.get("next_dsq_id").and_then(|v| v.as_u64()) {
+                let stats = self.dsq_stats.entry(dsq_id).or_insert_with(|| DsqStats {
+                    enqueue_count: 0,
+                    dequeue_count: 0,
+                    total_latency_us: 0,
+                    latency_samples: Vec::new(),
+                    max_queue_length: 0,
+                    current_queue_length: 0,
+                });
 
-                    stats.dequeue_count += 1;
+                stats.dequeue_count += 1;
 
-                    if let Some(lat) = json.get("next_dsq_lat_us").and_then(|v| v.as_u64()) {
-                        stats.total_latency_us += lat;
-                        stats.latency_samples.push(lat);
-                    }
+                if let Some(lat) = json.get("next_dsq_lat_us").and_then(|v| v.as_u64()) {
+                    stats.total_latency_us += lat;
+                    stats.latency_samples.push(lat);
+                }
 
-                    if let Some(queue_len) = json.get("next_dsq_nr_queued").and_then(|v| v.as_u64())
-                    {
-                        stats.current_queue_length = queue_len;
-                        stats.max_queue_length = stats.max_queue_length.max(queue_len);
-                    }
+                if let Some(queue_len) = json.get("next_dsq_nr_queued").and_then(|v| v.as_u64()) {
+                    stats.current_queue_length = queue_len;
+                    stats.max_queue_length = stats.max_queue_length.max(queue_len);
                 }
             }
         }
@@ -446,34 +445,34 @@ impl WakeupChainTracker {
         if !self.enabled {
             return;
         }
-        if let Some(event_type) = json.get("type").and_then(|v| v.as_str()) {
-            if event_type == "sched_wakeup" || event_type == "sched_wakeup_new" {
-                let waker_pid = json
-                    .get("waker_pid")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
-                let target_pid = json.get("pid").and_then(|v| v.as_u64()).map(|v| v as u32);
+        if let Some(event_type) = json.get("type").and_then(|v| v.as_str())
+            && (event_type == "sched_wakeup" || event_type == "sched_wakeup_new")
+        {
+            let waker_pid = json
+                .get("waker_pid")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let target_pid = json.get("pid").and_then(|v| v.as_u64()).map(|v| v as u32);
 
-                if let (Some(waker_pid), Some(target_pid)) = (waker_pid, target_pid) {
-                    let event = WakeupEvent {
-                        timestamp,
-                        waker_pid,
-                        waker_comm: json
-                            .get("waker_comm")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        target_pid,
-                        target_comm: json
-                            .get("comm")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        cpu: json.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    };
+            if let (Some(waker_pid), Some(target_pid)) = (waker_pid, target_pid) {
+                let event = WakeupEvent {
+                    timestamp,
+                    waker_pid,
+                    waker_comm: json
+                        .get("waker_comm")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    target_pid,
+                    target_comm: json
+                        .get("comm")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    cpu: json.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                };
 
-                    self.wakeups.entry(target_pid).or_default().push(event);
-                }
+                self.wakeups.entry(target_pid).or_default().push(event);
             }
         }
     }

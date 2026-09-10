@@ -68,7 +68,7 @@ fn comprehensive_wakeup_outlier_analysis() {
     }
 
     eprintln!("Total Instant Events: {}", instant_events.len());
-    eprintln!("");
+    eprintln!();
 
     // Find wakeup-to-schedule patterns
     let mut all_wakeup_latencies = Vec::new();
@@ -102,7 +102,7 @@ fn comprehensive_wakeup_outlier_analysis() {
         "Correlation rate: {:.1}%",
         all_wakeup_latencies.len() as f64 / instant_events.len() as f64 * 100.0
     );
-    eprintln!("");
+    eprintln!();
 
     if all_wakeup_latencies.is_empty() {
         eprintln!("No wakeup patterns found");
@@ -140,7 +140,7 @@ fn comprehensive_wakeup_outlier_analysis() {
     eprintln!("  P99:     {} ns ({:.2} µs)", p99, p99 as f64 / 1000.0);
     eprintln!("  P99.9:   {} ns ({:.2} µs)", p999, p999 as f64 / 1000.0);
     eprintln!("  Maximum: {} ns ({:.2} µs)", max, max as f64 / 1000.0);
-    eprintln!("");
+    eprintln!();
 
     // Outlier detection using IQR method
     let iqr = p75 - p25;
@@ -159,7 +159,7 @@ fn comprehensive_wakeup_outlier_analysis() {
         extreme_outlier_threshold,
         extreme_outlier_threshold as f64 / 1000.0
     );
-    eprintln!("");
+    eprintln!();
 
     let outliers: Vec<_> = wakeup_details
         .iter()
@@ -181,7 +181,7 @@ fn comprehensive_wakeup_outlier_analysis() {
         extreme_outliers.len(),
         extreme_outliers.len() as f64 / count as f64 * 100.0
     );
-    eprintln!("");
+    eprintln!();
 
     // Show worst outliers
     let mut sorted_outliers = outliers.clone();
@@ -209,7 +209,7 @@ fn comprehensive_wakeup_outlier_analysis() {
             *latency as f64 / median as f64
         );
     }
-    eprintln!("");
+    eprintln!();
 
     // Latency distribution
     eprintln!("=== Latency Distribution ===");
@@ -236,7 +236,7 @@ fn comprehensive_wakeup_outlier_analysis() {
             label, count_in_bucket, pct, bar
         );
     }
-    eprintln!("");
+    eprintln!();
 
     // Zero latency analysis
     let zero_latency_count = all_wakeup_latencies.iter().filter(|&&lat| lat == 0).count();
@@ -250,7 +250,7 @@ fn comprehensive_wakeup_outlier_analysis() {
         eprintln!(
             "  Interpretation: Task was already scheduled or instant/slice timestamps aligned"
         );
-        eprintln!("");
+        eprintln!();
     }
 
     // Track UUID analysis for outliers
@@ -267,7 +267,7 @@ fn comprehensive_wakeup_outlier_analysis() {
     for (track, count) in track_vec.iter().take(10) {
         eprintln!("  Track {:?}: {} outlier wakeups", track, count);
     }
-    eprintln!("");
+    eprintln!();
 
     eprintln!("========== END WAKEUP & OUTLIER ANALYSIS ==========\n");
 }

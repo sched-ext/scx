@@ -6,7 +6,7 @@
 use scx_utils::Topology;
 use scxtop::bpf_intf;
 use scxtop::bpf_skel::types::bpf_event;
-use scxtop::mcp::{create_shared_stats, SharedStats};
+use scxtop::mcp::{SharedStats, create_shared_stats};
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 

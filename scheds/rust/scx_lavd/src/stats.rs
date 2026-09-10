@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -10,8 +10,8 @@ use anyhow::bail;
 use anyhow::{Context, Result};
 use gpoint::GPoint;
 use scx_stats::prelude::*;
-use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_stats_derive::stat_doc;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -98,7 +98,7 @@ impl SysStats {
             Self::format_header(w)?;
         }
 
-        let color = if self.mseq % 2 == 0 {
+        let color = if self.mseq.is_multiple_of(2) {
             "\x1b[90m" // Dark gray for even mseq
         } else {
             "\x1b[37m" // white for odd mseq
@@ -318,6 +318,8 @@ pub struct SchedSamples {
 }
 
 #[derive(Debug)]
+// Renaming the *Req variants is an API decision for the scheduler author.
+#[allow(clippy::enum_variant_names)]
 pub enum StatsReq {
     NewSampler(ThreadId),
     SysStatsReq {
@@ -434,7 +436,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 
 pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<SchedSamples>(
-        &vec![
+        &[
             ("target".into(), "sched_samples".into()),
             ("nr_samples".into(), nr_samples.to_string()),
         ],

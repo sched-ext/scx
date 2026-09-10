@@ -69,15 +69,15 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
+use crate::Cpumask;
 use crate::compat::ROOT_PREFIX;
 use crate::cpumask::read_cpulist;
 use crate::misc::find_best_split_size;
 use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
 use crate::misc::read_from_file;
-use crate::Cpumask;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use glob::glob;
 use log::info;
 use log::warn;
@@ -89,7 +89,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
-use crate::gpu::{create_gpus, Gpu, GpuIndex};
+use crate::gpu::{Gpu, GpuIndex, create_gpus};
 
 lazy_static::lazy_static! {
     /// The maximum possible number of CPU IDs in the system. As mentioned
@@ -258,7 +258,7 @@ impl Topology {
         let mut topo_cores = BTreeMap::new();
         let mut topo_cpus = BTreeMap::new();
 
-        for (_node_id, node) in nodes.iter_mut() {
+        for node in nodes.values_mut() {
             let mut node_cores = BTreeMap::new();
             let mut node_cpus = BTreeMap::new();
 
@@ -434,7 +434,7 @@ impl Topology {
             for llc in node.llcs.values() {
                 let mut seg = String::new();
                 let nr_cores = llc.cores.len();
-                let nr_groups = (nr_cores + 7) / 8;
+                let nr_groups = nr_cores.div_ceil(8);
                 let base = nr_cores / nr_groups;
                 let rem = nr_cores % nr_groups;
                 // First `rem` groups get base+1, rest get base
@@ -451,11 +451,7 @@ impl Topology {
                     let nr_set: usize = cpu_ids.iter().filter(|&&c| cpumask.test_cpu(c)).count();
 
                     let ch = if nr_cpus == 1 {
-                        if nr_set > 0 {
-                            '█'
-                        } else {
-                            '░'
-                        }
+                        if nr_set > 0 { '█' } else { '░' }
                     } else if nr_cpus == 2 {
                         let first_set = cpumask.test_cpu(cpu_ids[0]);
                         let second_set = cpumask.test_cpu(cpu_ids[1]);
@@ -815,7 +811,7 @@ fn get_capacity_source() -> Option<CapacitySource> {
     'outer: for src in sources {
         let path_str = [prefix.clone(), src.to_string()].join("/");
         let path = Path::new(&path_str);
-        raw_capacity = read_from_file(&path).unwrap_or(0_usize);
+        raw_capacity = read_from_file(path).unwrap_or(0_usize);
         if raw_capacity > 0 {
             // It would be an okay source...
             suffix = src;
@@ -900,19 +896,16 @@ fn replace_with_virt_llcs(
 
     // First pass: determine core to partition mapping, partition to
     // kernel_id mapping, and total partitions needed
-    for (_llc_id, llc) in node.llcs.iter() {
+    for llc in node.llcs.values() {
         // Group cores by type (big/little) to partition separately
         let mut cores_by_type: BTreeMap<bool, Vec<usize>> = BTreeMap::new();
 
         for (core_id, core) in llc.cores.iter() {
             let core_type = core.core_type == CoreType::Little;
-            cores_by_type
-                .entry(core_type)
-                .or_insert(Vec::new())
-                .push(*core_id);
+            cores_by_type.entry(core_type).or_default().push(*core_id);
         }
 
-        for (_core_type, core_ids) in cores_by_type.iter() {
+        for core_ids in cores_by_type.values() {
             let num_cores_in_bucket = core_ids.len();
 
             // Find optimal partition size within specified range
@@ -950,32 +943,32 @@ fn replace_with_virt_llcs(
     }
 
     // Second pass: move cores to the appropriate new LLC based on partition
-    for (_llc_id, llc) in node.llcs.iter_mut() {
+    for llc in node.llcs.values_mut() {
         for (core_id, core) in llc.cores.iter() {
-            if let Some(&target_partition_id) = core_to_partition.get(core_id) {
-                if let Some(target_llc) = virt_llcs.get_mut(&target_partition_id) {
-                    let target_llc_mut = Arc::get_mut(target_llc).unwrap();
+            if let Some(&target_partition_id) = core_to_partition.get(core_id)
+                && let Some(target_llc) = virt_llcs.get_mut(&target_partition_id)
+            {
+                let target_llc_mut = Arc::get_mut(target_llc).unwrap();
 
-                    // Clone core and update its LLC ID to match new partition
-                    let mut new_core = (**core).clone();
-                    new_core.llc_id = target_partition_id;
+                // Clone core and update its LLC ID to match new partition
+                let mut new_core = (**core).clone();
+                new_core.llc_id = target_partition_id;
 
-                    // Update all CPUs within this core to reference new LLC ID
-                    let mut updated_cpus = BTreeMap::new();
-                    for (cpu_id, cpu) in new_core.cpus.iter() {
-                        let mut new_cpu = (**cpu).clone();
-                        new_cpu.llc_id = target_partition_id;
+                // Update all CPUs within this core to reference new LLC ID
+                let mut updated_cpus = BTreeMap::new();
+                for (cpu_id, cpu) in new_core.cpus.iter() {
+                    let mut new_cpu = (**cpu).clone();
+                    new_cpu.llc_id = target_partition_id;
 
-                        // Add CPU to the virtual LLC's span
-                        target_llc_mut.span.set_cpu(*cpu_id)?;
+                    // Add CPU to the virtual LLC's span
+                    target_llc_mut.span.set_cpu(*cpu_id)?;
 
-                        updated_cpus.insert(*cpu_id, Arc::new(new_cpu));
-                    }
-                    new_core.cpus = updated_cpus;
-
-                    // Add the updated core to the virtual LLC
-                    target_llc_mut.cores.insert(*core_id, Arc::new(new_core));
+                    updated_cpus.insert(*cpu_id, Arc::new(new_cpu));
                 }
+                new_core.cpus = updated_cpus;
+
+                // Add the updated core to the virtual LLC
+                target_llc_mut.cores.insert(*core_id, Arc::new(new_core));
             }
         }
     }

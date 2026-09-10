@@ -183,10 +183,10 @@ impl RunqueueDepthAnalyzer {
         // For each CPU, process events chronologically to track runqueue depth
         for cpu in 0..num_cpus {
             let cpu_id = cpu as u32;
-            if let Some(filter) = cpu_filter {
-                if cpu_id != filter {
-                    continue;
-                }
+            if let Some(filter) = cpu_filter
+                && cpu_id != filter
+            {
+                continue;
             }
 
             let events = self.trace.get_events_by_cpu(cpu_id);
@@ -556,7 +556,7 @@ impl FairnessAnalyzer {
         let starvation_threshold = fair_share / 10;
         let mut starved: Vec<_> = process_runtime
             .iter()
-            .filter(|(_, &runtime)| runtime < starvation_threshold && runtime > 0)
+            .filter(|&(_, &runtime)| runtime < starvation_threshold && runtime > 0)
             .map(|(&pid, &runtime)| {
                 let comm = process_names.get(&pid).cloned().unwrap_or_default();
                 let share_pct = if fair_share > 0 {
@@ -578,7 +578,7 @@ impl FairnessAnalyzer {
         let hogging_threshold = fair_share.saturating_mul(10);
         let mut hogging: Vec<_> = process_runtime
             .iter()
-            .filter(|(_, &runtime)| runtime > hogging_threshold)
+            .filter(|&(_, &runtime)| runtime > hogging_threshold)
             .map(|(&pid, &runtime)| {
                 let comm = process_names.get(&pid).cloned().unwrap_or_default();
                 let share_pct = if fair_share > 0 {

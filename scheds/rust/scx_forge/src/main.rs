@@ -14,14 +14,14 @@ mod stats;
 use std::collections::HashSet;
 use std::ffi::c_int;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore;
@@ -31,26 +31,26 @@ use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
+use scx_utils::CoreType;
+use scx_utils::Cpumask;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::Powermode;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
+use scx_utils::perf::PerfEventSpec;
 use scx_utils::perf::parse_perf_event;
 use scx_utils::perf::setup_perf_events;
-use scx_utils::perf::PerfEventSpec;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
-use scx_utils::Cpumask;
-use scx_utils::Powermode;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_forge";
@@ -797,12 +797,8 @@ impl<'a> Scheduler<'a> {
         let smt_siblings = topo.sibling_cpus();
         info!("SMT sibling CPUs: {:?}", smt_siblings);
         for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
-            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("enable_sibling_cpu: {}", e),
-                )
-            })?;
+            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize)
+                .map_err(|e| std::io::Error::other(format!("enable_sibling_cpu: {}", e)))?;
         }
         Ok(())
     }

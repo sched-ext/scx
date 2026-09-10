@@ -6,10 +6,10 @@
 // Basic smoke tests for BPF program rendering
 // More comprehensive tests would require constructing complex BpfProgData structures
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use scxtop::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
-use scxtop::{render::BpfProgramRenderer, AppTheme, BpfProgStats, Columns};
+use scxtop::{AppTheme, BpfProgStats, Columns, render::BpfProgramRenderer};
 use std::collections::VecDeque;
 
 #[test]

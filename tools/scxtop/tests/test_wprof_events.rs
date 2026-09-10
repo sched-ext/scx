@@ -14,8 +14,8 @@ impl MockTrace {
         let mut ts = 1_000_000_000u64;
 
         // Create diverse track events with different types
-        let categories = vec!["ONCPU", "WAKER", "WAKEE"];
-        let event_types = vec![
+        let categories = ["ONCPU", "WAKER", "WAKEE"];
+        let event_types = [
             TrackEventType::SliceBegin,
             TrackEventType::SliceEnd,
             TrackEventType::Instant,

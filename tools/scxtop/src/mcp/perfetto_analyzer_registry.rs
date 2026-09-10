@@ -387,7 +387,8 @@ impl TraceAnalyzer for DsqAnalyzerWrapper {
 
         let start = std::time::Instant::now();
         let analyzer = DsqAnalyzer::new(trace);
-        let result = if let Some(summary) = analyzer.get_summary() {
+
+        if let Some(summary) = analyzer.get_summary() {
             AnalyzerResult {
                 analyzer_id: self.metadata().id.clone(),
                 success: true,
@@ -403,9 +404,7 @@ impl TraceAnalyzer for DsqAnalyzerWrapper {
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: Some("No DSQ data found".to_string()),
             }
-        };
-
-        result
+        }
     }
 }
 

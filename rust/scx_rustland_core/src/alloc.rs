@@ -31,6 +31,7 @@ use std::alloc::{GlobalAlloc, Layout};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Buddy allocator
 ///
@@ -141,7 +142,7 @@ impl Node {
     }
 
     fn is_empty(list: *const Node) -> bool {
-        unsafe { (*list).next as *const Node == list }
+        unsafe { std::ptr::eq((*list).next, list) }
     }
 }
 
@@ -457,7 +458,6 @@ impl UserAllocator {
     }
 
     // Enable a seccomp filter that sends a SIGSYS when mmap() is called.
-    #[allow(static_mut_refs)]
     pub fn disable_mmap(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut ctx = seccomp::Context::default(Action::Allow)?;
         let syscall_nr = libc::SYS_mmap as usize;
@@ -474,7 +474,6 @@ impl UserAllocator {
         Ok(())
     }
 
-    #[allow(static_mut_refs)]
     pub fn lock_memory(&self) {
         unsafe {
             VM.save().ok();
@@ -496,16 +495,13 @@ impl UserAllocator {
             }
 
             // Hint the kernel to use huge pages for the memory arena.
-            let ptr = &mut HEAP.0 as *mut u8 as *mut libc::c_void;
+            let ptr = (&raw mut HEAP.0) as *mut u8 as *mut libc::c_void;
             libc::madvise(ptr, HEAP_SIZE, libc::MADV_HUGEPAGE);
         }
     }
 
-    #[allow(static_mut_refs)]
     pub fn unlock_memory(&self) {
-        unsafe {
-            VM.restore().ok();
-        };
+        VM.restore().ok();
     }
 }
 
@@ -546,10 +542,14 @@ static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
 // designed to operate on a pre-allocated buffer. This, coupled with the memory locking achieved
 // through mlockall(), prevents page faults from occurring during the execution of the user-space
 // scheduler.
-#[allow(static_mut_refs)]
 #[cfg_attr(not(test), global_allocator)]
-pub static ALLOCATOR: UserAllocator =
-    unsafe { UserAllocator::new(BuddyAllocParam::new(HEAP.0.as_ptr(), HEAP_SIZE, LEAF_SIZE)) };
+pub static ALLOCATOR: UserAllocator = unsafe {
+    UserAllocator::new(BuddyAllocParam::new(
+        (&raw const HEAP.0) as *const u8,
+        HEAP_SIZE,
+        LEAF_SIZE,
+    ))
+};
 
 // State of special sysctl VM settings.
 //
@@ -565,7 +565,7 @@ struct VmSettings {
     // that the scheduler never faults.
     //
     // The original value will be restored when the user-space scheduler exits.
-    compact_unevictable_allowed: i32,
+    saved_compact_unevictable_allowed: AtomicI32,
 }
 
 impl VmSettings {
@@ -603,9 +603,8 @@ impl VmSettings {
     fn save(&self) -> Result<(), String> {
         let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
         let value = self.read_procfs(compact_unevictable_allowed)?;
-        unsafe {
-            VM.compact_unevictable_allowed = value;
-        };
+        self.saved_compact_unevictable_allowed
+            .store(value, Ordering::Relaxed);
         self.write_procfs(compact_unevictable_allowed, 0)?;
 
         Ok(())
@@ -614,7 +613,9 @@ impl VmSettings {
     // Restore all the previous sysctl vm settings.
     fn restore(&self) -> Result<(), String> {
         let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
-        let value = unsafe { VM.compact_unevictable_allowed };
+        let value = self
+            .saved_compact_unevictable_allowed
+            .load(Ordering::Relaxed);
         self.write_procfs(compact_unevictable_allowed, value)?;
 
         Ok(())
@@ -622,6 +623,6 @@ impl VmSettings {
 }
 
 // Special sysctl VM settings.
-static mut VM: VmSettings = VmSettings {
-    compact_unevictable_allowed: 0,
+static VM: VmSettings = VmSettings {
+    saved_compact_unevictable_allowed: AtomicI32::new(0),
 };

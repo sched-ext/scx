@@ -167,25 +167,25 @@ impl ContextSwitchAnalyzer {
         let mut last_was_idle = false;
 
         for event_with_idx in events {
-            if let Some(ftrace_event::Event::SchedSwitch(switch)) = &event_with_idx.event.event {
-                if let Some(ts) = event_with_idx.event.timestamp {
-                    total_switches += 1;
+            if let Some(ftrace_event::Event::SchedSwitch(switch)) = &event_with_idx.event.event
+                && let Some(ts) = event_with_idx.event.timestamp
+            {
+                total_switches += 1;
 
-                    // Calculate timeslice if we have a previous switch
-                    if let Some(prev_ts) = last_switch_ts {
-                        let timeslice = ts.saturating_sub(prev_ts);
-                        timeslices.push(timeslice);
+                // Calculate timeslice if we have a previous switch
+                if let Some(prev_ts) = last_switch_ts {
+                    let timeslice = ts.saturating_sub(prev_ts);
+                    timeslices.push(timeslice);
 
-                        // Add to active time if previous task was not idle
-                        if !last_was_idle {
-                            active_time_ns += timeslice;
-                        }
+                    // Add to active time if previous task was not idle
+                    if !last_was_idle {
+                        active_time_ns += timeslice;
                     }
-
-                    // Check if next task is idle (PID 0 or swapper)
-                    last_was_idle = switch.next_pid.unwrap_or(0) == 0;
-                    last_switch_ts = Some(ts);
                 }
+
+                // Check if next task is idle (PID 0 or swapper)
+                last_was_idle = switch.next_pid.unwrap_or(0) == 0;
+                last_switch_ts = Some(ts);
             }
         }
 
@@ -239,16 +239,18 @@ impl ContextSwitchAnalyzer {
 
             for event_with_idx in events {
                 if let Some(ftrace_event::Event::SchedSwitch(switch)) = &event_with_idx.event.event
-                {
-                    if let (Some(ts), Some(prev_pid), Some(next_pid)) = (
+                    && let (Some(ts), Some(prev_pid), Some(next_pid)) = (
                         event_with_idx.event.timestamp,
                         switch.prev_pid,
                         switch.next_pid,
-                    ) {
-                        // Track when processes are scheduled off
-                        if prev_pid > 0 {
-                            let data = process_data.entry(prev_pid).or_insert_with(|| {
-                                ProcessRuntimeData {
+                    )
+                {
+                    // Track when processes are scheduled off
+                    if prev_pid > 0 {
+                        let data =
+                            process_data
+                                .entry(prev_pid)
+                                .or_insert_with(|| ProcessRuntimeData {
                                     pid: prev_pid,
                                     comm: switch
                                         .prev_comm
@@ -258,23 +260,24 @@ impl ContextSwitchAnalyzer {
                                     total_runtime_ns: 0,
                                     num_switches: 0,
                                     timeslices: Vec::new(),
-                                }
-                            });
+                                });
 
-                            // If we have a previous schedule-on time, calculate runtime
-                            if let Some(scheduled_on) = data.last_scheduled_on {
-                                let runtime = ts.saturating_sub(scheduled_on);
-                                data.total_runtime_ns += runtime;
-                                data.timeslices.push(runtime);
-                            }
-                            data.last_scheduled_on = None;
-                            data.num_switches += 1;
+                        // If we have a previous schedule-on time, calculate runtime
+                        if let Some(scheduled_on) = data.last_scheduled_on {
+                            let runtime = ts.saturating_sub(scheduled_on);
+                            data.total_runtime_ns += runtime;
+                            data.timeslices.push(runtime);
                         }
+                        data.last_scheduled_on = None;
+                        data.num_switches += 1;
+                    }
 
-                        // Track when processes are scheduled on
-                        if next_pid > 0 {
-                            let data = process_data.entry(next_pid).or_insert_with(|| {
-                                ProcessRuntimeData {
+                    // Track when processes are scheduled on
+                    if next_pid > 0 {
+                        let data =
+                            process_data
+                                .entry(next_pid)
+                                .or_insert_with(|| ProcessRuntimeData {
                                     pid: next_pid,
                                     comm: switch
                                         .next_comm
@@ -284,10 +287,8 @@ impl ContextSwitchAnalyzer {
                                     total_runtime_ns: 0,
                                     num_switches: 0,
                                     timeslices: Vec::new(),
-                                }
-                            });
-                            data.last_scheduled_on = Some(ts);
-                        }
+                                });
+                        data.last_scheduled_on = Some(ts);
                     }
                 }
             }
@@ -347,54 +348,53 @@ impl ContextSwitchAnalyzer {
                 for event_with_idx in events {
                     if let Some(ftrace_event::Event::SchedSwitch(switch)) =
                         &event_with_idx.event.event
-                    {
-                        if let (Some(ts), Some(prev_pid), Some(next_pid)) = (
+                        && let (Some(ts), Some(prev_pid), Some(next_pid)) = (
                             event_with_idx.event.timestamp,
                             switch.prev_pid,
                             switch.next_pid,
-                        ) {
-                            // Track prev_pid being scheduled off
-                            if prev_pid > 0 {
-                                let data = cpu_process_data.entry(prev_pid).or_insert_with(|| {
-                                    ProcessRuntimeData {
-                                        pid: prev_pid,
-                                        comm: switch
-                                            .prev_comm
-                                            .clone()
-                                            .unwrap_or_else(|| "unknown".to_string()),
-                                        last_scheduled_on: None,
-                                        total_runtime_ns: 0,
-                                        num_switches: 0,
-                                        timeslices: Vec::new(),
-                                    }
-                                });
-
-                                if let Some(scheduled_on) = data.last_scheduled_on {
-                                    let runtime = ts.saturating_sub(scheduled_on);
-                                    data.total_runtime_ns += runtime;
-                                    data.timeslices.push(runtime);
+                        )
+                    {
+                        // Track prev_pid being scheduled off
+                        if prev_pid > 0 {
+                            let data = cpu_process_data.entry(prev_pid).or_insert_with(|| {
+                                ProcessRuntimeData {
+                                    pid: prev_pid,
+                                    comm: switch
+                                        .prev_comm
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    last_scheduled_on: None,
+                                    total_runtime_ns: 0,
+                                    num_switches: 0,
+                                    timeslices: Vec::new(),
                                 }
-                                data.last_scheduled_on = None;
-                                data.num_switches += 1;
-                            }
+                            });
 
-                            // Track next_pid being scheduled on
-                            if next_pid > 0 {
-                                let data = cpu_process_data.entry(next_pid).or_insert_with(|| {
-                                    ProcessRuntimeData {
-                                        pid: next_pid,
-                                        comm: switch
-                                            .next_comm
-                                            .clone()
-                                            .unwrap_or_else(|| "unknown".to_string()),
-                                        last_scheduled_on: None,
-                                        total_runtime_ns: 0,
-                                        num_switches: 0,
-                                        timeslices: Vec::new(),
-                                    }
-                                });
-                                data.last_scheduled_on = Some(ts);
+                            if let Some(scheduled_on) = data.last_scheduled_on {
+                                let runtime = ts.saturating_sub(scheduled_on);
+                                data.total_runtime_ns += runtime;
+                                data.timeslices.push(runtime);
                             }
+                            data.last_scheduled_on = None;
+                            data.num_switches += 1;
+                        }
+
+                        // Track next_pid being scheduled on
+                        if next_pid > 0 {
+                            let data = cpu_process_data.entry(next_pid).or_insert_with(|| {
+                                ProcessRuntimeData {
+                                    pid: next_pid,
+                                    comm: switch
+                                        .next_comm
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    last_scheduled_on: None,
+                                    total_runtime_ns: 0,
+                                    num_switches: 0,
+                                    timeslices: Vec::new(),
+                                }
+                            });
+                            data.last_scheduled_on = Some(ts);
                         }
                     }
                 }
@@ -557,15 +557,14 @@ impl WakeupChainAnalyzer {
                         // Calculate latency if task was previously woken
                         if let (Some(ts), Some(next_pid)) =
                             (event_with_idx.event.timestamp, switch.next_pid)
+                            && let Some(wakeup_ts) = wakeup_times.remove(&next_pid)
                         {
-                            if let Some(wakeup_ts) = wakeup_times.remove(&next_pid) {
-                                let latency = ts.saturating_sub(wakeup_ts);
-                                latencies.push(latency);
-                                per_cpu_latencies
-                                    .entry(cpu as u32)
-                                    .or_default()
-                                    .push(latency);
-                            }
+                            let latency = ts.saturating_sub(wakeup_ts);
+                            latencies.push(latency);
+                            per_cpu_latencies
+                                .entry(cpu as u32)
+                                .or_default()
+                                .push(latency);
                         }
                     }
                     _ => {}
@@ -645,13 +644,13 @@ impl WakeupChainAnalyzer {
             // Group ONCPU slice begins by PID and sort by timestamp
             let mut oncpu_begins_by_pid: HashMap<i32, Vec<u64>> = HashMap::new();
             for event in &oncpu_events {
-                if event.event_type == TrackEventType::SliceBegin {
-                    if let Some(pid) = event.metadata.pid {
-                        oncpu_begins_by_pid
-                            .entry(pid)
-                            .or_default()
-                            .push(event.timestamp_ns);
-                    }
+                if event.event_type == TrackEventType::SliceBegin
+                    && let Some(pid) = event.metadata.pid
+                {
+                    oncpu_begins_by_pid
+                        .entry(pid)
+                        .or_default()
+                        .push(event.timestamp_ns);
                 }
             }
 
@@ -662,32 +661,31 @@ impl WakeupChainAnalyzer {
 
             // For each WAKEE event, find the next ONCPU begin for that PID
             for event in wakee_events.iter().chain(wakee_new_events.iter()) {
-                if let Some(pid) = event.metadata.pid {
-                    if let Some(oncpu_begins) = oncpu_begins_by_pid.get(&pid) {
-                        // Find the first ONCPU begin after this wakeup
-                        if let Ok(idx) = oncpu_begins.binary_search(&event.timestamp_ns) {
-                            // Exact match - use next one
-                            if idx + 1 < oncpu_begins.len() {
-                                let latency =
-                                    oncpu_begins[idx + 1].saturating_sub(event.timestamp_ns);
-                                if latency > 0 && latency < 1_000_000_000 {
-                                    // < 1 second sanity check
-                                    latencies.push(latency);
-                                    if let Some(cpu) = event.metadata.cpu {
-                                        per_cpu_latencies.entry(cpu).or_default().push(latency);
-                                    }
+                if let Some(pid) = event.metadata.pid
+                    && let Some(oncpu_begins) = oncpu_begins_by_pid.get(&pid)
+                {
+                    // Find the first ONCPU begin after this wakeup
+                    if let Ok(idx) = oncpu_begins.binary_search(&event.timestamp_ns) {
+                        // Exact match - use next one
+                        if idx + 1 < oncpu_begins.len() {
+                            let latency = oncpu_begins[idx + 1].saturating_sub(event.timestamp_ns);
+                            if latency > 0 && latency < 1_000_000_000 {
+                                // < 1 second sanity check
+                                latencies.push(latency);
+                                if let Some(cpu) = event.metadata.cpu {
+                                    per_cpu_latencies.entry(cpu).or_default().push(latency);
                                 }
                             }
-                        } else if let Err(idx) = oncpu_begins.binary_search(&event.timestamp_ns) {
-                            // idx is where it would be inserted - so oncpu_begins[idx] is the first after
-                            if idx < oncpu_begins.len() {
-                                let latency = oncpu_begins[idx].saturating_sub(event.timestamp_ns);
-                                if latency > 0 && latency < 1_000_000_000 {
-                                    // < 1 second sanity check
-                                    latencies.push(latency);
-                                    if let Some(cpu) = event.metadata.cpu {
-                                        per_cpu_latencies.entry(cpu).or_default().push(latency);
-                                    }
+                        }
+                    } else if let Err(idx) = oncpu_begins.binary_search(&event.timestamp_ns) {
+                        // idx is where it would be inserted - so oncpu_begins[idx] is the first after
+                        if idx < oncpu_begins.len() {
+                            let latency = oncpu_begins[idx].saturating_sub(event.timestamp_ns);
+                            if latency > 0 && latency < 1_000_000_000 {
+                                // < 1 second sanity check
+                                latencies.push(latency);
+                                if let Some(cpu) = event.metadata.cpu {
+                                    per_cpu_latencies.entry(cpu).or_default().push(latency);
                                 }
                             }
                         }
@@ -782,10 +780,10 @@ impl PerfettoMigrationAnalyzer {
         let cross_llc_migrations = 0usize;
 
         for event in &migrate_events {
-            if let Some(ftrace_event::Event::SchedMigrateTask(migrate)) = &event.event {
-                if let Some(pid) = migrate.pid {
-                    *migrations_by_process.entry(pid).or_insert(0) += 1;
-                }
+            if let Some(ftrace_event::Event::SchedMigrateTask(migrate)) = &event.event
+                && let Some(pid) = migrate.pid
+            {
+                *migrations_by_process.entry(pid).or_insert(0) += 1;
             }
         }
 
@@ -886,24 +884,22 @@ impl CorrelationAnalyzer {
                 match &event_with_idx.event.event {
                     Some(ftrace_event::Event::SchedWakeup(wakeup)) => {
                         if let (Some(ts), Some(pid)) = (event_with_idx.event.timestamp, wakeup.pid)
+                            && pid_filter.is_none_or(|filter| pid == filter)
                         {
-                            if pid_filter.is_none_or(|filter| pid == filter) {
-                                wakeup_times.entry(pid).or_default().push(WakeupRecord {
-                                    timestamp: ts,
-                                    waker_pid: event_with_idx.event.pid.unwrap_or(0),
-                                });
-                            }
+                            wakeup_times.entry(pid).or_default().push(WakeupRecord {
+                                timestamp: ts,
+                                waker_pid: event_with_idx.event.pid.unwrap_or(0),
+                            });
                         }
                     }
                     Some(ftrace_event::Event::SchedWaking(waking)) => {
                         if let (Some(ts), Some(pid)) = (event_with_idx.event.timestamp, waking.pid)
+                            && pid_filter.is_none_or(|filter| pid == filter)
                         {
-                            if pid_filter.is_none_or(|filter| pid == filter) {
-                                wakeup_times.entry(pid).or_default().push(WakeupRecord {
-                                    timestamp: ts,
-                                    waker_pid: event_with_idx.event.pid.unwrap_or(0),
-                                });
-                            }
+                            wakeup_times.entry(pid).or_default().push(WakeupRecord {
+                                timestamp: ts,
+                                waker_pid: event_with_idx.event.pid.unwrap_or(0),
+                            });
                         }
                     }
                     _ => {}
@@ -917,28 +913,25 @@ impl CorrelationAnalyzer {
 
             for event_with_idx in events {
                 if let Some(ftrace_event::Event::SchedSwitch(switch)) = &event_with_idx.event.event
-                {
-                    if let (Some(ts), Some(next_pid)) =
+                    && let (Some(ts), Some(next_pid)) =
                         (event_with_idx.event.timestamp, switch.next_pid)
-                    {
-                        if pid_filter.is_none_or(|filter| next_pid == filter) {
-                            // Find most recent wakeup for this PID
-                            if let Some(wakeups) = wakeup_times.get_mut(&next_pid) {
-                                // Find the most recent wakeup before this schedule
-                                if let Some(pos) = wakeups.iter().rposition(|w| w.timestamp <= ts) {
-                                    let wakeup = wakeups.remove(pos);
-                                    let latency = ts.saturating_sub(wakeup.timestamp);
+                    && pid_filter.is_none_or(|filter| next_pid == filter)
+                {
+                    // Find most recent wakeup for this PID
+                    if let Some(wakeups) = wakeup_times.get_mut(&next_pid) {
+                        // Find the most recent wakeup before this schedule
+                        if let Some(pos) = wakeups.iter().rposition(|w| w.timestamp <= ts) {
+                            let wakeup = wakeups.remove(pos);
+                            let latency = ts.saturating_sub(wakeup.timestamp);
 
-                                    correlations.push(WakeupScheduleCorrelation {
-                                        pid: next_pid,
-                                        wakeup_timestamp: wakeup.timestamp,
-                                        schedule_timestamp: ts,
-                                        wakeup_latency_ns: latency,
-                                        waker_pid: wakeup.waker_pid,
-                                        cpu: cpu as u32,
-                                    });
-                                }
-                            }
+                            correlations.push(WakeupScheduleCorrelation {
+                                pid: next_pid,
+                                wakeup_timestamp: wakeup.timestamp,
+                                schedule_timestamp: ts,
+                                wakeup_latency_ns: latency,
+                                waker_pid: wakeup.waker_pid,
+                                cpu: cpu as u32,
+                            });
                         }
                     }
                 }

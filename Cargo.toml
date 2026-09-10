@@ -35,7 +35,7 @@ members = [
     "tools/vmlinux_docify",
     "tools/xtask",
 ]
-resolver = "2"
+resolver = "3"
 
 [profile.release]
 lto = "thin"

@@ -17,8 +17,8 @@ unsafe impl Plain for bpf_intf::refresh_node_ctx_arg {}
 
 use std::collections::BTreeMap;
 
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 pub use config::LayerCommon;
 pub use config::LayerConfig;
 pub use config::LayerKind;
@@ -28,9 +28,9 @@ pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
 use scx_utils::Core;
 use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::NR_CPU_IDS;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::Topology;
 use std::sync::Arc;
 use tracing::info;
 
@@ -384,8 +384,8 @@ impl CpuPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scx_utils::testutils::{make_het_test_topo, make_test_topo, mask_from_bits};
     use scx_utils::Llc;
+    use scx_utils::testutils::{make_het_test_topo, make_test_topo, mask_from_bits};
 
     // 1N: 1 node, 2 LLCs, 4 cores/LLC, 2 HTs/core = 16 CPUs
     //   LLC0: cores 0-3 (cpus 0-7), LLC1: cores 4-7 (cpus 8-15)
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(alloc.weight(), 4);
         for cpu in alloc.iter() {
             assert!(
-                cpu >= 16 && cpu < 24,
+                (16..24).contains(&cpu),
                 "cpu {} should be on node 2 (16-23)",
                 cpu
             );
@@ -1271,7 +1271,7 @@ mod tests {
         let n1_order: Vec<usize> = order.iter().copied().filter(|&c| c >= 8).collect();
         for &core in &n1_order[..4] {
             assert!(
-                core >= 8 && core < 12,
+                (8..12).contains(&core),
                 "LLC2 core {} should be first within node 1",
                 core
             );
@@ -1291,7 +1291,7 @@ mod tests {
         // Node 1 cores (8-15) should appear first.
         for &core in &order[..8] {
             assert!(
-                core >= 8 && core < 16,
+                (8..16).contains(&core),
                 "core {} should be node 1 (8-15)",
                 core
             );
@@ -2418,7 +2418,7 @@ mod tests {
                 remaining -= cpus_in_llc;
             } else {
                 let mut extra = 0;
-                for (_, core) in llc.cores.iter() {
+                for core in llc.cores.values() {
                     if remaining == 0 {
                         break;
                     }
@@ -2488,7 +2488,7 @@ mod tests {
             .enumerate()
             .map(|(i, a)| (i, a.total() * au))
             .collect();
-        ascending.sort_by(|a, b| a.1.cmp(&b.1));
+        ascending.sort_by_key(|a| a.1);
 
         // Phase 1 — Free per-node: return excess LLCs.
         for &(idx, _) in ascending.iter().rev() {

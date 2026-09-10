@@ -33,8 +33,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -245,12 +245,19 @@ fn expand_glob_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn expand_sudo_password_file(spec_path: &Path, pw: &Path) -> Result<PathBuf> {
+    expand_sudo_password_file_in(spec_path, pw, home_dir())
+}
+
+fn expand_sudo_password_file_in(
+    spec_path: &Path,
+    pw: &Path,
+    home: Option<PathBuf>,
+) -> Result<PathBuf> {
     let raw = pw.to_string_lossy();
     let expanded = if raw == "~" {
-        home_dir().context("expand ~ in [system].sudo_passwd_file: HOME is not set")?
+        home.context("expand ~ in [system].sudo_passwd_file: HOME is not set")?
     } else if let Some(rest) = raw.strip_prefix("~/") {
-        home_dir()
-            .context("expand ~ in [system].sudo_passwd_file: HOME is not set")?
+        home.context("expand ~ in [system].sudo_passwd_file: HOME is not set")?
             .join(rest)
     } else {
         let path = PathBuf::from(raw.as_ref());
@@ -276,15 +283,14 @@ fn spec_sudo_password_file(spec_path: &Path, spec: &spec::Spec) -> Result<Option
     Ok(Some(expand_sudo_password_file(spec_path, pw)?))
 }
 
-fn configure_sudo_from_spec(spec_path: &Path, spec: &spec::Spec) -> Result<()> {
+fn sudo_password_file_from_spec(spec_path: &Path, spec: &spec::Spec) -> Result<Option<PathBuf>> {
     let Some(pw) = spec_sudo_password_file(spec_path, spec)? else {
-        return Ok(());
+        return Ok(None);
     };
     if !pw.is_file() {
         anyhow::bail!("[system].sudo_passwd_file not found: {}", pw.display());
     }
-    std::env::set_var("SCX_SUDO_PASSWORD_FILE", &pw);
-    Ok(())
+    Ok(Some(pw))
 }
 
 fn agent_log(color: color::Style, msg: impl AsRef<str>) {
@@ -672,10 +678,10 @@ fn print_final_report(
 ) -> Result<()> {
     if json {
         let mut out = rep.to_json();
-        if let Some(obj) = out.as_object_mut() {
-            if interrupted {
-                obj.insert("interrupted".to_string(), serde_json::Value::Bool(true));
-            }
+        if let Some(obj) = out.as_object_mut()
+            && interrupted
+        {
+            obj.insert("interrupted".to_string(), serde_json::Value::Bool(true));
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -1106,11 +1112,7 @@ fn classify_attempt(summary: &str, diff: &str) -> AttemptTags {
 }
 
 fn normalized_improvement(goal: &str, delta: f64) -> f64 {
-    if goal == "minimize" {
-        -delta
-    } else {
-        delta
-    }
+    if goal == "minimize" { -delta } else { delta }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1858,8 +1860,8 @@ async fn optimize(args: OptimizeArgs) -> Result<()> {
     // The harness loads the scheduler as root. If the scheduler spec provides a
     // sudo password file, export it so the harness (and its teardown pkills)
     // can authenticate without requiring passwordless sudo.
-    configure_sudo_from_spec(&spec_path, &spec)?;
-    let sudo = sudo::Sudo::resolve()?;
+    let sudo_password_file = sudo_password_file_from_spec(&spec_path, &spec)?;
+    let sudo = sudo::Sudo::resolve(sudo_password_file.as_deref())?;
 
     let client = http::build_http_client()?;
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -2009,7 +2011,8 @@ async fn optimize_loop(
     if !base.is_complete() {
         anyhow::bail!(
             "baseline does not build/attach/measure (stage={}); fix the scheduler before optimizing.\nerrors: {:?}",
-            base.stage, base.errors
+            base.stage,
+            base.errors
         );
     }
     // The baseline build produced the binary, so capture its --help now: both
@@ -2091,13 +2094,13 @@ async fn optimize_loop(
         let scheduler_cwd = source.join(crate_dir);
         let planning_tl = api::tool_loop(
             &scheduler_cwd,
-            scheds_root.as_deref(),
+            scheds_root,
             false,
             spec.ai.max_tool_iterations,
         );
         let edit_tl = api::tool_loop(
             &scheduler_cwd,
-            scheds_root.as_deref(),
+            scheds_root,
             true,
             spec.ai.max_tool_iterations,
         );
@@ -2356,11 +2359,11 @@ async fn optimize_loop(
                         if api_tries < MAX_API_ERROR_RETRIES {
                             api_tries += 1;
                             agent_warn(
-                                    stderr_color,
-                                    format!(
-                                        "API error before edit; retrying round attempt {api_tries}/{MAX_API_ERROR_RETRIES}: {msg}"
-                                    ),
-                                );
+                                stderr_color,
+                                format!(
+                                    "API error before edit; retrying round attempt {api_tries}/{MAX_API_ERROR_RETRIES}: {msg}"
+                                ),
+                            );
                             continue;
                         }
                         summary = format!("api error: {msg}");
@@ -2951,19 +2954,17 @@ mod tests {
 
     #[test]
     fn expands_tilde_in_sudo_passwd_file() {
-        let old_home = std::env::var_os("HOME");
         let home = std::env::temp_dir().join(format!("scx_home_test_{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
-        std::env::set_var("HOME", &home);
 
-        let path =
-            expand_sudo_password_file(Path::new("/tmp/spec.toml"), Path::new("~/.pass")).unwrap();
+        let path = expand_sudo_password_file_in(
+            Path::new("/tmp/spec.toml"),
+            Path::new("~/.pass"),
+            Some(home.clone()),
+        )
+        .unwrap();
         assert_eq!(path, home.join(".pass"));
 
-        match old_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -20,12 +20,12 @@ use std::os::fd::OwnedFd;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use libbpf_rs::libbpf_sys;
+use anyhow::bail;
 use libbpf_rs::AsRawLibbpf as _;
 use libbpf_rs::MapCore as _;
+use libbpf_rs::libbpf_sys;
 
 /// Cacheline size assumed by the arena allocator's alignment parameter.
 /// Mirrors scheds/include/lib/const-defs.h, keep in sync.

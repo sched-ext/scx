@@ -11,12 +11,12 @@
 //! A crate that allows schedulers to inspect and model the host's energy model,
 //! which is loaded from debugfs.
 
+use crate::Cpumask;
 use crate::compat;
 use crate::compat::ROOT_PREFIX;
 use crate::misc::read_from_file;
-use crate::Cpumask;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use glob::glob;
 use num::clamp;
 use std::collections::BTreeMap;
@@ -24,7 +24,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct PerfState {
     pub cost: usize,
     pub frequency: usize,
@@ -33,7 +33,7 @@ pub struct PerfState {
     pub power: usize,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct PerfDomain {
     /// Monotonically increasing unique id.
     pub id: usize,
@@ -147,7 +147,7 @@ impl EnergyModel {
     pub fn perf_total(&self) -> usize {
         let mut total = 0;
 
-        for (_, pd) in self.perf_doms.iter() {
+        for pd in self.perf_doms.values() {
             total += pd.perf_total();
         }
 
@@ -195,12 +195,6 @@ impl PerfDomain {
     }
 }
 
-impl PartialEq for PerfDomain {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.span == other.span && self.perf_table == other.perf_table
-    }
-}
-
 impl PerfState {
     /// Build a PerfState
     pub fn new(root: String) -> Result<PerfState> {
@@ -220,21 +214,12 @@ impl PerfState {
     }
 }
 
-impl PartialEq for PerfState {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-            && self.frequency == other.frequency
-            && self.performance == other.performance
-            && self.power == other.power
-    }
-}
-
 impl fmt::Display for EnergyModel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (_, pd) in self.perf_doms.iter() {
+        for pd in self.perf_doms.values() {
             writeln!(f, "{pd:#}")?;
         }
-        for (_, eq_pd) in self.eq_perf_doms.iter() {
+        for eq_pd in self.eq_perf_doms.values() {
             writeln!(f, "{eq_pd:#}")?;
         }
         Ok(())
@@ -245,7 +230,7 @@ impl fmt::Display for PerfDomain {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "# perf domain: {:#}, cpus: {:#}", self.id, self.span)?;
         writeln!(f, "cost, frequency, inefficient, performance, power")?;
-        for (_, ps) in self.perf_table.iter() {
+        for ps in self.perf_table.values() {
             writeln!(f, "{ps:#}")?;
         }
         Ok(())
@@ -263,7 +248,7 @@ impl fmt::Display for EqPerfDomain {
             pd_ids.join(",")
         )?;
         writeln!(f, "cost, frequency, inefficient, performance, power")?;
-        for (_, ps) in self.perf_table.iter() {
+        for ps in self.perf_table.values() {
             writeln!(f, "{ps:#}")?;
         }
         Ok(())

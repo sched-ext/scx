@@ -64,80 +64,73 @@ impl TaskStateAnalyzer {
                         // Handle prev task being scheduled off
                         if let (Some(prev_pid), Some(prev_state)) =
                             (switch.prev_pid, switch.prev_state)
+                            && prev_pid > 0
                         {
-                            if prev_pid > 0 {
-                                let tracker = task_trackers.entry(prev_pid).or_insert_with(|| {
-                                    TaskStateTracker::new(
-                                        prev_pid,
-                                        switch.prev_comm.clone().unwrap_or_default(),
-                                    )
-                                });
+                            let tracker = task_trackers.entry(prev_pid).or_insert_with(|| {
+                                TaskStateTracker::new(
+                                    prev_pid,
+                                    switch.prev_comm.clone().unwrap_or_default(),
+                                )
+                            });
 
-                                // Classify task state when scheduled off
-                                let new_state = classify_task_state(prev_state);
-                                tracker.enter_state(new_state, ts);
+                            // Classify task state when scheduled off
+                            let new_state = classify_task_state(prev_state);
+                            tracker.enter_state(new_state, ts);
 
-                                // Check if preemption was voluntary
-                                if prev_state == 0 {
-                                    tracker.involuntary_switches += 1;
-                                } else {
-                                    tracker.voluntary_switches += 1;
-                                }
+                            // Check if preemption was voluntary
+                            if prev_state == 0 {
+                                tracker.involuntary_switches += 1;
+                            } else {
+                                tracker.voluntary_switches += 1;
                             }
                         }
 
                         // Handle next task being scheduled on
-                        if let Some(next_pid) = switch.next_pid {
-                            if next_pid > 0 {
-                                let tracker = task_trackers.entry(next_pid).or_insert_with(|| {
-                                    TaskStateTracker::new(
-                                        next_pid,
-                                        switch.next_comm.clone().unwrap_or_default(),
-                                    )
-                                });
+                        if let Some(next_pid) = switch.next_pid
+                            && next_pid > 0
+                        {
+                            let tracker = task_trackers.entry(next_pid).or_insert_with(|| {
+                                TaskStateTracker::new(
+                                    next_pid,
+                                    switch.next_comm.clone().unwrap_or_default(),
+                                )
+                            });
 
-                                // Calculate scheduler latency if we have a wakeup timestamp
-                                if let Some(wakeup_ts) = tracker.last_wakeup_ts {
-                                    let latency = ts.saturating_sub(wakeup_ts);
-                                    tracker.scheduler_latencies.push(latency);
-                                }
-
-                                // Enter running state
-                                tracker.enter_state(TaskState::Running, ts);
-                                tracker.last_wakeup_ts = None;
+                            // Calculate scheduler latency if we have a wakeup timestamp
+                            if let Some(wakeup_ts) = tracker.last_wakeup_ts {
+                                let latency = ts.saturating_sub(wakeup_ts);
+                                tracker.scheduler_latencies.push(latency);
                             }
+
+                            // Enter running state
+                            tracker.enter_state(TaskState::Running, ts);
+                            tracker.last_wakeup_ts = None;
                         }
                     }
                     Some(ftrace_event::Event::SchedWakeup(wakeup)) => {
-                        if let Some(pid) = wakeup.pid {
-                            if pid > 0 {
-                                let tracker = task_trackers.entry(pid).or_insert_with(|| {
-                                    TaskStateTracker::new(
-                                        pid,
-                                        wakeup.comm.clone().unwrap_or_default(),
-                                    )
-                                });
+                        if let Some(pid) = wakeup.pid
+                            && pid > 0
+                        {
+                            let tracker = task_trackers.entry(pid).or_insert_with(|| {
+                                TaskStateTracker::new(pid, wakeup.comm.clone().unwrap_or_default())
+                            });
 
-                                // Enter runnable state
-                                tracker.enter_state(TaskState::Runnable, ts);
-                                tracker.last_wakeup_ts = Some(ts);
-                            }
+                            // Enter runnable state
+                            tracker.enter_state(TaskState::Runnable, ts);
+                            tracker.last_wakeup_ts = Some(ts);
                         }
                     }
                     Some(ftrace_event::Event::SchedWaking(waking)) => {
-                        if let Some(pid) = waking.pid {
-                            if pid > 0 {
-                                let tracker = task_trackers.entry(pid).or_insert_with(|| {
-                                    TaskStateTracker::new(
-                                        pid,
-                                        waking.comm.clone().unwrap_or_default(),
-                                    )
-                                });
+                        if let Some(pid) = waking.pid
+                            && pid > 0
+                        {
+                            let tracker = task_trackers.entry(pid).or_insert_with(|| {
+                                TaskStateTracker::new(pid, waking.comm.clone().unwrap_or_default())
+                            });
 
-                                // Enter runnable state
-                                tracker.enter_state(TaskState::Runnable, ts);
-                                tracker.last_wakeup_ts = Some(ts);
-                            }
+                            // Enter runnable state
+                            tracker.enter_state(TaskState::Runnable, ts);
+                            tracker.last_wakeup_ts = Some(ts);
                         }
                     }
                     _ => {}
@@ -481,30 +474,28 @@ impl PreemptionAnalyzer {
 
             for event_with_idx in events {
                 if let Some(ftrace_event::Event::SchedSwitch(switch)) = &event_with_idx.event.event
-                {
-                    if let (Some(prev_pid), Some(prev_state), Some(next_pid)) =
+                    && let (Some(prev_pid), Some(prev_state), Some(next_pid)) =
                         (switch.prev_pid, switch.prev_state, switch.next_pid)
-                    {
-                        // Only count involuntary preemptions (state == 0 means still runnable)
-                        if prev_state == 0 && prev_pid > 0 && next_pid > 0 {
-                            let tracker = preemption_data.entry(prev_pid).or_insert_with(|| {
-                                PreemptionTracker::new(
-                                    prev_pid,
-                                    switch.prev_comm.clone().unwrap_or_default(),
-                                )
-                            });
+                {
+                    // Only count involuntary preemptions (state == 0 means still runnable)
+                    if prev_state == 0 && prev_pid > 0 && next_pid > 0 {
+                        let tracker = preemption_data.entry(prev_pid).or_insert_with(|| {
+                            PreemptionTracker::new(
+                                prev_pid,
+                                switch.prev_comm.clone().unwrap_or_default(),
+                            )
+                        });
 
-                            tracker.preempted_count += 1;
-                            tracker
-                                .preempted_by
-                                .entry(next_pid)
-                                .or_insert_with(|| PreemptorInfo {
-                                    pid: next_pid,
-                                    comm: switch.next_comm.clone().unwrap_or_default(),
-                                    count: 0,
-                                })
-                                .count += 1;
-                        }
+                        tracker.preempted_count += 1;
+                        tracker
+                            .preempted_by
+                            .entry(next_pid)
+                            .or_insert_with(|| PreemptorInfo {
+                                pid: next_pid,
+                                comm: switch.next_comm.clone().unwrap_or_default(),
+                                count: 0,
+                            })
+                            .count += 1;
                     }
                 }
             }
@@ -589,10 +580,10 @@ impl WakeupChainDetector {
         // Match wakeups to schedules
         for wakeup_list in wakeup_map.values_mut() {
             for wakeup_event in wakeup_list {
-                if let Some(&schedule_ts) = schedule_times.get(&wakeup_event.wakee_pid) {
-                    if schedule_ts >= wakeup_event.wakeup_ts {
-                        wakeup_event.schedule_ts = Some(schedule_ts);
-                    }
+                if let Some(&schedule_ts) = schedule_times.get(&wakeup_event.wakee_pid)
+                    && schedule_ts >= wakeup_event.wakeup_ts
+                {
+                    wakeup_event.schedule_ts = Some(schedule_ts);
                 }
             }
         }
@@ -721,10 +712,10 @@ impl WakeupChainDetector {
         // Phase 2: Match wakeups to schedules
         for wakeup_list in wakeup_map.values_mut() {
             for wakeup_event in wakeup_list {
-                if let Some(&schedule_ts) = schedule_times.get(&wakeup_event.wakee_pid) {
-                    if schedule_ts >= wakeup_event.wakeup_ts {
-                        wakeup_event.schedule_ts = Some(schedule_ts);
-                    }
+                if let Some(&schedule_ts) = schedule_times.get(&wakeup_event.wakee_pid)
+                    && schedule_ts >= wakeup_event.wakeup_ts
+                {
+                    wakeup_event.schedule_ts = Some(schedule_ts);
                 }
             }
         }
@@ -844,21 +835,20 @@ impl SchedulingLatencyBreakdown {
                         }
                         Some(ftrace_event::Event::SchedWakeup(wakeup)) => {
                             if let Some(pid) = wakeup.pid {
-                                if let Some(waking_ts) = waking_times.get(&pid) {
-                                    if ts >= *waking_ts {
-                                        waking_to_wakeup.push(ts - waking_ts);
-                                    }
+                                if let Some(waking_ts) = waking_times.get(&pid)
+                                    && ts >= *waking_ts
+                                {
+                                    waking_to_wakeup.push(ts - waking_ts);
                                 }
                                 wakeup_times.insert(pid, ts);
                             }
                         }
                         Some(ftrace_event::Event::SchedSwitch(switch)) => {
-                            if let Some(next_pid) = switch.next_pid {
-                                if let Some(wakeup_ts) = wakeup_times.remove(&next_pid) {
-                                    if ts >= wakeup_ts {
-                                        wakeup_to_schedule.push(ts - wakeup_ts);
-                                    }
-                                }
+                            if let Some(next_pid) = switch.next_pid
+                                && let Some(wakeup_ts) = wakeup_times.remove(&next_pid)
+                                && ts >= wakeup_ts
+                            {
+                                wakeup_to_schedule.push(ts - wakeup_ts);
                             }
                         }
                         _ => {}

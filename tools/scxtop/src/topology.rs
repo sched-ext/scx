@@ -178,11 +178,11 @@ fn determine_cpu_topology(cpu_cnt: usize) -> Result<Vec<CpuTopo>> {
             }
 
             // Skip instruction caches
-            if let Ok(cache_type) = fs::read_to_string(&type_path) {
-                if cache_type.trim() == "Instruction" {
-                    cache_idx += 1;
-                    continue;
-                }
+            if let Ok(cache_type) = fs::read_to_string(&type_path)
+                && cache_type.trim() == "Instruction"
+            {
+                cache_idx += 1;
+                continue;
             }
 
             // Get cache level
@@ -191,27 +191,26 @@ fn determine_cpu_topology(cpu_cnt: usize) -> Result<Vec<CpuTopo>> {
                 cpu, cache_idx
             );
 
-            if let Ok(level_str) = fs::read_to_string(&level_path) {
-                if let Ok(level) = level_str.trim().parse::<usize>() {
-                    if (1..=3).contains(&level) {
-                        // Get cache ID
-                        let id_path = format!(
-                            "/sys/devices/system/cpu/cpu{}/cache/index{}/id",
-                            cpu, cache_idx
-                        );
+            if let Ok(level_str) = fs::read_to_string(&level_path)
+                && let Ok(level) = level_str.trim().parse::<usize>()
+                && (1..=3).contains(&level)
+            {
+                // Get cache ID
+                let id_path = format!(
+                    "/sys/devices/system/cpu/cpu{}/cache/index{}/id",
+                    cpu, cache_idx
+                );
 
-                        if let Ok(id_str) = fs::read_to_string(&id_path) {
-                            if let Ok(id) = id_str.trim().parse::<i64>() {
-                                let kind = match level {
-                                    1 => TopoKind::L1,
-                                    2 => TopoKind::L2,
-                                    3 => TopoKind::L3,
-                                    _ => unreachable!(),
-                                };
-                                cpu_topo.topo[kind as usize] = id;
-                            }
-                        }
-                    }
+                if let Ok(id_str) = fs::read_to_string(&id_path)
+                    && let Ok(id) = id_str.trim().parse::<i64>()
+                {
+                    let kind = match level {
+                        1 => TopoKind::L1,
+                        2 => TopoKind::L2,
+                        3 => TopoKind::L3,
+                        _ => unreachable!(),
+                    };
+                    cpu_topo.topo[kind as usize] = id;
                 }
             }
 

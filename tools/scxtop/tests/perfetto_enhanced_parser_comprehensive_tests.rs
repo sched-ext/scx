@@ -6,8 +6,8 @@
 //! Comprehensive tests for Phase 1 enhanced parser - edge cases, performance, compatibility
 
 use scxtop::mcp::{
-    events_in_category, softirq_type_name, CompatibilityDetector, EventCategory, PerfettoTrace,
-    TraceCapabilities, TraceSource,
+    CompatibilityDetector, EventCategory, PerfettoTrace, TraceCapabilities, TraceSource,
+    events_in_category, softirq_type_name,
 };
 use std::path::Path;
 
@@ -259,7 +259,7 @@ fn test_event_index_detailed_queries() {
     for cpu in 0..4.min(trace.num_cpus()) {
         let events = index.get_events_by_type_and_cpu("sched_switch", cpu as u32);
         println!("CPU {}: {} sched_switch events", cpu, events.len());
-        assert!(events.len() > 0 || cpu >= trace.num_cpus());
+        assert!(!events.is_empty() || cpu >= trace.num_cpus());
     }
 
     // Test get_events_by_type_in_range
@@ -456,11 +456,7 @@ fn test_event_count_accuracy() {
         if event_type != "softirq" {
             // For most event types, counts should be close or exact
             // Allow some tolerance for edge cases
-            let diff = if caps_count > index_count {
-                caps_count - index_count
-            } else {
-                index_count - caps_count
-            };
+            let diff = caps_count.abs_diff(index_count);
             assert!(
                 diff < 100,
                 "Event counts should be close: {} vs {}",

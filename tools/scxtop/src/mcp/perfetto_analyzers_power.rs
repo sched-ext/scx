@@ -26,19 +26,19 @@ impl CpuFrequencyAnalyzer {
             let events = trace.get_events_by_cpu(cpu as u32);
 
             for event_with_idx in events {
-                if let Some(ftrace_event::Event::CpuFrequency(freq)) = &event_with_idx.event.event {
-                    if let (Some(state), Some(ts)) = (freq.state, event_with_idx.event.timestamp) {
-                        let freq_khz = state;
+                if let Some(ftrace_event::Event::CpuFrequency(freq)) = &event_with_idx.event.event
+                    && let (Some(state), Some(ts)) = (freq.state, event_with_idx.event.timestamp)
+                {
+                    let freq_khz = state;
 
-                        let event = FrequencyEvent {
-                            cpu: cpu as u32,
-                            frequency_khz: freq_khz,
-                            timestamp: ts,
-                        };
+                    let event = FrequencyEvent {
+                        cpu: cpu as u32,
+                        frequency_khz: freq_khz,
+                        timestamp: ts,
+                    };
 
-                        per_cpu_freq.entry(cpu as u32).or_default().push(event);
-                        per_cpu_current_freq.insert(cpu as u32, freq_khz);
-                    }
+                    per_cpu_freq.entry(cpu as u32).or_default().push(event);
+                    per_cpu_current_freq.insert(cpu as u32, freq_khz);
                 }
             }
         }
@@ -116,16 +116,16 @@ impl CpuIdleStateAnalyzer {
             let events = trace.get_events_by_cpu(cpu as u32);
 
             for event_with_idx in events {
-                if let Some(ftrace_event::Event::CpuIdle(idle)) = &event_with_idx.event.event {
-                    if let (Some(state), Some(ts)) = (idle.state, event_with_idx.event.timestamp) {
-                        let event = IdleEvent {
-                            cpu: cpu as u32,
-                            state: state as i32,
-                            timestamp: ts,
-                        };
+                if let Some(ftrace_event::Event::CpuIdle(idle)) = &event_with_idx.event.event
+                    && let (Some(state), Some(ts)) = (idle.state, event_with_idx.event.timestamp)
+                {
+                    let event = IdleEvent {
+                        cpu: cpu as u32,
+                        state: state as i32,
+                        timestamp: ts,
+                    };
 
-                        per_cpu_idle.entry(cpu as u32).or_default().push(event);
-                    }
+                    per_cpu_idle.entry(cpu as u32).or_default().push(event);
                 }
             }
         }
@@ -201,14 +201,14 @@ impl PowerStateAnalyzer {
             let events = trace.get_events_by_cpu(cpu as u32);
 
             for event_with_idx in events {
-                if let Some(ftrace_event::Event::SuspendResume(sr)) = &event_with_idx.event.event {
-                    if let Some(ts) = event_with_idx.event.timestamp {
-                        let event = SuspendResumeEvent {
-                            action: sr.action.clone().unwrap_or_default(),
-                            timestamp: ts,
-                        };
-                        suspend_resume_events.push(event);
-                    }
+                if let Some(ftrace_event::Event::SuspendResume(sr)) = &event_with_idx.event.event
+                    && let Some(ts) = event_with_idx.event.timestamp
+                {
+                    let event = SuspendResumeEvent {
+                        action: sr.action.clone().unwrap_or_default(),
+                        timestamp: ts,
+                    };
+                    suspend_resume_events.push(event);
                 }
             }
         }

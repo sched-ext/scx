@@ -6,23 +6,26 @@ pub mod stats;
 use stats::Metrics;
 
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::skel::Skel;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::Skel;
 use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -38,9 +41,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use tracing::{debug, info, warn};
 use tracing_subscriber::filter::EnvFilter;
 
@@ -72,10 +72,10 @@ use bpf_intf::stat_idx_P2DQ_STAT_THERMAL_KICK;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
-use scx_p2dq::bpf_intf;
-use scx_p2dq::bpf_skel::*;
 use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
+use scx_p2dq::bpf_intf;
+use scx_p2dq::bpf_skel::*;
 
 const SCHEDULER_NAME: &str = "scx_p2dq";
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
@@ -211,7 +211,9 @@ impl<'a> Scheduler<'a> {
                     .p2dq_config
                     .thermal_enabled = std::mem::MaybeUninit::new(true);
             } else {
-                debug!("Kernel does not support thermal pressure tracking (CONFIG_SCHED_HW_PRESSURE not enabled)");
+                debug!(
+                    "Kernel does not support thermal pressure tracking (CONFIG_SCHED_HW_PRESSURE not enabled)"
+                );
             }
         }
 
@@ -447,17 +449,17 @@ fn main(opts: CliOpts) -> Result<()> {
                 } else {
                     get_uncore_max_freq_khz(pkg, die)?
                 };
-                if let Ok(orig) = get_uncore_max_freq_khz(pkg, die) {
-                    if orig != freq_khz {
-                        info!(
-                            "Setting max uncore frequency for package {} die {} to {} MHz",
-                            pkg,
-                            die,
-                            freq_khz / 1000
-                        );
-                        orig_uncore_freqs.push((pkg, die, orig));
-                        set_uncore_max_freq_khz(pkg, die, freq_khz)?;
-                    }
+                if let Ok(orig) = get_uncore_max_freq_khz(pkg, die)
+                    && orig != freq_khz
+                {
+                    info!(
+                        "Setting max uncore frequency for package {} die {} to {} MHz",
+                        pkg,
+                        die,
+                        freq_khz / 1000
+                    );
+                    orig_uncore_freqs.push((pkg, die, orig));
+                    set_uncore_max_freq_khz(pkg, die, freq_khz)?;
                 }
                 Ok(())
             });
@@ -472,14 +474,14 @@ fn main(opts: CliOpts) -> Result<()> {
             "performance"
         };
         for cpu in TOPO.all_cpus.values() {
-            if let Ok(orig) = get_epp(cpu.id) {
-                if orig != target_epp {
-                    if orig_epps.is_empty() {
-                        info!("Setting EPP to {} for all CPUs", target_epp);
-                    }
-                    orig_epps.push((cpu.id, orig));
-                    let _ = set_epp(cpu.id, target_epp);
+            if let Ok(orig) = get_epp(cpu.id)
+                && orig != target_epp
+            {
+                if orig_epps.is_empty() {
+                    info!("Setting EPP to {} for all CPUs", target_epp);
                 }
+                orig_epps.push((cpu.id, orig));
+                let _ = set_epp(cpu.id, target_epp);
             }
         }
     }

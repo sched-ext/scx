@@ -35,15 +35,15 @@ use anyhow::{Context, Result};
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use log::{info, warn};
-use scx_utils::get_primary_cpus;
 use scx_utils::Powermode;
 use scx_utils::Topology;
+use scx_utils::get_primary_cpus;
 
 use crate::bpf_intf::mlfq_bitmap;
 use crate::bpf_intf::mlfq_consts_MLFQ_BITMAP_WORDS;
 use crate::bpf_intf::mlfq_consts_MLFQ_MAX_CPUS;
-use crate::bpf_intf::mlfq_consts_MLFQ_MAX_LLCS;
 use crate::bpf_intf::mlfq_consts_MLFQ_MAX_LLC_CPUS;
+use crate::bpf_intf::mlfq_consts_MLFQ_MAX_LLCS;
 use crate::bpf_intf::mlfq_llc_cpu_list;
 
 /// Compile-time CPU bound; must match `MLFQ_MAX_CPUS` in `src/bpf/intf.h`.
@@ -278,10 +278,11 @@ fn llc_size_bytes(cache_path: &Path) -> Option<u64> {
         let id = std::fs::read_to_string(dir.join("id"))
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-        if let Some(llc_id) = llc_id {
-            if id.is_some() && id != Some(llc_id) {
-                continue;
-            }
+        if let Some(llc_id) = llc_id
+            && id.is_some()
+            && id != Some(llc_id)
+        {
+            continue;
         }
         let Some(size) = std::fs::read_to_string(dir.join("size"))
             .ok()
@@ -845,7 +846,7 @@ mod tests {
     fn bitmap_words_count_matches_bpf_constant() {
         assert_eq!(
             mlfq_consts_MLFQ_BITMAP_WORDS,
-            (crate::bpf_intf::mlfq_consts_MLFQ_MAX_CPUS + 63) / 64
+            crate::bpf_intf::mlfq_consts_MLFQ_MAX_CPUS.div_ceil(64)
         );
     }
 

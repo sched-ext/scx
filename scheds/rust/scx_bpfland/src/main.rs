@@ -14,15 +14,15 @@ mod stats;
 use std::ffi::{c_int, c_ulong};
 use std::fmt::Write;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::OpenObject;
@@ -30,7 +30,12 @@ use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
-use scx_utils::autopower::{fetch_power_profile, PowerProfile};
+use scx_utils::Cpumask;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Powermode;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
+use scx_utils::autopower::{PowerProfile, fetch_power_profile};
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::get_primary_cpus;
@@ -42,11 +47,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cpumask;
-use scx_utils::Powermode;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_bpfland";
@@ -61,7 +61,7 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     let max_cpu_id = *cpus.iter().max().unwrap();
 
     // Create a byte vector with enough bytes to cover all CPU IDs.
-    let mut bitmask = vec![0u8; (max_cpu_id + 1 + 7) / 8];
+    let mut bitmask = vec![0u8; (max_cpu_id + 1).div_ceil(8)];
 
     // Set the appropriate bits for each CPU ID.
     for cpu_id in cpus {
@@ -312,7 +312,7 @@ impl<'a> Scheduler<'a> {
             Self::resolve_energy_domain(&opts.primary_domain, power_profile).map_err(|err| {
                 anyhow!(
                     "failed to resolve primary domain '{}': {}",
-                    &opts.primary_domain,
+                    opts.primary_domain,
                     err
                 )
             })?;
@@ -513,10 +513,10 @@ impl<'a> Scheduler<'a> {
 
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
-            if domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
-                    bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
-                }
+            if domain.test_cpu(cpu)
+                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32)
+            {
+                bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
             }
         }
 
@@ -685,12 +685,10 @@ impl Drop for Scheduler<'_> {
         info!("Unregister {SCHEDULER_NAME} scheduler");
 
         // Restore default CPU idle QoS resume latency.
-        if self.opts.idle_resume_us >= 0 {
-            if cpu_idle_resume_latency_supported() {
-                for cpu in self.topo.all_cpus.values() {
-                    update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
-                        .unwrap();
-                }
+        if self.opts.idle_resume_us >= 0 && cpu_idle_resume_latency_supported() {
+            for cpu in self.topo.all_cpus.values() {
+                update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
+                    .unwrap();
             }
         }
     }

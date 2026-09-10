@@ -14,15 +14,15 @@ mod stats;
 use std::ffi::c_int;
 use std::fs;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use affinity::set_thread_affinity;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::OpenObject;
@@ -30,6 +30,10 @@ use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
+use scx_utils::Cpumask;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
@@ -39,10 +43,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_tickless";
@@ -141,10 +141,10 @@ impl<'a> Scheduler<'a> {
 
         // Process the domain of primary CPUs.
         let mut domain = Cpumask::from_str(&opts.primary_domain)?;
-        if domain.is_empty() {
-            if let Some(cpu) = cpus.last() {
-                domain = Cpumask::from_str(&format!("{:x}", 1 << cpu.id).to_string())?;
-            }
+        if domain.is_empty()
+            && let Some(cpu) = cpus.last()
+        {
+            domain = Cpumask::from_str(&format!("{:x}", 1 << cpu.id).to_string())?;
         }
         info!("primary CPU domain = 0x{:x}", domain);
 
@@ -188,7 +188,7 @@ impl<'a> Scheduler<'a> {
             bail!("primary cpumask is empty");
         }
         let timer_cpu = timer_cpu.unwrap();
-        if let Err(e) = set_thread_affinity(&[timer_cpu as usize]) {
+        if let Err(e) = set_thread_affinity([timer_cpu]) {
             bail!("cannot set central CPU affinity: {}", e);
         }
 
@@ -271,10 +271,10 @@ impl<'a> Scheduler<'a> {
         }
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
-            if domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
-                    warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
-                }
+            if domain.test_cpu(cpu)
+                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32)
+            {
+                warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
             }
         }
 

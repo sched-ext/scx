@@ -60,8 +60,8 @@ pub use power_data::{
 };
 pub use proc_data::ProcData;
 pub use profiling_events::{
-    available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
-    ProfilingEvent,
+    KprobeEvent, PerfEvent, ProfilingEvent, available_kprobe_events, available_perf_events,
+    get_default_events,
 };
 pub use stats::StatAggregation;
 pub use stats::VecStats;

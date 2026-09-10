@@ -9,8 +9,8 @@
 //! filtering, aggregation, and cross-event correlation.
 
 use super::perfetto_parser::PerfettoTrace;
-use perfetto_protos::ftrace_event::ftrace_event;
 use perfetto_protos::ftrace_event::FtraceEvent;
+use perfetto_protos::ftrace_event::ftrace_event;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -142,10 +142,10 @@ impl QueryBuilder {
                 }
 
                 // Check PID filter
-                if let Some(pid_filter) = self.pid_filter {
-                    if event.pid != Some(pid_filter as u32) {
-                        return None;
-                    }
+                if let Some(pid_filter) = self.pid_filter
+                    && event.pid != Some(pid_filter as u32)
+                {
+                    return None;
                 }
 
                 // Check field filters

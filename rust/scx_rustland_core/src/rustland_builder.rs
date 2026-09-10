@@ -26,7 +26,7 @@ impl RustLandBuilder {
         let path = Path::new(file_name);
 
         // Limit file writing to when file contents differ (for caching)
-        if fs::read(path).map_or(false, |b| b == content) {
+        if fs::read(path).is_ok_and(|b| b == content) {
             return;
         }
 

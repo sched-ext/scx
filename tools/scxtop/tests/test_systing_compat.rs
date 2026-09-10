@@ -99,5 +99,8 @@ fn test_systing_analyzers() {
         "\n✓ Ran {} analyzers successfully on systing trace!",
         ran_count
     );
-    assert!(ran_count >= 5, "Should be able to run at least 5 analyzers on systing trace (CPU, process, latency, migration, etc.)");
+    assert!(
+        ran_count >= 5,
+        "Should be able to run at least 5 analyzers on systing trace (CPU, process, latency, migration, etc.)"
+    );
 }

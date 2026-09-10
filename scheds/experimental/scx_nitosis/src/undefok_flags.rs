@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
 
 pub struct IgnoredUndefOkFlag {

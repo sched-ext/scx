@@ -4,12 +4,12 @@
 // GNU General Public License version 2.
 
 use procfs::process::ProcState;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Constraint;
-use ratatui::Terminal;
 use scxtop::{
-    render::ProcessRenderer, AppTheme, Column, EventData, FilterItem, FilteredState, ProcData,
-    ThreadData,
+    AppTheme, Column, EventData, FilterItem, FilteredState, ProcData, ThreadData,
+    render::ProcessRenderer,
 };
 use std::collections::BTreeMap;
 

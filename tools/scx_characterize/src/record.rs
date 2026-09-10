@@ -3,10 +3,10 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::Context;
 use crate::bpf::{BpfSkel, BpfSkelBuilder};
 use crate::bpf_intf::hints_event;
-use crate::Context;
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapHandle, OpenObject, RingBufferBuilder};
@@ -663,6 +663,96 @@ pub(crate) fn report_perf_script_stderr(context: &str, stderr: &str) {
     }
 }
 
+/// Fields to extract from perf mem script output
+pub const PERF_MEM_SCRIPT_FIELDS: &str =
+    "comm,tid,pid,time,cgroup,ip,addr,phys_addr,data_page_size,dso,sym";
+
+/// Fields to extract from sched trace perf script output
+pub const PERF_SCHED_SCRIPT_FIELDS: &str = "comm,pid,tid,cpu,time,event,trace";
+
+fn generate_perf_script(
+    ctx: &Context,
+    perf_data_path: &Path,
+    perf_script_path: &Path,
+    fields: &str,
+) -> Result<()> {
+    if !perf_data_path.exists() {
+        bail!("perf data file '{}' not found", perf_data_path.display());
+    }
+
+    let output_file = File::create(perf_script_path)
+        .with_context(|| format!("failed to create {}", perf_script_path.display()))?;
+
+    let child = Command::new(perf_binary())
+        .args([
+            "script",
+            "-F",
+            fields,
+            "-i",
+            perf_data_path.to_str().context("invalid perf.data path")?,
+        ])
+        .stdout(output_file)
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn perf script")?;
+
+    let pid = child.id() as i32;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
+    if fd < 0 {
+        bail!("pidfd_open failed: {}", std::io::Error::last_os_error());
+    }
+    let pidfd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let mut child = child;
+
+    loop {
+        match poll_fds(ctx.shutdown_fd(), &[pidfd.as_raw_fd()], None, 100)? {
+            PollResult::Shutdown => {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let _ = child.wait();
+                let _ = fs::remove_file(perf_script_path);
+                bail!("perf script interrupted");
+            }
+            PollResult::ProcessExited(_) => {
+                let output = child
+                    .wait_with_output()
+                    .context("failed to wait for perf script")?;
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let output_len = fs::metadata(perf_script_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                if !output.status.success() {
+                    if perf_script_output_exists(output_len) {
+                        eprintln!(
+                            "warning: perf script exited with status {} after writing {} bytes to {}. Continuing with the generated output because the output file is non-empty.",
+                            output.status,
+                            output_len,
+                            perf_script_path.display()
+                        );
+                        report_perf_script_stderr(&perf_script_path.display().to_string(), &stderr);
+                        break;
+                    }
+                    let _ = fs::remove_file(perf_script_path);
+                    let stderr = stderr.trim();
+                    if stderr.is_empty() {
+                        bail!("perf script failed with status: {}", output.status);
+                    }
+                    bail!(
+                        "perf script failed with status: {}: {}",
+                        output.status,
+                        stderr
+                    );
+                }
+                report_perf_script_stderr(&perf_script_path.display().to_string(), &stderr);
+                break;
+            }
+            PollResult::RingbufReady | PollResult::Timeout => {}
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,94 +785,4 @@ mod tests {
         assert!(perf_script_output_exists(4096));
         assert!(!perf_script_output_exists(0));
     }
-}
-
-/// Fields to extract from perf mem script output
-pub const PERF_MEM_SCRIPT_FIELDS: &str =
-    "comm,tid,pid,time,cgroup,ip,addr,phys_addr,data_page_size,dso,sym";
-
-/// Fields to extract from sched trace perf script output
-pub const PERF_SCHED_SCRIPT_FIELDS: &str = "comm,pid,tid,cpu,time,event,trace";
-
-fn generate_perf_script(
-    ctx: &Context,
-    perf_data_path: &Path,
-    perf_script_path: &Path,
-    fields: &str,
-) -> Result<()> {
-    if !perf_data_path.exists() {
-        bail!("perf data file '{}' not found", perf_data_path.display());
-    }
-
-    let output_file = File::create(&perf_script_path)
-        .with_context(|| format!("failed to create {}", perf_script_path.display()))?;
-
-    let child = Command::new(perf_binary())
-        .args([
-            "script",
-            "-F",
-            fields,
-            "-i",
-            perf_data_path.to_str().context("invalid perf.data path")?,
-        ])
-        .stdout(output_file)
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to spawn perf script")?;
-
-    let pid = child.id() as i32;
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
-    if fd < 0 {
-        bail!("pidfd_open failed: {}", std::io::Error::last_os_error());
-    }
-    let pidfd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-    let mut child = child;
-
-    loop {
-        match poll_fds(ctx.shutdown_fd(), &[pidfd.as_raw_fd()], None, 100)? {
-            PollResult::Shutdown => {
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-                let _ = child.wait();
-                let _ = fs::remove_file(&perf_script_path);
-                bail!("perf script interrupted");
-            }
-            PollResult::ProcessExited(_) => {
-                let output = child
-                    .wait_with_output()
-                    .context("failed to wait for perf script")?;
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let output_len = fs::metadata(perf_script_path)
-                    .map(|meta| meta.len())
-                    .unwrap_or(0);
-                if !output.status.success() {
-                    if perf_script_output_exists(output_len) {
-                        eprintln!(
-                            "warning: perf script exited with status {} after writing {} bytes to {}. Continuing with the generated output because the output file is non-empty.",
-                            output.status,
-                            output_len,
-                            perf_script_path.display()
-                        );
-                        report_perf_script_stderr(&perf_script_path.display().to_string(), &stderr);
-                        break;
-                    }
-                    let _ = fs::remove_file(&perf_script_path);
-                    let stderr = stderr.trim();
-                    if stderr.is_empty() {
-                        bail!("perf script failed with status: {}", output.status);
-                    }
-                    bail!(
-                        "perf script failed with status: {}: {}",
-                        output.status,
-                        stderr
-                    );
-                }
-                report_perf_script_stderr(&perf_script_path.display().to_string(), &stderr);
-                break;
-            }
-            PollResult::RingbufReady | PollResult::Timeout => {}
-        }
-    }
-
-    Ok(())
 }

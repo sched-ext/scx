@@ -20,10 +20,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{atomic::AtomicBool, mpsc, Arc};
+use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
 use crate::color::Style;
@@ -225,6 +225,7 @@ fn terminate_process_group(child: &mut Child, pid: i32) {
 /// Spawn `cmd` with `stdin_payload` piped in, stream stdout line-by-line, call
 /// `on_event` for each JSON line (echoing raw lines to stderr when verbose), and
 /// return the exit status plus captured stderr.
+#[allow(clippy::too_many_arguments)]
 fn run_streaming(
     mut cmd: Command,
     label: &str,
@@ -391,10 +392,10 @@ fn arg_hint(input: Option<&Value>) -> Option<String> {
         "pattern",
         "query",
     ] {
-        if let Some(s) = input.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                return Some(truncate(s, 100));
-            }
+        if let Some(s) = input.get(key).and_then(|v| v.as_str())
+            && !s.is_empty()
+        {
+            return Some(truncate(s, 100));
         }
     }
     None
@@ -488,12 +489,12 @@ impl ClaudePlanCapture {
             if let Some(path) = claude_plan_path(input) {
                 self.plan_path = Some(path);
             }
-        } else if name.eq_ignore_ascii_case("Write") {
-            if let Some(path) = claude_plan_path(input) {
-                self.plan_path = Some(path);
-                if let Some(plan) = nonempty_string(input.get("content")) {
-                    self.write_plan = Some(plan);
-                }
+        } else if name.eq_ignore_ascii_case("Write")
+            && let Some(path) = claude_plan_path(input)
+        {
+            self.plan_path = Some(path);
+            if let Some(plan) = nonempty_string(input.get("content")) {
+                self.write_plan = Some(plan);
             }
         }
     }
@@ -692,11 +693,11 @@ fn invoke_claude(
             first_line(&stderr_buf)
         );
     };
-    if text.trim().is_empty() {
-        if let Some(plan) = recovered_plan {
-            print_recovered_claude_plan(&mut printer, stream_stdout, &plan)?;
-            text = plan;
-        }
+    if text.trim().is_empty()
+        && let Some(plan) = recovered_plan
+    {
+        print_recovered_claude_plan(&mut printer, stream_stdout, &plan)?;
+        text = plan;
     }
     Ok((text, usage))
 }
@@ -777,14 +778,13 @@ fn invoke_opencode(
                                 .and_then(|m| m.get("compaction_continue"))
                                 .and_then(|x| x.as_bool())
                                 .unwrap_or(false);
-                        if !synthetic {
-                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                if !t.is_empty() {
-                                    text_parts.push(t.to_string());
-                                    printer.text(t)?;
-                                    printer.newline();
-                                }
-                            }
+                        if !synthetic
+                            && let Some(t) = part.get("text").and_then(|t| t.as_str())
+                            && !t.is_empty()
+                        {
+                            text_parts.push(t.to_string());
+                            printer.text(t)?;
+                            printer.newline();
                         }
                     }
                 }
@@ -978,29 +978,29 @@ fn invoke_codex(
             // Stream assistant text/reasoning to stdout and surface command/tool
             // execution items (with their command / changed paths) to stderr as
             // they complete.
-            if v.get("type").and_then(|t| t.as_str()) == Some("item.completed") {
-                if let Some(item) = v.get("item") {
-                    let ty = item
-                        .get("type")
-                        .or_else(|| item.get("item_type"))
-                        .and_then(|t| t.as_str());
-                    match ty {
-                        Some("agent_message") => {
-                            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                                printer.text(t)?;
-                                printer.newline();
-                            }
+            if v.get("type").and_then(|t| t.as_str()) == Some("item.completed")
+                && let Some(item) = v.get("item")
+            {
+                let ty = item
+                    .get("type")
+                    .or_else(|| item.get("item_type"))
+                    .and_then(|t| t.as_str());
+                match ty {
+                    Some("agent_message") => {
+                        if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                            printer.text(t)?;
+                            printer.newline();
                         }
-                        Some("reasoning") => {
-                            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                                printer.reasoning(t)?;
-                                printer.newline();
-                            }
+                    }
+                    Some("reasoning") => {
+                        if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                            printer.reasoning(t)?;
+                            printer.newline();
                         }
-                        _ => {
-                            if let Some(label) = codex_item_label(item) {
-                                print_tool(&label, color);
-                            }
+                    }
+                    _ => {
+                        if let Some(label) = codex_item_label(item) {
+                            print_tool(&label, color);
                         }
                     }
                 }
@@ -1155,10 +1155,10 @@ fn invoke_cursor(
                                         printer.text(text)?;
                                     }
                                 }
-                                Some("thinking") | Some("reasoning") => {
-                                    if cursor_is_new_fragment(&mut think_seg, text) {
-                                        printer.reasoning(text)?;
-                                    }
+                                Some("thinking") | Some("reasoning")
+                                    if cursor_is_new_fragment(&mut think_seg, text) =>
+                                {
+                                    printer.reasoning(text)?;
                                 }
                                 _ => {}
                             }
@@ -1167,10 +1167,10 @@ fn invoke_cursor(
                 }
                 // Surface each tool call once, when it starts.
                 Some("tool_call") => {
-                    if v.get("subtype").and_then(|s| s.as_str()) == Some("started") {
-                        if let Some(tc) = v.get("tool_call") {
-                            print_tool(&cursor_tool_label(tc), color);
-                        }
+                    if v.get("subtype").and_then(|s| s.as_str()) == Some("started")
+                        && let Some(tc) = v.get("tool_call")
+                    {
+                        print_tool(&cursor_tool_label(tc), color);
                     }
                 }
                 Some("result") => {

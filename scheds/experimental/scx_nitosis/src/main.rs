@@ -20,25 +20,30 @@ use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use clap::Parser;
-use libbpf_rs::skel::Skel as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::Skel as _;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::eventfd::EventFd;
 use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
+use scx_utils::Cpumask;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -49,11 +54,6 @@ use scx_utils::scx_ops_cid_load;
 use scx_utils::scx_ops_cid_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NR_CPU_IDS;
 use tracing::{debug, info, trace, warn};
 use tracing_subscriber::filter::EnvFilter;
 
@@ -325,7 +325,7 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
-    fn managed_cell_parent<'b>(opts: &'b Opts) -> Result<&'b str> {
+    fn managed_cell_parent(opts: &Opts) -> Result<&str> {
         opts.cell_parent_cgroup
             .as_deref()
             .ok_or_else(|| anyhow!("--cell-parent-cgroup is required to run the scheduler"))
@@ -740,7 +740,7 @@ impl<'a> Scheduler<'a> {
             let changed = cpu_assignments.iter().any(|a| {
                 self.cells
                     .get(&a.id)
-                    .map_or(true, |cell| cell.cpus != a.primary)
+                    .is_none_or(|cell| cell.cpus != a.primary)
             });
 
             if !changed {
@@ -911,7 +911,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        return Ok(DistributionStats {
+        Ok(DistributionStats {
             total_decisions: scope_queue_decisions,
             share_of_decisions_pct: share_of_global,
             local_q_pct: queue_pct[0],
@@ -922,7 +922,7 @@ impl<'a> Scheduler<'a> {
             steal_pct,
             pin_skip_pct,
             global_queue_decisions,
-        });
+        })
     }
 
     // Queue stats for the whole node
@@ -1112,10 +1112,10 @@ impl<'a> Scheduler<'a> {
             return Ok(());
         }
 
-        self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)
+        self.update_and_log_global_queue_stats(global_queue_decisions, cell_stats_delta)
             .context("updating global queue stats")?;
 
-        self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)
+        self.update_and_log_cell_queue_stats(global_queue_decisions, cell_stats_delta)
             .context("updating per-cell queue stats")?;
 
         Ok(())
@@ -1125,7 +1125,7 @@ impl<'a> Scheduler<'a> {
         &mut self,
         cpu_ctxs: &[bpf_intf::cpu_ctx],
     ) -> Result<[[u64; NR_CSTATS]; MAX_CELLS]> {
-        let mut cell_stats_delta = [[0 as u64; NR_CSTATS]; MAX_CELLS];
+        let mut cell_stats_delta = [[0_u64; NR_CSTATS]; MAX_CELLS];
 
         // Loop over cells and stats first, then CPU contexts
         // TODO: We should loop over the in_use cells only.
@@ -1397,7 +1397,7 @@ impl<'a> Scheduler<'a> {
             /* the array is cid-indexed; translate to the cpu domain */
             cell_to_cpus
                 .entry(cpu_ctx.cell)
-                .or_insert_with(|| Cpumask::new())
+                .or_insert_with(Cpumask::new)
                 .set_cpu(cpu_ctx.cpu as usize)
                 .expect("set cpu in existing mask");
         }
@@ -1420,7 +1420,7 @@ impl<'a> Scheduler<'a> {
             let cpus = cell_to_cpus
                 .get(cell_idx)
                 .cloned()
-                .unwrap_or_else(|| Cpumask::new());
+                .unwrap_or_else(Cpumask::new);
             self.cells
                 .entry(*cell_idx)
                 .or_insert_with(|| Cell {

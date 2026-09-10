@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
@@ -553,7 +553,10 @@ impl PerfProfiler {
                 attr.config = tp_id;
             }
             _ => {
-                return Err(anyhow!("Unknown event subsystem '{}'. Use 'hw:', 'sw:', or 'tracepoint:subsystem:event'", subsystem));
+                return Err(anyhow!(
+                    "Unknown event subsystem '{}'. Use 'hw:', 'sw:', or 'tracepoint:subsystem:event'",
+                    subsystem
+                ));
             }
         }
 
@@ -608,12 +611,11 @@ impl PerfProfiler {
             }
 
             // Check duration
-            if config.duration_secs > 0 {
-                if let Some(start) = self.start_time {
-                    if start.elapsed() >= Duration::from_secs(config.duration_secs) {
-                        return true;
-                    }
-                }
+            if config.duration_secs > 0
+                && let Some(start) = self.start_time
+                && start.elapsed() >= Duration::from_secs(config.duration_secs)
+            {
+                return true;
             }
         }
 

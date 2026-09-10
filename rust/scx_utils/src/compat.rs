@@ -3,14 +3,14 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use libbpf_rs::libbpf_sys::*;
 use libbpf_rs::{AsRawLibbpf, OpenProgramImpl, ProgramImpl};
 use log::{error, warn};
 use std::env;
-use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::c_void;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -104,9 +104,9 @@ fn btf_name_str_by_offset(btf: &btf, name_off: u32) -> Result<&str> {
     if n.is_null() {
         bail!("btf__name_by_offset() returned NULL");
     }
-    Ok(unsafe { CStr::from_ptr(n) }
+    unsafe { CStr::from_ptr(n) }
         .to_str()
-        .with_context(|| format!("Failed to convert {:?} to string", n))?)
+        .with_context(|| format!("Failed to convert {:?} to string", n))
 }
 
 /// Recover the true value of a 64-bit enum enumerator whose kernel BTF entry
@@ -459,7 +459,7 @@ pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result
 pub fn cond_kprobes_enable<T>(kprobes: Vec<(&str, &OpenProgramImpl<T>)>) -> Result<bool> {
     // Check if all the symbols exist.
     for (sym, _) in kprobes.iter() {
-        if in_kallsyms(sym)? == false {
+        if !in_kallsyms(sym)? {
             warn!("symbol {sym} is missing, kprobe not loaded");
             return Ok(false);
         }
@@ -518,7 +518,7 @@ pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>
 pub fn cond_tracepoints_enable<T>(tracepoints: Vec<(&str, &OpenProgramImpl<T>)>) -> Result<bool> {
     // Check if all the tracepoints exist.
     for (tp, _) in tracepoints.iter() {
-        if tracepoint_exists(tp)? == false {
+        if !tracepoint_exists(tp)? {
             warn!("tracepoint {tp} is missing, tracepoint not loaded");
             return Ok(false);
         }
@@ -922,13 +922,10 @@ mod tests {
             0x20000
         );
         // A low-32 mismatch on a >32-bit value is ABI drift; refuse.
-        assert!(super::recover_truncated_enum64_from(
-            table,
-            "scx_dsq_id_flags",
-            "SCX_DSQ_LOCAL",
-            3
-        )
-        .is_err());
+        assert!(
+            super::recover_truncated_enum64_from(table, "scx_dsq_id_flags", "SCX_DSQ_LOCAL", 3)
+                .is_err()
+        );
         // Unknown enumerators fail pessimistically (stale autogen table).
         assert!(
             super::recover_truncated_enum64_from(table, "scx_enq_flags", "SCX_ENQ_NEW", 7).is_err()

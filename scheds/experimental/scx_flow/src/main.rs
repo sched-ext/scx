@@ -15,20 +15,21 @@ mod carriage;
 mod stats;
 mod webui;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::CommandFactory;
 use clap::Parser;
-use clap_complete::generate;
 use clap_complete::Shell;
+use clap_complete::generate;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore;
 use log::info;
 use scx_stats::prelude::*;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
@@ -38,7 +39,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::UserExitInfo;
 
 use stats::Metrics;
 

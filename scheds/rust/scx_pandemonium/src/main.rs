@@ -280,10 +280,22 @@ fn run_scheduler(
                 if verbose {
                     println!(
                         "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us reenq: {} sjrn: {}ms l2: B={}% I={}% [BPF{}]",
-                        delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
-                        delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
-                        wake_avg_us, lat_idle_us, lat_kick_us,
-                        delta_reenq, sojourn_ms, l2_pct_b, l2_pct_i,
+                        delta_d,
+                        idle_pct,
+                        delta_shared,
+                        delta_preempt,
+                        delta_keep,
+                        delta_hard,
+                        delta_soft,
+                        delta_enq_wake,
+                        delta_enq_requeue,
+                        wake_avg_us,
+                        lat_idle_us,
+                        lat_kick_us,
+                        delta_reenq,
+                        sojourn_ms,
+                        l2_pct_b,
+                        l2_pct_i,
                         longrun_label,
                     );
                 }
@@ -334,10 +346,20 @@ fn run_scheduler(
             };
             println!(
                 "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={}",
-                knobs.slice_ns, knobs.batch_slice_ns,
+                knobs.slice_ns,
+                knobs.batch_slice_ns,
                 knobs.preempt_thresh_ns,
-                l2_cum_b, l2_cum_i,
-                x_scatter_pct, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7],
+                l2_cum_b,
+                l2_cum_i,
+                x_scatter_pct,
+                x[0],
+                x[1],
+                x[2],
+                x[3],
+                x[4],
+                x[5],
+                x[6],
+                x[7],
             );
 
             sched.read_exit_info()

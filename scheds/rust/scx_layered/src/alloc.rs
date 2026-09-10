@@ -448,15 +448,15 @@ fn allocate_budgets(
         // Floor guarantee: any competing layer with demand > 0 gets at
         // least 1 unit.  Steal from the layer with the highest target.
         for &idx in &competing {
-            if demands[idx].raw_total() > 0 && global_targets[idx] == 0 {
-                if let Some(&donor) = competing
+            if demands[idx].raw_total() > 0
+                && global_targets[idx] == 0
+                && let Some(&donor) = competing
                     .iter()
                     .filter(|&&j| global_targets[j] > 1)
                     .max_by_key(|&&j| global_targets[j])
-                {
-                    global_targets[donor] -= 1;
-                    global_targets[idx] = 1;
-                }
+            {
+                global_targets[donor] -= 1;
+                global_targets[idx] = 1;
             }
         }
 
@@ -1778,7 +1778,7 @@ mod tests {
         let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
 
         assert_eq!(allocs[0].total(), 40); // P: demand-capped
-                                           // Both spread layers get equal share of bottleneck.
+        // Both spread layers get equal share of bottleneck.
         assert_eq!(allocs[1].unpinned[0], 4);
         assert_eq!(allocs[1].unpinned[1], 4);
         assert_eq!(allocs[1].total(), 8);

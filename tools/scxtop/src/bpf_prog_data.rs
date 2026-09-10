@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, Result};
-use libbpf_rs::{btf, query::ProgInfoIter, ProgramType};
+use anyhow::{Result, anyhow};
+use libbpf_rs::{ProgramType, btf, query::ProgInfoIter};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, VecDeque};
@@ -1133,13 +1133,12 @@ impl BpfProgStats {
             let entry = entry?;
             let path = entry.path();
 
-            if let Some(pid_str) = path.file_name().and_then(|n| n.to_str()) {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    if Self::scan_process_for_bpf_temp(pid, programs, total_runtime_ns).is_err() {
-                        // Ignore individual process scan failures
-                        continue;
-                    }
-                }
+            if let Some(pid_str) = path.file_name().and_then(|n| n.to_str())
+                && let Ok(pid) = pid_str.parse::<u32>()
+                && Self::scan_process_for_bpf_temp(pid, programs, total_runtime_ns).is_err()
+            {
+                // Ignore individual process scan failures
+                continue;
             }
         }
 
@@ -1162,13 +1161,12 @@ impl BpfProgStats {
             let entry = entry?;
             let fd_path = entry.path();
 
-            if let Some(fd_str) = fd_path.file_name().and_then(|n| n.to_str()) {
-                if let Ok(fd) = fd_str.parse::<u32>() {
-                    if Self::check_fd_for_bpf_temp(pid, fd, programs, total_runtime_ns).is_err() {
-                        // Ignore individual FD check failures
-                        continue;
-                    }
-                }
+            if let Some(fd_str) = fd_path.file_name().and_then(|n| n.to_str())
+                && let Ok(fd) = fd_str.parse::<u32>()
+                && Self::check_fd_for_bpf_temp(pid, fd, programs, total_runtime_ns).is_err()
+            {
+                // Ignore individual FD check failures
+                continue;
             }
         }
 
@@ -1184,13 +1182,13 @@ impl BpfProgStats {
     ) -> Result<()> {
         let fdinfo_path = format!("/proc/{}/fdinfo/{}", pid, fd);
 
-        if let Ok(content) = fs::read_to_string(&fdinfo_path) {
-            if content.contains("prog_type") {
-                // This looks like a BPF program, try to parse it
-                if let Ok(prog_data) = Self::parse_bpf_fdinfo(&content, fd) {
-                    *total_runtime_ns += prog_data.run_time_ns;
-                    programs.insert(prog_data.id, prog_data);
-                }
+        if let Ok(content) = fs::read_to_string(&fdinfo_path)
+            && content.contains("prog_type")
+        {
+            // This looks like a BPF program, try to parse it
+            if let Ok(prog_data) = Self::parse_bpf_fdinfo(&content, fd) {
+                *total_runtime_ns += prog_data.run_time_ns;
+                programs.insert(prog_data.id, prog_data);
             }
         }
 

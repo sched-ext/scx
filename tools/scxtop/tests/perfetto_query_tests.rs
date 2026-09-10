@@ -78,7 +78,7 @@ fn test_query_execution_real_trace() {
     println!("Total matched: {}", result.total_matched);
     println!("Returned: {}", result.events.len());
     assert!(result.events.len() <= 100);
-    assert!(result.events.len() > 0);
+    assert!(!result.events.is_empty());
 }
 
 /// Test query with CPU filter
@@ -108,7 +108,7 @@ fn test_query_cpu_filter() {
     println!("Returned: {}", result.events.len());
 
     // All events should be on CPU 0 (implicit from query)
-    assert!(result.events.len() > 0);
+    assert!(!result.events.is_empty());
 }
 
 /// Test query with field filter

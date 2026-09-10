@@ -56,9 +56,9 @@
 //!```
 
 use crate::NR_CPU_IDS;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use bitvec::prelude::*;
 use sscanf::sscanf;
 use std::fmt;
@@ -108,6 +108,8 @@ impl Cpumask {
     }
 
     /// Build a new empty Cpumask object.
+    // Default is intentionally not implemented; new() is the established API.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Cpumask {
         Cpumask {
             mask: bitvec![u64, Lsb0; 0; mask_width()],
@@ -115,6 +117,9 @@ impl Cpumask {
     }
 
     /// Build a Cpumask object from a hexadecimal string.
+    // Not std::str::FromStr: callers use Cpumask::from_str without the trait
+    // in scope, and the error type is anyhow::Error.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(cpumask: &str) -> Result<Cpumask> {
         match cpumask {
             "none" => {
@@ -132,7 +137,7 @@ impl Cpumask {
                 .strip_prefix("0x")
                 .unwrap_or(cpumask)
                 .replace('_', "");
-            if tmp_str.len() % 2 != 0 {
+            if !tmp_str.len().is_multiple_of(2) {
                 tmp_str = "0".to_string() + &tmp_str;
             }
             tmp_str

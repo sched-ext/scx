@@ -6,17 +6,17 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::anyhow;
 use anyhow::Result;
-use itertools::iproduct;
+use anyhow::anyhow;
 use itertools::Itertools;
+use itertools::iproduct;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::EnergyModel;
+use scx_utils::NR_CPU_IDS;
 use scx_utils::PerfDomain;
 use scx_utils::PerfState;
 use scx_utils::Topology;
-use scx_utils::NR_CPU_IDS;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -357,8 +357,8 @@ impl CpuOrderCtx {
         // sorted orders in task stealing preserve proximity between domains
         // (e.g., 0, 1, 7 in the example), so we can achieve less cacheline
         // bouncing than with random-ordered task stealing.
-        for (_, cpdom) in cpdom_map.iter() {
-            for (_, neighbors) in cpdom.neighbor_map.borrow_mut().iter() {
+        for cpdom in cpdom_map.values() {
+            for neighbors in cpdom.neighbor_map.borrow_mut().values() {
                 let mut neighbors_csorted =
                     Self::circular_sort(cpdom.cpdom_id, &neighbors.borrow_mut().to_vec());
                 neighbors.borrow_mut().clear();
@@ -382,13 +382,13 @@ impl CpuOrderCtx {
                 // Note that currently, the idle CPU selection (pick_idle_cpu)
                 // is not optimized for this kind of architecture, where big
                 // and LITTLE cores are in different node/LLCs.
-                'outer: for (_dist, ncpdoms) in v.neighbor_map.borrow().iter() {
+                'outer: for ncpdoms in v.neighbor_map.borrow().values() {
                     for ncpdom_id in ncpdoms.borrow().iter() {
-                        if let Some(is_big) = cpdom_types.get(ncpdom_id) {
-                            if *is_big == key.is_big {
-                                v.cpdom_alt_id.set(*ncpdom_id);
-                                break 'outer;
-                            }
+                        if let Some(is_big) = cpdom_types.get(ncpdom_id)
+                            && *is_big == key.is_big
+                        {
+                            v.cpdom_alt_id.set(*ncpdom_id);
+                            break 'outer;
                         }
                     }
                 }
@@ -506,13 +506,14 @@ struct EnergyModelOptimizer<'a> {
     perf_cpu_order: RefCell<BTreeMap<usize, PerfCpuOrder>>,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct PDS<'a> {
     pd: &'a PerfDomain,
     ps: &'a PerfState,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct PDCpu<'a> {
     pd: &'a PerfDomain, // performance domain
     cpu_vid: usize,     // virtual ID of a CPU on the performance domain
@@ -592,11 +593,10 @@ impl<'a> EnergyModelOptimizer<'a> {
         em: &'a EnergyModel,
         cpus_pf: &'a Vec<CpuId>,
     ) -> BTreeMap<usize, PerfCpuOrder> {
-        let emo = EnergyModelOptimizer::new(em, &cpus_pf);
+        let emo = EnergyModelOptimizer::new(em, cpus_pf);
         emo.gen_perf_cpu_order_table();
-        let perf_cpu_order = emo.perf_cpu_order.borrow().clone();
 
-        perf_cpu_order
+        emo.perf_cpu_order.borrow().clone()
     }
 
     fn get_fake_perf_cpu_order_table(
@@ -616,18 +616,16 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     fn fake_pco(tot_perf: usize, cpuids: &'a Vec<CpuId>, powersave: bool) -> PerfCpuOrder {
-        let perf_cap;
-
-        if powersave {
-            perf_cap = cpuids[0].cpu_cap;
+        let perf_cap = if powersave {
+            cpuids[0].cpu_cap
         } else {
-            perf_cap = tot_perf;
-        }
+            tot_perf
+        };
 
         let perf_util: f32 = (perf_cap as f32) / (tot_perf as f32);
         let cpus: Vec<usize> = cpuids.iter().map(|cpuid| cpuid.cpu_adx).collect();
-        let cpus_perf: Vec<usize> = cpus[..1].iter().map(|&cpuid| cpuid).collect();
-        let cpus_ovflw: Vec<usize> = cpus[1..].iter().map(|&cpuid| cpuid).collect();
+        let cpus_perf: Vec<usize> = cpus[..1].to_vec();
+        let cpus_ovflw: Vec<usize> = cpus[1..].to_vec();
         PerfCpuOrder {
             perf_cap,
             perf_util,
@@ -742,7 +740,7 @@ impl<'a> EnergyModelOptimizer<'a> {
     fn sort_cpus_by_topological_order(&'a self, cpus: &Vec<usize>) -> Vec<usize> {
         let mut sorted: Vec<usize> = vec![];
         for &cpu_adx in self.cpus_topological_order.iter() {
-            if let Some(_) = cpus.iter().find(|&&x| x == cpu_adx) {
+            if cpus.iter().find(|&&x| x == cpu_adx).is_some() {
                 sorted.push(cpu_adx);
             }
         }
@@ -809,17 +807,17 @@ impl<'a> EnergyModelOptimizer<'a> {
                     // next level. To this end, insert the extended base (with
                     // updated performance and power values) and delete the old
                     // base.
-                    if let Some(ref best) = best_pdsi {
-                        if best.pdcpu_set.is_subset(&base.pdcpu_set) {
-                            let ext_pdcpu = PDSetInfo {
-                                performance: best.performance,
-                                power: best.power,
-                                pdcpu_set: base.pdcpu_set.clone(),
-                                pd_id_set: base.pd_id_set.clone(),
-                            };
-                            best_pdsi = Some(ext_pdcpu);
-                            del_pdsi = Some(base.clone());
-                        }
+                    if let Some(ref best) = best_pdsi
+                        && best.pdcpu_set.is_subset(&base.pdcpu_set)
+                    {
+                        let ext_pdcpu = PDSetInfo {
+                            performance: best.performance,
+                            power: best.power,
+                            pdcpu_set: base.pdcpu_set.clone(),
+                            pd_id_set: base.pd_id_set.clone(),
+                        };
+                        best_pdsi = Some(ext_pdcpu);
+                        del_pdsi = Some(base.clone());
                     }
                 }
                 None => {
@@ -1226,21 +1224,9 @@ impl<'a> PDS<'_> {
     }
 }
 
-impl PartialEq for PDS<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.pd == other.pd && self.ps == other.ps
-    }
-}
-
 impl<'a> PDCpu<'_> {
     fn new(pd: &'a PerfDomain, cpu_vid: usize) -> PDCpu<'a> {
         PDCpu { pd, cpu_vid }
-    }
-}
-
-impl PartialEq for PDCpu<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.pd == other.pd && self.cpu_vid == other.cpu_vid
     }
 }
 
@@ -1275,7 +1261,7 @@ impl<'a> PDSetInfo<'_> {
         let mut pds_map: BTreeMap<PDS<'a>, RefCell<Vec<PDS<'a>>>> = BTreeMap::new();
 
         for pds in pds_set.iter() {
-            let v = pds_map.get(&pds);
+            let v = pds_map.get(pds);
             match v {
                 Some(v) => {
                     let mut v = v.borrow_mut();
@@ -1292,7 +1278,7 @@ impl<'a> PDSetInfo<'_> {
         let mut pdcpu_set: BTreeSet<PDCpu<'a>> = BTreeSet::new();
         let pds_map = pds_map;
 
-        for (_, v) in pds_map.iter() {
+        for v in pds_map.values() {
             for (cpu_vid, pds) in v.borrow().iter().enumerate() {
                 let pdcpu = PDCpu::new(pds.pd, cpu_vid);
                 pdcpu_set.insert(pdcpu);
@@ -1352,13 +1338,13 @@ impl PartialEq for PerfCpuOrder {
 
 impl fmt::Display for PerfCpuOrder {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
+        writeln!(
             f,
-            "capacity bound:  {} ({}%)\n",
+            "capacity bound:  {} ({}%)",
             self.perf_cap,
             self.perf_util * 100.0
         )?;
-        write!(f, "  primary CPUs:  {:?}\n", self.cpus_perf.borrow())?;
+        writeln!(f, "  primary CPUs:  {:?}", self.cpus_perf.borrow())?;
         write!(f, "  overflow CPUs: {:?}", self.cpus_ovflw.borrow())?;
         Ok(())
     }

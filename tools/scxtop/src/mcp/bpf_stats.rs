@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use libbpf_rs::{query::ProgInfoIter, ProgramType};
+use libbpf_rs::{ProgramType, query::ProgInfoIter};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};

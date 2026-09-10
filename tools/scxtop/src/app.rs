@@ -3,6 +3,29 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::APP;
+use crate::AppState;
+use crate::AppTheme;
+use crate::ComponentViewState;
+use crate::CpuData;
+use crate::CpuStatTracker;
+use crate::EventData;
+use crate::FilterItem;
+use crate::FilteredState;
+use crate::KprobeEvent;
+use crate::LICENSE;
+use crate::LlcData;
+use crate::MemStatSnapshot;
+use crate::NetworkStatSnapshot;
+use crate::NodeData;
+use crate::PerfEvent;
+use crate::PerfettoTraceManager;
+use crate::ProcData;
+use crate::ProfilingEvent;
+use crate::SCHED_NAME_PATH;
+use crate::ThreadData;
+use crate::VecStats;
+use crate::ViewState;
 use crate::available_kprobe_events;
 use crate::available_perf_events;
 use crate::bpf_intf;
@@ -10,12 +33,11 @@ use crate::bpf_prog_data::{BpfProgData, BpfProgStats};
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
-    get_bpf_program_columns, get_perf_top_columns, get_perf_top_columns_no_bpf,
+    Columns, get_bpf_program_columns, get_perf_top_columns, get_perf_top_columns_no_bpf,
     get_process_columns, get_process_columns_no_bpf, get_thread_columns, get_thread_columns_no_bpf,
-    Columns,
 };
-use crate::config::get_config_path;
 use crate::config::Config;
+use crate::config::get_config_path;
 use crate::get_default_events;
 use crate::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
 use crate::render::scheduler::{DsqSummaryParams, ProcessLatencyParams, SchedulerViewParams};
@@ -29,29 +51,6 @@ use crate::util::{
     check_perf_capability, default_scxtop_sched_ext_stats, format_hz, read_file_string,
     sanitize_nbsp, u32_to_i32,
 };
-use crate::AppState;
-use crate::AppTheme;
-use crate::ComponentViewState;
-use crate::CpuData;
-use crate::CpuStatTracker;
-use crate::EventData;
-use crate::FilterItem;
-use crate::FilteredState;
-use crate::KprobeEvent;
-use crate::LlcData;
-use crate::MemStatSnapshot;
-use crate::NetworkStatSnapshot;
-use crate::NodeData;
-use crate::PerfEvent;
-use crate::PerfettoTraceManager;
-use crate::ProcData;
-use crate::ProfilingEvent;
-use crate::ThreadData;
-use crate::VecStats;
-use crate::ViewState;
-use crate::APP;
-use crate::LICENSE;
-use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, KprobeAction, MangoAppAction, SchedCpuPerfSetAction,
@@ -61,7 +60,7 @@ use crate::{
 };
 use scx_utils::perf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
@@ -69,6 +68,7 @@ use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
+    Frame,
     layout::{Alignment, Direction, Layout, Margin, Rect},
     prelude::Stylize,
     style::{Color, Modifier, Style},
@@ -80,19 +80,18 @@ use ratatui::{
         Gauge, LineGauge, Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Sparkline, Table, TableState, Wrap,
     },
-    Frame,
 };
 use regex::Regex;
 use scx_stats::prelude::StatsClient;
+use scx_utils::Topology;
 use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
-use scx_utils::Topology;
 use serde_json::Value as JsonValue;
 use sysinfo::System;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc::UnboundedSender;
 
-use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -3665,15 +3664,16 @@ impl<'a> App<'a> {
             let mut third_row = Vec::new();
             let mut has_third_row_content = false;
 
-            if let Some(layer_id) = proc_data.layer_id {
-                if self.layered_enabled && layer_id >= 0 {
-                    third_row.extend(vec![
-                        Span::styled("Layer: ", Style::default().fg(Color::Yellow)),
-                        Span::raw(layer_id.to_string()),
-                        Span::raw("  "),
-                    ]);
-                    has_third_row_content = true;
-                }
+            if let Some(layer_id) = proc_data.layer_id
+                && self.layered_enabled
+                && layer_id >= 0
+            {
+                third_row.extend(vec![
+                    Span::styled("Layer: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(layer_id.to_string()),
+                    Span::raw("  "),
+                ]);
+                has_third_row_content = true;
             }
 
             if let Some(dsq) = proc_data.dsq {
@@ -4618,10 +4618,10 @@ impl<'a> App<'a> {
 
         if pid == tgid {
             self.proc_data.remove(&pid);
-        } else if let Entry::Occupied(entry) = self.proc_data.entry(tgid) {
-            if self.in_thread_view {
-                entry.into_mut().remove_thread(pid);
-            }
+        } else if let Entry::Occupied(entry) = self.proc_data.entry(tgid)
+            && self.in_thread_view
+        {
+            entry.into_mut().remove_thread(pid);
         }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
@@ -4656,12 +4656,11 @@ impl<'a> App<'a> {
                 Entry::Occupied(entry) => {
                     let proc_data = entry.into_mut();
                     proc_data.layer_id = Some(*parent_layer_id);
-                    if self.in_thread_view {
-                        if let Some(selected_tgid) = self.selected_process {
-                            if selected_tgid == parent_tgid {
-                                proc_data.add_thread(child_pid);
-                            }
-                        }
+                    if self.in_thread_view
+                        && let Some(selected_tgid) = self.selected_process
+                        && selected_tgid == parent_tgid
+                    {
+                        proc_data.add_thread(child_pid);
                     }
                 }
             }
@@ -4698,15 +4697,13 @@ impl<'a> App<'a> {
         let tgid = u32_to_i32(*tgid);
 
         // Update waker information for the thread
-        if let Some(proc_data) = self.proc_data.get_mut(&tgid) {
-            if self.in_thread_view {
-                if let Some(thread_data) = proc_data.threads.get_mut(&tid) {
-                    if *waker_pid != 0 {
-                        thread_data.last_waker_pid = Some(*waker_pid);
-                        thread_data.last_waker_comm = Some(waker_comm.to_string());
-                    }
-                }
-            }
+        if let Some(proc_data) = self.proc_data.get_mut(&tgid)
+            && self.in_thread_view
+            && let Some(thread_data) = proc_data.threads.get_mut(&tid)
+            && *waker_pid != 0
+        {
+            thread_data.last_waker_pid = Some(*waker_pid);
+            thread_data.last_waker_comm = Some(waker_comm.to_string());
         }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
@@ -4728,15 +4725,13 @@ impl<'a> App<'a> {
         let tgid = u32_to_i32(*tgid);
 
         // Update waker information for the thread
-        if let Some(proc_data) = self.proc_data.get_mut(&tgid) {
-            if self.in_thread_view {
-                if let Some(thread_data) = proc_data.threads.get_mut(&tid) {
-                    if *waker_pid != 0 {
-                        thread_data.last_waker_pid = Some(*waker_pid);
-                        thread_data.last_waker_comm = Some(waker_comm.to_string());
-                    }
-                }
-            }
+        if let Some(proc_data) = self.proc_data.get_mut(&tgid)
+            && self.in_thread_view
+            && let Some(thread_data) = proc_data.threads.get_mut(&tid)
+            && *waker_pid != 0
+        {
+            thread_data.last_waker_pid = Some(*waker_pid);
+            thread_data.last_waker_comm = Some(waker_comm.to_string());
         }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
@@ -4816,12 +4811,11 @@ impl<'a> App<'a> {
                     }
                 };
 
-                if self.in_thread_view {
-                    if let Some(proc_data) = self.selected_proc_data() {
-                        if proc_data.tgid == tgid {
-                            insert_or_update_thread(proc_data, tid, dsq, layer);
-                        }
-                    }
+                if self.in_thread_view
+                    && let Some(proc_data) = self.selected_proc_data()
+                    && proc_data.tgid == tgid
+                {
+                    insert_or_update_thread(proc_data, tid, dsq, layer);
                 }
             };
 
@@ -4845,19 +4839,19 @@ impl<'a> App<'a> {
 
         if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
             proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
-            if self.in_thread_view {
-                if let Some(thread_data) = proc_data.threads.get_mut(&prev_tid) {
-                    thread_data.add_event_data("slice_consumed", *prev_used_slice_ns);
-                }
+            if self.in_thread_view
+                && let Some(thread_data) = proc_data.threads.get_mut(&prev_tid)
+            {
+                thread_data.add_event_data("slice_consumed", *prev_used_slice_ns);
             }
         }
 
         if let Some(proc_data) = self.proc_data.get_mut(&next_tgid) {
             proc_data.add_event_data("lat_us", *next_dsq_lat_us);
-            if self.in_thread_view {
-                if let Some(thread_data) = proc_data.threads.get_mut(&next_tid) {
-                    thread_data.add_event_data("lat_us", *next_dsq_lat_us);
-                }
+            if self.in_thread_view
+                && let Some(thread_data) = proc_data.threads.get_mut(&next_tid)
+            {
+                thread_data.add_event_data("lat_us", *next_dsq_lat_us);
             }
         }
 
@@ -5003,10 +4997,10 @@ impl<'a> App<'a> {
             .unwrap()
             .sample_rate as u64;
 
-        if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu) {
-            if kprobe.instruction_pointer == Some(action.instruction_pointer) {
-                kprobe.increment_by(sample_rate);
-            }
+        if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu)
+            && kprobe.instruction_pointer == Some(action.instruction_pointer)
+        {
+            kprobe.increment_by(sample_rate);
         }
     }
 
@@ -5082,16 +5076,16 @@ impl<'a> App<'a> {
             self.filter_symbols();
 
             // Only store detailed stack trace if this matches the highlighted instruction pointer
-            if let Some(selected_symbol) = self.get_selected_symbol() {
-                if selected_symbol.symbol_info.address == action.instruction_pointer {
-                    // Store the latest symbolized data for the selected symbol
-                    self.symbol_data.update_selected_symbol_details(
-                        action.instruction_pointer,
-                        &action.kernel_stack,
-                        &action.user_stack,
-                        action.pid,
-                    );
-                }
+            if let Some(selected_symbol) = self.get_selected_symbol()
+                && selected_symbol.symbol_info.address == action.instruction_pointer
+            {
+                // Store the latest symbolized data for the selected symbol
+                self.symbol_data.update_selected_symbol_details(
+                    action.instruction_pointer,
+                    &action.kernel_stack,
+                    &action.user_stack,
+                    action.pid,
+                );
             }
         }
     }
@@ -5107,15 +5101,14 @@ impl<'a> App<'a> {
                 let mut enhanced = sample.clone();
 
                 // If we have cached BPF symbol info, try to get source location
-                if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info {
-                    if let Some((line, _col)) =
+                if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info
+                    && let Some((line, _col)) =
                         bpf_symbol_info.get_source_location(sample.symbol_info.address)
-                    {
-                        // Update the symbol name to include line number
-                        let base_name = &sample.symbol_info.symbol_name;
-                        enhanced.symbol_info.symbol_name = format!("{} (line {})", base_name, line);
-                        enhanced.symbol_info.line_number = Some(line);
-                    }
+                {
+                    // Update the symbol name to include line number
+                    let base_name = &sample.symbol_info.symbol_name;
+                    enhanced.symbol_info.symbol_name = format!("{} (line {})", base_name, line);
+                    enhanced.symbol_info.line_number = Some(line);
                 }
 
                 enhanced
@@ -7179,10 +7172,10 @@ impl<'a> App<'a> {
         // Add any new processes that aren't already in our proc_data
         for proc in all_procs.flatten() {
             let tgid = proc.pid();
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.proc_data.entry(tgid) {
-                if let Ok(proc_data) = ProcData::from_tgid(tgid, 10) {
-                    entry.insert(proc_data);
-                }
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.proc_data.entry(tgid)
+                && let Ok(proc_data) = ProcData::from_tgid(tgid, 10)
+            {
+                entry.insert(proc_data);
             }
         }
 

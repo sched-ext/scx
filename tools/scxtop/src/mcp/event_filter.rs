@@ -94,12 +94,12 @@ impl EventFilter {
         }
 
         // Check comm regex
-        if let Some(ref pattern) = self.comm_regex {
-            if let Ok(regex) = Regex::new(pattern) {
-                let comm = self.extract_comm(json);
-                if !regex.is_match(&comm) {
-                    return false;
-                }
+        if let Some(ref pattern) = self.comm_regex
+            && let Ok(regex) = Regex::new(pattern)
+        {
+            let comm = self.extract_comm(json);
+            if !regex.is_match(&comm) {
+                return false;
             }
         }
 

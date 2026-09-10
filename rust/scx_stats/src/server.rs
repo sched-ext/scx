@@ -1,7 +1,7 @@
 use crate::StatsClient;
 use crate::{Meta, StatsData, StatsKind, StatsMeta};
-use anyhow::{anyhow, bail, Context, Result};
-use crossbeam::channel::{unbounded, Receiver, RecvError, Select, Sender};
+use anyhow::{Context, Result, anyhow, bail};
+use crossbeam::channel::{Receiver, RecvError, Select, Sender, unbounded};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,11 +17,8 @@ pub trait StatsReader<Req, Res>:
     FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>
 {
 }
-impl<
-        Req,
-        Res,
-        T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>,
-    > StatsReader<Req, Res> for T
+impl<Req, Res, T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>>
+    StatsReader<Req, Res> for T
 {
 }
 
@@ -30,10 +27,10 @@ pub trait StatsReaderSend<Req, Res>:
 {
 }
 impl<
-        Req,
-        Res,
-        T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value> + Send,
-    > StatsReaderSend<Req, Res> for T
+    Req,
+    Res,
+    T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value> + Send,
+> StatsReaderSend<Req, Res> for T
 {
 }
 
@@ -42,12 +39,10 @@ pub trait StatsReaderSync<Req, Res>:
 {
 }
 impl<
-        Req,
-        Res,
-        T: Fn(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>
-            + Send
-            + Sync,
-    > StatsReaderSync<Req, Res> for T
+    Req,
+    Res,
+    T: Fn(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value> + Send + Sync,
+> StatsReaderSync<Req, Res> for T
 {
 }
 
@@ -56,16 +51,17 @@ pub trait StatsOpener<Req, Res>:
 {
 }
 impl<
-        Req,
-        Res,
-        T: FnMut((&Sender<Req>, &Receiver<Res>)) -> Result<Box<dyn StatsReader<Req, Res>>> + Send,
-    > StatsOpener<Req, Res> for T
+    Req,
+    Res,
+    T: FnMut((&Sender<Req>, &Receiver<Res>)) -> Result<Box<dyn StatsReader<Req, Res>>> + Send,
+> StatsOpener<Req, Res> for T
 {
 }
 
 pub trait StatsCloser<Req, Res>: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send {}
 impl<Req, Res, T: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send> StatsCloser<Req, Res> for T {}
 
+#[allow(clippy::type_complexity)]
 pub struct StatsOps<Req, Res> {
     pub open: Box<dyn StatsOpener<Req, Res>>,
     pub close: Option<Box<dyn StatsCloser<Req, Res>>>,
@@ -92,7 +88,7 @@ impl<Req, Res> StatsOpenOps<Req, Res> {
 
 impl<Req, Res> std::ops::Drop for StatsOpenOps<Req, Res> {
     fn drop(&mut self) {
-        for (_, (ops, _, ch)) in self.map.iter_mut() {
+        for (ops, _, ch) in self.map.values_mut() {
             if let Some(close) = ops.lock().unwrap().close.take() {
                 close((&ch.req, &ch.res));
             }
@@ -174,6 +170,16 @@ where
     top: Option<String>,
     meta: BTreeMap<String, StatsMeta>,
     ops: BTreeMap<String, Arc<Mutex<StatsOps<Req, Res>>>>,
+}
+
+impl<Req, Res> Default for StatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<Req, Res> StatsServerData<Req, Res>
@@ -451,7 +457,7 @@ where
                         Some(e) if e.0 != 0 => e.0,
                         _ => libc::EINVAL,
                     };
-                    Self::build_resp(errno, &format!("{:?}", &e))?
+                    Self::build_resp(errno, &format!("{:?}", e))?
                 }
             };
 
@@ -645,10 +651,10 @@ where
         }
 
         let res = std::fs::remove_file(path);
-        if let std::io::Result::Err(e) = &res {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                res.with_context(|| format!("deleting {path:?}"))?;
-            }
+        if let std::io::Result::Err(e) = &res
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            res.with_context(|| format!("deleting {path:?}"))?;
         }
 
         let listener =

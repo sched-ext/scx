@@ -10,6 +10,7 @@ use crate::util::{format_bytes, format_bytes_per_sec};
 use crate::{AppTheme, LlcData, NodeData, ViewState};
 
 use anyhow::Result;
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::bar::NINE_LEVELS;
@@ -19,7 +20,6 @@ use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Borders, LineGauge, Paragraph, RenderDirection,
     Sparkline, Wrap,
 };
-use ratatui::Frame;
 
 use std::collections::BTreeMap;
 

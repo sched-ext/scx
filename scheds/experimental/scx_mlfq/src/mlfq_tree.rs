@@ -784,11 +784,7 @@ pub fn predict(tree: &SerializedTree, feats: &TreeFeats) -> u64 {
         return 0;
     }
     let node = &tree.nodes[idx];
-    if node.right == 0 {
-        node.left as u64
-    } else {
-        0
-    }
+    if node.right == 0 { node.left as u64 } else { 0 }
 }
 
 /// The publish quality gate. The tree replaces the previous model only when
@@ -812,10 +808,10 @@ pub fn should_publish(mae_tree: f64, mae_ema: f64, corr: f64, published_corr: Op
     if corr < 0.30 {
         return false;
     }
-    if let Some(pc) = published_corr {
-        if corr <= pc + 1e-9 {
-            return false;
-        }
+    if let Some(pc) = published_corr
+        && corr <= pc + 1e-9
+    {
+        return false;
     }
     true
 }
@@ -837,11 +833,7 @@ pub fn weighted_holdout_mae(preds: &[u64], actuals: &[u64], weights: &[f64]) -> 
         sw += *w;
         sw_err += *w * err;
     }
-    if sw == 0.0 {
-        0.0
-    } else {
-        sw_err / sw
-    }
+    if sw == 0.0 { 0.0 } else { sw_err / sw }
 }
 
 /// Record-layout version tag of the emitted training samples, from

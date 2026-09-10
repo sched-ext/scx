@@ -200,8 +200,8 @@
 //!     // ...
 //! ```
 
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use std::collections::BTreeMap;
 
 const MIN_WEIGHT: usize = 1;
@@ -297,7 +297,7 @@ impl LoadAggregator {
         let mut dom_load_sums = Vec::new();
         let mut dom_dcycle_sums = Vec::new();
 
-        for (_, dom) in self.doms.iter() {
+        for dom in self.doms.values() {
             dom_load_sums.push(dom.load_sum);
             dom_dcycle_sums.push(dom.dcycle_sum);
         }

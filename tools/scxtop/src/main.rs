@@ -4,8 +4,19 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
+use scxtop::Action;
+use scxtop::App;
+use scxtop::CpuStatTracker;
+use scxtop::Event;
+use scxtop::Key;
+use scxtop::KeyMap;
+use scxtop::MemStatSnapshot;
+use scxtop::PerfettoTraceManager;
+use scxtop::SCHED_NAME_PATH;
+use scxtop::SystemStatAction;
+use scxtop::Tui;
 use scxtop::bpf_skel::types::bpf_event;
-use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
+use scxtop::cli::{Cli, Commands, TraceArgs, TuiArgs, generate_completions};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
 use scxtop::layered_util;
@@ -16,33 +27,22 @@ use scxtop::util::{
     check_bpf_capability, get_capability_warning_message, get_clock_value, is_root,
     read_file_string,
 };
-use scxtop::Action;
-use scxtop::App;
-use scxtop::CpuStatTracker;
-use scxtop::Event;
-use scxtop::Key;
-use scxtop::KeyMap;
-use scxtop::MemStatSnapshot;
-use scxtop::PerfettoTraceManager;
-use scxtop::SystemStatAction;
-use scxtop::Tui;
-use scxtop::SCHED_NAME_PATH;
-use scxtop::{available_kprobe_events, UpdateColVisibilityAction};
-use scxtop::{bpf_skel::*, AppState};
+use scxtop::{AppState, bpf_skel::*};
+use scxtop::{UpdateColVisibilityAction, available_kprobe_events};
 
+use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use futures::future::join_all;
-use libbpf_rs::libbpf_sys;
-use libbpf_rs::num_possible_cpus;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::Link;
 use libbpf_rs::MapCore;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::UprobeOpts;
+use libbpf_rs::libbpf_sys;
+use libbpf_rs::num_possible_cpus;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::SkelBuilder;
 use log::debug;
 use log::info;
 use ratatui::crossterm::event::{KeyCode::Char, KeyEvent};
@@ -55,9 +55,9 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::mpsc;
@@ -380,15 +380,15 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                     links.push(link);
                 }
                 // v2 API variants (6.19+)
-                if compat::ksym_exists("scx_bpf_dsq_insert___v2")? {
-                    if let Ok(link) = skel.progs.scx_insert_v2.attach() {
-                        links.push(link);
-                    }
+                if compat::ksym_exists("scx_bpf_dsq_insert___v2")?
+                    && let Ok(link) = skel.progs.scx_insert_v2.attach()
+                {
+                    links.push(link);
                 }
-                if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")? {
-                    if let Ok(link) = skel.progs.scx_insert_vtime_args.attach() {
-                        links.push(link);
-                    }
+                if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")?
+                    && let Ok(link) = skel.progs.scx_insert_vtime_args.attach()
+                {
+                    links.push(link);
                 }
             } else {
                 if let Ok(link) = skel.progs.scx_dispatch.attach() {
@@ -908,15 +908,14 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                             Ok(mut loaded_skel) => {
                                 // Populate the CPU-to-ringbuffer mapping after loading
                                 for (cpu_id, &rb_id) in rb_cpu_mapping.iter().enumerate() {
-                                    if cpu_id < cpu_cnt_pow2 {
-                                        if let Err(e) = loaded_skel.maps.data_rb_cpu_map.update(
+                                    if cpu_id < cpu_cnt_pow2
+                                        && let Err(e) = loaded_skel.maps.data_rb_cpu_map.update(
                                             &(cpu_id as u32).to_ne_bytes(),
                                             &rb_id.to_ne_bytes(),
                                             libbpf_rs::MapFlags::ANY,
                                         ) {
                                             capability_warnings.push(format!("Failed to set CPU {} -> ringbuf {}: {}", cpu_id, rb_id, e));
                                         }
-                                    }
                                 }
 
                                 let (skel_links, attach_warnings) = attach_progs(&mut loaded_skel)?;
@@ -1245,7 +1244,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
 fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
     use scx_utils::Topology;
-    use scxtop::mcp::{events::action_to_mcp_event, McpServer, McpServerConfig};
+    use scxtop::mcp::{McpServer, McpServerConfig, events::action_to_mcp_event};
     use std::sync::Arc;
 
     // Set up logging to stderr (important: not stdout, which is used for MCP protocol)
@@ -1513,8 +1512,8 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                         }
 
                         // 3. Migration Analyzer
-                        if let Ok(mut analyzer) = ctx.migration_analyzer.try_lock() {
-                            if event_type == bpf_intf::event_type_SCHED_MIGRATE {
+                        if let Ok(mut analyzer) = ctx.migration_analyzer.try_lock()
+                            && event_type == bpf_intf::event_type_SCHED_MIGRATE {
                                 let migrate = &event.event.migrate;
                                 let json = serde_json::json!({
                                     "pid": migrate.pid, "from_cpu": event.cpu,
@@ -1522,7 +1521,6 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                 });
                                 analyzer.record_migration(&json, event.ts);
                             }
-                        }
 
                         // 4. Process Event History
                         if let Ok(mut history) = ctx.process_history.try_lock() {
@@ -1556,8 +1554,8 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                         }
 
                         // 7. Wakeup Chain Tracker
-                        if let Ok(mut tracker) = ctx.wakeup_tracker.try_lock() {
-                            if event_type == bpf_intf::event_type_SCHED_WAKEUP || event_type == bpf_intf::event_type_SCHED_WAKING {
+                        if let Ok(mut tracker) = ctx.wakeup_tracker.try_lock()
+                            && (event_type == bpf_intf::event_type_SCHED_WAKEUP || event_type == bpf_intf::event_type_SCHED_WAKING) {
                                 let (pid, waker_pid) = if event_type == bpf_intf::event_type_SCHED_WAKEUP {
                                     (event.event.wakeup.pid, event.event.wakeup.waker_pid)
                                 } else {
@@ -1568,11 +1566,10 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                 });
                                 tracker.record_wakeup(&json, event.ts);
                             }
-                        }
 
                         // 8. Softirq Analyzer
-                        if let Ok(mut analyzer) = ctx.softirq_analyzer.try_lock() {
-                            if event_type == bpf_intf::event_type_SOFTIRQ {
+                        if let Ok(mut analyzer) = ctx.softirq_analyzer.try_lock()
+                            && event_type == bpf_intf::event_type_SOFTIRQ {
                                 let softirq = &event.event.softirq;
                                 let json = serde_json::json!({
                                     "type": "softirq", "pid": softirq.pid, "softirq_nr": softirq.softirq_nr,
@@ -1580,7 +1577,6 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                 });
                                 analyzer.record_event(&json);
                             }
-                        }
 
                         // Dispatch to action channel
                         let mut edm = EventDispatchManager::new(None, None);
@@ -1839,8 +1835,8 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                             }
 
                             // Feed perf samples to profiler if it's collecting
-                            if let Some(ref profiler) = perf_profiler {
-                                if let Action::PerfSample(ref perf_sample) = action {
+                            if let Some(ref profiler) = perf_profiler
+                                && let Action::PerfSample(ref perf_sample) = action {
                                     use scxtop::mcp::RawSample;
                                     profiler.add_sample(RawSample {
                                         address: perf_sample.instruction_pointer,
@@ -1856,7 +1852,6 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                                         },
                                     });
                                 }
-                            }
 
                             // Update app state
                             let _ = app.handle_action(&action);

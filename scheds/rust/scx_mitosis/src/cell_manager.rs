@@ -16,7 +16,7 @@ use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use inotify::{Inotify, WatchMask};
 use scx_utils::Cpumask;
 use tracing::{debug, info};
@@ -927,6 +927,7 @@ impl CellManager {
     /// Rather than processing individual events, we simply check if any events occurred
     /// and then rescan the directory to reconcile state. This is simpler and handles
     /// edge cases like inotify queue overflow gracefully.
+    #[allow(clippy::type_complexity)]
     pub fn process_events(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
         let mut buffer = [0; 1024];
         let mut has_events = false;
@@ -1046,11 +1047,12 @@ impl CellManager {
         let cpuset = Self::read_cpuset(path)
             .with_context(|| format!("reading cpuset for cgroup {}", path.display()))?;
         if let Some(ref mask) = cpuset {
+            let cpuset_path = path.join("cpuset.cpus");
             debug!(
                 "Cell {} has cpuset: {} (from {})",
                 cell_id,
                 mask.to_cpulist(),
-                path.join("cpuset.cpus").display()
+                cpuset_path.display()
             );
         }
 
@@ -2662,9 +2664,10 @@ mod tests {
         assert_eq!(mgr.cell_count(), 2);
         assert!(mgr.find_cell_by_name("container-a").is_some());
         assert!(mgr.find_cell_by_name("container-b").is_some());
-        assert!(mgr
-            .find_cell_by_name("systemd-workaround.service")
-            .is_none());
+        assert!(
+            mgr.find_cell_by_name("systemd-workaround.service")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3371,8 +3374,8 @@ mod tests {
         // 10 / 3 = 3 each + 1 remainder
         let total: usize = targets.values().sum();
         assert_eq!(total, 10);
-        for (_, &count) in &targets {
-            assert!(count >= 3 && count <= 4);
+        for &count in targets.values() {
+            assert!((3..=4).contains(&count));
         }
     }
 

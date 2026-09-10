@@ -3,9 +3,9 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use scxtop::{render::MemoryRenderer, AppTheme, KeyMap, MemStatSnapshot};
+use ratatui::backend::TestBackend;
+use scxtop::{AppTheme, KeyMap, MemStatSnapshot, render::MemoryRenderer};
 
 // Helper function to create test MemStatSnapshot
 fn create_test_mem_stats() -> MemStatSnapshot {

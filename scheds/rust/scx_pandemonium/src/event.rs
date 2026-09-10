@@ -31,6 +31,12 @@ pub struct EventLog {
     len: usize,
 }
 
+impl Default for EventLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventLog {
     pub fn new() -> Self {
         Self {
@@ -59,6 +65,7 @@ impl EventLog {
 
     // RECORD ONE STATS SNAPSHOT. CALLED ONCE PER SECOND FROM THE MONITOR LOOP.
     // OVERWRITES OLDEST ENTRY WHEN FULL.
+    #[allow(clippy::too_many_arguments)]
     pub fn snapshot(
         &mut self,
         dispatches: u64,
@@ -97,6 +104,10 @@ impl EventLog {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn head(&self) -> usize {

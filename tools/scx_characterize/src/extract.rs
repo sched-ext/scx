@@ -792,10 +792,12 @@ mod tests {
                 "mcrpxy-webNR".to_string()
             )]])
         );
-        assert!(allotment_spec
-            .subcells
-            .iter()
-            .all(|spec| spec.name != "mcrpxy-webNR1" && spec.name != "mcrpxy-webNR2"));
+        assert!(
+            allotment_spec
+                .subcells
+                .iter()
+                .all(|spec| spec.name != "mcrpxy-webNR1" && spec.name != "mcrpxy-webNR2")
+        );
     }
 
     #[test]
@@ -854,7 +856,7 @@ mod tests {
 
     #[test]
     fn mem_extract_summary_groups_numeric_suffix_comms_and_reports_hints() {
-        let samples = vec![
+        let samples = [
             sample("mcrpxy-webNR1", "cg", 0),
             sample("mcrpxy-webNR2", "cg", 7),
             sample("mcrpxy-webNR3", "cg", 7),

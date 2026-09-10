@@ -7,14 +7,16 @@
 fn add_bpf_warning_suppression(flag: &str) {
     const KEY: &str = "BPF_EXTRA_CFLAGS_POST_INCL";
 
-    match std::env::var(KEY) {
+    let value = match std::env::var(KEY) {
         Ok(existing) => {
-            if !existing.split_whitespace().any(|entry| entry == flag) {
-                std::env::set_var(KEY, format!("{existing} {flag}"));
+            if existing.split_whitespace().any(|entry| entry == flag) {
+                return;
             }
+            format!("{existing} {flag}")
         }
-        Err(_) => std::env::set_var(KEY, flag),
-    }
+        Err(_) => flag.to_owned(),
+    };
+    unsafe { std::env::set_var(KEY, value) };
 }
 
 fn main() {

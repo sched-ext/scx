@@ -2,7 +2,8 @@
 name = "scx_cake"
 version = "1.2.1"
 authors = ["RitzDaCat"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.91"
 description = "A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling"
 license = "GPL-2.0-only"
 

@@ -18,9 +18,9 @@ use load_balance::LoadBalancer;
 mod stats;
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -33,16 +33,20 @@ use stats::NodeStats;
 extern crate static_assertions;
 
 use ::fb_procfs as procfs;
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::info;
 use scx_stats::prelude::*;
+use scx_utils::Cpumask;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -53,10 +57,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 
 const SCHEDULER_NAME: &str = "scx_rusty";
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -327,7 +327,7 @@ impl StatsCtx {
                 .bpf_stats
                 .iter()
                 .zip(rhs.bpf_stats.iter())
-                .map(|(lhs, rhs)| sub_or_zero(&lhs, &rhs))
+                .map(|(lhs, rhs)| sub_or_zero(lhs, rhs))
                 .collect(),
             time_used: self.time_used - rhs.time_used,
         }
@@ -531,7 +531,7 @@ impl<'a> Scheduler<'a> {
             slice_us: self.tuner.slice_ns / 1000,
 
             cpu_busy,
-            load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
+            load: node_stats.values().map(|v| v.load).sum::<f64>(),
             nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
 
             task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
@@ -582,7 +582,7 @@ impl<'a> Scheduler<'a> {
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
 
-        self.skel.maps.stats.value_size() as usize;
+        self.skel.maps.stats.value_size();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();

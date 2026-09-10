@@ -33,8 +33,8 @@ use crate::scheduler::Scheduler;
 // REFERENCE: CHEEGER'S INEQUALITY BOUNDS lambda_2 AGAINST GRAPH BOTTLENECK.
 const LAMBDA_ZERO_EPS: f64 = 1e-8;
 const TAU_SCALE_NS: f64 = 1.6e8; // 160MS. CAPACITY-AWARE ANCHOR: AT THE
-                                 // 12C REFERENCE (lambda_2=12, N=12)
-                                 // tau = 160ms / sqrt(144) = 13.3MS.
+// 12C REFERENCE (lambda_2=12, N=12)
+// tau = 160ms / sqrt(144) = 13.3MS.
 const TAU_FLOOR_NS: u64 = 1_000_000; //  1MS
 const TAU_CEIL_NS: u64 = 40_000_000; // 40MS
 
@@ -850,10 +850,10 @@ impl CpuTopology {
         while frontier.len() < target.max(1) {
             let mut best: Option<(usize, f64)> = None;
             for (i, node) in frontier.iter().enumerate() {
-                if let DomainNode::Cut { phi, .. } = node {
-                    if best.map_or(true, |(_, bp)| *phi < bp) {
-                        best = Some((i, *phi));
-                    }
+                if let DomainNode::Cut { phi, .. } = node
+                    && best.is_none_or(|(_, bp)| *phi < bp)
+                {
+                    best = Some((i, *phi));
                 }
             }
             let Some((idx, _)) = best else { break }; // no cuts left to split
@@ -1436,11 +1436,7 @@ mod t2_cut_tests {
             let (mut x, mut y) = (c.0.clone(), c.1.clone());
             x.sort();
             y.sort();
-            if x < y {
-                (x, y)
-            } else {
-                (y, x)
-            }
+            if x < y { (x, y) } else { (y, x) }
         };
         norm(a) == norm(b)
     }
@@ -1537,7 +1533,7 @@ mod t2_cut_tests {
         // CPUs 2 and 3 are the same sibling L2 pair: identical crossing price from 0.
         assert_eq!(m[0 * n + 2], m[0 * n + 3]);
         // Symmetric.
-        assert_eq!(m[0 * n + 4], m[4 * n + 0]);
+        assert_eq!(m[0 * n + 4], m[4 * n]);
     }
 
     #[test]

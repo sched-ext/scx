@@ -26,7 +26,7 @@ use anyhow::Result;
 use crate::chaos::{self, Priced, RawWindow};
 use crate::scheduler::{PandemoniumStats, Scheduler};
 use crate::topology::CpuTopology;
-use crate::tuning::{self, detect_regime, scaled_regime_knobs, Regime, HIST_BUCKETS};
+use crate::tuning::{self, HIST_BUCKETS, Regime, detect_regime, scaled_regime_knobs};
 
 // CHAOS WINDOW SIZE. 16 SAMPLES AT 1HZ = 16-SECOND REGIME MEMORY.
 // SIZED FOR BENCH-SCALE RESPONSIVENESS (16-30s iterations) RATHER THAN
@@ -210,15 +210,15 @@ impl LoadGraph {
                 // is the only place in this loop that acts on a prediction
                 // rather than on a completed loss. Only the positive half
                 // matters -- an oscillating CPU (r1 < 0) is already recovering.
-                if let Some(r1) = self.node_slowing.get(i).and_then(|v| *v) {
-                    if r1.value > 0.0 {
-                        let tighten = Priced {
-                            value: 1.0 - 0.4 * r1.value.clamp(0.0, 1.0),
-                            confidence: r1.confidence,
-                        }
-                        .weighted(1.0);
-                        k.preempt_thresh_ns = ((k.preempt_thresh_ns as f64) * tighten) as u64;
+                if let Some(r1) = self.node_slowing.get(i).and_then(|v| *v)
+                    && r1.value > 0.0
+                {
+                    let tighten = Priced {
+                        value: 1.0 - 0.4 * r1.value.clamp(0.0, 1.0),
+                        confidence: r1.confidence,
                     }
+                    .weighted(1.0);
+                    k.preempt_thresh_ns = ((k.preempt_thresh_ns as f64) * tighten) as u64;
                 }
 
                 // PERSISTENCE -> CoDel RESCUE THRESHOLD.
@@ -731,19 +731,47 @@ pub fn monitor_loop(
             let frozen_disp = if frozen { 1 } else { 0 };
             println!(
                 "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% chaos: lam={:.2} H={:.2} det={:.2} x={} frozen: {} (n={}) retune_iv: {} [{}{}] graph: n={} e={} cpl={:.2}/{:.2}/{:.2} osc: {:.2}/{}us",
-                delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
-                delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
-                wake_avg_us, p99_us, tp99_b, tp99_i, tp99_l,
-                lat_idle_us, lat_kick_us,
-                io_pct, knobs.slice_ns / 1000, knobs.batch_slice_ns / 1000,
-                delta_reenq, sojourn_ms, sojourn_thresh_ms,
+                delta_d,
+                idle_pct,
+                delta_shared,
+                delta_preempt,
+                delta_keep,
+                delta_hard,
+                delta_soft,
+                delta_enq_wake,
+                delta_enq_requeue,
+                wake_avg_us,
+                p99_us,
+                tp99_b,
+                tp99_i,
+                tp99_l,
+                lat_idle_us,
+                lat_kick_us,
+                io_pct,
+                knobs.slice_ns / 1000,
+                knobs.batch_slice_ns / 1000,
+                delta_reenq,
+                sojourn_ms,
+                sojourn_thresh_ms,
                 delta_rescue,
-                l2_pct_b, l2_pct_i,
-                idle_lambda, wake_bp_h, rqa_disp, chaos_count.load(),
-                frozen_disp, frozen_ticks, retune_interval,
-                graph.n, g_edges, g_mean, g_min, g_max,
-                osc_pos, osc_rel_us,
-                regime.label(), longrun_label,
+                l2_pct_b,
+                l2_pct_i,
+                idle_lambda,
+                wake_bp_h,
+                rqa_disp,
+                chaos_count.load(),
+                frozen_disp,
+                frozen_ticks,
+                retune_interval,
+                graph.n,
+                g_edges,
+                g_mean,
+                g_min,
+                g_max,
+                osc_pos,
+                osc_rel_us,
+                regime.label(),
+                longrun_label,
             );
         }
 
@@ -839,12 +867,26 @@ pub fn monitor_loop(
 
     println!(
         "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} osc_park={}",
-        regime.label(), final_knobs.slice_ns, final_knobs.batch_slice_ns,
+        regime.label(),
+        final_knobs.slice_ns,
+        final_knobs.batch_slice_ns,
         final_knobs.preempt_thresh_ns,
         0.0f64,
-        light_ticks, mixed_ticks, heavy_ticks, frozen_ticks,
-        l2_cum_b, l2_cum_i,
-        x_scatter_pct, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7],
+        light_ticks,
+        mixed_ticks,
+        heavy_ticks,
+        frozen_ticks,
+        l2_cum_b,
+        l2_cum_i,
+        x_scatter_pct,
+        x[0],
+        x[1],
+        x[2],
+        x[3],
+        x[4],
+        x[5],
+        x[6],
+        x[7],
         final_stats.nr_osc_park,
     );
 
@@ -1276,7 +1318,7 @@ mod derivation_tests {
 #[cfg(test)]
 mod affinity_tests {
     use super::*;
-    use crate::tuning::{TuningKnobs, AFFINITY_WEAK};
+    use crate::tuning::{AFFINITY_WEAK, TuningKnobs};
 
     fn win(vals: &[f64]) -> RawWindow<CHAOS_WIN> {
         let mut w = RawWindow::new();

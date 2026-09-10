@@ -9,8 +9,8 @@ fn create_test_track_events() -> Vec<ParsedTrackEvent> {
     let mut ts = 1_000_000_000u64; // Start at 1 second
 
     // Create a variety of event types with different categories
-    let categories = vec!["ONCPU", "WAKER", "WAKEE", "PREEMPTOR", "PREEMPTEE"];
-    let event_types = vec![
+    let categories = ["ONCPU", "WAKER", "WAKEE", "PREEMPTOR", "PREEMPTEE"];
+    let event_types = [
         TrackEventType::SliceBegin,
         TrackEventType::SliceEnd,
         TrackEventType::Instant,
@@ -183,7 +183,7 @@ fn comprehensive_track_event_analysis() {
                     event.metadata.cpu, event.metadata.pid, event.metadata.tid
                 );
             }
-            eprintln!("");
+            eprintln!();
             slice_count += 1;
             if slice_count >= 5 {
                 break;
@@ -205,7 +205,7 @@ fn comprehensive_track_event_analysis() {
                     eprintln!("      {}: {:?}", ann.name, ann.value);
                 }
             }
-            eprintln!("");
+            eprintln!();
             instant_count += 1;
             if instant_count >= 5 {
                 break;

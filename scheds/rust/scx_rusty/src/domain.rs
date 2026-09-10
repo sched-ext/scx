@@ -15,6 +15,9 @@ use std::sync::Mutex;
 pub struct Domain {
     id: usize,
     mask: Cpumask,
+    // The raw pointer makes this !Send/!Sync; sharing is intentional and the
+    // pointee lives in mmapped BPF memory. Proper fix is a Send newtype.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub ctx: Arc<Mutex<Option<*mut types::dom_ctx>>>,
 }
 
@@ -40,14 +43,14 @@ impl Domain {
         self.mask.weight()
     }
 
-    pub fn ctx(&self) -> Option<&mut types::dom_ctx> {
+    pub fn ctx(&self) -> Option<&types::dom_ctx> {
         let domc = self.ctx.lock().unwrap();
 
         // Ideally we would be storing the dom_ctx as a reference in struct Domain,
         // in the first place. Rust makes embedding references to structs into other
         // structs very difficult, so this is more pragmatic.
         match *domc {
-            Some(ptr) => Some(unsafe { &mut *(ptr) }),
+            Some(ptr) => Some(unsafe { &*(ptr) }),
             None => None,
         }
     }
@@ -90,7 +93,7 @@ impl DomainGroup {
         } else {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
             for (node_id, node) in &top.nodes {
-                for (_, llc) in node.llcs.iter() {
+                for llc in node.llcs.values() {
                     let mask = llc.span.clone();
                     span |= &mask;
                     doms.insert(

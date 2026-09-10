@@ -7,11 +7,11 @@
 //!
 
 use crate::topology::{NR_PARTITION_MAX_CORES, NR_PARTITION_MIN_CORES};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Args;
 
 /// Topology configuration arguments
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 pub struct TopologyArgs {
     /// Configure virtual LLC partitioning with min and max cores per partition.
     /// Format: --virt-llc [min_cores-max_cores]
@@ -62,11 +62,5 @@ impl TopologyArgs {
             }
         }
         Ok(())
-    }
-}
-
-impl Default for TopologyArgs {
-    fn default() -> Self {
-        Self { virt_llc: None }
     }
 }

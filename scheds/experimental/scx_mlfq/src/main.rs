@@ -36,25 +36,26 @@ mod webui;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::mem::size_of;
 use std::mem::MaybeUninit;
+use std::mem::size_of;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::CommandFactory;
 use clap::Parser;
-use clap_complete::generate;
 use clap_complete::Shell;
+use clap_complete::generate;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore;
 use log::info;
 use scx_stats::prelude::*;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
@@ -65,7 +66,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::UserExitInfo;
 
 use config::Config;
 use mlfq_tree::FitScratch;
@@ -435,10 +435,10 @@ impl<'a> Scheduler<'a> {
             if skel.progs.mlfq_gpu_sched_queue.autoload() {
                 mask |= crate::bpf_intf::MLFQ_GPU_TRACE_GPU_SCHED;
             }
-            if mask != 0 {
-                if let Some(bss) = skel.maps.bss_data.as_mut() {
-                    bss.mlfq_gpu_trace_mask |= mask;
-                }
+            if mask != 0
+                && let Some(bss) = skel.maps.bss_data.as_mut()
+            {
+                bss.mlfq_gpu_trace_mask |= mask;
             }
         }
 
@@ -1043,19 +1043,47 @@ impl<'a> Scheduler<'a> {
         let m = self.get_metrics();
         log::info!(
             "mlfq exit counters: Q1={} Q2={} Q3={} fastpath={} regular={} pin_idle={} pin_busy={} pin_global={} drop_tctx={} drop_weight={} drop_deadline={} promotions={} demotions={} aging_boosts={} short_sleep_boosts={} cpuperf_boosts={} preempt_kicks={} runtime={} on_cpu={} steals={} steals_same_llc={} steals_cross_llc={} keep_running={} rt_takeovers={} rt_evacuations={} rt_redirects={} rt_reenqs={} tree gen={} nodes={} samples={} mae={}us ema_mae={}us corr={:.3} tree_inf={} tree_fallback={} tree_disagree={} tree_emitted={} tree_dropped={} tree_cap_dropped={} wakeups={} adapt_steps={}",
-            m.q1_placements, m.q2_placements, m.q3_placements, m.enq_fastpath,
-            m.enq_regular, m.enq_pinned_idle, m.enq_pinned_busy,
-            m.enq_pinned_global, m.enq_no_tctx, m.enq_bad_weight,
-            m.enq_no_deadline, m.promotions, m.demotions, m.aging_boosts,
-            m.short_sleep_boosts, m.cpuperf_boosts, m.preemption_kicks,
-            m.total_runtime, m.on_cpu, m.steals, m.steals_same_llc,
-            m.steals_cross_llc, m.keep_running,
-            m.rt_takeovers, m.rt_evacuations, m.rt_redirects, m.rt_reenqs,
-            m.tree_model_generation, m.tree_model_nodes, m.tree_model_samples,
-            m.tree_mae_tree_us, m.tree_mae_ema_us, self.model.corr,
-            m.tree_inference, m.tree_fallback, m.tree_disagree,
-            m.tree_samples_emitted, m.tree_samples_dropped,
-            m.tree_samples_cap_dropped, m.wakeup_total, m.adapt_steps
+            m.q1_placements,
+            m.q2_placements,
+            m.q3_placements,
+            m.enq_fastpath,
+            m.enq_regular,
+            m.enq_pinned_idle,
+            m.enq_pinned_busy,
+            m.enq_pinned_global,
+            m.enq_no_tctx,
+            m.enq_bad_weight,
+            m.enq_no_deadline,
+            m.promotions,
+            m.demotions,
+            m.aging_boosts,
+            m.short_sleep_boosts,
+            m.cpuperf_boosts,
+            m.preemption_kicks,
+            m.total_runtime,
+            m.on_cpu,
+            m.steals,
+            m.steals_same_llc,
+            m.steals_cross_llc,
+            m.keep_running,
+            m.rt_takeovers,
+            m.rt_evacuations,
+            m.rt_redirects,
+            m.rt_reenqs,
+            m.tree_model_generation,
+            m.tree_model_nodes,
+            m.tree_model_samples,
+            m.tree_mae_tree_us,
+            m.tree_mae_ema_us,
+            self.model.corr,
+            m.tree_inference,
+            m.tree_fallback,
+            m.tree_disagree,
+            m.tree_samples_emitted,
+            m.tree_samples_dropped,
+            m.tree_samples_cap_dropped,
+            m.wakeup_total,
+            m.adapt_steps
         );
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
@@ -1146,7 +1174,7 @@ impl<'a> Scheduler<'a> {
             return;
         }
 
-        let gen = self.model.generation + 1;
+        let new_gen = self.model.generation + 1;
         /*
          * A tree fit on the behavior of a handful of tasks would
          * over-fit them, so the publish requires at least
@@ -1157,7 +1185,9 @@ impl<'a> Scheduler<'a> {
         if res.nr_pids_train < MLFQ_TREE_MIN_PIDS {
             log::info!(
                 "MLFQ tree gen {} rejected: fit slice has only {} distinct pids (< {} required), keeping the previous model",
-                gen, res.nr_pids_train, MLFQ_TREE_MIN_PIDS
+                new_gen,
+                res.nr_pids_train,
+                MLFQ_TREE_MIN_PIDS
             );
             return;
         }
@@ -1169,7 +1199,7 @@ impl<'a> Scheduler<'a> {
         if !mlfq_tree::should_publish(res.mae_tree, res.mae_ema, res.corr, published_corr) {
             log::info!(
                 "MLFQ tree gen {} rejected: holdout MAE_tree={:.1}us > MAE_ema={:.1}us or corr {:.3} below floor 0.30 or not above published {:.3}, keeping the previous model",
-                gen,
+                new_gen,
                 res.mae_tree / 1e3,
                 res.mae_ema / 1e3,
                 res.corr,
@@ -1178,13 +1208,13 @@ impl<'a> Scheduler<'a> {
             return;
         }
 
-        if let Err(e) = self.publish_tree(&res.tree, gen) {
+        if let Err(e) = self.publish_tree(&res.tree, new_gen) {
             log::warn!("MLFQ tree publish failed, keeping the previous model: {e:#}");
             return;
         }
 
         self.model = ModelMeta {
-            generation: gen,
+            generation: new_gen,
             nr_samples: res.nr_train,
             nr_nodes: res.tree.nodes.len(),
             mae_tree_us: (res.mae_tree / 1e3).round() as u64,
@@ -1193,7 +1223,7 @@ impl<'a> Scheduler<'a> {
         };
         info!(
             "MLFQ tree model gen {}, nodes {}, fit {} samples (holdout {}), MAE_tree={}us MAE_ema={}us corr={:.3}",
-            gen,
+            new_gen,
             res.tree.nodes.len(),
             res.nr_train,
             res.holdout_len,
@@ -1222,7 +1252,7 @@ impl<'a> Scheduler<'a> {
     /// theoretical race is one mispredicted burst, which the queue-band
     /// nets absorb. The walk masks every index to the buffer bound, so
     /// it is never a memory-safety issue.
-    fn publish_tree(&mut self, tree: &mlfq_tree::SerializedTree, gen: u64) -> Result<()> {
+    fn publish_tree(&mut self, tree: &mlfq_tree::SerializedTree, new_gen: u64) -> Result<()> {
         let old_meta = {
             let bss = self
                 .skel
@@ -1234,8 +1264,12 @@ impl<'a> Scheduler<'a> {
         };
         let old_gen = old_meta >> crate::bpf_intf::MLFQ_TREE_META_GENERATION_SHIFT;
         // Monotonic generation check: new gen must exceed old, fail otherwise.
-        if gen <= old_gen && old_gen != 0 {
-            anyhow::bail!("monotonic gen violation: new {} <= old {}", gen, old_gen);
+        if new_gen <= old_gen && old_gen != 0 {
+            anyhow::bail!(
+                "monotonic gen violation: new {} <= old {}",
+                new_gen,
+                old_gen
+            );
         }
         let old_active = (old_meta >> 1) & 1;
         let new_active = 1 - old_active;
@@ -1264,7 +1298,7 @@ impl<'a> Scheduler<'a> {
                 .bss_data
                 .as_mut()
                 .expect("bss_data missing, the BPF object has no .bss section");
-            bss.mlfq_tree_ctrl.meta = mlfq_tree::tree_meta(gen, tree.nodes.len(), new_active);
+            bss.mlfq_tree_ctrl.meta = mlfq_tree::tree_meta(new_gen, tree.nodes.len(), new_active);
         }
         Ok(())
     }

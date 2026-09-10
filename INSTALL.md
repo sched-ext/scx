@@ -2,10 +2,10 @@
 
 ## Ubuntu
 
-#### Upgrading to 25.10 (Questing Quokka) - recommended
+#### Upgrading to 26.04 (Resolute Raccoon) - recommended
 
-Currently, only release 25.04 and newer are supported. If you're using an
-earlier release, upgrade to the latest release (25.10) using the command
+Currently, only release 26.04 and newer are supported. If you're using an
+earlier release, upgrade to the latest release (26.04) using the command
 below:
 
 ```

@@ -7,7 +7,7 @@ use crate::extract::ExtractSchedUtilOpts;
 use crate::process::PerfSchedScriptRecord;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -396,12 +396,13 @@ impl<S: BusyIntervalSink> SchedBusyTracker<S> {
                 });
             state.last_seen_ns = time_ns;
 
-            if let Some(task) = state.running_task.as_mut() {
-                if record.tid == task.tid && record.hint != task.hint {
-                    task.hint = record.hint;
-                    if let Some(interval) = sync_cpu_state(state, time_ns) {
-                        emitted.push(interval);
-                    }
+            if let Some(task) = state.running_task.as_mut()
+                && record.tid == task.tid
+                && record.hint != task.hint
+            {
+                task.hint = record.hint;
+                if let Some(interval) = sync_cpu_state(state, time_ns) {
+                    emitted.push(interval);
                 }
             }
 
@@ -695,10 +696,10 @@ impl CompiledCategoryMatcher {
         if let Some(indices) = self.exact_any_hint.get(&interval.comm) {
             matched.extend(indices.iter().copied());
         }
-        if let Some(by_hint) = self.exact_by_hint.get(&interval.comm) {
-            if let Some(indices) = by_hint.get(&interval.hint) {
-                matched.extend(indices.iter().copied());
-            }
+        if let Some(by_hint) = self.exact_by_hint.get(&interval.comm)
+            && let Some(indices) = by_hint.get(&interval.hint)
+        {
+            matched.extend(indices.iter().copied());
         }
 
         for glob in &self.glob_specs {
@@ -1130,9 +1131,10 @@ mod tests {
         let err = agg
             .finalize(trace_end_ns, cpu_count, opts.window_ms)
             .expect_err("expected overlapping categories to be rejected");
-        assert!(err
-            .to_string()
-            .contains("sched util categories are not mutually exclusive"));
+        assert!(
+            err.to_string()
+                .contains("sched util categories are not mutually exclusive")
+        );
 
         Ok(())
     }

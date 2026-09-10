@@ -3,10 +3,10 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
+use scxtop::Action;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
-use scxtop::Action;
 use tokio::sync::mpsc;
 
 // Mock implementation of ActionHandler for testing

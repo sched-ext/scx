@@ -84,8 +84,8 @@ pub fn bump_versions_command(
                 for dep in &pkg.dependencies {
                     let dep_name = dep.name.as_str();
                     let is_workspace_dep = dep.source.is_none(); // workspace dependency has null source
-                                                                 // Only include regular dependencies and build dependencies
-                                                                 // Exclude dev dependencies
+                    // Only include regular dependencies and build dependencies
+                    // Exclude dev dependencies
                     if is_workspace_dep
                         && workspace_members.contains(dep_name)
                         && !matches!(dep.kind, cargo_metadata::DependencyKind::Development)

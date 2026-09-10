@@ -3,8 +3,8 @@
 // Copyright (c) 2026 Meta Platforms
 
 use crate::BpfSkel;
-use libbpf_rs::skel::Skel;
 use libbpf_rs::ProgramType;
+use libbpf_rs::skel::Skel;
 use std::io::Read;
 use std::io::Write;
 
@@ -18,7 +18,7 @@ fn dump_program_stream(
     stream.read_to_end(&mut buf)?;
 
     let body = String::from_utf8_lossy(&buf);
-    if body.len() == 0 {
+    if body.is_empty() {
         return Ok(false);
     }
 

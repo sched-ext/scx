@@ -18,14 +18,14 @@ use cgroup::CgroupReader;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_ulong};
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore;
@@ -33,27 +33,27 @@ use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
-use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::Nvml;
+use nvml_wrapper::bitmasks::InitFlags;
 use scx_stats::prelude::*;
+use scx_utils::GpuIndex;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Powermode;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
+use scx_utils::perf::PerfEventSpec;
 use scx_utils::perf::parse_perf_event;
 use scx_utils::perf::setup_perf_events;
-use scx_utils::perf::PerfEventSpec;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::GpuIndex;
-use scx_utils::Powermode;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cosmos";
@@ -472,7 +472,7 @@ impl DynamicThresholdState {
             // Rate in stable band (considering hysteresis).
             if self.adjustment_direction.is_some() {
                 // We were adjusting; check if we should stop.
-                if rate >= DYNAMIC_THRESHOLD_RATE_LOW && rate <= DYNAMIC_THRESHOLD_RATE_HIGH {
+                if (DYNAMIC_THRESHOLD_RATE_LOW..=DYNAMIC_THRESHOLD_RATE_HIGH).contains(&rate) {
                     None // Back in target band, stop adjusting.
                 } else {
                     self.adjustment_direction // Continue current direction.
@@ -759,42 +759,45 @@ impl<'a> Scheduler<'a> {
         let mut perf_available = true;
         let sticky_counter_idx = if opts.perf_config.event_id > 0 { 1 } else { 0 };
         for cpu in 0..nr_cpus {
-            if opts.perf_config.event_id > 0 {
-                if let Err(e) =
+            if opts.perf_config.event_id > 0
+                && let Err(e) =
                     setup_perf_events(&skel.maps.scx_pmu_map, cpu as i32, &opts.perf_config, 0)
-                {
-                    if cpu == 0 {
-                        let err_str = e.to_string();
-                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
-                            warn!("Performance counters not available on this CPU architecture");
-                            warn!("PMU event '{}' not supported - scheduler will run without perf monitoring", opts.perf_config.display_name);
-                        } else {
-                            warn!("Failed to setup perf events: {}", e);
-                        }
-                        perf_available = false;
-                        break;
-                    }
+                && cpu == 0
+            {
+                let err_str = e.to_string();
+                if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                    warn!("Performance counters not available on this CPU architecture");
+                    warn!(
+                        "PMU event '{}' not supported - scheduler will run without perf monitoring",
+                        opts.perf_config.display_name
+                    );
+                } else {
+                    warn!("Failed to setup perf events: {}", e);
                 }
+                perf_available = false;
+                break;
             }
-            if opts.perf_sticky.event_id > 0 {
-                if let Err(e) = setup_perf_events(
+            if opts.perf_sticky.event_id > 0
+                && let Err(e) = setup_perf_events(
                     &skel.maps.scx_pmu_map,
                     cpu as i32,
                     &opts.perf_sticky,
                     sticky_counter_idx,
-                ) {
-                    if cpu == 0 {
-                        let err_str = e.to_string();
-                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
-                            warn!("Performance counters not available on this CPU architecture");
-                            warn!("PMU event '{}' not supported - scheduler will run without perf monitoring", opts.perf_sticky.display_name);
-                        } else {
-                            warn!("Failed to setup perf events: {}", e);
-                        }
-                        perf_available = false;
-                        break;
-                    }
+                )
+                && cpu == 0
+            {
+                let err_str = e.to_string();
+                if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                    warn!("Performance counters not available on this CPU architecture");
+                    warn!(
+                        "PMU event '{}' not supported - scheduler will run without perf monitoring",
+                        opts.perf_sticky.display_name
+                    );
+                } else {
+                    warn!("Failed to setup perf events: {}", e);
                 }
+                perf_available = false;
+                break;
             }
         }
         if perf_available {
@@ -809,7 +812,7 @@ impl<'a> Scheduler<'a> {
                     info!("GPU{} -> node{}", nvml_id, gpu.node_id);
                 }
                 skel.maps.gpu_node_map.update(
-                    &(nvml_id as u32).to_ne_bytes(),
+                    &nvml_id.to_ne_bytes(),
                     &(gpu.node_id as u32).to_ne_bytes(),
                     MapFlags::ANY,
                 )?;
