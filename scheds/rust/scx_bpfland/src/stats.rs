@@ -25,31 +25,6 @@ pub struct Metrics {
     pub nr_direct_dispatches: u64,
     #[stat(desc = "Number of regular task dispatches")]
     pub nr_shared_dispatches: u64,
-    // TIMELY stats (zero when timely mode is disabled)
-    #[stat(desc = "Number of delay recovery dispatches")]
-    pub nr_delay_recovery_dispatches: u64,
-    #[stat(desc = "Number of delay middle add dispatches")]
-    pub nr_delay_middle_add_dispatches: u64,
-    #[stat(desc = "Number of delay fast recovery dispatches")]
-    pub nr_delay_fast_recovery_dispatches: u64,
-    #[stat(desc = "Number of delay rate-limited dispatches")]
-    pub nr_delay_rate_limited_dispatches: u64,
-    #[stat(desc = "Number of gain floor dispatches")]
-    pub nr_gain_floor_dispatches: u64,
-    #[stat(desc = "Number of gain ceiling dispatches")]
-    pub nr_gain_ceiling_dispatches: u64,
-    #[stat(desc = "Number of delay low region samples")]
-    pub nr_delay_low_region_samples: u64,
-    #[stat(desc = "Number of delay mid region samples")]
-    pub nr_delay_mid_region_samples: u64,
-    #[stat(desc = "Number of delay high region samples")]
-    pub nr_delay_high_region_samples: u64,
-    #[stat(desc = "Number of gain floor resident samples")]
-    pub nr_gain_floor_resident_samples: u64,
-    #[stat(desc = "Number of gain mid resident samples")]
-    pub nr_gain_mid_resident_samples: u64,
-    #[stat(desc = "Number of gain ceiling resident samples")]
-    pub nr_gain_ceiling_resident_samples: u64,
     #[stat(desc = "Number of idle select path picks")]
     pub nr_idle_select_path_picks: u64,
     #[stat(desc = "Number of idle enqueue path picks")]
@@ -86,18 +61,13 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] tasks -> r: {:>2}/{:<2} | dispatch -> k: {:<5} d: {:<5} s: {:<5} | timely -> rec: {:<5} mid: {:<5} rl: {:<5} min: {:<5} max: {:<5}",
+            "[{}] tasks -> r: {:>2}/{:<2} | dispatch -> k: {:<5} d: {:<5} s: {:<5}",
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.nr_cpus,
             self.nr_kthread_dispatches,
             self.nr_direct_dispatches,
-            self.nr_shared_dispatches,
-            self.nr_delay_recovery_dispatches,
-            self.nr_delay_middle_add_dispatches,
-            self.nr_delay_rate_limited_dispatches,
-            self.nr_gain_floor_dispatches,
-            self.nr_gain_ceiling_dispatches
+            self.nr_shared_dispatches
         )?;
         Ok(())
     }
@@ -107,29 +77,6 @@ impl Metrics {
             nr_kthread_dispatches: self.nr_kthread_dispatches - rhs.nr_kthread_dispatches,
             nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
             nr_shared_dispatches: self.nr_shared_dispatches - rhs.nr_shared_dispatches,
-            nr_delay_recovery_dispatches: self.nr_delay_recovery_dispatches
-                - rhs.nr_delay_recovery_dispatches,
-            nr_delay_middle_add_dispatches: self.nr_delay_middle_add_dispatches
-                - rhs.nr_delay_middle_add_dispatches,
-            nr_delay_fast_recovery_dispatches: self.nr_delay_fast_recovery_dispatches
-                - rhs.nr_delay_fast_recovery_dispatches,
-            nr_delay_rate_limited_dispatches: self.nr_delay_rate_limited_dispatches
-                - rhs.nr_delay_rate_limited_dispatches,
-            nr_gain_floor_dispatches: self.nr_gain_floor_dispatches - rhs.nr_gain_floor_dispatches,
-            nr_gain_ceiling_dispatches: self.nr_gain_ceiling_dispatches
-                - rhs.nr_gain_ceiling_dispatches,
-            nr_delay_low_region_samples: self.nr_delay_low_region_samples
-                - rhs.nr_delay_low_region_samples,
-            nr_delay_mid_region_samples: self.nr_delay_mid_region_samples
-                - rhs.nr_delay_mid_region_samples,
-            nr_delay_high_region_samples: self.nr_delay_high_region_samples
-                - rhs.nr_delay_high_region_samples,
-            nr_gain_floor_resident_samples: self.nr_gain_floor_resident_samples
-                - rhs.nr_gain_floor_resident_samples,
-            nr_gain_mid_resident_samples: self.nr_gain_mid_resident_samples
-                - rhs.nr_gain_mid_resident_samples,
-            nr_gain_ceiling_resident_samples: self.nr_gain_ceiling_resident_samples
-                - rhs.nr_gain_ceiling_resident_samples,
             nr_idle_select_path_picks: self.nr_idle_select_path_picks
                 - rhs.nr_idle_select_path_picks,
             nr_idle_enqueue_path_picks: self.nr_idle_enqueue_path_picks
