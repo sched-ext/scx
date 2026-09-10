@@ -10,9 +10,10 @@
  *
  * Everything sized by the machine lives in a BPF arena, allocated once by
  * user space before the scheduler is attached, so nothing here caps the
- * number of CPUs, cores, LLCs, nodes or capacity tiers.
+ * number of CPUs, cores, LLCs, nodes or placement tiers.
  */
 #include <scx/common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include <lib/arena_map.h>
 #include <lib/ravg.h>
 #include <lib/arena_loop.h>
@@ -172,6 +173,7 @@ const volatile u32 balance_sample = 2;
  * Scheduler statistics.
  */
 volatile u64 nr_steals __hot_written;
+volatile u64 nr_active_balances __hot_written;
 volatile u64 nr_preempts __hot_written;
 volatile u64 nr_hrticks __hot_written;
 
@@ -197,11 +199,15 @@ static u32 nr_cids_max;
 static u32 nr_cpu_ids;
 
 /*
- * Number of capacity tiers, 0 being the fastest, and whether there is
- * more than one.
+ * Packing and capacity are independent kernel policies and have independent
+ * tiers, both with 0 as the most preferred. Packing tiers are used by
+ * SD_ASYM_PACKING balance; capacity tiers are used only when CPU capacity is
+ * asymmetric.
  */
-static u32 nr_tiers;
+static u32 nr_place_tiers;
+static u32 nr_capacity_tiers;
 static bool asym_capacity;
+static bool asym_packing;
 
 /*
  * Per-task context.
@@ -229,6 +235,7 @@ struct task_ctx {
 	u32 wakee_flips;
 	s32 last_wakee_pid;
 	s32 recent_used_cid;
+	s32 dispatch_migrate_cid; /* preferred destination chosen for running @p */
 
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
@@ -301,12 +308,15 @@ static u64 cgrp_gen = 1;
  */
 struct cid_topo {
 	u32 cpu;		/* cpu behind this cid, for affinity tests */
-	u32 tier;		/* capacity tier, 0 = fastest */
+	u32 place_tier;		/* SD_ASYM_PACKING priority tier */
+	u32 capacity_tier;	/* CPU capacity tier */
+	u32 smt_asym_packing;	/* SMT domain follows SD_ASYM_PACKING */
 	u64 cap;		/* capacity, 1024 = fastest */
 	u32 core_base;		/* first cid of the core */
 	u32 core_nr;		/* cids in the core (SMT siblings) */
 	u32 llc_base;		/* first cid of the LLC */
 	u32 llc_nr;		/* cids in the LLC */
+	u32 llc_place_tier;	/* best SD_ASYM_PACKING tier in the LLC */
 	u32 node_base;		/* first cid of the node */
 	u32 node_nr;		/* cids in the node */
 };
@@ -328,10 +338,14 @@ struct cid_ctx {
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
+	u64 active_balance_next;	/* destination: next asymmetric balance */
+	u32 active_balance_interval_ms; /* destination: balance backoff */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
+	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
+	s32 active_balance_cid;	/* idle cid asking for the running task */
 };
 
 /*
@@ -343,9 +357,12 @@ struct cid_ctx {
 static struct cid_topo __arena *topos;
 static struct cid_ctx __arena *cctxs;
 static struct scx_cmask __arena *idle_cids;	/* one bit per idle cid */
+static struct scx_cmask __arena *idle_core_llcs; /* LLCs known to have an idle core */
 static struct scx_cmask __arena *queued_cids;	/* one bit per cid with a queued task */
-static struct scx_cmask __arena *tier_cids;	/* nr_tiers masks: the cids of a tier */
-static u64 tier_stride;				/* bytes from one tier mask to the next */
+static struct scx_cmask __arena *place_tier_cids; /* one mask per placement tier */
+static struct scx_cmask __arena *capacity_tier_cids; /* one mask per capacity tier */
+static u64 place_tier_stride;			 /* bytes between placement tier masks */
+static u64 capacity_tier_stride;			 /* bytes between capacity tier masks */
 
 /*
  * The bitmaps are struct scx_cmask, the type the kernel's cid interfaces
@@ -356,12 +373,20 @@ static u64 tier_stride;				/* bytes from one tier mask to the next */
  * cmask_range_word(). What the scans stay away from is the per-cid
  * iterators, not the helpers: a scan reads whole words.
  */
-static __always_inline struct scx_cmask __arena *tier_mask(u32 t)
+static __always_inline struct scx_cmask __arena *place_tier_mask(u32 t)
 {
-	return (struct scx_cmask __arena *)((char __arena *)tier_cids + t * tier_stride);
+	return (struct scx_cmask __arena *)((char __arena *)place_tier_cids +
+					     t * place_tier_stride);
+}
+static __always_inline struct scx_cmask __arena *capacity_tier_mask(u32 t)
+{
+	return (struct scx_cmask __arena *)((char __arena *)capacity_tier_cids +
+					     t * capacity_tier_stride);
 }
 static u64 __arena *cpu_cap_in;		/* cpu space: capacity from user space */
-static u32 __arena *cpu_tier_in;	/* cpu space: tier from user space */
+static u32 __arena *cpu_place_tier_in; /* cpu space: placement tier */
+static u32 __arena *cpu_capacity_tier_in; /* cpu space: capacity tier */
+static u32 __arena *cpu_smt_asym_in;	/* cpu space: SMT SD_ASYM_PACKING */
 
 /*
  * Scratch space for scx_bpf_cid_topo(), only used by ops.init(). It has
@@ -472,7 +497,12 @@ static void cid_util_set_running(s32 cid, bool running, u64 now)
 	struct cid_ctx __arena *cctx;
 	struct ravg_data rd;
 
-	if (!cpufreq_enabled || !cid_valid(cid))
+	/*
+	 * Placement uses this signal too, so keep it even when frequency
+	 * control is disabled. update_cpufreq() independently honors
+	 * cpufreq_enabled before applying it to the governor.
+	 */
+	if (!cid_valid(cid))
 		return;
 	cctx = cid_ctx(cid);
 
@@ -613,6 +643,52 @@ static bool core_is_idle(s32 cid)
 }
 
 /*
+ * Return true when every SMT sibling of @cid is idle. This is fair.c's
+ * is_core_idle() test as sched_use_asym_prio() applies it to a running
+ * source CPU: @cid itself is deliberately excluded.
+ */
+static bool siblings_idle(s32 cid)
+{
+	struct cid_topo __arena *topo;
+	u32 sibling;
+
+	if (!cid_valid(cid))
+		return false;
+	topo = cid_topo(cid);
+	bpf_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+		if (sibling != (u32)cid && !cid_idle_test(sibling))
+			return false;
+	}
+
+	return true;
+}
+
+/* fair.c's sd_balance_shared::has_idle_cores hint, keyed by LLC base cid. */
+static bool test_idle_cores(s32 cid)
+{
+	struct cid_topo __arena *topo;
+
+	if (!cid_valid(cid))
+		return false;
+	topo = cid_topo(cid);
+
+	return __cmask_test(topo->llc_base, idle_core_llcs);
+}
+
+static void set_idle_cores(s32 cid, bool has_idle_core)
+{
+	struct cid_topo __arena *topo;
+
+	if (!cid_valid(cid))
+		return;
+	topo = cid_topo(cid);
+	if (has_idle_core)
+		cmask_set(topo->llc_base, idle_core_llcs);
+	else
+		cmask_clear(topo->llc_base, idle_core_llcs);
+}
+
+/*
  * Claim the idle state of @cid, returning true if this caller is the one
  * that took it out of the idle state. Claiming keeps concurrent wakeups
  * from aiming at the same cid.
@@ -627,8 +703,12 @@ static bool cid_idle_claim(s32 cid)
  */
 static void cid_idle_set(s32 cid)
 {
-	if (cid_valid(cid))
-		cmask_set(cid, idle_cids);
+	if (!cid_valid(cid))
+		return;
+
+	cmask_set(cid, idle_cids);
+	if (smt_enabled && !test_idle_cores(cid) && core_is_idle(cid))
+		set_idle_cores(cid, true);
 }
 
 /*
@@ -679,11 +759,16 @@ static __always_inline u64 rotr64(u64 w, u32 s)
 }
 
 /*
- * Return the word @k of the cids of tier @t.
+ * Return word @k of the cids in placement tier @t.
  */
-static __always_inline u64 tier_word(u32 t, u32 k)
+static __always_inline u64 place_tier_word(u32 t, u32 k)
 {
-	return cmask_word(tier_mask(t), k);
+	return cmask_word(place_tier_mask(t), k);
+}
+
+static __always_inline u64 capacity_tier_word(u32 t, u32 k)
+{
+	return cmask_word(capacity_tier_mask(t), k);
 }
 
 /*
@@ -734,14 +819,10 @@ static __always_inline s32 first_allowed_cid(const struct task_struct *p,
 	return -EBUSY;
 }
 
-/*
- * Scan the idle cids of tier @t within [@base, @base + @nr) for one @p can
- * take, see first_idle_cid(). The range is contiguous in cid space, so
- * only the words it spans are read.
- */
+/* Scan idle cids without an asymmetric-packing tier restriction. */
 static __always_inline s32
-scan_idle_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
-		bool restricted, bool whole_core)
+scan_idle_unranked_range(const struct task_struct *p, u32 base, u32 nr,
+			 bool restricted, bool whole_core)
 {
 	u32 k, last;
 
@@ -749,7 +830,7 @@ scan_idle_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 		return -EBUSY;
 	last = (base + nr - 1) / 64;
 	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = cmask_word(idle_cids, k) & tier_word(t, k) &
+		u64 w = cmask_word(idle_cids, k) &
 			cmask_range_word(idle_cids, k, base, nr);
 		s32 cid;
 
@@ -763,7 +844,32 @@ scan_idle_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 	return -EBUSY;
 }
 
-/* Flags for pick_idle_cid_ranked() */
+/* scan_idle_range() restricted by CPU capacity rather than packing priority. */
+static __always_inline s32
+scan_idle_capacity_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
+			 bool restricted, bool whole_core)
+{
+	u32 k, last;
+
+	if (!nr)
+		return -EBUSY;
+	last = (base + nr - 1) / 64;
+	bpf_arena_for(k, base / 64, last + 1) {
+		u64 w = cmask_word(idle_cids, k) & capacity_tier_word(t, k) &
+			cmask_range_word(idle_cids, k, base, nr);
+		s32 cid;
+
+		if (!w)
+			continue;
+		cid = first_idle_cid(p, w, k, restricted, whole_core);
+		if (cid >= 0)
+			return cid;
+	}
+
+	return -EBUSY;
+}
+
+/* Flags for pick_idle_cid_topology() */
 enum pick_idle_flags {
 	/* @prev_cid is in @p's allowed set and can be returned as is */
 	PICK_IDLE_PREV_ALLOWED	= 1 << 0,
@@ -773,6 +879,9 @@ enum pick_idle_flags {
 
 	/* Return the cid without claiming it, for a caller that only kicks */
 	PICK_IDLE_NO_CLAIM	= 1 << 2,
+
+	/* Restrict the scan to the LLC containing @prev_cid */
+	PICK_IDLE_LLC_ONLY	= 1 << 3,
 };
 
 /*
@@ -813,21 +922,59 @@ static bool task_fits_cid(const struct task_struct *p, s32 cid)
 }
 
 /*
- * Pick an idle cid for @p one capacity tier at a time from the fastest.
- * Only fully idle cores are considered if @whole_core is set, any idle
- * cid otherwise: the caller runs the whole core pass first, across every
- * tier, since sharing a core costs more than the step down to the next
- * tier, the way select_idle_core() looks for a whole core before
- * select_idle_cpu() settles for a thread.
+ * fair.c's select_idle_smt_cpu(): redirect an idle CPU to a more-preferred
+ * available sibling when SD_ASYM_PACKING is active in its SMT domain.
+ */
+static s32 select_idle_smt_cpu(const struct task_struct *p, s32 cid)
+{
+	struct cid_topo __arena *topo;
+	s32 best = cid;
+	u32 sibling;
+
+	if (!smt_enabled || !cid_valid(cid))
+		return cid;
+	topo = cid_topo(cid);
+	if (!topo->smt_asym_packing)
+		return cid;
+
+	bpf_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+		if (sibling == (u32)best || !cid_idle_test(sibling) ||
+		    !cid_allowed(p, sibling))
+			continue;
+		if (cid_topo(sibling)->place_tier < cid_topo(best)->place_tier)
+			best = sibling;
+	}
+
+	return best;
+}
+
+static s32 claim_idle_cid(const struct task_struct *p, s32 cid)
+{
+	cid = select_idle_smt_cpu(p, cid);
+
+	return cid_idle_claim(cid) ? cid : -EAGAIN;
+}
+
+/*
+ * Pick an idle cid for @p in topology order. Ordinary fair.c idle selection
+ * does not rank different cores by SD_ASYM_PACKING priority: it searches the
+ * target LLC and redirects only the selected CPU to a preferred SMT sibling.
+ * Keep that policy out of this wakeup path. When CPU capacity itself is
+ * asymmetric, capacity tiers remain the outer ordering, corresponding to
+ * fair.c's separate select_idle_capacity() path.
+ * Only fully idle cores are considered if @whole_core is set, any idle cid
+ * otherwise. pick_idle_cid() uses the LLC's has_idle_core hint to decide
+ * whether to run the whole-core pass, the way select_idle_sibling() chooses
+ * between select_idle_core() and select_idle_cpu().
  *
- * An idle @prev_cid wins before the capacity tiers are walked. Otherwise,
- * each tier considers a cid in the same LLC, then the same node, then any
- * cid. This keeps a task where its cache is warm instead of moving it for a
- * transient capacity advantage, while capacity still decides among the idle
- * alternatives when the previous cid is unavailable. The domain order is
- * the one select_idle_sibling() applies, with the node on top since this scan
- * covers them all. Each domain is a contiguous range, so a wakeup reads the
- * words of its own LLC before anything else.
+ * An idle @prev_cid wins before capacity tiers are walked. Otherwise, each
+ * capacity tier considers a cid in the same LLC, then the same node, then any
+ * cid. On uniform-capacity systems there is one unranked pass instead. This
+ * keeps a task where its cache is warm instead of moving it for a transient
+ * capacity advantage. The domain order is the one select_idle_sibling()
+ * applies, with the node on top since this scan covers them all. Each domain
+ * is a contiguous range, so a wakeup reads the words of its own LLC before
+ * anything else.
  *
  * The idle state is claimed only for the cid that is returned. -EAGAIN
  * means a candidate was found but claimed by someone else first. @flags
@@ -836,14 +983,16 @@ static bool task_fits_cid(const struct task_struct *p, s32 cid)
  * A global function: verified once rather than at every call site, of
  * which the claim retries make eight.
  */
-__noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
-				    s32 prev_cid, u32 flags)
+__noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
+				      s32 prev_cid, u32 flags)
 {
 	bool is_prev_allowed = flags & PICK_IDLE_PREV_ALLOWED;
 	bool whole_core = flags & PICK_IDLE_WHOLE_CORE;
+	bool llc_only = flags & PICK_IDLE_LLC_ONLY;
 	struct cid_topo __arena *prev;
 	bool restricted;
 	s32 best = -EBUSY;
+	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
 	u32 t;
 
 	TOUCH_ARENA();
@@ -864,34 +1013,76 @@ __noinline s32 pick_idle_cid_ranked(struct task_struct *p __arg_trusted,
 		 * A domain that is the whole of the next one is not scanned
 		 * twice.
 		 */
-		best = scan_idle_range(p, t, prev->llc_base, prev->llc_nr,
-				       restricted, whole_core);
-		if (best < 0 && numa_enabled && prev->node_nr > prev->llc_nr)
-			best = scan_idle_range(p, t, prev->node_base, prev->node_nr,
-					       restricted, whole_core);
-		if (best < 0 && (numa_enabled ? prev->node_nr : prev->llc_nr) < nr_cids)
-			best = scan_idle_range(p, t, 0, nr_cids, restricted,
-					       whole_core);
+		if (asym_capacity)
+			best = scan_idle_capacity_range(p, t, prev->llc_base,
+						prev->llc_nr, restricted, whole_core);
+		else
+			best = scan_idle_unranked_range(p, prev->llc_base,
+						prev->llc_nr, restricted, whole_core);
+		if (best < 0 && !llc_only && numa_enabled && prev->node_nr > prev->llc_nr)
+			best = asym_capacity ?
+				scan_idle_capacity_range(p, t, prev->node_base,
+							 prev->node_nr, restricted, whole_core) :
+				scan_idle_unranked_range(p, prev->node_base,
+						       prev->node_nr, restricted, whole_core);
+		if (best < 0 && !llc_only &&
+		    (numa_enabled ? prev->node_nr : prev->llc_nr) < nr_cids)
+			best = asym_capacity ?
+				scan_idle_capacity_range(p, t, 0, nr_cids,
+							 restricted, whole_core) :
+				scan_idle_unranked_range(p, 0, nr_cids,
+						       restricted, whole_core);
 		if (best >= 0)
 			break;
 	}
 
 claim:
-	if (best >= 0 && !(flags & PICK_IDLE_NO_CLAIM) && !cid_idle_claim(best))
-		best = -EAGAIN;
+	if (best >= 0) {
+		best = select_idle_smt_cpu(p, best);
+		if (!(flags & PICK_IDLE_NO_CLAIM))
+			best = cid_idle_claim(best) ? best : -EAGAIN;
+	}
 
 	return best;
 }
 
-/*
- * Scan for an idle cid: fully idle cores first, then any idle cid, from
- * the fastest tier.
- *
- * Return the cid or -EBUSY if no idle cid is found.
- */
-static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
+/* fair.c's select_idle_smt(): scan the previous CPU's SMT siblings. */
+static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
+			   s32 target)
 {
-	u32 flags = !is_restricted(p) || cid_allowed(p, prev_cid) ?
+	struct cid_topo __arena *prev, *dst;
+	u32 sibling;
+
+	if (!smt_enabled || !cid_valid(prev_cid) || !cid_valid(target))
+		return -EBUSY;
+	prev = cid_topo(prev_cid);
+	dst = cid_topo(target);
+	if (prev->llc_base != dst->llc_base)
+		return -EBUSY;
+
+	bpf_for(sibling, prev->core_base, prev->core_base + prev->core_nr) {
+		s32 cid;
+
+		if (sibling == (u32)prev_cid || !cid_idle_test(sibling) ||
+		    !cid_allowed(p, sibling))
+			continue;
+		cid = claim_idle_cid(p, sibling);
+		if (cid >= 0)
+			return cid;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Scan for an idle cid in fair.c's order within the target LLC: a fully idle
+ * core when the LLC says one exists, otherwise an idle sibling of @prev_cid,
+ * then any idle CPU. Cidland's node/global extensions follow only if the LLC
+ * has no idle CPU at all.
+ */
+static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
+{
+	u32 flags = !is_restricted(p) || cid_allowed(p, target) ?
 		    PICK_IDLE_PREV_ALLOWED : 0;
 	s32 cid = -EBUSY;
 	int i;
@@ -921,17 +1112,543 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid)
 	 * with both siblings of a P-core busy and E-cores idle.
 	 */
 	for (i = 0; i < CLAIM_RETRIES; i++) {
-		cid = pick_idle_cid_ranked((struct task_struct *)p, prev_cid,
-					   flags | (smt_enabled ? PICK_IDLE_WHOLE_CORE : 0));
+		bool has_idle_core = smt_enabled && test_idle_cores(target);
+
+		if (!has_idle_core && !asym_capacity) {
+			cid = select_idle_smt(p, prev_cid, target);
+			if (cid >= 0)
+				return cid;
+		}
+
+		if (has_idle_core) {
+			cid = pick_idle_cid_topology((struct task_struct *)p, target,
+						   flags | PICK_IDLE_WHOLE_CORE |
+						   PICK_IDLE_LLC_ONLY);
+			if (cid >= 0)
+				return cid;
+			if (cid == -EAGAIN)
+				continue;
+			set_idle_cores(target, false);
+		}
+
+		cid = pick_idle_cid_topology((struct task_struct *)p, target,
+					   flags | PICK_IDLE_LLC_ONLY);
 		if (cid >= 0)
 			return cid;
-		if (cid != -EAGAIN && smt_enabled)
-			cid = pick_idle_cid_ranked((struct task_struct *)p, prev_cid, flags);
+		if (cid == -EAGAIN)
+			continue;
+
+		/* Cidland extends select_idle_sibling() beyond the target LLC. */
+		if (smt_enabled) {
+			cid = pick_idle_cid_topology((struct task_struct *)p, target,
+						   flags | PICK_IDLE_WHOLE_CORE);
+			if (cid >= 0)
+				return cid;
+			if (cid == -EAGAIN)
+				continue;
+		}
+		cid = pick_idle_cid_topology((struct task_struct *)p, target, flags);
 		if (cid != -EAGAIN)
-			break;
+			return cid >= 0 ? cid : -EBUSY;
 	}
 
-	return cid >= 0 ? cid : -EBUSY;
+	return -EBUSY;
+}
+
+#define ACTIVE_BALANCE_MAX_INTERVAL_MS 512U
+
+enum active_balance_outcome {
+	ACTIVE_BALANCE_MISS,
+	ACTIVE_BALANCE_MOVED,
+	ACTIVE_BALANCE_PINNED,
+};
+
+/*
+ * fair.c keeps the balance interval on the idle CPU which runs the balance,
+ * not on the busy CPU which asks for one. Cidland has one active-balance
+ * level covering the placement domain, so its minimum interval is the
+ * domain weight in milliseconds. Ordinary misses back off only to twice
+ * that interval; affinity failures may use the longer migration backoff.
+ */
+static u32 active_balance_min_ms(s32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+
+	return numa_enabled ? topo->node_nr : nr_cids;
+}
+
+static bool active_balance_due(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!cid_valid(cid))
+		return false;
+	cctx = cid_ctx(cid);
+
+	return !READ_ONCE(cctx->active_balance_pending) &&
+	       !time_before(now, READ_ONCE(cctx->active_balance_next));
+}
+
+/*
+ * Claim a due destination before sending its IPI. Stamping the next balance
+ * while the claim is held prevents two source ticks from kicking the same
+ * idle CPU for one interval.
+ */
+static bool active_balance_reserve(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+	u32 interval;
+
+	if (!active_balance_due(cid, now) || !cid_idle_test(cid))
+		return false;
+	cctx = cid_ctx(cid);
+	/* 1 is an unpublished reservation; dispatch consumes only state 2. */
+	if (__sync_val_compare_and_swap(&cctx->active_balance_pending, 0, 1))
+		return false;
+	if (!cid_idle_test(cid) ||
+	    time_before(now, READ_ONCE(cctx->active_balance_next))) {
+		WRITE_ONCE(cctx->active_balance_pending, 0);
+		return false;
+	}
+	interval = MAX(READ_ONCE(cctx->active_balance_interval_ms),
+		       active_balance_min_ms(cid));
+	WRITE_ONCE(cctx->active_balance_next,
+		   now + (u64)interval * NSEC_PER_MSEC);
+	__sync_val_compare_and_swap(&cctx->active_balance_pending, 1, 2);
+
+	return true;
+}
+
+static void active_balance_complete(s32 cid, u32 outcome)
+{
+	struct cid_ctx __arena *cctx;
+	u32 min_ms, interval, max_ms;
+
+	if (!cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	min_ms = active_balance_min_ms(cid);
+	interval = MAX(READ_ONCE(cctx->active_balance_interval_ms), min_ms);
+	if (outcome == ACTIVE_BALANCE_MOVED)
+		interval = min_ms;
+	else {
+		max_ms = outcome == ACTIVE_BALANCE_PINNED ?
+			 ACTIVE_BALANCE_MAX_INTERVAL_MS : min_ms * 2;
+		interval = MIN(interval * 2, max_ms);
+	}
+	WRITE_ONCE(cctx->active_balance_interval_ms, interval);
+}
+
+/*
+ * Scan packing tier @t for a fully idle, due active-balance destination.
+ * Unlike wake placement this does not claim the idle bit; reservation is a
+ * separate atomic step immediately before the kick.
+ */
+static __always_inline s32
+balance_scan_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
+		   bool restricted, u64 now)
+{
+	u32 k, last;
+
+	if (!nr)
+		return -EBUSY;
+	last = (base + nr - 1) / 64;
+	bpf_arena_for(k, base / 64, last + 1) {
+		u64 w = cmask_word(idle_cids, k) & place_tier_word(t, k) &
+			cmask_range_word(idle_cids, k, base, nr);
+
+		while (w && can_loop) {
+			s32 cid = k * 64 + __builtin_ctzll(w);
+
+			w &= w - 1;
+			if (!cid_valid(cid) || !cid_idle_test(cid) ||
+			    (smt_enabled && !core_is_idle(cid)) ||
+			    (restricted && !cid_allowed(p, cid)) ||
+			    !active_balance_due(cid, now))
+				continue;
+			return cid;
+		}
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Find the idle destination that fair.c's asymmetric active balance would
+ * use to pull @p off @src_cid. Across cores, sched_use_asym_prio() requires
+ * the destination core to be fully idle under SMT. Within an SMT domain CPU
+ * priority is always usable, so a preferred idle sibling is considered first.
+ */
+static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
+				 u64 now)
+{
+	struct cid_topo __arena *src;
+	struct task_ctx *tctx;
+	bool restricted;
+	u32 base, nr, nr_tiers, sibling, t;
+
+	if (!asym_packing || !cid_valid(src_cid) || is_pcpu_task(p))
+		return -EBUSY;
+	src = cid_topo(src_cid);
+	restricted = is_restricted(p);
+
+	if (smt_enabled && src->smt_asym_packing) {
+		bpf_for(sibling, src->core_base, src->core_base + src->core_nr) {
+			if (sibling != (u32)src_cid && cid_idle_test(sibling) &&
+			    cid_topo(sibling)->place_tier < src->place_tier &&
+			    (!restricted || cid_allowed(p, sibling)) &&
+			    active_balance_due(sibling, now))
+				return sibling;
+		}
+	}
+
+	/*
+	 * cidland has no fair-style group load attached to the running task.
+	 * Do not actively chase a bursty current task through transient idle
+	 * gaps; queued work is handled independently by the detach scan.
+	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx || util_fits_cap(task_util(tctx, now), src->cap))
+		return -EBUSY;
+
+	/* Balance the child LLC domain before walking its parent, as fair.c does. */
+	nr_tiers = src->place_tier;
+	if (smt_enabled && !siblings_idle(src_cid))
+		nr_tiers = nr_place_tiers;
+	if (!nr_tiers)
+		goto parent;
+	bpf_arena_for(t, 0, nr_tiers) {
+		s32 cid = balance_scan_range(p, t, src->llc_base, src->llc_nr,
+					     restricted, now);
+
+		if (cid >= 0)
+			return cid;
+	}
+
+parent:
+	/*
+	 * At the parent domain, compare scheduling groups by their preferred
+	 * CPU, not an arbitrary source CPU. The local-LLC scan above already
+	 * exhausted these tiers, so a global scan cannot select it again.
+	 */
+	nr_tiers = src->llc_place_tier;
+	if (!nr_tiers)
+		return -EBUSY;
+	base = numa_enabled ? src->node_base : 0;
+	nr = numa_enabled ? src->node_nr : nr_cids;
+	bpf_arena_for(t, 0, nr_tiers) {
+		s32 cid = balance_scan_range(p, t, base, nr, restricted, now);
+
+		if (cid >= 0 && cid_topo(cid)->llc_base != src->llc_base)
+			return cid;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Find a fully idle CPU of the highest capacity available to a task that does
+ * not fit @src_cid, mirroring fair.c's misfit active-balance case. A saturated
+ * task does not pass fits_capacity() even on the fastest CPU; fair.c stops
+ * treating it as misfit there through p->max_allowed_capacity instead. Thus
+ * the destination is the task's highest allowed capacity, not necessarily a
+ * CPU on which its current utilization passes the headroom test.
+ */
+static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
+{
+	struct task_ctx *tctx;
+	bool restricted;
+	u64 util, src_cap, max_cap = 0;
+	s32 best = -EBUSY;
+	u32 cid;
+
+	if (!asym_capacity || !cid_valid(src_cid) || is_pcpu_task(p))
+		return -EBUSY;
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return -EBUSY;
+	util = task_util(tctx, now);
+	src_cap = cid_topo(src_cid)->cap;
+	restricted = is_restricted(p);
+
+	bpf_for(cid, 0, nr_cids) {
+		struct cid_topo __arena *dst;
+
+		if (restricted && !cid_allowed(p, cid))
+			continue;
+		dst = cid_topo(cid);
+		if (dst->cap > max_cap)
+			max_cap = dst->cap;
+	}
+	if (src_cap == max_cap || util_fits_cap(util, src_cap))
+		return -EBUSY;
+
+	bpf_for(cid, 0, nr_cids) {
+		struct cid_topo __arena *dst = cid_topo(cid);
+
+		if (dst->cap != max_cap || cid == (u32)src_cid ||
+		    !cid_idle_test(cid) ||
+		    (smt_enabled && !core_is_idle(cid)) ||
+		    (restricted && !cid_allowed(p, cid)) ||
+		    !active_balance_due(cid, now))
+			continue;
+		best = cid;
+		break;
+	}
+
+	return best;
+}
+
+static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
+{
+	s32 cid;
+
+	if ((!asym_packing && !asym_capacity) || cmask_empty(idle_cids))
+		return -EBUSY;
+	cid = idle_asym_packing_cid(p, src_cid, now);
+
+	return cid >= 0 ? cid : idle_misfit_cid(p, src_cid, now);
+}
+
+enum active_balance_type {
+	ACTIVE_BALANCE_NONE,
+	ACTIVE_BALANCE_CAPACITY,
+	ACTIVE_BALANCE_REMOTE_PACKING,
+	ACTIVE_BALANCE_LOCAL_SMT,
+	ACTIVE_BALANCE_LOCAL_PACKING,
+};
+
+/*
+ * Classify the imbalance between an idle destination and a source. This is
+ * task-independent: affinity and capacity fit are checked when a queued task
+ * is detached or the source revalidates its current task.
+ */
+static u32 active_balance_type(s32 dst_cid, s32 src_cid)
+{
+	struct cid_topo __arena *dst, *src;
+
+	if (!cid_valid(dst_cid) || !cid_valid(src_cid) || dst_cid == src_cid ||
+	    cid_idle_test(src_cid))
+		return ACTIVE_BALANCE_NONE;
+	dst = cid_topo(dst_cid);
+	src = cid_topo(src_cid);
+
+	if (asym_packing) {
+		if (dst->core_base == src->core_base)
+			return dst->place_tier < src->place_tier &&
+			       dst->smt_asym_packing ? ACTIVE_BALANCE_LOCAL_PACKING :
+			       ACTIVE_BALANCE_NONE;
+		if (dst->llc_base == src->llc_base &&
+		    (!smt_enabled || core_is_idle(dst_cid))) {
+			if (dst->place_tier < src->place_tier)
+				return ACTIVE_BALANCE_LOCAL_PACKING;
+			if (smt_enabled && !siblings_idle(src_cid))
+				return ACTIVE_BALANCE_LOCAL_SMT;
+		}
+		if (dst->llc_base != src->llc_base &&
+		    (!numa_enabled || dst->node_base == src->node_base) &&
+		    (!smt_enabled || core_is_idle(dst_cid)) &&
+		    dst->llc_place_tier < src->llc_place_tier) {
+			return ACTIVE_BALANCE_REMOTE_PACKING;
+		}
+	}
+
+	if (asym_capacity && dst->cap > src->cap &&
+	    (!smt_enabled || core_is_idle(dst_cid)))
+		return ACTIVE_BALANCE_CAPACITY;
+
+	return ACTIVE_BALANCE_NONE;
+}
+
+static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid,
+		     u64 now);
+
+/*
+ * Detach one eligible queued task from the selected source. Unlike the normal
+ * steal path, walk past an affinity-restricted or cache-hot DSQ head, as
+ * fair.c's detach_tasks() walks the CFS task list looking for a candidate.
+ */
+static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
+					     u64 now)
+{
+	struct task_struct *p;
+	bool movable = false, pinned = false;
+
+	TOUCH_ARENA();
+
+	bpf_for_each(scx_dsq, p, cid_dsq(src_cid), 0) {
+		if (is_pcpu_task(p) ||
+		    !bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr)) {
+			pinned = true;
+			continue;
+		}
+		movable = true;
+		if (task_hot(p, src_cid, dst_cid, now))
+			continue;
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL, 0)) {
+			__sync_fetch_and_add(&nr_steals, 1);
+			cid_queued_check(src_cid);
+			return ACTIVE_BALANCE_MOVED;
+		}
+		break;
+	}
+	cid_queued_check(src_cid);
+
+	return pinned && !movable ? ACTIVE_BALANCE_PINNED : ACTIVE_BALANCE_MISS;
+}
+
+/*
+ * Select the busiest source with the strongest asymmetric imbalance. Try to
+ * detach an eligible queued task from it first; only if that fails ask for its
+ * current task through active balance. This is the focused equivalent of
+ * sched_balance_find_src_group(), sched_balance_find_src_rq(), detach_tasks()
+ * and the active-balance fallback.
+ */
+static bool request_active_balance(s32 dst_cid, u64 now)
+{
+	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
+	u32 base = numa_enabled ? cid_topo(dst_cid)->node_base : 0;
+	u32 nr = numa_enabled ? cid_topo(dst_cid)->node_nr : nr_cids;
+	u32 start = dst->steal_cursor;
+	u32 best_type = ACTIVE_BALANCE_NONE, best_tier = 0;
+	u32 best_nr_running = 0;
+	u32 detach = ACTIVE_BALANCE_MISS;
+	u64 best_util = 0;
+	s32 best = -1;
+	u32 i;
+
+	if ((!asym_packing && !asym_capacity) || !cid_idle_test(dst_cid))
+		return false;
+	if (start < base || start >= base + nr)
+		start = base;
+
+	bpf_arena_for(i, 0, nr) {
+		s32 src_cid = base + (start - base + i) % nr;
+		struct cid_ctx __arena *src = cid_ctx(src_cid);
+		u32 type = active_balance_type(dst_cid, src_cid);
+		u32 nr_running;
+		u64 util;
+
+		if (!type)
+			continue;
+		nr_running = scx_bpf_dsq_nr_queued(cid_dsq(src_cid)) +
+			     !!READ_ONCE(src->curr_w);
+		if (!nr_running)
+			continue;
+		util = cid_util(src_cid, now);
+		if (best >= 0 && type < best_type)
+			continue;
+		if (best >= 0 && type == best_type &&
+		    cid_topo(src_cid)->place_tier < best_tier)
+			continue;
+		if (best >= 0 && type == best_type &&
+		    cid_topo(src_cid)->place_tier == best_tier &&
+		    nr_running < best_nr_running)
+			continue;
+		if (best >= 0 && type == best_type &&
+		    cid_topo(src_cid)->place_tier == best_tier &&
+		    nr_running == best_nr_running && util <= best_util)
+			continue;
+		best = src_cid;
+		best_type = type;
+		best_tier = cid_topo(src_cid)->place_tier;
+		best_nr_running = nr_running;
+		best_util = util;
+	}
+
+	if (best < 0) {
+		active_balance_complete(dst_cid, ACTIVE_BALANCE_MISS);
+		return false;
+	}
+	dst->steal_cursor = best + 1;
+	if (cid_queued_test(best)) {
+		detach = detach_one_queued_task(dst_cid, best, now);
+		if (detach == ACTIVE_BALANCE_MOVED) {
+			active_balance_complete(dst_cid, detach);
+			return true;
+		}
+	}
+	if (!READ_ONCE(cid_ctx(best)->curr_w) ||
+	    __sync_val_compare_and_swap(&cid_ctx(best)->active_balance_cid, -1,
+					    dst_cid) != -1) {
+		active_balance_complete(dst_cid, detach);
+		return false;
+	}
+	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
+
+	return false;
+}
+
+/*
+ * Consume and revalidate an idle destination's active-balance request against
+ * the task which is actually running on @src_cid now.
+ */
+static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
+				 u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(src_cid);
+	struct cid_topo __arena *src, *dst;
+	struct task_ctx *tctx = NULL;
+	s32 dst_cid = READ_ONCE(cctx->active_balance_cid);
+	s32 target = -EBUSY;
+	u32 outcome = ACTIVE_BALANCE_MISS;
+	bool restricted;
+
+	if (dst_cid < 0 ||
+	    __sync_val_compare_and_swap(&cctx->active_balance_cid, dst_cid,
+					 -1) != dst_cid)
+		return -EBUSY;
+	if (!cid_valid(dst_cid))
+		return -EBUSY;
+	if (is_pcpu_task(p) || !cid_allowed(p, dst_cid)) {
+		outcome = ACTIVE_BALANCE_PINNED;
+		goto out;
+	}
+	if (!cid_idle_test(dst_cid))
+		goto out;
+	src = cid_topo(src_cid);
+	dst = cid_topo(dst_cid);
+
+	if (active_balance_type(dst_cid, src_cid) > ACTIVE_BALANCE_CAPACITY) {
+		/* Preferred SMT siblings remain fair.c's direct priority case. */
+		if (dst->core_base == src->core_base) {
+			target = dst_cid;
+			goto out;
+		}
+		tctx = try_lookup_task_ctx(p);
+		if (tctx && !util_fits_cap(task_util(tctx, now), src->cap))
+			target = dst_cid;
+		goto out;
+	}
+
+	if (!asym_capacity || dst->cap <= src->cap ||
+	    (smt_enabled && !core_is_idle(dst_cid)))
+		goto out;
+	if (!tctx)
+		tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		goto out;
+
+	/* Match update_misfit_status(): stop at the maximum allowed capacity. */
+	restricted = is_restricted(p);
+	if (!util_fits_cap(task_util(tctx, now), src->cap)) {
+		u64 max_cap = 0;
+		u32 cid;
+
+		bpf_for(cid, 0, nr_cids) {
+			if ((!restricted || cid_allowed(p, cid)) &&
+			    cid_topo(cid)->cap > max_cap)
+				max_cap = cid_topo(cid)->cap;
+		}
+		if (dst->cap == max_cap)
+			target = dst_cid;
+	}
+
+out:
+	if (target >= 0)
+		outcome = ACTIVE_BALANCE_MOVED;
+	active_balance_complete(dst_cid, outcome);
+	return target;
 }
 
 #define WAKEE_DECAY_NS NSEC_PER_SEC
@@ -1051,17 +1768,24 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 				   s32 target)
 {
 	struct task_ctx *tctx;
+	s32 cid;
 	s32 recent = -1;
 
 	if (cid_idle_test(target) && cid_allowed(p, target) &&
-	    task_fits_cid(p, target) && cid_idle_claim(target))
-		return target;
+	    task_fits_cid(p, target)) {
+		cid = claim_idle_cid(p, target);
+		if (cid >= 0)
+			return cid;
+	}
 
 	if (prev_cid != target &&
 	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
-	    task_fits_cid(p, prev_cid) && cid_idle_claim(prev_cid))
-		return prev_cid;
+	    task_fits_cid(p, prev_cid)) {
+		cid = claim_idle_cid(p, prev_cid);
+		if (cid >= 0)
+			return cid;
+	}
 
 	/* Check and rotate p->recent_used_cpu at the same point fair.c does. */
 	tctx = try_lookup_task_ctx(p);
@@ -1072,15 +1796,18 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
 	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(recent) && cid_allowed(p, recent) &&
-	    task_fits_cid(p, recent) && cid_idle_claim(recent))
-		return recent;
+	    task_fits_cid(p, recent)) {
+		cid = claim_idle_cid(p, recent);
+		if (cid >= 0)
+			return cid;
+	}
 
-	return pick_idle_cid(p, target);
+	return pick_idle_cid(p, prev_cid, target);
 }
 
 /*
  * Return the cid of the node of @prev_cid with the fewest tasks queued
- * that @p can run on, the fastest one on ties, or -EBUSY.
+ * that @p can run on, the most-preferred one on ties, or -EBUSY.
  *
  * A new task that finds no idle CPU would otherwise be queued behind its
  * parent, and a parent forking a hundred workers on a busy system would
@@ -1100,15 +1827,18 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
 		return -EBUSY;
 
 	/*
-	 * A cid with nothing queued, the fastest one, is the usual answer
-	 * and the bitmaps give it without a lookup.
+	 * A cid with nothing queued is the usual answer and the bitmaps give it
+	 * without a lookup. SD_ASYM_PACKING is not a fork-placement order in
+	 * fair.c; rank this choice only when capacity itself is asymmetric.
 	 */
-	bpf_arena_for(t, 0, nr_tiers) {
+	bpf_arena_for(t, 0, asym_capacity ? nr_capacity_tiers : 1) {
 		bpf_arena_for(k, base / 64, last + 1) {
-			u64 w = ~cmask_word(queued_cids, k) & tier_word(t, k) &
+			u64 w = ~cmask_word(queued_cids, k) &
 				cmask_range_word(queued_cids, k, base, nr);
 			s32 cid;
 
+			if (asym_capacity)
+				w &= capacity_tier_word(t, k);
 			if (!w)
 				continue;
 			cid = first_allowed_cid(p, w, k, restricted);
@@ -1132,7 +1862,8 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
 			continue;
 		nr_queued = scx_bpf_dsq_nr_queued(cid_dsq(cid));
 		if (best < 0 || nr_queued < best_nr ||
-		    (nr_queued == best_nr && cid_topo(cid)->tier < cid_topo(best)->tier)) {
+		    (nr_queued == best_nr && asym_capacity &&
+		     cid_topo(cid)->capacity_tier < cid_topo(best)->capacity_tier)) {
 			best = cid;
 			best_nr = nr_queued;
 		}
@@ -1146,13 +1877,10 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
  * not claimed: the caller only kicks the cid, so that it comes and looks
  * at a queue it would otherwise never read.
  *
- * Fully idle cores first, then any idle cid, from the fastest tier: the
- * ranking pick_idle_cid() applies, since the cid is being woken for one
- * particular task and the best CPU for it is the one a wakeup would have
- * chosen. Every tier is scanned, not only the tiers faster than @cid's:
- * a CPU of the same tier is just as blind to a queue building up next to
- * it, and it is the one that would otherwise stay idle beside a runnable
- * task.
+ * Fully idle cores first, then any idle cid, with the same topology/capacity
+ * ordering a wakeup uses. SD_ASYM_PACKING priority is deliberately absent:
+ * this kick only supplies an idle balancer for queued work, while packing
+ * policy is applied when that balancer pulls and through active balance.
  */
 static s32 idle_peer_cid(const struct task_struct *p, s32 cid)
 {
@@ -1162,14 +1890,14 @@ static s32 idle_peer_cid(const struct task_struct *p, s32 cid)
 		return -ENOENT;
 
 	if (smt_enabled) {
-		other = pick_idle_cid_ranked((struct task_struct *)p, cid,
+		other = pick_idle_cid_topology((struct task_struct *)p, cid,
 					     PICK_IDLE_NO_CLAIM |
 					     PICK_IDLE_WHOLE_CORE);
 		if (other >= 0)
 			return other;
 	}
 
-	other = pick_idle_cid_ranked((struct task_struct *)p, cid,
+	other = pick_idle_cid_topology((struct task_struct *)p, cid,
 				     PICK_IDLE_NO_CLAIM);
 
 	return other >= 0 ? other : -ENOENT;
@@ -2665,6 +3393,26 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	now = bpf_ktime_get_ns();
 
 	/*
+	 * An idle preferred destination asked @prev_cid for this running task.
+	 * The source dispatch validated the request and let its slice expire;
+	 * ops.stopping() has charged the service since then. Honor the handoff if
+	 * the destination is still idle, otherwise use ordinary placement.
+	 */
+	cid = tctx->dispatch_migrate_cid;
+	tctx->dispatch_migrate_cid = -1;
+	if (!(enq_flags & SCX_ENQ_WAKEUP) && cid_valid(cid) && cid != prev_cid &&
+	    cid_idle_test(cid) && cid_allowed(p, cid)) {
+		cid = claim_idle_cid(p, cid);
+		if (cid >= 0) {
+			place_task(cid, p, tctx, now, false);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
+					   task_request(p), enq_flags | SCX_ENQ_IMMED);
+			__sync_fetch_and_add(&nr_active_balances, 1);
+			return;
+		}
+	}
+
+	/*
 	 * Attempt to dispatch directly to an idle cid if the task can
 	 * migrate.
 	 *
@@ -2692,14 +3440,13 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and @prev_cid is taken for an unknown amount of time, so an idle
 	 * cid is the better option.
 	 *
-	 * A busy SMT sibling is not a reason to leave. Sharing a core is
-	 * avoided when a task is placed, the idle scan prefers a fully idle
-	 * core, and never by moving a running task: EEVDF does the same in
-	 * select_idle_core(), and leaves a running task where it is.
+	 * A busy SMT sibling is not by itself a reason to leave. Asymmetric
+	 * active balance records a specific preferred destination before this
+	 * point; absent that request, preserve the local EEVDF placement.
 	 */
 	if ((task_should_migrate(p, enq_flags) && !reenq_immed(p, enq_flags)) ||
 	    (reenq_preempted(p, enq_flags) && p->scx.slice && !cid_idle_test(prev_cid))) {
-		cid = pick_idle_cid(p, prev_cid);
+		cid = pick_idle_cid(p, prev_cid, prev_cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
@@ -2806,16 +3553,44 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 
 	TOUCH_ARENA();
 
-	if (!cid_valid(cid) || !scx_bpf_dsq_nr_queued(cid_dsq(cid)))
+	if (!cid_valid(cid))
 		return;
+	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid))) {
+		u64 now = bpf_ktime_get_ns();
+
+		/*
+		 * nohz_balancer_kick() also wakes an idle balancer when the sole
+		 * runnable task is on a lower-priority or undersized CPU. Serialize
+		 * that trigger once per placement domain, initially at fair.c's
+		 * domain-weight interval. The interval belongs to the idle
+		 * destination, as fair.c's balance interval does. Reserve that
+		 * destination before the kick so concurrent source ticks cannot
+		 * request the same balance.
+		 */
+		peer = idle_balance_cid(p, cid, now);
+		if (peer >= 0 && peer != cid && active_balance_reserve(peer, now)) {
+			scx_bpf_kick_cid(peer, SCX_KICK_IDLE);
+		}
+		return;
+	}
 
 	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
 	if (!head)
 		return;
 
 	peer = idle_peer_cid(head, cid);
-	if (peer >= 0 && peer != cid)
+	if (peer >= 0 && peer != cid) {
+		u64 now = bpf_ktime_get_ns();
+
+		/*
+		 * If the ordinary head pull fails, let the idle cid walk past a
+		 * pinned or cache-hot head before considering active balance. The
+		 * ordinary pull is not paced; only reserve its active-balance
+		 * fallback when the destination interval is due.
+		 */
+		active_balance_reserve(peer, now);
 		scx_bpf_kick_cid(peer, SCX_KICK_IDLE);
+	}
 }
 
 /*
@@ -3037,7 +3812,7 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
 
 		w = cmask_word(queued_cids, k) & cmask_range_word(queued_cids, k, base, nr);
 		if (t >= 0)
-			w &= tier_word(t, k);
+			w &= place_tier_word(t, k);
 		if (!w)
 			continue;
 		ret = steal_from_word(dst_cid, w, (k << 16) | (i ? 0 : start & 63),
@@ -3077,11 +3852,13 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  *
  * A cid with nothing to run pulls the first task it finds: from the slower
  * cids first, once the task is no longer cache-hot on its previous CPU. This
- * carries load up the capacity ladder without migrating a task as soon as a
- * faster core becomes transiently idle. The pull is only onto a fully idle
- * faster core, as a fast thread sharing its core is no better than a whole
- * slow one and asym_smt_can_pull_tasks() refuses that move too; then the cid
- * scans its own LLC and the rest of the node with the same hot-task check.
+ * carries queued load up the capacity ladder. Asymmetric packing and misfit
+ * balancing separately move a running task when fair.c's active-balance
+ * conditions are met; this pull path still leaves cache-hot queued tasks
+ * alone. A pull onto a faster core is only attempted when the whole core is
+ * idle, as a fast thread sharing its core is no better than a whole slow one
+ * and asym_smt_can_pull_tasks() refuses that move too; then the cid scans its
+ * own LLC and the rest of the node with the same hot-task check.
  *
  * The check is given up, on the climb as much as on the scans that
  * follow it, once the cid has come back empty from @cache_nice_tries
@@ -3158,12 +3935,13 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep)
 	if (start >= nr_cids)
 		start = 0;
 
-	if (!busy && asym_capacity && (!smt_enabled || core_is_idle(dst_cid))) {
+	if (!busy && nr_place_tiers > 1 &&
+	    (!smt_enabled || core_is_idle(dst_cid))) {
 		u32 t;
 
-		/* Slower tiers first, from the slowest, leaving hot tasks alone. */
-		bpf_arena_for(t, 0, nr_tiers - topo->tier - 1) {
-			src = steal_from_range(dst_cid, nr_tiers - 1 - t, node_base,
+		/* Less-preferred tiers first, from the last, leaving hot tasks alone. */
+		bpf_arena_for(t, 0, nr_place_tiers - topo->place_tier - 1) {
+			src = steal_from_range(dst_cid, nr_place_tiers - 1 - t, node_base,
 					       node_nr, node_base, now,
 					       !force_steal &&
 					       failed <= cache_nice_tries,
@@ -3252,7 +4030,8 @@ __noinline int cid_idle_rearm(s32 cid)
 
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
-	bool has_prev, keep = false;
+	bool has_prev, keep = false, active_balance = false;
+	s32 migrate_cid = -EBUSY;
 	u64 now = 0;
 
 	TOUCH_ARENA();
@@ -3263,19 +4042,44 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	/*
 	 * Take a task from this cid's queue or from a deeper one on the
 	 * node, then fall back to this cid's own DSQ in case the pick raced
-	 * with another cid. A task whose slice has ended is asked for the
-	 * CPU rather than simply relieved of it, see keep_running().
+	 * with another cid. An idle cid that failed to pull queued work may have
+	 * requested this running task through asymmetric active balance. Consume
+	 * and validate that one destination before renewing the task; otherwise
+	 * ask the task for this CPU again, see keep_running().
 	 */
 	has_prev = prev && is_task_queued(prev);
+	if (READ_ONCE(cid_ctx(cid)->active_balance_pending) == 2 &&
+	    __sync_val_compare_and_swap(&cid_ctx(cid)->active_balance_pending,
+					    2, 0) == 2) {
+		if (has_prev)
+			active_balance_complete(cid, ACTIVE_BALANCE_MISS);
+		else
+			active_balance = true;
+	}
 	if (has_prev) {
 		now = bpf_ktime_get_ns();
-		keep = keep_running(cid, now);
+		migrate_cid = active_balance_target(prev, cid, now);
+		if (migrate_cid >= 0) {
+			struct task_ctx *tctx = try_lookup_task_ctx(prev);
+
+			if (tctx)
+				tctx->dispatch_migrate_cid = migrate_cid;
+			else
+				migrate_cid = -EBUSY;
+		}
+		if (migrate_cid < 0)
+			keep = keep_running(cid, now);
 	}
 
-	if (try_steal_task(cid, has_prev, keep))
+	if (try_steal_task(cid, has_prev, keep)) {
+		if (active_balance)
+			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
 		return;
+	}
 	if (!keep && scx_bpf_dsq_move_to_local(cid_dsq(cid), 0)) {
 		cid_queued_check(cid);
+		if (active_balance)
+			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
 		return;
 	}
 
@@ -3299,6 +4103,9 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * gives it 33%.
 	 */
 	if (has_prev) {
+		/* Let ops.stopping() charge it and ops.enqueue() perform the handoff. */
+		if (migrate_cid >= 0)
+			return;
 		keep_charge(prev, cid, now);
 		scx_bpf_task_set_slice(prev, task_request(prev));
 		if (cid_queued_test(cid))
@@ -3310,8 +4117,13 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * Nothing to run: the CPU is going idle. ops.update_idle() will not
 	 * say so if the cid was claimed and kicked for a task that never
 	 * came, since there is no transition then, so re-arm the bit here.
+	 * Ordinary queued pulling has already failed. Only now ask a source
+	 * for its sole running task, as fair.c's active balance does after
+	 * detach_tasks() fails.
 	 */
 	cid_idle_rearm(cid);
+	if (active_balance && request_active_balance(cid, bpf_ktime_get_ns()))
+		return;
 }
 
 void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
@@ -3561,6 +4373,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->vcid = -1;
 		tctx->delay_cid = -1;
 		tctx->recent_used_cid = -1;
+		tctx->dispatch_migrate_cid = -1;
 	}
 }
 
@@ -3690,15 +4503,21 @@ static void init_topology(void)
 		struct cid_topo __arena *topo = cid_topo(cid);
 		s32 cpu = scx_bpf_cid_to_cpu(cid);
 
+		cid_ctx(cid)->active_balance_cid = -1;
+
 		scx_bpf_cid_topo(cid, ct);
 
 		topo->cpu = cpu >= 0 ? cpu : 0;
 		if (cpu >= 0 && (u32)cpu < nr_cpu_ids) {
 			topo->cap = cpu_cap_in[cpu];
-			topo->tier = cpu_tier_in[cpu];
+			topo->place_tier = cpu_place_tier_in[cpu];
+			topo->capacity_tier = cpu_capacity_tier_in[cpu];
+			topo->smt_asym_packing = cpu_smt_asym_in[cpu];
 		} else {
 			topo->cap = 1;
-			topo->tier = nr_tiers - 1;
+			topo->place_tier = nr_place_tiers - 1;
+			topo->capacity_tier = nr_capacity_tiers - 1;
+			topo->smt_asym_packing = 0;
 		}
 
 		/*
@@ -3771,16 +4590,36 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	 * bit is set.
 	 */
 	cmask_init(idle_cids, 0, nr_cids);
+	cmask_init(idle_core_llcs, 0, nr_cids);
 	cmask_init(queued_cids, 0, nr_cids);
-	bpf_for(cid, 0, nr_tiers)
-		cmask_init(tier_mask(cid), 0, nr_cids);
+	bpf_for(cid, 0, nr_place_tiers)
+		cmask_init(place_tier_mask(cid), 0, nr_cids);
+	bpf_for(cid, 0, nr_capacity_tiers)
+		cmask_init(capacity_tier_mask(cid), 0, nr_cids);
 
 	nr_words = cmask_nr_words(idle_cids);
 
 	init_topology();
 
 	/*
-	 * Build the bitmap of each capacity tier, create the per-cid DSQs
+	 * fair.c compares an asymmetric scheduling group by its preferred CPU.
+	 * The LLC is the child group of the package-level packing domain on the
+	 * topologies cidland models, so cache its best tier for parent-domain
+	 * source and destination comparisons.
+	 */
+	bpf_for(cid, 0, nr_cids) {
+		struct cid_topo __arena *topo = cid_topo(cid);
+		u32 best = nr_place_tiers - 1;
+		u32 i;
+
+		bpf_arena_for(i, 0, topo->llc_nr)
+			best = MIN(best,
+				   cid_topo(topo->llc_base + i)->place_tier);
+		topo->llc_place_tier = best;
+	}
+
+	/*
+	 * Build the packing- and capacity-tier bitmaps, create the per-cid DSQs
 	 * and start with every cid idle, the way the kernel resets its own
 	 * idle masks: a CPU that is busy clears its bit as soon as a task
 	 * runs there, while a CPU that sits idle from the start never
@@ -3790,9 +4629,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	bpf_for(cid, 0, nr_cids) {
 		struct cid_topo __arena *topo = cid_topo(cid);
 
-		if (topo->tier >= nr_tiers)
-			topo->tier = nr_tiers - 1;
-		__cmask_set(cid, tier_mask(topo->tier));
+		if (topo->place_tier >= nr_place_tiers)
+			topo->place_tier = nr_place_tiers - 1;
+		if (topo->capacity_tier >= nr_capacity_tiers)
+			topo->capacity_tier = nr_capacity_tiers - 1;
+		__cmask_set(cid, place_tier_mask(topo->place_tier));
+		__cmask_set(cid, capacity_tier_mask(topo->capacity_tier));
 
 		err = scx_bpf_create_dsq(cid_dsq(cid), -1);
 		if (err) {
@@ -3841,8 +4683,9 @@ static void __arena *arena_carve(u64 bytes, u64 align)
 }
 
 /*
- * Size the arena for a cid space of @args->nr_cpus and @args->nr_tiers
- * capacity tiers, and carve the tables out of it.
+ * Size the arena for a cid space of @args->nr_cpus and
+ * @args->nr_place_tiers packing tiers and @args->nr_capacity_tiers capacity
+ * tiers, and carve the tables out of it.
  *
  * Run by user space after load and before attach: the tables have to be
  * in place before ops.init(), and the cid space, num_possible_cpus()
@@ -3853,7 +4696,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
 {
 	u64 nr = args->nr_cpus, mask, bytes, pages;
 
-	if (!nr || !args->nr_tiers)
+	if (!nr || !args->nr_place_tiers || !args->nr_capacity_tiers)
 		return -EINVAL;
 
 	/*
@@ -3862,8 +4705,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	 */
 	mask = (sizeof(struct scx_cmask) + (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = nr * sizeof(struct cid_topo) + nr * sizeof(struct cid_ctx) +
-		(2 + args->nr_tiers) * mask +
-		nr * (sizeof(u64) + sizeof(u32)) + 9 * 64;
+		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
+		nr * (sizeof(u64) + 3 * sizeof(u32)) + 9 * 64;
 	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
 	arena_base = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
@@ -3875,26 +4718,34 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	topos = arena_carve(nr * sizeof(struct cid_topo), 64);
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
 	idle_cids = arena_carve(mask, 64);
+	idle_core_llcs = arena_carve(mask, 64);
 	queued_cids = arena_carve(mask, 64);
-	tier_stride = mask;
-	tier_cids = arena_carve(args->nr_tiers * mask, 64);
+	place_tier_stride = mask;
+	place_tier_cids = arena_carve(args->nr_place_tiers * mask, 64);
+	capacity_tier_stride = mask;
+	capacity_tier_cids = arena_carve(args->nr_capacity_tiers * mask, 64);
 	cpu_cap_in = arena_carve(nr * sizeof(u64), 64);
-	cpu_tier_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !idle_cids || !queued_cids || !tier_cids ||
-	    !cpu_cap_in || !cpu_tier_in)
+	cpu_place_tier_in = arena_carve(nr * sizeof(u32), 64);
+	cpu_capacity_tier_in = arena_carve(nr * sizeof(u32), 64);
+	cpu_smt_asym_in = arena_carve(nr * sizeof(u32), 64);
+	if (!topos || !cctxs || !idle_cids || !idle_core_llcs || !queued_cids ||
+	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
+	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in)
 		return -ENOMEM;
 
 	nr_cids_max = nr;
-	nr_tiers = args->nr_tiers;
-	asym_capacity = nr_tiers > 1;
+	nr_place_tiers = args->nr_place_tiers;
+	nr_capacity_tiers = args->nr_capacity_tiers;
+	asym_capacity = args->asym_capacity;
+	asym_packing = args->asym_packing;
 
 	return 0;
 }
 
 /*
- * Report the capacity and the tier of one CPU, in cpu space: the cid
- * layout is only known once the kernel has built it, so ops.init()
- * translates.
+ * Report the capacity and its independent packing and capacity tiers in CPU
+ * space. The cid layout is only known once the kernel has built it, so
+ * ops.init() translates.
  */
 SEC("syscall")
 int cidland_set_cpu(struct cidland_cpu_args *args)
@@ -3903,12 +4754,57 @@ int cidland_set_cpu(struct cidland_cpu_args *args)
 
 	TOUCH_ARENA();
 
-	if (!cpu_cap_in || cpu >= nr_cids_max || args->tier >= nr_tiers)
+	if (!cpu_cap_in || cpu >= nr_cids_max ||
+	    args->place_tier >= nr_place_tiers ||
+	    args->capacity_tier >= nr_capacity_tiers)
 		return -EINVAL;
 
 	cpu_cap_in[cpu] = args->capacity;
-	cpu_tier_in[cpu] = args->tier;
+	cpu_place_tier_in[cpu] = args->place_tier;
+	cpu_capacity_tier_in[cpu] = args->capacity_tier;
+	cpu_smt_asym_in[cpu] = args->smt_asym_packing;
 
+	return 0;
+}
+
+/*
+ * Return the kernel's live SD_ASYM_PACKING state and
+ * arch_asym_cpu_priority() value for one CPU. Reading the per-CPU symbols
+ * here avoids treating a hardware performance estimate as scheduler policy.
+ */
+SEC("syscall")
+int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
+{
+	struct sched_domain *sd;
+	u64 cpu = args->cpu;
+	int priority;
+
+	args->priority = 0;
+	args->asym_packing = 0;
+	args->smt_asym_packing = 0;
+	if (cpu > INT_MAX || !&sched_core_priority || !&sd_asym_packing)
+		return 0;
+
+	priority = cpu_priority(cpu);
+	sd = cpu_asym_packing_dom(cpu);
+	if (priority < 0 || !sd)
+		return 0;
+
+	args->priority = priority;
+	args->asym_packing = 1;
+	bpf_repeat(16) {
+		int flags;
+
+		if (!sd)
+			break;
+		flags = BPF_CORE_READ(sd, flags);
+		if ((flags & (SD_SHARE_CPUCAPACITY | SD_ASYM_PACKING)) ==
+		    (SD_SHARE_CPUCAPACITY | SD_ASYM_PACKING)) {
+			args->smt_asym_packing = 1;
+			break;
+		}
+		sd = BPF_CORE_READ(sd, child);
+	}
 	return 0;
 }
 

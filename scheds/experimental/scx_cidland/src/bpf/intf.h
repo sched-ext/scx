@@ -30,22 +30,41 @@ typedef int pid_t;
 
 /*
  * Arguments to cidland_arena_init(), which sizes everything indexed by cid:
- * the width of the cid space, num_possible_cpus(), and the number of
- * capacity tiers.
+ * the width of the cid space, num_possible_cpus(), the number of packing and
+ * capacity tiers, and the active asymmetric placement policies.
  */
 struct cidland_arena_args {
 	unsigned long long	nr_cpus;
-	unsigned long long	nr_tiers;
+	unsigned long long	nr_place_tiers;
+	unsigned long long	nr_capacity_tiers;
+	unsigned long long	asym_capacity;
+	unsigned long long	asym_packing;
 };
 
 /*
- * Arguments to cidland_set_cpu(): the capacity and the tier of one CPU, in
+ * Arguments to cidland_set_cpu(): the capacity, its independent capacity and
+ * packing tiers, and the SMT-domain asymmetric-packing state of one CPU, in
  * cpu space.
  */
 struct cidland_cpu_args {
 	unsigned long long	cpu;
 	unsigned long long	capacity;
-	unsigned long long	tier;
+	unsigned long long	place_tier;
+	unsigned long long	capacity_tier;
+	unsigned long long	smt_asym_packing;
+};
+
+/*
+ * Arguments to cidland_get_cpu_priority(). The program returns the live
+ * arch_asym_cpu_priority() value, whether SD_ASYM_PACKING is active in a
+ * scheduling domain containing the CPU, and whether the SMT domain itself has
+ * both SD_SHARE_CPUCAPACITY and SD_ASYM_PACKING.
+ */
+struct cidland_cpu_priority_args {
+	unsigned long long	cpu;
+	long long		priority;
+	unsigned long long	asym_packing;
+	unsigned long long	smt_asym_packing;
 };
 
 #endif /* __INTF_H */

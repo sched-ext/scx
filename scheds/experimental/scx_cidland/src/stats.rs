@@ -18,6 +18,9 @@ pub struct Metrics {
     #[stat(desc = "Tasks stolen from another CPU's queue")]
     pub nr_steals: u64,
 
+    #[stat(desc = "Running tasks moved to an idle core by asymmetric balance")]
+    pub nr_active_balances: u64,
+
     #[stat(desc = "Running tasks interrupted for a woken task")]
     pub nr_preempts: u64,
 
@@ -29,9 +32,10 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] steals={} preempts={} hrticks={}",
+            "[{}] steals={} active_balances={} preempts={} hrticks={}",
             crate::SCHEDULER_NAME,
             self.nr_steals,
+            self.nr_active_balances,
             self.nr_preempts,
             self.nr_hrticks,
         )?;
@@ -41,6 +45,7 @@ impl Metrics {
     fn delta(&self, rhs: &Self) -> Self {
         Self {
             nr_steals: self.nr_steals - rhs.nr_steals,
+            nr_active_balances: self.nr_active_balances - rhs.nr_active_balances,
             nr_preempts: self.nr_preempts - rhs.nr_preempts,
             nr_hrticks: self.nr_hrticks - rhs.nr_hrticks,
         }
