@@ -119,18 +119,22 @@ be turned off on the command line to compare the two rules against each other.
    the CPU capacity is used to balance the load, never to discount the
    vruntime.
 
- - **Wakeup preemption.** A task queued on a CPU with a deadline earlier than
+- **Wakeup preemption.** A task queued on a CPU with a deadline earlier than
    the one the CPU is running is a task that CPU would pick if it were asked
    again, so the CPU is interrupted for it rather than left to finish its
    slice: `wakeup_preempt_fair()`. The woken task has to be owed service to
    qualify and the running one is left alone while it is still owed its own,
    which is what `pick_eevdf()` does when it drops an ineligible `curr` before
-   looking at the tree. `--no-run-to-parity` drops the running task's half
-   alone, the sense the feature had when EEVDF was merged; `--no-eligibility`
-   decides on the deadlines alone; `--no-wakeup-preempt` never interrupts.
-   The policies are settled first, as `wakeup_preempt_fair()` settles them: a
-   running `SCHED_IDLE` task is interrupted for any task that is not one, and
-   a `SCHED_IDLE` or `SCHED_BATCH` task never interrupts anything.
+   looking at the tree. And it has to be what the CPU would run next, at the
+   head of the queue: `wakeup_preempt_fair()` preempts only when the woken task
+   is the pick, `nse == pse`, and a running task that has lost the pick to some
+   other queued task is left to finish its slice. `--no-run-to-parity` drops
+   the running task's half alone, the sense the feature had when EEVDF was
+   merged; `--no-eligibility` decides on the deadlines alone; `--no-wakeup-
+   preempt` never interrupts. The policies are settled first, as
+   `wakeup_preempt_fair()` settles them: a running `SCHED_IDLE` task is
+   interrupted for any task that is not one, and a `SCHED_IDLE` or
+   `SCHED_BATCH` task never interrupts anything.
 
  - **Idle search.** `wake_affine()` first computes the target around which
    `select_idle_sibling()` searches. The target is tried if it is idle, then

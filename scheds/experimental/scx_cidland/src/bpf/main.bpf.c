@@ -2366,6 +2366,7 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 			    const struct task_ctx *tctx, u64 dl, u64 now)
 {
 	struct cid_ctx __arena *cctx;
+	struct task_struct *head;
 	bool owed, p_idle;
 
 	if (no_wakeup_preempt || cid_idle_test(cid))
@@ -2415,6 +2416,32 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	 * say. --no-eligibility keeps deciding on the deadlines alone.
 	 */
 	if ((owed || no_eligibility) && !time_before(dl, cctx->curr_dl))
+		goto idle;
+
+	/*
+	 * The task is only worth interrupting the CPU for if it is what the
+	 * CPU would run next. wakeup_preempt_fair() preempts for the woken
+	 * task alone,
+	 *
+	 *	nse = pick_next_entity(rq, ...);
+	 *	if (nse == pse)
+	 *		goto preempt;
+	 *
+	 * and a curr that has lost the pick to some other queued task is
+	 * left running until its slice ends, or until a wakeup that does win
+	 * it. The dispatch takes the head of the queue, so the woken task
+	 * is the pick only if its deadline is strictly ahead of the current
+	 * head. A task already queued is not displaced by one that ties it. The
+	 * insertion asked for above is applied once this op returns, so the head
+	 * seen here is the one the task is queued against. A kick for a task
+	 * that queues behind others
+	 * only trades the running task for the head a slice early, once for
+	 * every wakeup that lands in the queue: with sixteen tasks queued per
+	 * CPU that was one context switch in three, and perf bench sched
+	 * messaging ran at half its speed.
+	 */
+	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
+	if (head && !time_before(dl, head->scx.dsq_vtime))
 		goto idle;
 
 preempt:
