@@ -1,11 +1,19 @@
+<!--
+  SPDX-License-Identifier: GPL-2.0
+  Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+  Flow web UI. A live view of per-CPU queues,
+  per-CPU running tasks and system counters, served by
+  the dashboard server over loopback with a unix socket
+  fallback. Offline first with no external assets.
+-->
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0" />
   <title>scx_flow stats</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     :root {
       --bg: #000000;
@@ -20,11 +28,16 @@
       --success: #31c48d;
       --warning: #f5a623;
       --error: #ee0000;
-      --font-sans: "Inter", system-ui, -apple-system, sans-serif;
-      --font-mono: "JetBrains Mono", monospace;
+      --font-sans: system-ui, -apple-system,
+        "Segoe UI", sans-serif;
+      --font-mono: ui-monospace, "Cascadia Mono",
+        "SF Mono", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    *, *::before, *::after { transition: none !important; animation: none !important; }
+    *, *::before, *::after {
+      transition: none !important;
+      animation: none !important;
+    }
     body {
       background: var(--bg);
       color: var(--text-primary);
@@ -34,8 +47,9 @@
       min-height: 100vh;
       overflow-x: hidden;
     }
-    @media (min-width: 640px) { body { padding: 24px; } }
-
+    @media (min-width: 640px) {
+      body { padding: 24px; }
+    }
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -44,44 +58,123 @@
       min-width: 0;
       overflow: hidden;
     }
-
     .stat-value {
       font-family: var(--font-mono);
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-
-    /* Per-core card grid */
+    /* Per-CPU card grid. Dense small chips that
+     * wrap across the page. No inner scroll: the
+     * page scrolls as one page so 20+ cores fit
+     * without a nested scroll container. */
     .core-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-      gap: 8px;
-      margin-bottom: 16px;
-    }
-    .core-card { padding: 12px; font-size: 0.8125rem; }
-    .core-card .core-id { font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono); }
-    .core-card .core-freq { font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px; }
-    .core-card .core-smt { font-size: 0.6875rem; color: var(--warning); }
-    .core-card .core-llc { font-size: 0.6875rem; color: var(--text-muted); }
-
-    /* Carriage pool grid */
-    .carriage-grid {
-      display: flex;
+      grid-template-columns:
+        repeat(auto-fill, minmax(104px, 1fr));
       gap: 4px;
-      flex-wrap: wrap;
-      margin-top: 8px;
+      margin-bottom: 12px;
     }
-    .carriage-slot {
-      width: 20px; height: 20px;
-      border-radius: 3px;
-      font-size: 0.5rem;
-      display: flex; align-items: center; justify-content: center;
+    .core-card {
+      padding: 4px 6px;
+      font-size: 0.625rem;
+      line-height: 1.35;
+      border-radius: 6px;
+    }
+    .core-card .core-id {
+      font-size: 0.625rem;
+      font-weight: 600;
+      color: var(--text-muted);
       font-family: var(--font-mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .carriage-slot.filling { background: var(--accent); color: #fff; }
-    .carriage-slot.calculating { background: var(--warning); color: #000; }
-    .carriage-slot.idle { background: var(--elevated); color: var(--text-muted); }
-
+    .core-card .core-freq {
+      font-size: 0.6rem;
+      color: var(--text-secondary);
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .core-card .core-smt {
+      font-size: 0.5625rem;
+      color: var(--warning);
+    }
+    .core-card .core-llc {
+      font-size: 0.6rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .core-card .core-pid {
+      font-size: 0.6rem;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .core-card .core-est {
+      font-size: 0.6rem;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .core-card .core-slice {
+      font-size: 0.6rem;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Running badge on each CPU card. Running tasks
+     * show live, idle cards stay muted. */
+    .run-badge {
+      display: inline-block;
+      margin-top: 2px;
+      padding: 0 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border-hover);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      line-height: 1.5;
+    }
+    .run-idle { color: var(--text-muted); }
+    .run-live {
+      color: var(--success);
+      border-color: var(--success);
+    }
+    /* Summary card */
+    .summary-tldr {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--success);
+      line-height: 1.45;
+      margin-bottom: 8px;
+    }
+    .summary-explanation {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+    .section-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .subsection-label {
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
     /* System stats grid */
     .sys-grid {
       display: grid;
@@ -89,13 +182,22 @@
       gap: 8px;
       font-size: 0.8125rem;
     }
-    @media (min-width: 640px) { .sys-grid { grid-template-columns: repeat(4, 1fr); } }
+    @media (min-width: 640px) {
+      .sys-grid { grid-template-columns: repeat(4, 1fr); }
+    }
     @media (max-width: 640px) {
       body { padding: 8px; }
       .card { padding: 10px; }
-      .stat-value { font-size: 0.875rem !important; word-break: break-all; }
-      .core-grid { grid-template-columns: repeat(2, 1fr); gap: 6px; }
-      .carriage-slot { width: 16px; height: 16px; }
+      .core-card { padding: 4px 5px; }
+      .stat-value {
+        font-size: 0.875rem !important;
+        word-break: break-all;
+      }
+      .core-grid {
+        grid-template-columns:
+          repeat(auto-fill, minmax(92px, 1fr));
+        gap: 4px;
+      }
     }
   </style>
 </head>
@@ -103,50 +205,202 @@
   <div style="max-width:1152px;margin:auto">
 
     <!-- Header -->
-    <header class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+    <header class="card" style="margin-bottom:16px;display:flex;
+      align-items:center;justify-content:space-between;
+      gap:12px;">
       <div style="min-width:0;overflow:hidden">
-        <h1 style="font-size:1.25rem;font-weight:700">scx_flow stats</h1>
-        <p style="font-size:0.8125rem;color:var(--text-secondary);margin-top:2px">Waiting Room — per-core dispatch, carriage pool</p>
+        <h1 style="font-size:1.25rem;font-weight:700">
+          scx_flow stats
+        </h1>
+        <p style="font-size:0.8125rem;
+          color:var(--text-secondary);margin-top:2px">
+          per-CPU queues, fixed slices and placement
+        </p>
+        <p style="font-size:0.75rem;
+          color:var(--text-muted);margin-top:2px;
+          font-family:var(--font-mono)"
+          id="meta-line">Loading...</p>
       </div>
-      <div id="status-badge" style="font-size:0.75rem;padding:3px 10px;border-radius:999px;border:1px solid var(--success);color:var(--success);font-family:var(--font-mono);white-space:nowrap">
-        ● running
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="download" style="font-size:0.75rem;
+          padding:3px 10px;border-radius:999px;
+          border:1px solid var(--border-hover);
+          background:var(--elevated);
+          color:var(--text-primary);
+          font-family:var(--font-mono);white-space:nowrap">
+          Download JSON
+        </button>
+        <div id="status-badge" style="font-size:0.75rem;
+          padding:3px 10px;border-radius:999px;
+          border:1px solid var(--success);
+          color:var(--success);
+          font-family:var(--font-mono);white-space:nowrap">
+          ● running
+        </div>
       </div>
     </header>
 
-    <!-- Per-core cards -->
+    <!-- Per-CPU cards -->
     <div id="core-cards" class="core-grid"></div>
 
-    <!-- Carriage pool -->
+    <!-- Summary -->
     <div class="card" style="margin-bottom:16px">
-      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">Waiting Room — Carriage Pool</p>
-      <div style="display:flex;gap:12px;font-size:0.75rem;font-family:var(--font-mono);margin-bottom:8px">
-        <span>prod: <span id="carriage-prod">0</span></span>
-        <span>slot: <span id="carriage-slot">0</span></span>
+      <p class="section-label">Summary</p>
+      <p class="subsection-label">TL;DR</p>
+      <p class="summary-tldr" id="summary-tldr">
+        Loading...
+      </p>
+      <p class="subsection-label">Explanation</p>
+      <p class="summary-explanation"
+        id="summary-explanation"></p>
+    </div>
 
-        <span>fill: <span id="carriage-fill">0</span></span>
-
-
+    <!-- Groups with depths plus pressure plus rates -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Groups</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">
+          Light depth:</span>
+          <span class="stat-value" id="light-depth">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Hog depth:</span>
+          <span class="stat-value" id="hog-depth">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Allowance:</span>
+          <span class="stat-value" id="allowance">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Demote rate:</span>
+          <span class="stat-value" id="demote-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote rate:</span>
+          <span class="stat-value" id="promote-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Wake rate:</span>
+          <span class="stat-value" id="wake-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Steal rate:</span>
+          <span class="stat-value" id="steal-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip rate:</span>
+          <span class="stat-value" id="skip-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Preempt rate:</span>
+          <span class="stat-value" id="preempt-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Preempt skip (all):</span>
+          <span class="stat-value" id="pskip-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Coalesce rate:</span>
+          <span class="stat-value" id="coalesce-rate">0</span>
+        </div>
       </div>
-      <div id="carriage-grid" class="carriage-grid"></div>
     </div>
 
     <!-- System stats -->
     <div class="card">
-      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">System</p>
+      <p class="section-label">System</p>
       <div class="sys-grid">
-        <div><span style="color:var(--text-muted)">On CPU:</span> <span class="stat-value" id="on-cpu">0</span></div>
-        <div><span style="color:var(--text-muted)">Uptime:</span> <span class="stat-value" id="uptime">0</span></div>
-        <div><span style="color:var(--text-muted)">Wake dispatches:</span> <span class="stat-value" id="prio-disp">0</span></div>
-        <div><span style="color:var(--text-muted)">Pinned dispatches:</span> <span class="stat-value" id="pinned-disp">0</span></div>
-        <div><span style="color:var(--text-muted)">Budget exhaustions:</span> <span class="stat-value" id="budget-exhaust">0</span></div>
-        <div><span style="color:var(--text-muted)">CPU migrations:</span> <span class="stat-value" id="cpu-mig">0</span></div>
-        <div><span style="color:var(--text-muted)">Wakeups:</span> <span class="stat-value" id="wakeups">0</span></div>
+        <div><span style="color:var(--text-muted)">
+          On-CPU:</span>
+          <span class="stat-value" id="on-cpu">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Uptime:</span>
+          <span class="stat-value" id="uptime">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Runtime:</span>
+          <span class="stat-value" id="runtime">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Inserts:</span>
+          <span class="stat-value" id="inserts">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Requeues:</span>
+          <span class="stat-value" id="requeues">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Completions:</span>
+          <span class="stat-value" id="completions">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Park moves:</span>
+          <span class="stat-value" id="park">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Steal moves:</span>
+          <span class="stat-value" id="steal">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Kicks:</span>
+          <span class="stat-value" id="kicks">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          No task state:</span>
+          <span class="stat-value" id="no-tctx">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          EDF enqueued:</span>
+          <span class="stat-value" id="edf-enq">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          EDF clamped:</span>
+          <span class="stat-value" id="edf-clamp">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          EDF ordered:</span>
+          <span class="stat-value" id="edf-ord">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Demote:</span>
+          <span class="stat-value" id="demote">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote:</span>
+          <span class="stat-value" id="promote">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Wake promote:</span>
+          <span class="stat-value" id="wpromote">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Pinned inflate:</span>
+          <span class="stat-value" id="pinfl">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Group skip:</span>
+          <span class="stat-value" id="gskip">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Preempt kicks:</span>
+          <span class="stat-value" id="pkick">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Preempt skip (all):</span>
+          <span class="stat-value" id="pskip">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Kick coalesced:</span>
+          <span class="stat-value" id="kcoal">0</span>
+        </div>
       </div>
     </div>
 
     <!-- Connection status -->
     <div style="text-align:center;margin-top:16px">
-      <p style="font-size:0.75rem;color:var(--text-muted)" id="conn-status">Loading...</p>
+      <p style="font-size:0.75rem;color:var(--text-muted)"
+        id="conn-status">Loading...</p>
     </div>
   </div>
 
@@ -155,6 +409,8 @@
 
     function clamp(v) { return v < 0 ? 0 : v; }
 
+    /* Compact counter form, same shape as the
+     * system table values. */
     function fmt(n) {
       n = clamp(n);
       if (n >= 1e15) return (n / 1e15).toFixed(2) + 'Q';
@@ -165,9 +421,11 @@
       return n.toLocaleString();
     }
 
+    /* Nanoseconds as a wall clock duration for the
+     * uptime and runtime gauges. */
     function fmtRuntime(ns) {
       ns = clamp(ns);
-      var sec = ns / 1_000_000_000;
+      var sec = ns / 1e9;
       if (sec < 60) return sec.toFixed(1) + ' sec';
       var min = sec / 60;
       if (min < 60) return min.toFixed(1) + ' min';
@@ -177,78 +435,331 @@
       return day.toFixed(1) + ' days';
     }
 
+    /* Slice in nanos. Below a microsecond stays in
+     * ns, below a millisecond shows us, above
+     * shows ms. */
+    function fmtSlice(ns) {
+      ns = clamp(ns);
+      if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
+      if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' us';
+      return Math.round(ns) + ' ns';
+    }
+
+    /* Per-CPU cards with fixed slice plus group
+     * plus the running estimate plus the pid plus
+     * nice plus weight plus delay. Freq unknown stays
+     * plain with no zero print. No sibling stays plain
+     * with no badge. Group shows live table when
+     * ready, else halves. Nice plus weight stay
+     * display only with dash when idle. Delay shows
+     * latched dot with hollow when clear. Delay
+     * shows stale word when idle, explicit. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
       if (!perCpu.length) {
-        container.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;color:var(--text-muted)">No CPU data yet</div>';
+        container.innerHTML = '<div class="card" ' +
+          'style="grid-column:1/-1;text-align:center;' +
+          'color:var(--text-muted)">' +
+          'No CPU data yet</div>';
         return;
       }
       container.innerHTML = perCpu.map(function(cpu) {
-        var freqMhz = Math.round(cpu.freq_khz / 1000);
-        var smtLabel = cpu.smt ? ' <span class="core-smt">SMT</span>' : '';
+        var curMhz = Math.round(
+          (cpu.cur_freq_khz || 0) / 1000);
+        var maxMhz = Math.round(
+          (cpu.freq_khz || 0) / 1000);
+        var freqLabel = 'freq unknown';
+        if (maxMhz > 0 && curMhz > 0) {
+          freqLabel = curMhz + ' of ' +
+            maxMhz + ' MHz';
+        } else if (maxMhz > 0) {
+          freqLabel = maxMhz + ' MHz';
+        } else if (curMhz > 0) {
+          freqLabel = curMhz + ' MHz';
+        }
+        var smtLabel = cpu.smt
+          ? ' <span class="core-smt">SMT</span>'
+          : '';
+        var pid = cpu.running_pid || 0;
+        var est = cpu.running_est_ns || 0;
+        var slice = cpu.slice_ns || cpu.tq_ns || 0;
+        var nice = cpu.running_nice || 0;
+        var weight = cpu.running_weight || 0;
+        var idle = !pid;
+        var badge = idle
+          ? '<span class="run-badge run-idle">idle</span>'
+          : '<span class="run-badge run-live">live</span>';
+        var pidLabel = idle
+          ? '<div class="core-pid">pid -</div>'
+          : '<div class="core-pid">pid ' + pid + '</div>';
+        var estLabel = idle
+          ? '<div class="core-est">est -</div>'
+          : '<div class="core-est">est ' + fmtSlice(est) +
+            '</div>';
+        var niceLabel = idle
+          ? '<div class="core-llc">nice -</div>'
+          : '<div class="core-llc">nice ' + nice + '</div>';
+        var weightLabel = idle
+          ? '<div class="core-llc">weight -</div>'
+          : '<div class="core-llc">weight ' + weight + '</div>';
+        var sliceLabel = '<div class="core-slice">slice ' +
+          fmtSlice(slice) + '</div>';
+        var llcLabel = '<div class="core-llc">LLC ' +
+          (cpu.llc_id || 0) + '</div>';
+        var grp = (cpu.group === 1) ? 'hog' : 'light';
+        var groupLabel = '<div class="core-llc">group ' +
+          grp + '</div>';
+        var delay = cpu.delay_win || 0;
+        var armed = !!cpu.delay_armed;
+        var dot = armed ? ' ●' : ' ○';
+        var delayLabel = '<div class="core-llc">delay ' +
+          delay + dot + (idle ? ' stale' : '') + '</div>';
         return '<div class="card core-card">' +
-          '<div class="core-id">CPU ' + cpu.id + smtLabel + '</div>' +
-          '<div class="core-freq">' + freqMhz + ' MHz</div>' +
-          '<div class="core-llc">LLC ' + cpu.llc_id + '</div>' +
+          '<div class="core-id">CPU ' + cpu.id +
+          smtLabel + '</div>' +
+          '<div class="core-freq">' + freqLabel +
+          '</div>' + llcLabel + groupLabel +
+          '<div>' + badge + '</div>' +
+          pidLabel + estLabel + niceLabel +
+          weightLabel + sliceLabel + delayLabel +
           '</div>';
       }).join('');
     }
 
-    function renderCarriagePool(data) {
-      var s = data.stats || {};
-      var prod = s.carriage_producer || 0;
-      var fillCount = data.carriage_filling_count || 0;
-      el('carriage-prod').textContent = fmt(prod);
-      el('carriage-slot').textContent = prod & 63;
-      el('carriage-fill').textContent = fmt(fillCount);
-
-      // Render slot grid from stats API (carriage_pool data not in current API)
-      // Show a simple 64-slot grid based on producer/consumer
-      var grid = el('carriage-grid');
-      var slots = '';
-      for (var i = 0; i < 64; i++) {
-        var cls = 'carriage-slot';
-        if (i === (prod & 63)) cls += ' filling';
-        else cls += ' idle';
-        slots += '<div class="' + cls + '"></div>';
+    /* Summary prose, built from the live gauges.
+     * The tldr names the running count. The explanation
+     * walks the insert plus move plus group split with
+     * wake detail. */
+    function buildSummary(s) {
+      var onCpu = s.on_cpu || 0;
+      var ins = s.inserts || 0;
+      var req = s.requeues || 0;
+      var done = s.completions || 0;
+      var park = s.park_moves || 0;
+      var steal = s.steal_moves || 0;
+      var demote = s.group_demote || 0;
+      var promote = s.group_promote || 0;
+      var wake = s.group_wake_promote || 0;
+      var placed = ins + req;
+      var tldr, explanation;
+      if (!placed && !onCpu) {
+        tldr = 'Flow is idle and waiting for work.';
+        explanation = 'As you can see from the gauges, ' +
+          'no tasks have been placed yet.';
+      } else if (onCpu > 0) {
+        tldr = 'Flow is running ' + fmt(onCpu) +
+          ' tasks.';
+        explanation = 'As you can see from the gauges, ' +
+          'joins cover ' + fmt(placed) +
+          ' with completions ' + fmt(done) +
+          '. Park moves cover ' + fmt(park) +
+          ' and steal moves cover ' + fmt(steal) +
+          '. Demote covers ' + fmt(demote) +
+          ' and promote covers ' + fmt(promote) +
+          ' with wake ' + fmt(wake) + '.';
+      } else {
+        tldr = 'Flow placed ' + fmt(placed) +
+          ' tasks and is now idle.';
+        explanation = 'As you can see from the gauges, ' +
+          'joins cover ' + fmt(placed) +
+          ' with completions ' + fmt(done) +
+          '. Park moves cover ' + fmt(park) +
+          ' and steal moves cover ' + fmt(steal) +
+          '. Demote covers ' + fmt(demote) +
+          ' and promote covers ' + fmt(promote) +
+          ' with wake ' + fmt(wake) + '.';
       }
-      grid.innerHTML = slots;
+      return { tldr: tldr, explanation: explanation };
+    }
+
+    /* Prior counters plus wall time for rate math. */
+    var prevStats = null;
+    var prevAt = 0;
+
+    /* Per second rate with one decimal below 100. */
+    function fmtRate(v) {
+      v = clamp(v);
+      if (v >= 100) return Math.round(v) + '/s';
+      return v.toFixed(1) + '/s';
+    }
+
+    /* Rate of one counter over the poll gap. */
+    function rateOf(cur, prev, dt) {
+      if (!dt || dt <= 0) return 0;
+      var d = cur - prev;
+      if (d < 0) d = 0;
+      return d / dt;
     }
 
     function updateUI(data) {
       el('status-badge').textContent = '● running';
-      el('status-badge').style.borderColor = 'var(--success)';
+      el('status-badge').style.borderColor =
+        'var(--success)';
       el('status-badge').style.color = 'var(--success)';
 
       var s = data.stats || {};
+      var summary = buildSummary(s);
+      el('summary-tldr').textContent = summary.tldr;
+      el('summary-explanation').textContent =
+        summary.explanation;
+
+      /* Meta line with version plus topology. */
+      var ver = data.version || '';
+      var topo = data.topology || '';
+      var meta = '';
+      if (ver) meta += 'v' + ver;
+      if (ver && topo) meta += ', ';
+      if (topo) meta += topo;
+      el('meta-line').textContent = meta ||
+        'per-CPU queues, fixed slices and placement';
+
+      /* Group depths plus pressure from snapshot. */
+      el('light-depth').textContent =
+        fmt(data.light_depth || 0);
+      el('hog-depth').textContent =
+        fmt(data.hog_depth || 0);
+      el('allowance').textContent =
+        fmtSlice(data.burst_allowance_ns || 0);
+
+      /* Rates from deltas over the poll gap. */
+      var nowMs = Date.now();
+      var dt = prevStats ?
+        (nowMs - prevAt) / 1000 : 0;
+      var demoteR = prevStats ?
+        rateOf(s.group_demote || 0,
+          prevStats.group_demote || 0, dt) : 0;
+      var promoteR = prevStats ?
+        rateOf(s.group_promote || 0,
+          prevStats.group_promote || 0, dt) : 0;
+      var wakeR = prevStats ?
+        rateOf(s.group_wake_promote || 0,
+          prevStats.group_wake_promote || 0, dt) : 0;
+      var stealR = prevStats ?
+        rateOf(s.steal_moves || 0,
+          prevStats.steal_moves || 0, dt) : 0;
+      var skipR = prevStats ?
+        rateOf(s.group_steal_skipped || 0,
+          prevStats.group_steal_skipped || 0, dt) : 0;
+      var preemptR = prevStats ?
+        rateOf(s.preempt_kicks || 0,
+          prevStats.preempt_kicks || 0, dt) : 0;
+      var pskipR = prevStats ?
+        rateOf(s.preempt_skipped || 0,
+          prevStats.preempt_skipped || 0, dt) : 0;
+      var coalesceR = prevStats ?
+        rateOf(s.kick_coalesced || 0,
+          prevStats.kick_coalesced || 0, dt) : 0;
+      el('demote-rate').textContent = fmtRate(demoteR);
+      el('promote-rate').textContent = fmtRate(promoteR);
+      el('wake-rate').textContent = fmtRate(wakeR);
+      el('steal-rate').textContent = fmtRate(stealR);
+      el('skip-rate').textContent = fmtRate(skipR);
+      el('preempt-rate').textContent = fmtRate(preemptR);
+      el('pskip-rate').textContent = fmtRate(pskipR);
+      el('coalesce-rate').textContent = fmtRate(coalesceR);
+      prevStats = {
+        group_demote: s.group_demote || 0,
+        group_promote: s.group_promote || 0,
+        group_wake_promote: s.group_wake_promote || 0,
+        steal_moves: s.steal_moves || 0,
+        group_steal_skipped: s.group_steal_skipped || 0,
+        preempt_kicks: s.preempt_kicks || 0,
+        preempt_skipped: s.preempt_skipped || 0,
+        kick_coalesced: s.kick_coalesced || 0
+      };
+      prevAt = nowMs;
+
       el('on-cpu').textContent = fmt(s.on_cpu || 0);
-      el('uptime').textContent = fmtRuntime(s.uptime_ns || 0);
-      el('prio-disp').textContent = fmt(s.prio_dispatches || 0);
-      el('pinned-disp').textContent = fmt(s.pinned_dispatches || 0);
-      el('budget-exhaust').textContent = fmt(s.budget_exhaustions || 0);
-      el('cpu-mig').textContent = fmt(s.cpu_migrations || 0);
-      el('wakeups').textContent = fmt(s.runnable_wakeups || 0);
+      el('uptime').textContent =
+        fmtRuntime(s.uptime_ns || 0);
+      el('runtime').textContent =
+        fmtRuntime(s.total_runtime || 0);
+      el('inserts').textContent =
+        fmt(s.inserts || 0);
+      el('requeues').textContent =
+        fmt(s.requeues || 0);
+      el('completions').textContent =
+        fmt(s.completions || 0);
+      el('park').textContent =
+        fmt(s.park_moves || 0);
+      el('steal').textContent =
+        fmt(s.steal_moves || 0);
+      el('kicks').textContent =
+        fmt(s.kicks || 0);
+      el('no-tctx').textContent =
+        fmt(s.enq_no_tctx || 0);
+      el('edf-enq').textContent =
+        fmt(s.edf_enqueued || 0);
+      el('edf-clamp').textContent =
+        fmt(s.edf_clamped || 0);
+      el('edf-ord').textContent =
+        fmt(s.edf_ordered || 0);
+      el('demote').textContent =
+        fmt(s.group_demote || 0);
+      el('promote').textContent =
+        fmt(s.group_promote || 0);
+      el('wpromote').textContent =
+        fmt(s.group_wake_promote || 0);
+      el('pinfl').textContent =
+        fmt(s.pinned_hog_inflated || 0);
+      el('gskip').textContent =
+        fmt(s.group_steal_skipped || 0);
+      el('pkick').textContent =
+        fmt(s.preempt_kicks || 0);
+      el('pskip').textContent =
+        fmt(s.preempt_skipped || 0);
+      el('kcoal').textContent =
+        fmt(s.kick_coalesced || 0);
 
       renderCoreCards(data);
-      renderCarriagePool(data);
+    }
+
+    /* Full snapshot download as a timestamped file. */
+    /* Pure blob save with no new network surface plus */
+    /* the same loopback snapshot route. */
+    function downloadSnapshot() {
+      fetch('/api/snapshot', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var txt = JSON.stringify(data, null, 2);
+          var blob = new Blob([txt],
+            { type: 'application/json' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          var stamp = new Date().toISOString()
+            .replace(/[:.]/g, '-').slice(0, 19);
+          a.href = url;
+          a.download = 'scx_flow_' + stamp + '.json';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        })
+        .catch(function() {});
     }
 
     function pollStats() {
-      fetch('/api/stats')
+      fetch('/api/stats', { cache: 'no-store' })
         .then(function(r) { return r.json(); })
         .then(function(data) {
           updateUI(data);
-          el('conn-status').textContent = 'Live — ' + new Date().toLocaleTimeString();
+          el('conn-status').textContent = 'Live at ' +
+            new Date().toLocaleTimeString();
         })
         .catch(function() {
-          el('status-badge').textContent = '● disconnected';
-          el('status-badge').style.borderColor = 'var(--error)';
+          el('status-badge').textContent =
+            '● disconnected';
+          el('status-badge').style.borderColor =
+            'var(--error)';
           el('status-badge').style.color = 'var(--error)';
-          el('conn-status').textContent = 'Disconnected — retrying...';
+          el('conn-status').textContent =
+            'Disconnected, retrying...';
         });
     }
 
+    el('download').addEventListener('click',
+      downloadSnapshot);
     pollStats();
     setInterval(pollStats, 1000);
   </script>
