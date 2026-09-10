@@ -53,11 +53,13 @@ be turned off on the command line to compare the two rules against each other.
 
  - **Per-runqueue reference.** Each CPU keeps `V = \Sum (w_i * v_i) / \Sum w_i`
    over the tasks queued on it, EEVDF's `avg_vruntime()`, kept incrementally,
-   so the queues of different CPUs stay comparable. A running task is only
-   charged when it stops, so the reference of its pack stands still while it
-   runs; it is brought up to date on the spot before every placement and every
-   eligibility test, the way `update_curr()` runs ahead of `place_entity()`.
-   `--no-vref-update` reads it as stored instead.
+   so the queues of different CPUs stay comparable. A running task is charged
+   when it stops and at the end of every slice it is kept across, the way
+   `update_curr()` runs at every pick, so the reference of its pack is never
+   more than a request behind; what it has taken since is added on the spot
+   before every placement and every eligibility test, the way `update_curr()`
+   runs ahead of `place_entity()`. `--no-vref-update` reads it as stored
+   instead.
 
  - **Lag.** How far a task is from the reference is taken when it stops being
    runnable and restored when it comes back or migrates, the way

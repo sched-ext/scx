@@ -1599,8 +1599,10 @@ static u64 cid_vref(s32 cid)
  * and it is only a read: the service is charged for real, once, by
  * vref_charge() when the task stops. ops.stopping() clears @curr_w, so a
  * cid with nothing of ours on it projects nothing, and past a whole
- * request there is nothing worth projecting either - the task is due to
- * be rescheduled and the estimate would be running past what it can know.
+ * request there is nothing worth projecting either: the task is due to
+ * be rescheduled, and if it is kept it is charged for real at that
+ * point, see cidland_dispatch(), so the estimate would be running past
+ * what it can know.
  */
 static u64 cid_vref_at(s32 cid, u64 now)
 {
@@ -2914,6 +2916,7 @@ __noinline int cid_idle_rearm(s32 cid)
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
 	bool has_prev, keep = false;
+	u64 now = 0;
 
 	TOUCH_ARENA();
 
@@ -2928,11 +2931,8 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 */
 	has_prev = prev && is_task_queued(prev);
 	if (has_prev) {
-		u64 now = bpf_ktime_get_ns();
-
+		now = bpf_ktime_get_ns();
 		keep = keep_running(cid, now);
-		if (keep)
-			keep_charge(prev, cid, now);
 	}
 
 	if (try_steal_task(cid, has_prev, keep))
@@ -2945,9 +2945,24 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	/*
 	 * The task that was running keeps the CPU: either nothing else
 	 * wants it, or what does was asked and lost, see keep_running().
-	 * Either way it is given another slice to hold it with.
+	 * Either way it is given another slice to hold it with, and it is
+	 * settled with first, whichever of the two it was.
+	 *
+	 * A task that goes on running with nothing queued behind it is as
+	 * much picked again as one that was asked and won: fair.c runs
+	 * update_curr() and reissues the deadline at every pick, so a task
+	 * alone on its CPU is charged, and protected afresh, once a slice.
+	 * Charged only when it stops, a task that ran alone for a second
+	 * leaves its pack's reference a second behind, and a task waking
+	 * onto that cid is placed against it: it is then owed everything the
+	 * running task took while it slept, and runs uncontested until it
+	 * has caught up, where place_entity() would have put it at V. A
+	 * burst of 20 ms next to a hog, sleeping 20 ms in between, ran its
+	 * whole burst in one piece and took 49% of the CPU where fair.c
+	 * gives it 33%.
 	 */
 	if (has_prev) {
+		keep_charge(prev, cid, now);
 		scx_bpf_task_set_slice(prev, task_request(prev));
 		return;
 	}
