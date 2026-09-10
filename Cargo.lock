@@ -6064,6 +6064,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_lunar"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs",
+ "log",
+ "scx_cargo",
+ "scx_utils",
+ "simplelog",
+]
+
+[[package]]
 name = "scx_mitosis"
 version = "1.1.3"
 dependencies = [
