@@ -3494,15 +3494,20 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * @prev_cid, which either wakes it or interrupts what it is running
 	 * for this task, see kick_queued_cid().
 	 *
-	 * SCX_ENQ_LAST is the runnable task ops.dispatch() just displaced. If
-	 * it is the only waiter, the queue can exist for less than a tick: the
-	 * selected task blocks, @prev_cid takes its waiter back, and an idle cid
-	 * never observes the transient imbalance. Tell one idle peer at enqueue
-	 * time. It is also told to ignore hotness for this pull, since otherwise
-	 * the one guaranteed dispatch can reject the waiter and go idle again.
-	 * Restrict this to a depth of one: deeper queues survive until the tick
-	 * path notices them, and wakeup-heavy loads should not pay an idle scan
-	 * and a cache-cold migration on every enqueue.
+	 * SCX_ENQ_LAST says the task is the only sched_ext work available to a
+	 * CPU that is about to run a higher scheduling class. The kernel keeps
+	 * it runnable but requires the BPF scheduler to trigger a follow-up
+	 * scheduling event. A rejected active-balance handoff can reach this
+	 * path, but it is not the only source of the flag.
+	 *
+	 * If the task is the only waiter, the queue can exist for less than a
+	 * tick: the higher-class task blocks, @prev_cid takes its waiter back,
+	 * and an idle cid never observes the transient imbalance. Tell one idle
+	 * peer at enqueue time. It is also told to ignore hotness for this pull,
+	 * since otherwise the one guaranteed dispatch can reject the waiter and
+	 * go idle again. Restrict this to a depth of one: deeper queues survive
+	 * until the tick path notices them, and wakeup-heavy loads should not pay
+	 * an idle scan and a cache-cold migration on every enqueue.
 	 */
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), task_request(p), dl,
 				 enq_flags);
