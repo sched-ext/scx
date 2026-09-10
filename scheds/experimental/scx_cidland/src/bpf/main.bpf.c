@@ -124,6 +124,13 @@ const volatile bool no_eligibility;
 const volatile bool no_run_to_parity;
 
 /*
+ * Do not inflate a placement offset to preserve it across the task joining
+ * the weighted-average virtual-time reference. This restores cidland's
+ * placement before its fair.c PLACE_LAG compensation was added.
+ */
+const volatile bool no_place_lag;
+
+/*
  * Grant a task that is moved or queued again without having slept a
  * whole new request, rather than what is left of the one it was in the
  * middle of. This is PLACE_REL_DEADLINE off, see set_vruntime().
@@ -3031,6 +3038,31 @@ static void delay_settle(struct task_ctx *tctx, u64 now)
  * preferred wake target, see pick_idle_cid(), so this is the common
  * placement, not a corner of one.
  */
+/*
+ * Inflate a placement offset so that joining the destination pack does not
+ * dilute it. If the pack has weight W and @p has weight w, placing @p at
+ * V - offset moves the weighted-average reference to
+ *
+ *	V' = V - w * offset / (W + w).
+ *
+ * The lag visible after the join is therefore only W / (W + w) of the
+ * requested offset. PLACE_LAG in fair.c compensates by (W + w) / W; write
+ * that as offset + offset * w / W here to avoid forming W + w first.
+ *
+ * A task already in this pack is only being re-placed, not joined, because
+ * vref_join() is a no-op for it. Its offset therefore needs no correction.
+ */
+static s64 compensate_place_offset(s32 cid, const struct task_struct *p,
+				   const struct task_ctx *tctx, s64 offset)
+{
+	u64 weight, load = cid_pack_weight(cid);
+
+	if (no_place_lag || !load || tctx->vcid == cid || !offset)
+		return offset;
+	weight = task_weight(p, tctx);
+
+	return offset + vdiv(offset * (s64)weight, load);
+}
 static void place_task(s32 cid, const struct task_struct *p,
 		       struct task_ctx *tctx, u64 now, bool sleep)
 {
@@ -3045,8 +3077,12 @@ static void place_task(s32 cid, const struct task_struct *p,
 		if (!sleep && cid_valid(tctx->vcid))
 			tctx->vlag = task_lag_at(p, tctx, tctx->vcid, now);
 		delay_settle(tctx, now);
-		if (cid_pack_weight(cid))
-			vruntime -= tctx->vlag;
+		if (cid_pack_weight(cid)) {
+			s64 offset = tctx->vlag;
+
+			offset = compensate_place_offset(cid, p, tctx, offset);
+			vruntime -= offset;
+		}
 		set_vruntime(tctx, vruntime, sleep);
 	}
 	vref_join(cid, p, tctx);

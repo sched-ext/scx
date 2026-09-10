@@ -230,6 +230,17 @@ struct Opts {
     #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
     no_run_to_parity: bool,
 
+    /// Do not compensate placement lag for joining a virtual-time pack.
+    ///
+    /// Normally cidland inflates a task's placement offset before adding its
+    /// weight to the destination pack, so the movement of the weighted-average
+    /// reference does not dilute the requested lag. This disables that
+    /// PLACE_LAG compensation and restores the older behavior where lag can
+    /// evaporate as a task repeatedly sleeps and wakes. For comparing the two
+    /// placement rules against each other.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_place_lag: bool,
+
     /// Give a task a new request every time it is placed.
     ///
     /// A task that is moved to another CPU, or queued again without having
@@ -454,6 +465,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_run_to_parity = opts.no_run_to_parity;
+        rodata.no_place_lag = opts.no_place_lag;
         rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
         rodata.no_delay_dequeue = opts.no_delay_dequeue;
         rodata.no_hrtick = opts.no_hrtick;
