@@ -293,6 +293,7 @@ struct cid_ctx {
 	u64 curr_run_at;	/* when its service was last charged */
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
+	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
@@ -1151,6 +1152,7 @@ static s32 idle_peer_cid(const struct task_struct *p, s32 cid)
  */
 #define MAX_RT_PRIO	100
 #define WEIGHT_IDLEPRIO	3
+#define SCHED_BATCH	3
 #define SCHED_IDLE	5
 
 static const u32 prio_to_weight[40] = {
@@ -1909,6 +1911,7 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 	cctx->curr_w = task_weight(p, tctx);
 	cctx->curr_run_at = now;
 	cctx->curr_request = task_request(p);
+	cctx->curr_idle = p->policy == SCHED_IDLE;
 }
 
 /*
@@ -2156,22 +2159,56 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * which is why the only cid this looks at is the one the task was queued
  * on.
  *
+ * Before any of that, the policies. wakeup_preempt_fair() settles a
+ * SCHED_IDLE task on either side without looking at the virtual times:
+ *
+ *	if (cse_is_idle && !pse_is_idle)
+ *		goto preempt;
+ *	update_curr_fair(rq);
+ *	if (cse_is_idle != pse_is_idle)
+ *		goto update;
+ *	if (unlikely(!normal_policy(p->policy)))
+ *		goto update;
+ *
+ * A SCHED_IDLE task is interrupted for any task that is not one, before
+ * anything is asked about eligibility or deadlines, and a SCHED_IDLE or
+ * SCHED_BATCH task never interrupts anything: both are policies for work
+ * that gives up latency, not for work that is served less. What the
+ * weight of 3 already does for a SCHED_IDLE task is to be interrupted
+ * almost at once, since it is owed almost nothing, and to be queued
+ * behind everything else; the policy rule is what keeps it from being
+ * kicked for at all, and takes the running one off the CPU without
+ * waiting for the tick to find it.
+ *
  * The @curr_ fields describe the last task of ours to run there and say
  * nothing about a cid running something else. The idle test covers the
  * idle task; for a higher scheduling class the kick costs an IPI and
  * leaves the CPU with the class that owns it, which is where not kicking
  * would have left it too.
  */
-static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
-			    u64 now)
+static void kick_queued_cid(s32 cid, const struct task_struct *p,
+			    const struct task_ctx *tctx, u64 dl, u64 now)
 {
 	struct cid_ctx __arena *cctx;
-	bool owed;
+	bool owed, p_idle;
 
 	if (no_wakeup_preempt || cid_idle_test(cid))
 		goto idle;
 
 	cctx = cid_ctx(cid);
+
+	/*
+	 * A SCHED_IDLE task running is interrupted for anything else, and a
+	 * SCHED_IDLE or SCHED_BATCH task queued interrupts nothing. The three
+	 * tests above collapse to these two: once the first has taken the
+	 * idle curr with a non-idle wakee, what the second and third turn
+	 * away between them is any wakee that is not of a normal policy.
+	 */
+	p_idle = p->policy == SCHED_IDLE;
+	if (cctx->curr_idle && !p_idle)
+		goto preempt;
+	if (p_idle || p->policy == SCHED_BATCH)
+		goto idle;
 
 	/*
 	 * The queued task has to be owed service to be a candidate at all:
@@ -2204,6 +2241,7 @@ static void kick_queued_cid(s32 cid, const struct task_ctx *tctx, u64 dl,
 	if ((owed || no_eligibility) && !time_before(dl, cctx->curr_dl))
 		goto idle;
 
+preempt:
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
 	__sync_fetch_and_add(&nr_preempts, 1);
 
@@ -2324,7 +2362,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 		}
 	}
-	kick_queued_cid(prev_cid, tctx, dl, now);
+	kick_queued_cid(prev_cid, p, tctx, dl, now);
 }
 
 /*
@@ -2998,6 +3036,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		cctx->curr_since = tctx->last_run_at;
 		cctx->curr_request = task_request(p);
 		cctx->curr_w = task_weight(p, tctx);
+		cctx->curr_idle = p->policy == SCHED_IDLE;
 	}
 
 	/*
