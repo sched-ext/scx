@@ -4,8 +4,8 @@
  * Copyright (c) 2025 Daniel Hodges <hodgesd@meta.com>
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/arena.h>
 #include <lib/percpu.h>

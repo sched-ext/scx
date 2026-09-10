@@ -18,8 +18,8 @@
  * as the cgroup data pointer that leads to it.
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <lib/sdt_cgroup.h>
 #include <lib/urcu.h>
 

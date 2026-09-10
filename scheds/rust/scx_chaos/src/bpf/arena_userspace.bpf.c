@@ -8,8 +8,8 @@
  * so they live here rather than in lib/.
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <scx/arena_userspace_interrop.bpf.h>
 
 /**

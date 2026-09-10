@@ -4,8 +4,9 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <lib/alloc/bpf_helpers_local.h>
+#include <libarena/common.h>
 #include <bpf_arena_common.h>
 #include <lib/topology.h>
 #include <lib/cgroup.h>

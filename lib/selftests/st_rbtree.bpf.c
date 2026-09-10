@@ -1,5 +1,5 @@
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <lib/sdt_task.h>
 
 #include "selftest.h"

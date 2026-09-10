@@ -4,10 +4,8 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-#include <vmlinux.h>
-
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
