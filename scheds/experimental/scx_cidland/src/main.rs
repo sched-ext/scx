@@ -223,6 +223,18 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     no_place_rel_deadline: bool,
 
+    /// Let a task that blocks over-served carry its whole debt across the sleep.
+    ///
+    /// A task that blocks while it is over-served normally has the debt paid
+    /// off by the pack it left, with the service delivered there while it
+    /// slept, and never more than paid off: it wakes owing at most what it
+    /// owed, and often nothing. This makes it carry the whole debt to its next
+    /// placement instead, however long it slept.
+    ///
+    /// This is DELAY_DEQUEUE and DELAY_ZERO off. For comparing the two rules
+    /// against each other.
+    #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
+    no_delay_dequeue: bool,
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -413,6 +425,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_run_to_parity = opts.no_run_to_parity;
         rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
+        rodata.no_delay_dequeue = opts.no_delay_dequeue;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Capacity tiers: CPUs sorted by capacity in descending order, with

@@ -90,6 +90,22 @@ be turned off on the command line to compare the two rules against each other.
    the sched_ext class, as it reaches `reweight_task_fair()` for the fair
    class.
 
+ - **Delayed dequeue.** A task that blocks while over-served is not dequeued
+   by `fair.c`: it is left in the tree, `sched_delayed`, still counted in the
+   weight and still holding its place, so the reference moves past it while it
+   sleeps and it is dequeued the moment `pick_eevdf()` would have run it, with
+   its lag clipped to zero, `DELAY_DEQUEUE` and `DELAY_ZERO`. A wakeup that
+   comes sooner finds the part of the debt that has been paid. There is no
+   tree to leave a task in here, so the task leaves its pack and remembers
+   where the pack stood and what it weighed without it; when it is placed
+   again the pack's progress since, scaled to what it would have been with the
+   task's weight still counted, is credited to the debt and not a unit more,
+   and a pack that has emptied since forgives it whole. What is not followed
+   is where the task wakes: `ttwu_runnable()` requeues a delayed task on the
+   runqueue it slept on without going through `select_task_rq()`; here it is
+   placed by the wakeup path like any other. `--no-delay-dequeue` carries the
+   whole debt across the sleep instead.
+
  - **Relative deadline.** A task that is placed again without having slept,
    moved to another CPU or queued again after a preemption by a higher
    class, keeps what is left of the request it was in the middle of: the
@@ -224,11 +240,6 @@ that has not been done.
    that test faster than the kernel before it had an `ops.yield()`, at 31M,
    because the kernel's fallback ended the slice and the dispatch that
    followed handed the CPU straight back: a yield that never yielded.
-
- - **`DELAY_DEQUEUE` / `DELAY_ZERO`.** A task that blocks while over-served is
-   kept on the runqueue by `fair.c` so it burns the debt off in place and is
-   owed service by definition when it is picked again. Here it is dequeued and
-   carries the debt in its lag across the sleep.
 
 ### Wakeup placement
 

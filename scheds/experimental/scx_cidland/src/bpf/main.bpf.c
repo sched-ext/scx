@@ -139,6 +139,13 @@ const volatile bool no_place_rel_deadline;
 const volatile bool no_vref_update;
 
 /*
+ * Let a task that blocks over-served carry the whole of its debt across
+ * the sleep, rather than have it paid off by the pack it left as fair.c
+ * does with DELAY_DEQUEUE and DELAY_ZERO, see delay_settle().
+ */
+const volatile bool no_delay_dequeue;
+
+/*
  * Number of other cids' queues a busy cid looks at on each dispatch for a
  * queue deeper than its own. 0 disables the sampling, leaving a busy cid
  * with its own queue only.
@@ -204,6 +211,10 @@ struct task_ctx {
 	s64 vlag;
 	u64 vw;			/* weight @vlag and @deadline are scaled to */
 	s32 vcid;
+	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
+	u64 delay_vref;		/* its reference when the task left it */
+	u64 delay_w;		/* its weight without the task */
+	u64 delay_gen;		/* its @empty_gen then */
 	u32 cgw;		/* weight of its cgroup, see cgrp_weight() */
 	u64 vjoin_w;
 	u64 vjoin_v;
@@ -288,6 +299,7 @@ struct cid_ctx {
 	u64 vsum_w;
 	u64 vref;
 	u64 vref_rem;
+	u64 empty_gen;		/* bumped when the last member leaves */
 	u64 curr_dl;		/* deadline of the task running here */
 	u64 curr_v;		/* its vruntime when it was picked */
 	u64 curr_w;		/* its weight */
@@ -1783,6 +1795,9 @@ static void vref_leave(struct task_ctx *tctx)
 		d = (s64)(cctx->vref - tctx->vjoin_v);
 		__sync_fetch_and_add(&cctx->vref,
 				     vdiv((s64)tctx->vjoin_w * d, w - tctx->vjoin_w));
+	} else {
+		/* Nothing left to pay a debt off, see delay_settle(). */
+		__sync_fetch_and_add(&cctx->empty_gen, 1);
 	}
 
 	tctx->vcid = -1;
@@ -1990,6 +2005,82 @@ static void set_vruntime(struct task_ctx *tctx, u64 vruntime, bool sleep)
 }
 
 /*
+ * Pay off what a task owed the pack it blocked in, with the service that
+ * pack has delivered since, which is DELAY_DEQUEUE and DELAY_ZERO.
+ *
+ * fair.c does not dequeue a task that blocks while it is over-served. It
+ * is left in the tree, sched_delayed, still counted in W and still
+ * holding its place, so that the reference goes on moving past it while
+ * it sleeps: pick_next_entity() dequeues it the moment pick_eevdf()
+ * would have run it, which is the moment it becomes eligible, and a
+ * wakeup that comes sooner finds it where it was, with the part of the
+ * debt that has been paid,
+ *
+ *	if (se->sched_delayed) {
+ *		vlag = max(vlag, se->vlag);
+ *		if (sched_feat(DELAY_ZERO))
+ *			vlag = min(vlag, 0);
+ *	}
+ *
+ * Either way it never wakes owing more than it did when it blocked, and
+ * DELAY_ZERO sees to it that the pack's progress is not turned into
+ * credit either. A task that is dequeued at once, as it is here, would
+ * carry the whole debt across a sleep of any length and pay it in full
+ * on waking, against a pack that may have long since moved on.
+ *
+ * There is no tree to leave the task in: ops.quiescent() is the end of
+ * the kernel's interest in it, and the DSQ holds runnable tasks. So the
+ * task leaves its pack, and what is remembered is where the pack stood
+ * when it left, @delay_vref, and what the pack weighed without it,
+ * @delay_w. When the task is placed again the pack's reference has
+ * moved by the service delivered there since, and the delayed task
+ * would have seen it move at
+ *
+ *	dV = w_j * dv_j / (W_o + w_i)
+ *
+ * with its own weight w_i still in the denominator, where the pack it
+ * left advances at w_j * dv_j / W_o: the advance is scaled by
+ * W_o / (W_o + w_i), which is exact while the pack keeps its weight and
+ * an estimate otherwise. That much is credited to the debt and not a
+ * unit more, DELAY_ZERO.
+ *
+ * A pack that has emptied since forgives the debt whole. That is what
+ * pick_next_entity() does the moment the delayed task is the only thing
+ * left to pick, and what it would do a moment later anyway, V being the
+ * task's own vruntime once nothing else is there.
+ *
+ * What is not followed is where the task wakes. ttwu_runnable() finds a
+ * delayed task on its runqueue and requeues it there, without going
+ * through select_task_rq(); here it is placed by the wakeup path like
+ * any other, and gets the idle CPU it would have had to wait for a
+ * balance to be moved to.
+ */
+static void delay_settle(struct task_ctx *tctx, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+	s64 adv, lag = tctx->vlag;
+	s32 cid = tctx->delay_cid;
+
+	if (!cid_valid(cid))
+		return;
+	tctx->delay_cid = -1;
+	cctx = cid_ctx(cid);
+
+	if (cctx->empty_gen != tctx->delay_gen || lag >= 0) {
+		tctx->vlag = 0;
+		return;
+	}
+
+	adv = (s64)(cid_vref_place(cid, now) - tctx->delay_vref);
+	if (adv <= 0)
+		return;
+	adv = vdiv(adv * (s64)tctx->delay_w, tctx->delay_w + tctx->vw);
+
+	lag += adv;
+	tctx->vlag = lag > 0 ? 0 : lag;
+}
+
+/*
  * Place @p on @cid: a task that is not running is put at the cid's
  * reference minus the lag it carries, the way place_entity() does, and
  * either way it becomes a member of @cid's reference.
@@ -2014,6 +2105,7 @@ static void place_task(s32 cid, const struct task_struct *p,
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
 		u64 vruntime = cid_vref_place(cid, now);
 
+		delay_settle(tctx, now);
 		if (cid_pack_weight(cid))
 			vruntime -= tctx->vlag;
 		set_vruntime(tctx, vruntime, sleep);
@@ -3044,6 +3136,32 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 		tctx->vlag = lag;
 	}
 	vref_leave(tctx);
+
+	/*
+	 * A task that blocks over-served is what fair.c keeps in the tree,
+	 *
+	 *	if (sched_feat(DELAY_DEQUEUE) && delay &&
+	 *	    !entity_eligible(cfs_rq, se)) {
+	 *		...
+	 *		set_delayed(se);
+	 *		return false;
+	 *	}
+	 *
+	 * and only for a sleep: a task dequeued for a change of its
+	 * parameters is put straight back. Remember what is needed to pay
+	 * the debt off with the pack's progress when the task returns, see
+	 * delay_settle(). The reference is read after the task has left,
+	 * since that is the value that goes on moving.
+	 */
+	if (!no_delay_dequeue && (deq_flags & SCX_DEQ_SLEEP) && lag < 0 &&
+	    cid_valid(cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
+
+		tctx->delay_cid = cid;
+		tctx->delay_vref = cctx->vref;
+		tctx->delay_w = cctx->vsum_w;
+		tctx->delay_gen = cctx->empty_gen;
+	}
 }
 
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
@@ -3206,6 +3324,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->vruntime = 0;
 		tctx->deadline = 0;
 		tctx->vcid = -1;
+		tctx->delay_cid = -1;
 		tctx->recent_used_cid = -1;
 	}
 }
@@ -3249,6 +3368,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 	tctx->vcid = -1;
+	tctx->delay_cid = -1;
 	tctx->recent_used_cid = -1;
 	tctx->vw = task_weight(p, tctx);
 
