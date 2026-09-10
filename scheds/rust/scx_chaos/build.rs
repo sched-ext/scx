@@ -7,6 +7,7 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .add_source("src/bpf/arena_userspace.bpf.c")
         .add_source("src/bpf/lib/arena.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
         .add_source("src/bpf/lib/cpumask.bpf.c")
