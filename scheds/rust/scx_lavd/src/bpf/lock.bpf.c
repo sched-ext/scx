@@ -17,7 +17,17 @@
 static void __inc_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
-	task_ctx *taskc = get_task_ctx(p);
+	task_ctx *taskc;
+
+	/*
+	 * These hooks are system-wide, so they also fire for RT and DL
+	 * tasks. sched_ext does not manage those, so they have no task_ctx
+	 * and get_task_ctx() would report the miss as an error.
+	 */
+	if (rt_or_dl_task(p))
+		return;
+
+	taskc = get_task_ctx(p);
 
 	if (taskc) {
 		if (!cpuc)
@@ -36,7 +46,17 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 static void __dec_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
-	task_ctx *taskc = get_task_ctx(p);
+	task_ctx *taskc;
+
+	/*
+	 * These hooks are system-wide, so they also fire for RT and DL
+	 * tasks. sched_ext does not manage those, so they have no task_ctx
+	 * and get_task_ctx() would report the miss as an error.
+	 */
+	if (rt_or_dl_task(p))
+		return;
+
+	taskc = get_task_ctx(p);
 
 	if (taskc && test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST)) {
 		if (!cpuc)
