@@ -1726,6 +1726,24 @@ static bool keep_running(s32 cid, u64 now)
 	v = cctx->curr_v + (now - cctx->curr_run_at) * NICE_0_WEIGHT / w;
 
 	/*
+	 * A task that has had more than its share is not in the pick at all,
+	 * whatever its deadline: pick_eevdf() drops it before it looks at
+	 * the tree,
+	 *
+	 *	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
+	 *		curr = NULL;
+	 *
+	 * and this is the same test kick_queued_cid() applies when a task
+	 * wakes against it. Applied here too, the two agree: a task kicked
+	 * off the CPU for being over-served was kept by the dispatch that
+	 * followed whenever its deadline happened to be the earlier one,
+	 * and got a whole new slice out of it. A probe waking next to a hog
+	 * waited 1.6 ms for that on one wakeup in four, 0.3 ms under fair.c.
+	 */
+	if (!no_eligibility && time_after(v, cid_vref_at(cid, now)))
+		return false;
+
+	/*
 	 * A deadline stands until the request it was issued for is consumed,
 	 * see task_dl(); past that it is reissued from where the vruntime
 	 * has reached, which is what puts a task that has had its turn behind
