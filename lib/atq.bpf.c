@@ -168,7 +168,7 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	return ret;
 }
 
-__hidden
+__hidden __always_inline
 u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 {
 	scx_task_common *taskc;

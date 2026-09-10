@@ -875,7 +875,7 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id);
 
-static void schedule_atq_destroy(scx_atq_t *btq)
+static __always_inline void schedule_atq_destroy(scx_atq_t *btq)
 {
 	static u64 slots[CBW_DEFERRED_BTQ_SIZE] __attribute__((aligned(SCX_CACHELINE_SIZE)));
 	static u64 tail __attribute__((aligned(SCX_CACHELINE_SIZE)));
