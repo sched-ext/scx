@@ -41,9 +41,6 @@ pub struct ArenaLib {
 }
 
 impl ArenaLib {
-    /// Amount of pages allocated at once form the BPF map. by the static stack allocator.
-    const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 8;
-
     /// Number of u64 words needed to hold a mask of @nr_cpus bits. The arena
     /// side allocates its bitmaps to this size, so writes into them must be
     /// bounded by it rather than by MAX_CPU_SUPPORTED.
@@ -80,7 +77,6 @@ impl ArenaLib {
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
         let mut args = types::arena_init_args {
-            static_pages: Self::STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
             task_ctx_size: task_size as c_ulong,
             task_ctx_align: task_align as c_ulong,
         };

@@ -99,14 +99,12 @@ struct Opts {
 }
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
-    const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 512;
     const TASK_SIZE: c_ulong = 42;
 
     // Allocate the arena memory from the BPF side so userspace initializes it before starting
     // the scheduler. Despite the function call's name this is neither a test nor a test run,
     // it's the recommended way of executing SEC("syscall") probes.
     let mut args = types::arena_init_args {
-        static_pages: STATIC_ALLOC_PAGES_GRANULARITY,
         task_ctx_size: TASK_SIZE,
         task_ctx_align: 0,
     };

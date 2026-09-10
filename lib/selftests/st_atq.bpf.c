@@ -4,6 +4,7 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 
 #include <lib/sdt_task.h>
@@ -11,7 +12,6 @@
 
 #include "selftest.h"
 
-struct scx_stk stack;
 
 #define NATQS 16
 scx_atq_t *prios[NATQS];
@@ -172,7 +172,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	for (i = 0; i < TEST_CYCLES && can_loop; i++ ) {
 
 		for (j = 0; j < PUSHES_PER_TEST && can_loop; j++ ) {
-			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			taskc = arena_calloc(1, sizeof(*taskc));
 			if (!taskc)
 				return -ENOMEM;
 
@@ -242,7 +242,7 @@ int scx_selftest_atq_peek_nodestruct(u64 unused)
 		return -EINVAL;
 	}
 
-	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	taskc = arena_calloc(1, sizeof(*taskc));
 	if (!taskc)
 		return -ENOMEM;
 
@@ -314,7 +314,7 @@ int scx_selftest_atq_sized(u64 unused)
 		return -ENOMEM;
 	}
 
-	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	taskc = arena_calloc(1, sizeof(*taskc));
 	if (!taskc)
 		return -ENOMEM;
 
@@ -324,7 +324,7 @@ int scx_selftest_atq_sized(u64 unused)
 		return -EINVAL;
 	}
 
-	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	taskc = arena_calloc(1, sizeof(*taskc));
 	if (!taskc)
 		return -ENOMEM;
 
@@ -359,7 +359,7 @@ int scx_selftest_atq(void)
 	int i;
 
 	for (i = 0; i < NTASKS && can_loop; i++) {
-		tasks[i] = scx_static_alloc(sizeof(*tasks[i]), 1);
+		tasks[i] = arena_calloc(1, sizeof(*tasks[i]));
 		if (!tasks[i]) {
 			bpf_printk("Could not allocate task with index i", i);
 			return -ENOMEM;

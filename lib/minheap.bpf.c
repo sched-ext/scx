@@ -4,6 +4,7 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 
 #include <lib/sdt_task.h>
@@ -30,11 +31,11 @@ u64 scx_minheap_alloc_internal(size_t capacity)
 	size_t alloc_size = sizeof(scx_minheap_t);
 	scx_minheap_t *heap;
 
-	heap = scx_static_alloc(alloc_size, 1);
+	heap = arena_calloc(1, alloc_size);
 	if (!heap)
 		return (u64)NULL;
 
-	heap->helems = scx_static_alloc(capacity * sizeof(*heap->helems), 1);
+	heap->helems = arena_calloc(capacity, sizeof(*heap->helems));
 	if (!heap->helems) {
 		/* 
 		 * XXXETSAL: Once we move on from the static alloc,

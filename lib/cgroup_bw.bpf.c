@@ -11,6 +11,17 @@
 #include <lib/cgroup.h>
 #include <lib/atq.h>
 
+/*
+ * libarena used to define these; it no longer does. Guarded so the file
+ * builds against either version.
+ */
+#ifndef div_round_up
+#define div_round_up(a, b) (((a) + (b) - 1) / (b))
+#endif
+#ifndef round_up
+#define round_up(a, b) ((((a) + (b) - 1) / (b)) * (b))
+#endif
+
 #ifndef U64_MAX
 #define U64_MAX		((u64)~0ULL)
 #endif
