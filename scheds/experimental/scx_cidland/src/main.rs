@@ -155,15 +155,29 @@ struct Opts {
     #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
     disable_cgroups: bool,
 
-    /// Report every CPU at the same capacity, collapsing the capacity tiers.
+    /// Force every CPU to have the same capacity.
     ///
-    /// The capacity is guessed from ACPI CPPC or cpufreq, which separates the
-    /// P-cores, the favored P-cores and the E-cores of a hybrid x86 into three
-    /// tiers. The kernel's own cpu_capacity is uniform on those machines, so
-    /// fair.c has no fast-core preference on the wakeup path. This makes cidland
-    /// see what fair.c sees, for comparing the placement decisions of the two.
-    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
+    /// By default cidland uses the kernel-exported cpu_capacity values, matching
+    /// the capacity classes used to construct the kernel's scheduling domains.
+    #[clap(
+        short = 'u',
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "asym_capacity"
+    )]
     uniform_capacity: bool,
+
+    /// Force asymmetric capacities using the best available hardware estimate.
+    ///
+    /// This uses ACPI CPPC, cpufreq, or cpu_capacity through scx_utils rather
+    /// than following the kernel's selected capacity classes. It can therefore
+    /// expose hybrid x86 capacity differences that fair.c does not use.
+    #[clap(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "uniform_capacity"
+    )]
+    asym_capacity: bool,
 
     /// Maximum capacity difference, in percent, within one capacity tier.
     ///
@@ -171,9 +185,10 @@ struct Opts {
     /// small differences such as favored versus ordinary P-cores do not make
     /// wakeups chase a marginally faster CPU. A larger gap still starts a new
     /// tier and retains the preference for P-cores over E-cores. 0 restores
-    /// one tier per distinct reported capacity.
-    #[clap(short = 't', long, default_value = "5", value_parser = clap::value_parser!(u32).range(0..=50))]
-    capacity_tier_tolerance_pct: u32,
+    /// one tier per distinct reported capacity. The default is 0 when following
+    /// the kernel and 5 with --asym-capacity.
+    #[clap(short = 't', long, value_parser = clap::value_parser!(u32).range(0..=50))]
+    capacity_tier_tolerance_pct: Option<u32>,
 
     /// Disable direct dispatch during synchronous wakeups.
     ///
@@ -437,32 +452,84 @@ impl<'a> Scheduler<'a> {
         rodata.no_hrtick = opts.no_hrtick;
         rodata.no_vref_update = opts.no_vref_update;
 
+        // Follow the capacity classes selected by the kernel unless explicitly
+        // overridden. cpu_capacity is topology_get_cpu_scale(), the same input
+        // used to construct SD_ASYM_CPUCAPACITY domains. scx_utils deliberately
+        // has a more aggressive hardware-derived estimate, retained here for
+        // the --asym-capacity override.
+        let (mut cpus, capacity_mode, default_tolerance): (Vec<_>, _, u32) = if opts
+            .uniform_capacity
+        {
+            (
+                topo.all_cpus
+                    .values()
+                    .map(|cpu| (cpu.clone(), 1024usize))
+                    .collect(),
+                "forced uniform",
+                0,
+            )
+        } else if opts.asym_capacity {
+            (
+                topo.all_cpus
+                    .values()
+                    .map(|cpu| (cpu.clone(), cpu.cpu_capacity))
+                    .collect(),
+                "forced hardware-derived",
+                5,
+            )
+        } else {
+            let kernel_cpus: Option<Vec<_>> = topo
+                .all_cpus
+                .values()
+                .map(|cpu| Some((cpu.clone(), cpu.kernel_cpu_capacity?)))
+                .collect();
+
+            match kernel_cpus {
+                Some(cpus) => (cpus, "kernel", 0),
+                None => {
+                    warn!(
+                        "kernel CPU capacity classes are not exported by sysfs; falling back to hardware-derived capacities"
+                    );
+                    (
+                        topo.all_cpus
+                            .values()
+                            .map(|cpu| (cpu.clone(), cpu.cpu_capacity))
+                            .collect(),
+                        "hardware-derived fallback",
+                        5,
+                    )
+                }
+            }
+        };
+
         // Capacity tiers: CPUs sorted by capacity in descending order, with
         // close capacities coalesced into a tier, 0 being the fastest.
         // Capacities are normalized to 1..1024 so the highest is always 1024.
-        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
-        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
-        let max_cap = cpus.first().map(|c| c.cpu_capacity).unwrap_or(1).max(1);
-        let capacities: Vec<_> = cpus.iter().map(|cpu| cpu.cpu_capacity).collect();
-        let tiers = capacity_tiers(&capacities, opts.capacity_tier_tolerance_pct);
+        cpus.sort_by_key(|(_, capacity)| std::cmp::Reverse(*capacity));
+        let max_cap = cpus
+            .first()
+            .map(|(_, capacity)| *capacity)
+            .unwrap_or(1)
+            .max(1);
+        let capacities: Vec<_> = cpus.iter().map(|(_, capacity)| *capacity).collect();
+        let tolerance = opts
+            .capacity_tier_tolerance_pct
+            .unwrap_or(default_tolerance);
+        let tiers = capacity_tiers(&capacities, tolerance);
         let mut cpu_tiers: Vec<(u64, u64, u64)> = Vec::new();
-        for (i, cpu) in cpus.iter().enumerate() {
-            if opts.uniform_capacity {
-                cpu_tiers.push((cpu.id as u64, 1024, 0));
-                continue;
-            }
-            let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
+        for (i, (cpu, capacity)) in cpus.iter().enumerate() {
+            let normalized = (*capacity * 1024 / max_cap).clamp(1, 1024);
             cpu_tiers.push((cpu.id as u64, normalized as u64, tiers[i]));
         }
-        let nr_tiers = if opts.uniform_capacity {
-            1
-        } else {
-            tiers.last().copied().unwrap_or(0) + 1
-        };
+        let nr_tiers = tiers.last().copied().unwrap_or(0) + 1;
+        info!(
+            "CPU capacity mode: {capacity_mode} ({nr_tiers} tier{}, tolerance {tolerance}%)",
+            if nr_tiers == 1 { "" } else { "s" }
+        );
         if nr_tiers > 1 {
             info!(
                 "CPUs by capacity: {:?}",
-                cpus.iter().map(|cpu| cpu.id).collect::<Vec<_>>()
+                cpus.iter().map(|(cpu, _)| cpu.id).collect::<Vec<_>>()
             );
         }
 
