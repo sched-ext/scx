@@ -52,8 +52,6 @@ enum scx_cgroup_consts {
 	CBW_RUNTUME_INF			= ((s64)~((u64)1 << 63)),
 	/* maximum number of re-enqueue tasks in one dispatch */
 	CBW_REENQ_MAX_BATCH		= 2,
-	/* size of the deferred BTQ destroy queue */
-	CBW_DEFERRED_BTQ_SIZE		= 256,
 };
 
 /*
@@ -96,8 +94,13 @@ struct scx_cgroup_ctx {
 		/* cgroup id */
 		u64		id;
 
-		/* parent cgroup id (0 for root); set once at init */
-		u64		parent_id;
+		/*
+		 * Id of the nearest ancestor with a context -- the effective
+		 * parent in the tree of tracked cgroups: the nearest limited
+		 * (finite cpu.max) ancestor, or the root. Infinite ancestors are
+		 * skipped. 0 for the root itself. Set once at init.
+		 */
+		u64		eff_parent_id;
 
 		/* cgroup tree depth (root = 0); set once at init */
 		u32		level;
@@ -121,13 +124,6 @@ struct scx_cgroup_ctx {
 		 * normalized quota of all its ancestors and itself.
 		 */
 		u64		nquota_ub;
-	
-		/*
-		 * A boolean flag indicating whether the cgroup has LLC
-		 * contexts. Written only during slow-path init/destroy;
-		 * treated as read-only in the hot path.
-		 */
-		bool		has_llcx;
 	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 	/* read-write cache line */
@@ -226,7 +222,7 @@ struct scx_cgroup_llc_ctx {
 	 * and cbw_freelist_push() can operate on any arena struct generically.
 	 * When this object is on the free list, holds the raw u64 arena address
 	 * of the next free node (0 = end of list).  Only valid between
-	 * cbw_free_llcx() pushing and cbw_alloc_llcx() popping.
+	 * cbw_free_llcx() pushing and cbw_alloc_llcx_sleepable() popping.
 	 */
 	u64		free_next;
 
@@ -261,6 +257,34 @@ typedef struct scx_cgroup_llc_ctx __arena scx_cgroup_llc_ctx_t;
  * Library-wide configuration for CPU bandwidth control.
  */
 static struct scx_cgroup_bw_config cbw_config;
+
+/*
+ * Load-time cap on the number of managed cgroups. Defaults to CBW_NR_CGRP_MAX;
+ * userspace may set this before load and resize the backing maps to match
+ * (cbw_cgrp_map, cbw_cgrp_llc_map, cbw_cgroup_ids, cbw_throttled_cgroup_ids).
+ */
+const volatile u32 nr_cgrp_max = CBW_NR_CGRP_MAX;
+
+/*
+ * Load-time cap on cgroup nesting depth. Defaults to CBW_CGRP_TREE_HEIGHT_MAX;
+ * userspace may set this before load and resize tree_levels_map to match.
+ */
+const volatile u32 tree_height_max = CBW_CGRP_TREE_HEIGHT_MAX;
+
+/*
+ * Whether ops.cgroup_set_bandwidth() runs in a sleepable context, which the
+ * kernel allows only with the "sched_ext: allow ops.cgroup_set_bandwidth() to
+ * be sleepable" change. Userspace probes for it and sets this together with the
+ * program's BPF_F_SLEEPABLE flag before load.
+ *
+ * When true, a cgroup that gains a finite cpu.max at runtime materializes its
+ * context by allocating on demand, so no memory is pre-reserved. When false,
+ * the non-sleepable path pre-reserves a spare set per unmanaged cgroup during
+ * the sleepable ops.cgroup_init() and claims it at materialize. This is a
+ * const so the verifier prunes the unused (and, for the non-sleepable load,
+ * verifier-illegal sleepable-allocation) branch.
+ */
+const volatile bool bw_set_sleepable;
 
 /*
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
@@ -344,28 +368,138 @@ static inline void cbw_freelist_push(u64 *head, void __arena *ptr)
 }
 
 /*
+ * CPU-bandwidth reserve accounting.
+ *
+ * A cgroup that gains a finite cpu.max at runtime is materialized from the
+ * non-sleepable ops.cgroup_set_bandwidth(), which cannot allocate. To guarantee
+ * it always finds a ready context set, every unmanaged (infinite) cgroup
+ * reserves one spare set -- 1 cgx plus one llcx-with-BTQ per LLC -- during its
+ * sleepable ops.cgroup_init(). cbw_nr_pending_reservations counts those
+ * reservations; cbw_nr_free_{cgx,llcx} (declared with their free lists below)
+ * count the objects currently parked on the lists. The invariant held at every
+ * instant is
+ *
+ *     cbw_nr_free_cgx  >= cbw_nr_pending_reservations, and
+ *     cbw_nr_free_llcx >= cbw_nr_pending_reservations * TOPO_NR(LLC),
+ *
+ * so a burst of concurrent materializations can never exhaust the reserve.
+ *
+ * Free-list discipline that makes the counters safe to act on: push the object
+ * onto the list *before* incrementing the counter, and (atomically) decrement
+ * the counter *before* popping. The counter then never exceeds the list length,
+ * so a successful decrement always has a real object to pop.
+ */
+static s64 cbw_nr_pending_reservations;
+
+/*
+ * Atomically claim one object from *counter while keeping it above the reserve
+ * floor cbw_nr_pending_reservations * @floor_mult. Returns true after the
+ * decrement (the caller then pops), or false if nothing is available above the
+ * floor. @floor_mult is 1 for cgx and TOPO_NR(LLC) for llcx in the sleepable
+ * managed allocator, and 0 in the non-sleepable materialize allocator (which is
+ * entitled to the reserve). The counter (supply) is read before the floor
+ * (demand): since a reservation publishes the demand before pushing the spare,
+ * a counter that already reflects the spare pairs with a freshly read floor
+ * that reflects the reservation -- so a managed init cannot claim a fresh
+ * reserve through a stale-low floor.
+ */
+static inline bool cbw_claim_free(u64 *counter, u64 floor_mult)
+{
+	u64 f, floor;
+	s64 pending;
+
+	while (can_loop) {
+		f = READ_ONCE(*counter);
+		/*
+		 * Complete the pairing with the reservation side, which orders
+		 * its two updates with full barriers: keep the supply and floor
+		 * loads below from being satisfied out of order on a weakly
+		 * ordered CPU, which would pair a new supply with a stale floor.
+		 */
+		smp_rmb();
+		pending = READ_ONCE(cbw_nr_pending_reservations);
+		floor = (pending > 0 ? (u64)pending : 0) * floor_mult;
+		if (f <= floor)
+			return false;
+		if (__sync_bool_compare_and_swap(counter, f, f - 1))
+			return true;
+	}
+	return false;
+}
+
+/*
  * Per-type free-list heads and alloc/free wrappers for scx_cgroup_llc_ctx.
  * Cacheline-aligned to avoid false sharing with adjacent globals.
  */
 static u64 cbw_llcx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64 cbw_nr_free_llcx;	/* objects on cbw_llcx_free_head */
 
-static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
+static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx_sleepable(void)
+{
+	/*
+	 * Managed (sleepable) allocation: reuse a recycled llcx only from the
+	 * surplus beyond the reserve; otherwise allocate fresh, leaving the
+	 * reserve intact. A recycled llcx carries its BTQ; a fresh one is
+	 * BTQ-less and the caller (__cbw_init_llcx_sleepable()) creates one.
+	 */
+	if (cbw_claim_free(&cbw_nr_free_llcx, TOPO_NR(LLC))) {
+		scx_cgroup_llc_ctx_t *llcx = cbw_freelist_pop(&cbw_llcx_free_head);
+
+		if (llcx)
+			return llcx;
+		/* Claimed a slot but the pop lost a CAS race; undo and fall back. */
+		__sync_fetch_and_add(&cbw_nr_free_llcx, 1);
+	}
+	return scx_static_alloc(sizeof(scx_cgroup_llc_ctx_t), SCX_CACHELINE_SIZE);
+}
+
+/*
+ * Materialize (non-sleepable) allocation: claim a reserved llcx-with-BTQ, or
+ * NULL when the reserve is empty. Never allocates. A rare BTQ-less spare (left
+ * by a failed BTQ create) is discarded and the next tried.
+ */
+static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx_atomic(void)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 
-	llcx = cbw_freelist_pop(&cbw_llcx_free_head);
-	if (!llcx)
-		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
-	return llcx;
+	while (can_loop) {
+		if (!cbw_claim_free(&cbw_nr_free_llcx, 0))
+			return NULL;
+		llcx = cbw_freelist_pop(&cbw_llcx_free_head);
+		if (!llcx) {
+			/* Claimed a slot but the pop lost a CAS race; undo and bail. */
+			__sync_fetch_and_add(&cbw_nr_free_llcx, 1);
+			return NULL;
+		}
+		if (llcx->btq)
+			return llcx;
+		/*
+		 * BTQ-less spare: its claim already removed it from the list, so
+		 * drop it (arena never frees) and try the next.
+		 */
+	}
+	return NULL;
 }
 
 static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
 {
+	const int btq_off = __builtin_offsetof(struct scx_cgroup_llc_ctx, btq);
 	int i;
 
-	for (i = 0; can_loop && i < sizeof(*llcx); i++)
+	/*
+	 * Zero every field except btq. BTQs are never destroyed, so a recycled
+	 * llcx keeps its (drained, empty) BTQ for reuse by a later init.
+	 * btq is left untouched -- not zeroed and restored -- so that a
+	 * concurrent stale drain re-reading llcx->btq never observes a torn
+	 * pointer during recycling.
+	 */
+	for (i = 0; can_loop && i < sizeof(*llcx); i++) {
+		if (i >= btq_off && i < btq_off + sizeof(llcx->btq))
+			continue;
 		((char __arena *)llcx)[i] = 0;
+	}
 	cbw_freelist_push(&cbw_llcx_free_head, llcx);
+	__sync_fetch_and_add(&cbw_nr_free_llcx, 1);	/* push before count */
 }
 
 /*
@@ -373,15 +507,34 @@ static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
  * Cacheline-aligned to avoid false sharing with adjacent globals.
  */
 static u64 cbw_cgx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64 cbw_nr_free_cgx;	/* objects on cbw_cgx_free_head */
 
-static inline scx_cgroup_ctx_t *cbw_alloc_cgx(void)
+static inline scx_cgroup_ctx_t *cbw_alloc_cgx_sleepable(void)
 {
-	scx_cgroup_ctx_t *cgx;
+	/* Managed (sleepable): reuse surplus beyond the reserve, else fresh. */
+	if (cbw_claim_free(&cbw_nr_free_cgx, 1)) {
+		scx_cgroup_ctx_t *cgx = cbw_freelist_pop(&cbw_cgx_free_head);
 
-	cgx = cbw_freelist_pop(&cbw_cgx_free_head);
-	if (!cgx)
-		cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
-	return cgx;
+		if (cgx)
+			return cgx;
+		/* Claimed a slot but the pop lost a CAS race; undo and fall back. */
+		__sync_fetch_and_add(&cbw_nr_free_cgx, 1);
+	}
+	return scx_static_alloc(sizeof(scx_cgroup_ctx_t), SCX_CACHELINE_SIZE);
+}
+
+/* Materialize (non-sleepable): claim a reserved cgx, or NULL. Never allocates. */
+static inline scx_cgroup_ctx_t *cbw_alloc_cgx_atomic(void)
+{
+	if (cbw_claim_free(&cbw_nr_free_cgx, 0)) {
+		scx_cgroup_ctx_t *cgx = cbw_freelist_pop(&cbw_cgx_free_head);
+
+		if (cgx)
+			return cgx;
+		/* Claimed a slot but the pop lost a CAS race; undo and bail. */
+		__sync_fetch_and_add(&cbw_nr_free_cgx, 1);
+	}
+	return NULL;
 }
 
 static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
@@ -391,22 +544,64 @@ static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
 	for (i = 0; can_loop && i < sizeof(*cgx); i++)
 		((char __arena *)cgx)[i] = 0;
 	cbw_freelist_push(&cbw_cgx_free_head, cgx);
+	__sync_fetch_and_add(&cbw_nr_free_cgx, 1);	/* push before count */
 }
 
 /*
- * A per-CPU map to store levels in traversing a cgroup hierarchy while
- * updating runtime_total_sloppy. The per-CPU map is used to reduce the
- * stack size of cbw_update_runtime_total_sloppy().
+ * Build the spare context set (1 cgx + one llcx-with-BTQ per LLC) that a
+ * context-less cgroup's reservation covers, so a later non-sleepable
+ * ops.cgroup_set_bandwidth() can materialize from it. The caller has already
+ * published the demand (cbw_nr_pending_reservations++), so throughout the build
+ * a concurrent managed init already sees the raised floor and cannot claim the
+ * spare being pushed as if it were surplus. The transient
+ * cbw_nr_free_* < cbw_nr_pending gap this opens is exactly this cgroup's
+ * not-yet-built set, and this cgroup cannot materialize until its init returns,
+ * so no materialize consumes it early. Any allocation failure is fatal: the
+ * reservation is already published, so a partial spare would break the
+ * cbw_nr_free_* >= cbw_nr_pending invariant and later strand a correctly-
+ * reserved cgroup; call scx_bpf_error() to eject. MUST run in a sleepable
+ * context.
  */
-struct tree_levels {
-	s64		levels[CBW_CGRP_TREE_HEIGHT_MAX];
-};
+static void cbw_build_spare(void)
+{
+	scx_cgroup_ctx_t *cgx;
+	scx_cgroup_llc_ctx_t *llcx;
+	int i;
 
+	cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
+	if (!cgx) {
+		scx_bpf_error("cgroup_bw: failed to build spare cgx");
+		return;
+	}
+	cbw_free_cgx(cgx);
+
+	bpf_for(i, 0, TOPO_NR(LLC)) {
+		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
+		if (!llcx) {
+			scx_bpf_error("cgroup_bw: failed to build spare llcx");
+			return;
+		}
+		llcx->btq = (scx_atq_t *)scx_atq_create(false);
+		if (!llcx->btq) {
+			scx_bpf_error("cgroup_bw: failed to build spare BTQ");
+			return;	/* llcx orphaned; arena never frees */
+		}
+		cbw_free_llcx(llcx);
+	}
+}
+
+/*
+ * A per-CPU map of per-level accumulators used while traversing a cgroup
+ * hierarchy in cbw_update_runtime_total_sloppy(). Keyed by cgroup level, it
+ * keeps the aggregation off the (limited) BPF stack. Sized to
+ * CBW_CGRP_TREE_HEIGHT_MAX by default; userspace may resize it to
+ * tree_height_max before load.
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
-	__type(value, struct tree_levels);
-	__uint(max_entries, 1);
+	__type(value, s64);
+	__uint(max_entries, CBW_CGRP_TREE_HEIGHT_MAX);
 } tree_levels_map SEC(".maps");
 
 /*
@@ -414,7 +609,12 @@ struct {
  * cgroups without holding an RCU lock.
  */
 static u64		cbw_nr_cgroups;
-static u64		cbw_cgroup_ids[CBW_NR_CGRP_MAX];
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, CBW_NR_CGRP_MAX);
+} cbw_cgroup_ids SEC(".maps");
 
 /*
  * Number of allocated cgroup contexts, i.e. the live occupancy of
@@ -428,7 +628,12 @@ static u64		cbw_nr_cgx;
 /*
  * An array of throttled cgroups that need to be reenqueued.
  */
-static u64		cbw_throttled_cgroup_ids[CBW_NR_CGRP_MAX];
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, CBW_NR_CGRP_MAX);
+} cbw_throttled_cgroup_ids SEC(".maps");
 
 /*
  * Timer to replenish time budget for all cgroups periodically.
@@ -721,12 +926,6 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 }
 
 static
-bool cgroup_is_threaded(struct cgroup *cgrp)
-{
-	return cgrp->dom_cgrp != cgrp;
-}
-
-static
 u64 cgroup_get_id(struct cgroup *cgrp)
 {
 	return cgrp->kn->id;
@@ -756,49 +955,17 @@ scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
 long cbw_del_cgroup_ctx(u64 cgrp_id)
 {
 	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
+	long ret = bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
 
+	/*
+	 * Unpublish the context before recycling it: with the map entry gone a
+	 * concurrent lookup resolves to the cgroup's effective parent instead of
+	 * reading the zeroed cgx -- or, once the object is reused, another
+	 * cgroup's cgx.
+	 */
 	if (cgx)
 		cbw_free_cgx(cgx);
-	return bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
-}
-
-static
-scx_cgroup_llc_ctx_t *cbw_alloc_llc_ctx(struct cgroup *cgrp,
-					 scx_cgroup_ctx_t *cgx,
-					 int llc_id)
-{
-	scx_cgroup_llc_ctx_t *llcx;
-	struct cbw_llc_entry entry = {};
-	struct cgroup_llc_id key = {
-		.cgrp_id = cgroup_get_id(cgrp),
-		.llc_id = llc_id,
-	};
-
-	/* Allocate an LLC context from the free list or the arena bump allocator. */
-	llcx = cbw_alloc_llcx();
-	if (!llcx)
-		return NULL;
-
-	llcx->id = cgroup_get_id(cgrp);
-
-	/* Create an associated BTQ. */
-	llcx->btq = (scx_atq_t *)scx_atq_create(false);
-	if (!llcx->btq) {
-		cbw_err("Fail to allocate a BTQ");
-		cbw_free_llcx(llcx);
-		return NULL;
-	}
-
-	/* Store the arena pointer in the map. */
-	entry.llcx = (u64)llcx;
-	if (bpf_map_update_elem(&cbw_cgrp_llc_map, &key, &entry, BPF_NOEXIST)) {
-		scx_atq_destroy(llcx->btq);
-		llcx->btq = NULL;
-		cbw_free_llcx(llcx);
-		return NULL;
-	}
-
-	return llcx;
+	return ret;
 }
 
 static __always_inline
@@ -837,72 +1004,111 @@ long cbw_del_llc_ctx_with_id(u64 cgrp_id, int llc_id)
 	return bpf_map_delete_elem(&cbw_cgrp_llc_map, &key);
 }
 
+/*
+ * Sleepable implementation of cbw_init_llcx(): allocate each per-LLC context on
+ * demand and publish it in cbw_cgrp_llc_map under BPF_NOEXIST. A recycled llcx
+ * carries its BTQ (never destroyed); reuse it and only create one for a fresh,
+ * BTQ-less object.
+ *
+ * Returns -EEXIST if a concurrent materialize of @cgrp published first.
+ */
 static
-int cbw_init_llc_ctx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
+int __cbw_init_llcx_sleepable(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 {
-	int i;
+	u64 cgrp_id = cgroup_get_id(cgrp);
+	int i, ret;
 
 	if (!cgx || !cgrp)
 		return -EINVAL;
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
-		scx_cgroup_llc_ctx_t *llcx;
+		struct cbw_llc_entry entry = {};
+		struct cgroup_llc_id key = {
+			.cgrp_id = cgrp_id,
+			.llc_id = i,
+		};
+		scx_cgroup_llc_ctx_t *llcx = cbw_alloc_llcx_sleepable();
 
-		llcx = cbw_alloc_llc_ctx(cgrp, cgx, i);
+		if (llcx && !llcx->btq) {
+			llcx->btq = (scx_atq_t *)scx_atq_create(false);
+			if (!llcx->btq) {
+				cbw_err("Fail to allocate a BTQ");
+				cbw_free_llcx(llcx);
+				llcx = NULL;
+			}
+		}
 		if (!llcx)
 			return -ENOMEM;
-	}
-	cgx->has_llcx = true;
 
+		llcx->id = cgrp_id;
+		entry.llcx = (u64)llcx;
+		ret = bpf_map_update_elem(&cbw_cgrp_llc_map, &key, &entry,
+					  BPF_NOEXIST);
+		if (ret) {
+			cbw_free_llcx(llcx);
+			return ret;
+		}
+	}
 	return 0;
 }
 
-__hidden
-int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id);
-
-static void schedule_atq_destroy(scx_atq_t *btq)
+/*
+ * Non-sleepable counterpart of __cbw_init_llcx_sleepable(): claim each per-LLC context
+ * from the reserve built during ops.cgroup_init() (each already owns a drained
+ * BTQ) rather than allocating, and publish it under BPF_NOEXIST.
+ *
+ * Returns -EEXIST if a concurrent materialize of @cgrp published first.
+ */
+static
+int __cbw_init_llcx_atomic(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 {
-	static u64 slots[CBW_DEFERRED_BTQ_SIZE] __attribute__((aligned(SCX_CACHELINE_SIZE)));
-	static u64 tail __attribute__((aligned(SCX_CACHELINE_SIZE)));
-	u64 slot, old, prev;
+	u64 cgrp_id = cgroup_get_id(cgrp);
+	int i, ret;
 
-	do {
-		/*
-		 * Atomically claim the slot. If the slot is empty, we are done.
-		 */
-		slot = __sync_fetch_and_add(&tail, 1) % CBW_DEFERRED_BTQ_SIZE;
-		old = __sync_val_compare_and_swap(&slots[slot], 0, (u64)btq);
-		if (!old)
-			return;
+	bpf_for(i, 0, TOPO_NR(LLC)) {
+		struct cbw_llc_entry entry = {};
+		struct cgroup_llc_id key = {
+			.cgrp_id = cgrp_id,
+			.llc_id = i,
+		};
+		scx_cgroup_llc_ctx_t *llcx = cbw_alloc_llcx_atomic();
 
-		/*
-		 * If it is occupied, the tail has wrapped around: replace old
-		 * with the new BTQ via CAS to make the eviction atomic and
-		 * prevent a double-free.
-		 */
-		prev = __sync_val_compare_and_swap(&slots[slot], old, (u64)btq);
-		if (likely(old == prev)) {
-			scx_atq_destroy((scx_atq_t *)old);
-			return;
+		if (!llcx)
+			return -ENOMEM;
+
+		llcx->id = cgrp_id;
+		entry.llcx = (u64)llcx;
+		ret = bpf_map_update_elem(&cbw_cgrp_llc_map, &key, &entry,
+					  BPF_NOEXIST);
+		if (ret) {
+			cbw_free_llcx(llcx);
+			return ret;
 		}
-
-		/*
-		 * The CAS can fail if CBW_DEFERRED_BTQ_SIZE concurrent
-		 * destroyer claimed the same slot. If the CAS fails,
-		 * retry to work on a new slot.
-		 */
-	} while (can_loop);
-
-	/*
-	 * Atomically updating tail and slots could be a potential memory hot
-	 * spot, causing a lot of cache coherence traffic. However, it is
-	 * unlikely that real-world workloads will continuously and concurrently
-	 * destroy cgroups. So, let’s keep the design simple for now.
-	 */
+	}
+	return 0;
 }
 
+/*
+ * Populate @cgx's per-LLC contexts and publish them. The sleepable path
+ * (patched kernel) allocates on demand; the non-sleepable path claims the
+ * reserve built during ops.cgroup_init(). The bw_set_sleepable const prunes the
+ * branch not in use, so a non-sleepable load never verifies the sleepable
+ * allocation. Both publish under BPF_NOEXIST and return -EEXIST if a concurrent
+ * materialize of @cgrp published first, so the caller leaves it to that winner.
+ */
+static
+int cbw_init_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
+{
+	if (bw_set_sleepable)
+		return __cbw_init_llcx_sleepable(cgrp, cgx);
+	return __cbw_init_llcx_atomic(cgrp, cgx);
+}
+
+__hidden
+int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id);
+
 static __always_inline
-int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
+int cbw_free_llc_ctx(u64 cgrp_id)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 	volatile int nr_moved = 0; /* Add volatile to satisfy the verifier. */
@@ -917,43 +1123,25 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 	if (unlikely(cgrp_id == ROOT_CGID))
 		return 0;
 
-	if (cgx) {
-		if (!cgx->has_llcx)
-			return 0;
-		cgx->has_llcx = false;
-	}
-
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, i);
 		if (!llcx || !(btq = READ_ONCE(llcx->btq)))
 			continue;
 
 		/*
-		 * Atomically null llcx->btq to signal
-		 * cbw_drain_btq_until_throttled() that this ATQ is being
-		 * destroyed. The CAS acts as a full memory barrier, ordering
-		 * this store before scx_atq_destroy(). Only the CAS winner
-		 * proceeds to drain and destroy; the loser skips via the
-		 * branch below.
+		 * Winner-takes-all via the map delete: bpf_map_delete_elem is
+		 * atomic, so exactly one CPU removes the entry and then owns the
+		 * now-unmapped llcx exclusively; the losers skip and move on to
+		 * the next LLC context (cbw_free_llc_ctx() is multi-CPU-reentrant).
+		 * Deleting first also stops new put-asides into this cgroup's BTQ
+		 * during the drain (lookups return NULL), and cbw_put_aside()
+		 * re-checks the map under the BTQ lock to catch one in flight.
 		 */
-		if (!__sync_bool_compare_and_swap(&llcx->btq, btq, NULL)) {
-			/*
-			 * Another CPU concurrently zeroed llcx->btq via the
-			 * same CAS. That CPU is the winner and is responsible
-			 * for draining this LLC context, freeing it, and
-			 * scheduling BTQ destruction. The loser (this CPU)
-			 * will just move on to the next LLC context. Hence,
-			 * cbw_free_llc_ctx() is multi-CPU-reentrant.
-			 */
+		if (cbw_del_llc_ctx_with_id(cgrp_id, i))
 			continue;
-		}
-		/*
-		 * This CPU won the CAS - proceed to drain, delete, and destroy.
-		 */
 
 		/*
 		 * Move all the throttled exiting tasks into the root cgroup.
-		 * Then, delete the LLC context and its associated BTQ.
 		 */
 		if (cgrp_id != ROOT_CGID) {
 			while (can_loop && (taskc = scx_atq_pop(btq, true))) {
@@ -974,6 +1162,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 				 * path's lock-acquire provides the matching
 				 * load-acquire.
 				 */
+				WRITE_ONCE(t->bill_cgrp_id, 0);
 				WRITE_ONCE(t->cgx_raw, 0);
 				WRITE_ONCE(t->llcx_raw, 0);
 				/*
@@ -998,35 +1187,16 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 			}
 		}
 
-		if (cbw_del_llc_ctx_with_id(cgrp_id, i)) {
-			cbw_err("Failed to delete an LLC context: [%llu/%d]",
-				cgrp_id, i);
-			/*
-			 * Even if the map delete fails, it is still safe to
-			 * call schedule_atq_destroy() below. We won the CAS
-			 * above, so we hold exclusive ownership of btq -- no
-			 * other CPU will access it. The stale LLC map entry
-			 * will be harmless: future lookups will find
-			 * llcx->btq == NULL and skip it.
-			 *
-			 * Do NOT recycle llcx: the stale map entry still
-			 * holds a reference to it.
-			 */
-		} else {
-			/*
-			 * Map entry removed; no future lookup can reach llcx.
-			 * Return it to the free list for reuse.
-			 */
-			cbw_free_llcx(llcx);
-		}
-
 		/*
-		 * Defer scx_atq_destroy() to avoid a use-after-free in
-		 * cbw_drain_btq_batch(): that function snapshots llcx->btq
-		 * under READ_ONCE(), and cbw_free_llc_ctx() may destroy the
-		 * BTQ in the window between the snapshot and scx_atq_pop().
+		 * Recycle the llcx with its (drained) BTQ intact -- BTQs are
+		 * never destroyed. A drain that snapshotted this BTQ before the
+		 * delete above may still pop from it after it is recycled and
+		 * reused, but that is only a transient inaccuracy (a task briefly
+		 * reenqueued from the wrong cgroup, then re-evaluated), never a
+		 * use-after-free, since the memory stays valid and BTQ operations
+		 * are lock-serialized.
 		 */
-		schedule_atq_destroy(btq);
+		cbw_free_llcx(llcx);
 	}
 
 	return nr_moved;
@@ -1069,30 +1239,187 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 	 * causes the compiler to emit addr_space_cast inside the subprogram.
 	 */
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
-	scx_cgroup_ctx_t *parentx;
+	scx_cgroup_ctx_t *eff_parentx;
+	u64 ub;
 
 	if (!cgx)
 		return -EINVAL;
 
 	/*
-	 * We assume that all its ancestors' nquota_ub are already updated
-	 * (e.g., pre-order traversal of the cgroup tree). Hence, we don't
-	 * need to walk up all its ancestors to get the minimum, so we compare
-	 * against its parent's nquota_ub. The parent is identified by
-	 * cgx->parent_id, which is cached at init.
+	 * Cap against the effective parent -- the nearest ancestor with a
+	 * context (cgx->eff_parent_id). Callers update in pre-order, so the
+	 * effective parent's nquota_ub is already current; a managed cgroup keeps
+	 * its context for life, so a live descendant's effective parent always
+	 * resolves, and only the root (eff_parent_id 0) has none. Commit the
+	 * bound once: the replenish path reads nquota_ub concurrently and must
+	 * never observe the uncapped value.
 	 */
-	cgx->nquota_ub = cgx->nquota;
-	if (cgx->level > 1) {
-		parentx = cbw_get_cgroup_ctx_with_id(cgx->parent_id);
-		if (!parentx) {
-			cbw_err("Fail to lookup parent ctx: %llu",
-				cgx->parent_id);
-			return -ESRCH;
-		}
-
-		cgx->nquota_ub = min(cgx->nquota_ub, parentx->nquota_ub);
-	}
+	ub = cgx->nquota;
+	eff_parentx = cbw_get_cgroup_ctx_with_id(READ_ONCE(cgx->eff_parent_id));
+	if (eff_parentx)
+		ub = min(ub, READ_ONCE(eff_parentx->nquota_ub));
+	WRITE_ONCE(cgx->nquota_ub, ub);
 	return 0;
+}
+
+/*
+ * Id of @cgrp's effective parent -- the nearest ancestor that has a context:
+ * the nearest limited (finite cpu.max) ancestor, or the root; infinite
+ * ancestors are skipped. 0 if @cgrp is the root (it has no ancestor).
+ * Ref-counted walk, so no RCU read lock is required.
+ */
+static __always_inline
+u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
+{
+	struct cgroup *anc;
+	u64 id = 0;
+	int i, level = cgrp->level;
+
+	bpf_for(i, 1, level + 1) {
+		anc = bpf_cgroup_ancestor(cgrp, level - i);
+		if (!anc)
+			break;
+		if (cbw_get_cgroup_ctx(anc))
+			id = cgroup_get_id(anc);
+		bpf_cgroup_release(anc);
+		if (id)
+			break;
+	}
+	return id;
+}
+
+/*
+ * Billing cgroup for @cgrp: the cgroup itself if it has a context (is limited),
+ * otherwise its effective parent (nearest managed ancestor). The root always
+ * terminates the walk, so a cgroup under only-infinite ancestors bills to the
+ * root. @cgrp is borrowed, not released.
+ *
+ * @cgrp must come from a source that is not filtered by the caller's cgroup
+ * namespace -- scx_bpf_task_cgroup() (from the task) or a trusted cgroup
+ * argument -- never bpf_cgroup_from_id(), which returns NULL for an id outside
+ * current's namespace on kernels before v6.18.
+ */
+static __always_inline
+u64 cbw_resolve_bill_cgid(struct cgroup *cgrp)
+{
+	u64 bill;
+
+	if (cbw_get_cgroup_ctx(cgrp))
+		bill = cgroup_get_id(cgrp);
+	else
+		bill = cbw_eff_parent_cgid(cgrp);
+
+	return bill ? bill : ROOT_CGID;
+}
+
+/*
+ * Resolve and cache a task's billing cgroup id from its own cgroup. Resolved
+ * once (0 = unresolved) and reused; invalidated when the task changes cgroup
+ * (scx_cgroup_bw_move) or its cgroup context is torn down (cbw_free_llc_ctx).
+ * Resolution uses scx_bpf_task_cgroup(), so @p must be the task the current op
+ * is operating on. A NULL @p is a cache-only caller (a non-subject op): return
+ * the cached id, or 0 (unknown) when the cache is cold, without resolving.
+ */
+static __always_inline
+u64 cbw_bill_task(scx_task_cgroup_bw_t *taskc, struct task_struct *p)
+{
+	struct cgroup *cgrp;
+	u64 bill;
+
+	if (taskc && taskc->bill_cgrp_id)
+		return taskc->bill_cgrp_id;
+
+	/*
+	 * A NULL @p marks a cache-only caller: a non-subject op (e.g.
+	 * ops.dispatch() accounting the previous task) where scx_bpf_task_cgroup()
+	 * is illegal. With the cache cold, report the billing cgroup as unknown
+	 * (0); the caller then skips, and it is resolved on @p's next subject op.
+	 */
+	if (!p)
+		return 0;
+
+	cgrp = scx_bpf_task_cgroup(p);
+	if (!cgrp) {
+		scx_bpf_error("cgroup_bw: failed to get cgroup for task %d", p->pid);
+		return 0;
+	}
+	bill = cbw_resolve_bill_cgid(cgrp);
+	bpf_cgroup_release(cgrp);
+
+	if (taskc)
+		taskc->bill_cgrp_id = bill;
+	return bill;
+}
+
+/*
+ * Generation id of the managed-cgroup set. Bumped when a cgroup's managed
+ * status flips -- it gains a finite cpu.max and becomes its subtree's nearest
+ * managed billing target, or loses it and hands its billers up to its effective
+ * parent -- because either moves live tasks' billing target. A task stamps its
+ * cached billing state (bill_cgrp_id/cgx_raw/llcx_raw) with the generation id it
+ * resolved against (bill_gen); cbw_sync_bill_gen() drops the cache when this
+ * generation id no longer matches.
+ */
+static u64 cbw_bill_gen;
+
+/*
+ * Drop a task's cached billing state (bill_cgrp_id/cgx_raw/llcx_raw) and
+ * restamp bill_gen when it lags cbw_bill_gen. Runs before any cached field is
+ * read on the hot paths, including the cgx_raw fast path that does not go
+ * through cbw_bill_task().
+ */
+static inline void cbw_sync_bill_gen(scx_task_cgroup_bw_t *taskc)
+{
+	u64 gen = READ_ONCE(cbw_bill_gen);
+
+	if (unlikely(taskc->bill_gen != gen)) {
+		/*
+		 * Atomic exchanges, not plain stores: LLVM folds constant stores
+		 * into base+offset addressing and drops the arena addr_space_cast,
+		 * which the verifier rejects (same reason as scx_cgroup_bw_move()).
+		 */
+		__sync_lock_test_and_set(&taskc->bill_cgrp_id, 0);
+		__sync_lock_test_and_set(&taskc->cgx_raw, 0);
+		__sync_lock_test_and_set(&taskc->llcx_raw, 0);
+		__sync_lock_test_and_set(&taskc->bill_gen, gen);
+	}
+}
+
+/*
+ * Initialize a freshly allocated context for @cgrp with the given bandwidth
+ * parameters: cache its effective parent (nearest ancestor with a context), set
+ * the quota and its effective upper bound, and clear the runtime state. Shared
+ * by the sleepable init path and the non-sleepable manage path, which differ
+ * only in how they allocate and populate the LLC contexts.
+ */
+static
+void cbw_init_cgx(struct cgroup *cgrp, u64 cgx_raw,
+		   u64 period_us, u64 quota_us, u64 burst_us)
+{
+	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
+
+	cgx->id = cgroup_get_id(cgrp);
+	cgx->level = cgrp->level;
+	cgx->eff_parent_id = cbw_eff_parent_cgid(cgrp);
+	cbw_set_bandwidth(cgx_raw, period_us, quota_us, burst_us);
+	cbw_update_nquota_ub(cgx_raw);
+	cgx->runtime_total_sloppy = 0;
+	cgx->period_budget = cgx->nquota_ub;
+	cgx->is_throttled = false;
+}
+
+/*
+ * Tear down a partially or fully built context after a failed build: recycle
+ * its LLC contexts and itself onto the free lists and release the managed slot.
+ */
+static
+void cbw_deinit_cgx(u64 cgx_raw, u64 cgrp_id)
+{
+	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
+
+	cbw_free_llc_ctx(cgrp_id);
+	cbw_free_cgx(cgx);
+	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 }
 
 /**
@@ -1109,8 +1436,7 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted)
 {
 	struct cbw_cgrp_entry entry;
-	scx_cgroup_ctx_t *cgx, *parentx;
-	struct cgroup *parent;
+	scx_cgroup_ctx_t *cgx;
 	u64 cgrp_id;
 	int ret;
 
@@ -1122,23 +1448,52 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	/*
 	 * Abort past the static limits rather than run a cgroup unmanaged.
 	 */
-	if (cgrp->level >= CBW_CGRP_TREE_HEIGHT_MAX) {
+	if (cgrp->level >= tree_height_max) {
 		cbw_err("cgroup %llu level %d exceeds max tree height %d; aborting",
-			cgrp_id, cgrp->level, CBW_CGRP_TREE_HEIGHT_MAX);
+			cgrp_id, cgrp->level, tree_height_max);
 		return -E2BIG;
 	}
 
-	if (READ_ONCE(cbw_nr_cgx) >= CBW_NR_CGRP_MAX) {
-		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
-			cgrp_id, CBW_NR_CGRP_MAX);
-		return -ENOSPC;
+	/*
+	 * When ops.cgroup_set_bandwidth() is non-sleepable it cannot allocate, so
+	 * a cgroup that may gain a finite cpu.max at runtime needs its context set
+	 * pre-reserved here, in this sleepable ops.cgroup_init(). Take a
+	 * reservation for every non-root cgroup under the height cap and hold it
+	 * until the cgroup either publishes a context below or exits, so
+	 * cbw_nr_pending_reservations always equals the number of live non-root
+	 * cgroups that have no context, and scx_cgroup_bw_exit() releases on
+	 * context-absence alone. When set_bandwidth is sleepable, materialize
+	 * allocates on demand and nothing is reserved.
+	 */
+	if (!bw_set_sleepable && cgrp->level > 0)
+		__sync_fetch_and_add(&cbw_nr_pending_reservations, 1);
+
+	/*
+	 * Manage only cgroups that define a limit -- a finite cpu.max -- plus
+	 * the root. A non-root cgroup with an infinite cpu.max gets no context:
+	 * its tasks are billed to the nearest limited ancestor, and the roll-up
+	 * and throttle propagation treat it as a pass-through gap.
+	 */
+	if (cgrp->level > 0 && args->bw_quota_us == CBW_RUNTUME_INF_RAW) {
+		/* Build the spare its reservation covers (non-sleepable path). */
+		if (!bw_set_sleepable)
+			cbw_build_spare();
+		return 0;
 	}
-	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= CBW_NR_CGRP_MAX) {
+
+	if (READ_ONCE(cbw_nr_cgx) >= nr_cgrp_max) {
+		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
+			cgrp_id, nr_cgrp_max);
+		ret = -ENOSPC;
+		goto out_unreserve;
+	}
+	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= nr_cgrp_max) {
 		/* Raced past the limit after the fast-path check; give the slot back. */
 		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
-			cgrp_id, CBW_NR_CGRP_MAX);
-		return -ENOSPC;
+			cgrp_id, nr_cgrp_max);
+		ret = -ENOSPC;
+		goto out_unreserve;
 	}
 
 	/*
@@ -1149,80 +1504,71 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * so the cgroup can distribute the budget to its descendants
 	 * when requested.
 	 */
-	cgx = cbw_alloc_cgx();
+	cgx = cbw_alloc_cgx_sleepable();
 	if (!cgx) {
 		cbw_err("Failed to allocate cgroup ctx: %llu", cgrp_id);
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 		ret = -ENOMEM;
-		goto err_unreserve;
+		goto out_unreserve;
 	}
 
-	cgx->id = cgrp_id;
-	cgx->level = cgrp->level;
-	if (cgrp->level > 0 &&
-	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
-		cgx->parent_id = cgroup_get_id(parent);
-		bpf_cgroup_release(parent);
-	} else {
-		cgx->parent_id = 0;
-	}
-	cbw_set_bandwidth((u64)cgx, args->bw_period_us, args->bw_quota_us,
-			  args->bw_burst_us);
-	cbw_update_nquota_ub((u64)cgx);
-	cgx->runtime_total_sloppy = 0;
-	cgx->period_budget = cgx->nquota_ub;
-	cgx->is_throttled = false;
+	cbw_init_cgx(cgrp, (u64)cgx, args->bw_period_us, args->bw_quota_us,
+		      args->bw_burst_us);
 
 	/*
-	 * The parent of @cgrp becomes non-leaf. If the parent is not
-	 * threaded, it cannot have tasks. So, we should free its
-	 * per-LLC-cgroup contexts.
+	 * A managed cgroup keeps its per-LLC contexts and BTQs even after it
+	 * becomes non-leaf: tasks in unlimited descendants bill to their nearest
+	 * managed ancestor, which must own LLC contexts to account for and park
+	 * them. The managed set is small, so retaining them is cheap.
 	 *
-	 * Note that the root cgroup always has LLC contexts and its
-	 * associated BTQs since its level is 0.
+	 * ops.cgroup_init() is always sleepable and allocates fresh, so it uses
+	 * the sleepable path directly rather than the bw_set_sleepable dispatch.
 	 */
-	if ((cgrp->level > 0) &&
-	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
-		if (cgroup_get_id(parent) != ROOT_CGID) {
-			parentx = cbw_get_cgroup_ctx(parent);
-			if (parentx && !cgroup_is_threaded(parent)) {
-				cbw_free_llc_ctx(parentx, parentx->id);
-			}
+	if ((ret = __cbw_init_llcx_sleepable(cgrp, cgx))) {
+		/*
+		 * -EEXIST means a concurrent materialize (cbw_manage_cgroup())
+		 * of @cgrp published the LLC set first and owns @cgrp's context,
+		 * having already released @cgrp's reservation. Return only the
+		 * cgx claimed here and leave @cgrp to that winner: routing
+		 * through cbw_deinit_cgx() would delete the winner's LLC entries,
+		 * and out_unreserve would release the reservation a second time.
+		 */
+		if (ret == -EEXIST) {
+			cbw_free_cgx(cgx);
+			__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+			return 0;
 		}
-		bpf_cgroup_release(parent);
-	}
-
-	/*
-	 * Create per-LLC-cgroup contexts if @cgrp can have tasks (i.e.,
-	 * a cgroup is either at the leaf level or threaded). Here, @cgrp
-	 * is at the leaf (a cgroup is a leaf until its child is created),
-	 * so we will create per-LLC-cgroup contexts anyway.
-	 */
-	if ((ret = cbw_init_llc_ctx(cgrp, cgx))) {
 		cbw_err("Failed to init LLC contexts: %llu (%d)", cgrp_id, ret);
-		goto err_free;
+		cbw_deinit_cgx((u64)cgx, cgrp_id);
+		goto out_unreserve;
 	}
 
 	/*
 	 * Publish the fully-initialized context into cbw_cgrp_map as the very
 	 * last step. Making @cgrp reachable only after its LLC contexts and BTQs
-	 * exist (has_llcx == true) upholds the invariant that any cgroup found
-	 * through the map can hold tasks.
+	 * exist upholds the invariant that any cgroup found through the map can
+	 * hold tasks.
 	 */
 	entry.cgx = (u64)cgx;
 	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
 		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
+		cbw_deinit_cgx((u64)cgx, cgrp_id);
 		ret = -ENOMEM;
-		goto err_free;
+		goto out_unreserve;
 	}
 
-	return 0;
+	ret = 0;
+out_unreserve:
+	/*
+	 * Release the reservation taken above on every outcome except the
+	 * infinite-quota early return: a managed cgroup consumes it once its
+	 * context is published, and a failed init leaves no cgroup for
+	 * scx_cgroup_bw_exit() to release later. Only the non-sleepable path
+	 * reserves (see the init gate).
+	 */
+	if (!bw_set_sleepable && cgrp->level > 0)
+		__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 
-err_free:
-	cgx->has_llcx = true;
-	cbw_free_llc_ctx(cgx, cgrp_id);
-	cbw_free_cgx(cgx);
-err_unreserve:
-	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 	return ret;
 }
 
@@ -1240,7 +1586,7 @@ int cbw_unthrottle_cgroup_for_exit(u64 cgrp_id)
 		return -ESRCH;
 	}
 
-	if (cgx->nquota_ub == CBW_RUNTUME_INF)
+	if (READ_ONCE(cgx->nquota_ub) == CBW_RUNTUME_INF)
 		return 0;
 
 	WRITE_ONCE(cgx->nquota_ub, CBW_RUNTUME_INF);
@@ -1294,14 +1640,172 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 * limits, or CPU controller not enabled -- has no context; nothing to
 	 * tear down.
 	 */
-	if (!cbw_get_cgroup_ctx_with_id(cgrp_id))
+	if (!cbw_get_cgroup_ctx_with_id(cgrp_id)) {
+		/*
+		 * Release the reservation @cgrp took in scx_cgroup_bw_init().
+		 * Every non-root cgroup under the height cap holds one for as
+		 * long as it has no context, so context-absence alone decides
+		 * this -- @cgrp's current cpu.max does not matter, and a limit
+		 * that changed while it stayed context-less cannot unbalance it.
+		 * Only the non-sleepable path reserves (see the init gate).
+		 */
+		if (!bw_set_sleepable &&
+		    cgrp->level > 0 && cgrp->level < tree_height_max)
+			__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 		return 0;
+	}
 
 	cbw_unthrottle_cgroup_for_exit(cgrp_id);
 	if (!cbw_del_cgroup_ctx(cgrp_id))
 		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
-	cbw_free_llc_ctx(NULL, cgrp_id);
+	cbw_free_llc_ctx(cgrp_id);
 	return 0;
+}
+
+/*
+ * Move every managed cgroup in @cgrp's subtree that caps against @from_id over
+ * to @to_id, and recompute the subtree's quota bounds (pre-order: self before
+ * descendants). @cgrp gaining a context passes (its effective parent -> @cgrp);
+ * @cgrp losing one passes (@cgrp -> its effective parent).
+ */
+static
+int cbw_repoint_subtree(struct cgroup *cgrp, u64 from_id, u64 to_id)
+{
+	struct cgroup_subsys_state *start_css, *pos;
+	scx_cgroup_ctx_t *cur_cgx;
+	u64 self_id = cgroup_get_id(cgrp);
+	u64 cur_id;
+	int ret = 0;
+
+	bpf_rcu_read_lock();
+	start_css = &cgrp->self;
+	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+		cur_id = cgroup_get_id(pos->cgroup);
+
+		/*
+		 * Only a managed cgroup carries the state updated below. Confirm
+		 * the context still belongs to cur_id: one freed while the walk
+		 * runs (cbw_free_cgx() zeroes it) can be reissued to another
+		 * cgroup, and an id mismatch means this resolution is stale.
+		 */
+		cur_cgx = cbw_get_cgroup_ctx_with_id(cur_id);
+		if (unlikely(!cur_cgx || READ_ONCE(cur_cgx->id) != cur_id))
+			continue;
+
+		/*
+		 * eff_parent_id names the nearest ancestor that has a context, so
+		 * a descendant pointing at @from_id has nothing managed between
+		 * itself and @from_id -- which is exactly where @cgrp now sits
+		 * (materialize) or no longer sits (retire). Moving those and only
+		 * those to @to_id keeps every eff_parent_id correct without
+		 * walking any ancestors. @cgrp's own effective parent is set by
+		 * the caller; rewriting it here would point it at itself.
+		 */
+		if (cur_id != self_id && READ_ONCE(cur_cgx->eff_parent_id) == from_id)
+			WRITE_ONCE(cur_cgx->eff_parent_id, to_id);
+
+		/*
+		 * Pre-order, so an effective parent inside this subtree has its
+		 * own bound updated before the descendants capping against it.
+		 */
+		if ((ret = cbw_update_nquota_ub((u64)cur_cgx)))
+			break;
+	}
+	bpf_rcu_read_unlock();
+	return ret;
+}
+
+/*
+ * Bring @cgrp, which gained a finite cpu.max while unmanaged, under bandwidth
+ * management. It builds the context by allocating on demand when
+ * ops.cgroup_set_bandwidth() may sleep, or from a spare reserved during
+ * ops.cgroup_init() otherwise.
+ * On success @cgrp joins the managed set: its reservation is released,
+ * cbw_bill_gen is bumped so cached billers re-resolve, and its subtree is
+ * re-pointed. Over the static caps, or with no spare available, it aborts
+ * with -errno, failing the cpu.max update.
+ */
+static
+int cbw_manage_cgroup(struct cgroup *cgrp, u64 period_us, u64 quota_us, u64 burst_us)
+{
+	struct cbw_cgrp_entry entry = {};
+	scx_cgroup_ctx_t *cgx;
+	u64 cgrp_id = cgroup_get_id(cgrp);
+	int ret;
+
+	/* Abort past the static limits; see scx_cgroup_bw_init(). */
+	if (cgrp->level >= tree_height_max) {
+		cbw_err("cgroup %llu level %d exceeds max tree height %d; aborting",
+			cgrp_id, cgrp->level, tree_height_max);
+		return -E2BIG;
+	}
+
+	if (READ_ONCE(cbw_nr_cgx) >= nr_cgrp_max) {
+		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
+			cgrp_id, nr_cgrp_max);
+		return -ENOSPC;
+	}
+	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= nr_cgrp_max) {
+		/* Raced past the limit after the fast-path check; give the slot back. */
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
+			cgrp_id, nr_cgrp_max);
+		return -ENOSPC;
+	}
+
+	/*
+	 * Sleepable: allocate on demand. Non-sleepable: claim the spare reserved
+	 * during ops.cgroup_init() -- abort if that build came up short.
+	 */
+	if (bw_set_sleepable)
+		cgx = cbw_alloc_cgx_sleepable();
+	else
+		cgx = cbw_alloc_cgx_atomic();
+	if (!cgx) {
+		cbw_err("cgroup %llu: failed to obtain a context; aborting", cgrp_id);
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+		return -ENOMEM;
+	}
+
+	cbw_init_cgx(cgrp, (u64)cgx, period_us, quota_us, burst_us);
+
+	ret = cbw_init_llcx(cgrp, cgx);
+	if (ret == -EEXIST) {
+		/*
+		 * Lost a concurrent materialize of @cgrp: the winner owns the
+		 * published LLC set, so return only the cgx claimed here and
+		 * leave @cgrp to it. Nothing was published from this call --
+		 * both racers start at LLC 0, so the loser fails there.
+		 */
+		cbw_free_cgx(cgx);
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+		return 0;
+	}
+	if (ret) {
+		cbw_err("cgroup %llu: failed to obtain LLC contexts; aborting", cgrp_id);
+		cbw_deinit_cgx((u64)cgx, cgrp_id);
+		return ret;
+	}
+
+	entry.cgx = (u64)cgx;
+	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
+		cbw_err("cgroup %llu: failed to publish the context; aborting", cgrp_id);
+		cbw_deinit_cgx((u64)cgx, cgrp_id);
+		return -ENOMEM;
+	}
+
+	/*
+	 * @cgrp is managed now: consume the reservation it held while unmanaged
+	 * (non-sleepable path only -- the sleepable path reserves nothing), bump
+	 * the generation so cached billers re-resolve to it, and re-point the
+	 * subtree so descendants cap against it.
+	 */
+	if (!bw_set_sleepable)
+		__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
+	__sync_fetch_and_add(&cbw_bill_gen, 1);
+
+	/* Re-point descendants to cap against @cgrp. */
+	return cbw_repoint_subtree(cgrp, READ_ONCE(cgx->eff_parent_id), cgrp_id);
 }
 
 /**
@@ -1338,12 +1842,28 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 	if (!cgx_raw) {
 		/*
-		 * Unmanaged cgroup -- skipped at init for exceeding the static
-		 * limits. Nothing to configure.
+		 * Unmanaged cgroup. A finite cpu.max makes it eligible for
+		 * management: materialize a context from a reserved spare. An
+		 * infinite quota (or being over the static limits) leaves it
+		 * unmanaged, with nothing to configure.
 		 */
-		return 0;
+		if (quota_us == CBW_RUNTUME_INF_RAW)
+			return 0;
+		return cbw_manage_cgroup(cgrp, period_us, quota_us, burst_us);
 	}
 
+	/*
+	 * A managed cgroup keeps its context for the rest of its life, even
+	 * once its cpu.max goes back to infinite: an unlimited managed cgroup
+	 * caps nobody (nquota_ub becomes infinite), so it costs a context but
+	 * changes no behaviour. Never handing a live context back is a
+	 * deliberate simplification: a context is then freed only at cgroup
+	 * exit, when the cgroup is already empty and childless, so no task
+	 * bills to it and no descendant points at it. That removes every
+	 * use-after-recycle window this concurrent code would otherwise face
+	 * and the deferred-free (RCU-style) machinery that closing them would
+	 * require.
+	 */
 	cbw_set_bandwidth(cgx_raw, period_us, quota_us, burst_us);
 
 	/*
@@ -1376,67 +1896,115 @@ s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 	s64 sum;
 	int i;
 
-	if (!cgx->has_llcx)
-		return 0;
-
 	sum = 0;
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx(cgrp, i);
+		/*
+		 * A set can be missing an entry while it is being built or
+		 * torn down; the remaining LLCs still count.
+		 */
 		if (!llcx)
-			break;
+			continue;
 		sum += READ_ONCE(llcx->runtime_total);
 	}
 	return sum;
 }
 
 static
-struct tree_levels *get_clean_tree_levels(void)
+s64 *tree_level(u32 level)
 {
-	const u32 idx = 0;
-	struct tree_levels *tree;
+	return bpf_map_lookup_elem(&tree_levels_map, &level);
+}
 
-	tree = bpf_map_lookup_elem(&tree_levels_map, &idx);
-	if (tree)
-		__builtin_memset(tree, 0, sizeof(*tree));
+static
+int clean_tree_levels(void)
+{
+	s64 *lv;
+	u32 l;
 
-	return tree;
+	bpf_for(l, 0, tree_height_max) {
+		lv = bpf_map_lookup_elem(&tree_levels_map, &l);
+		if (!lv)
+			return -ENOMEM;
+		*lv = 0;
+	}
+
+	return 0;
+}
+
+/*
+ * Sum and clear every per-level accumulator below @level. In a post-order
+ * pass these hold the subtree totals of the current cgroup's descendants,
+ * which infinite cgroups may separate from it by deeper levels.
+ */
+static
+s64 tree_absorb_deeper(u32 level)
+{
+	s64 sum = 0, *lv;
+	u32 l;
+
+	bpf_for(l, level + 1, tree_height_max) {
+		lv = tree_level(l);
+		if (!lv)
+			continue;
+		sum += *lv;
+		*lv = 0;
+	}
+
+	return sum;
 }
 
 static
 int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
-	u32 cur_level, prev_level = CBW_CGRP_TREE_HEIGHT_MAX;
 	struct cgroup_subsys_state *start_css, *pos;
 	scx_cgroup_ctx_t *cur_cgx = NULL;
-	struct tree_levels *tree;
 	struct cgroup *cur_cgrp;
-	s64 rt_llcx;
+	s64 rt_llcx, rts, *lv;
+	u32 cur_level;
 	int ret = 0;
 
 
-	tree = get_clean_tree_levels();
-	if (!tree)
-		return -ENOMEM;
+	ret = clean_tree_levels();
+	if (ret)
+		return ret;
 
 	/*
-	 * Suppose the following cgroup hierarchy with cgroup name and level.
-	 * (cgroup_root:0
-	 *	(A:1
-	 *		(D:2
-	 *		 E:2))
-	 *	(B:1)
-	 *	(C:1
-	 *		(F:2
-	 *		 G:2)))
+	 * Refresh each cgroup's runtime_total_sloppy to the CPU time consumed by
+	 * its whole subtree, in a single post-order (left-right-self) pass.
 	 *
-	 * The post-order traversal of the tree is as follows:
-	 *   D:2 -> E:2 -> A:1 -> B:1 -> F:2 -> G:2 -> C:1 -> cgroup_root:0
+	 * Post-order visits an entire subtree before its root, so by the time we
+	 * reach a cgroup every deeper cgroup has already deposited its own subtree
+	 * total into the per-level scratch (tree_levels_map, indexed by cgroup
+	 * level). A cgroup absorbs and clears all deeper levels, adds its own LLC
+	 * runtime, and deposits the result at its own level for an ancestor to
+	 * absorb in turn.
 	 *
-	 * We traverse the tree in a post-order (left-right-self). We first
-	 * update the runtime_total_sloppy (rts) to the fresh value. Then,
-	 * we aggregate the runtime_total_sloppy values at the same level
-	 * (e.g., D:2 and E:2). When we visit an upper level (e.g., A:1),
-	 * we put the aggregate value in the upper level (A:1).
+	 * Only limited cgroups (finite cpu.max) and the root have a context; they
+	 * are marked '+' below. With every cgroup limited:
+	 *   (P:0+
+	 *	(Q:1+
+	 *		(S:2+
+	 *		 T:2+))
+	 *	(R:1+))
+	 * post-order is S:2 -> T:2 -> Q:1 -> R:1 -> P:0: S and T deposit at level
+	 * 2, then Q absorbs level 2 (S+T) into its own total; leaf R has nothing
+	 * deeper. The root P:0 is never throttled, so the sweep stops there.
+	 *
+	 * A cgroup with an infinite cpu.max has no context: it records nothing of
+	 * its own, but still forwards its descendants' totals up to its own level,
+	 * so a context-bearing ancestor absorbs them. Here V has a limited child W
+	 * and an infinite child X, and X has a limited child Y:
+	 *   (U:0+
+	 *	(V:1+
+	 *		(W:2+)
+	 *		(X:2
+	 *			(Y:3+))))
+	 * post-order is W:2 -> Y:3 -> X:2 -> V:1 -> U:0: W deposits at level 2 and
+	 * Y at level 3; X, though it has no context, forwards Y up to level 2
+	 * (clearing level 3); V then absorbs level 2 and gets both W and Y. W keeps
+	 * only its own runtime, since it absorbs only levels deeper than 2 and so
+	 * never picks up Y.
 	 *
 	 * Note that refreshing runtime_total_sloppy is racy because we do
 	 * not coordinate multiple, concurrent CPUs to consume budget and
@@ -1448,75 +2016,39 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 	bpf_rcu_read_lock();
 	start_css = &cgrp->self;
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
-		/*
-		 * We first obtain the up-to-date value of runtime_total
-		 * of its LLC contexts if they exist.
-		 */
 		cur_cgrp = pos->cgroup;
 		cur_level = cur_cgrp->level;
 		if (can_loop && cur_level == 0) /* cgroup_root */
 			break;
-		if (cur_level >= CBW_CGRP_TREE_HEIGHT_MAX) {
-			ret = -E2BIG;
-			break;
-		}
-		if (prev_level == CBW_CGRP_TREE_HEIGHT_MAX)
-			prev_level = cur_level;
-
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
-		if (!cur_cgx) {
-			/*
-			 * The CPU controller of this cgroup is not enabled
-			 * so that we can skip it safely.
-			 */
+		/*
+		 * A cgroup deeper than the height cap has no accumulator slot
+		 * and was already left unmanaged at init, so skip it and keep
+		 * rolling up the rest of the tree. Its subtree contributes no
+		 * runtime; every cgroup visited after it still gets an accurate
+		 * total for this period.
+		 */
+		if (cur_level >= tree_height_max)
 			continue;
-		}
-
-		rt_llcx = cbw_sum_rumtime_total_llcx(cur_cgrp, cur_cgx);
 
 		/*
-		 * When traversing the siblings (e.g., D:2 -> E2, A:1 -> B:1,
-		 * B:1 -> C:1), the previous and current levels are the same.
-		 *
-		 * This means the current cgroup does not have children.
-		 * Hence, its runtime_total_sloppy is the sum of runtime_total
-		 * of its LLC contexts (i.e., rt_llcx).
+		 * Roll the subtree up whether or not this cgroup has a context:
+		 * absorb and clear all deeper levels and deposit the result at
+		 * this level. A contextless cgroup contributes no runtime of its
+		 * own but still forwards its descendants' totals up to its own
+		 * level, so a context-bearing ancestor -- never a sibling --
+		 * absorbs them.
 		 */
-		if (prev_level == cur_level) {
-			WRITE_ONCE(cur_cgx->runtime_total_sloppy, rt_llcx);
-		}
-		/*
-		 * When starting to travel the subtree of a sibling (e.g.,
-		 * B:1 -> F:2), the current level is larger than the previous
-		 * level.
-		 *
-		 * This means the current cgroup does not have children.
-		 * Hence, its runtime_total_sloppy is the sum of runtime_total
-		 * of its LLC contexts (i.e., rt_llcx).
-		 */
-		else if (prev_level < cur_level) {
-			WRITE_ONCE(cur_cgx->runtime_total_sloppy, rt_llcx);
-		}
-		/*
-		 * Once finishing the traversal of all its siblings (e.g.,
-		 * D:2 E:2 -> A1, F:2 G:2 -> C:1), the current level is smaller
-		 * than the previous level.
-		 *
-		 * This means that the current cgroup is a parent of cgroups
-		 * in the previous level. Hence, we should aggregate all
-		 * children's runtime_total_sloppy (i.e., levels[prev_level])
-		 * and the sum of runtime_total of its LLC contexts (i.e.,
-		 * rt_llcx).
-		 *
-		 * Since we finished a subtree, we should reset the accumulated
-		 * runtime_total_sloppy value of the previous level (i.e.,
-		 * levels[prev_level] = 0).
-		 */
-		else if (prev_level > cur_level) {
-			WRITE_ONCE(cur_cgx->runtime_total_sloppy,
-				   tree->levels[prev_level] + rt_llcx);
-			tree->levels[prev_level] = 0;
-		}
+		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
+		rt_llcx = cur_cgx ? cbw_sum_rumtime_total_llcx(cur_cgrp, cur_cgx) : 0;
+		rts = rt_llcx + tree_absorb_deeper(cur_level);
+		lv = tree_level(cur_level);
+		if (lv)
+			*lv += rts;
+
+		if (!cur_cgx)
+			continue;
+
+		WRITE_ONCE(cur_cgx->runtime_total_sloppy, rts);
 
 		/*
 		 * If the cgroup has consumed its effective period budget, mark
@@ -1524,17 +2056,11 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		 * reflects any debt carried from the previous period, so the
 		 * comparison enforces long-run average convergence.
 		 */
-		if (READ_ONCE(cur_cgx->runtime_total_sloppy) >= cur_cgx->period_budget)
+		if (rts >= cur_cgx->period_budget)
 			WRITE_ONCE(cur_cgx->is_throttled, true);
 
-		/* Aggregate this cgroup's runtime_total_sloppy to the level. */
-		tree->levels[cur_level] += READ_ONCE(cur_cgx->runtime_total_sloppy);
-		
-		/* Update the previous level. */
-		prev_level = cur_level;
-
 		cbw_dbg("cgid%llu -- rt_llcx: %lld -- runtime_total_sloppy: %lld",
-			cur_cgx->id, rt_llcx, cur_cgx->runtime_total_sloppy);
+			cur_cgx->id, rt_llcx, rts);
 	}
 	bpf_rcu_read_unlock();
 
@@ -1593,7 +2119,7 @@ u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 		 * This cgroup has an unlimited quota,
 		 * so it cannot be throttled; skip it.
 		 */
-		if (cur_cgx->nquota_ub == CBW_RUNTUME_INF)
+		if (READ_ONCE(cur_cgx->nquota_ub) == CBW_RUNTUME_INF)
 			continue;
 
 		/*
@@ -1618,7 +2144,7 @@ u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 		 * be throttled; so this cgroup should be throttled too.
 		 */
 		anc_css = pos->parent;
-		bpf_for(i, 0, CBW_CGRP_TREE_HEIGHT_MAX) {
+		bpf_for(i, 0, tree_height_max) {
 			if (!anc_css)
 				break;
 			cur_anc_cgrp = anc_css->cgroup;
@@ -1662,47 +2188,40 @@ int cbw_get_current_llc_id(void)
 	return topo_cpu_to_llc_id(cpu);
 }
 
+/*
+ * Whether the billing cgroup @bill_id (already resolved to the task's nearest
+ * managed ancestor) is throttled.
+ *
+ * The throttle decision is based solely on cgx->is_throttled, which is
+ * maintained asynchronously by the accounting timer via a two-step process:
+ *
+ *   Step 1 (cbw_update_runtime_total_sloppy): aggregates runtime_total from LLC
+ *   contexts bottom-up and sets is_throttled when runtime_total_sloppy reaches
+ *   nquota_ub.
+ *
+ *   Step 2 (cbw_throttle_cgroups): propagates is_throttled top-down to all
+ *   descendants of a throttled ancestor.
+ *
+ * The flag is cleared at the replenish period boundary. A stale read is
+ * harmless: at worst it allows one extra accounting interval of overspend,
+ * which is recovered via debt carry-over at the next period.
+ */
 static
-int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
+int cbw_billed_throttled(u64 bill_id, scx_task_cgroup_bw_t *taskc)
 {
-	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_ctx_t *cgx;
 	u64 cgx_raw;
 
-	/*
-	 * The throttle decision is based solely on cgx->is_throttled, which is
-	 * maintained asynchronously by the accounting timer via a two-step
-	 * process:
-	 *
-	 *   Step 1 (cbw_update_runtime_total_sloppy): aggregates runtime_total
-	 *   from LLC contexts bottom-up and sets is_throttled when
-	 *   runtime_total_sloppy reaches nquota_ub.
-	 *
-	 *   Step 2 (cbw_throttle_cgroups): propagates is_throttled top-down to
-	 *   all descendants of a throttled ancestor.
-	 *
-	 * The flag is cleared at the replenish period boundary. A stale read
-	 * is harmless: at worst it allows one extra accounting interval of
-	 * overspend, which is recovered via debt carry-over at the next period.
-	 */
-
-	/* Always go ahead with the root cgroup. */
-	if (cgrp_id == ROOT_CGID)
-		return 0;
-
-	/* Skip the uninitialized cgroup id. */
-	if (unlikely(cgrp_id == 0))
+	if (bill_id == ROOT_CGID || unlikely(bill_id == 0))
 		return 0;
 
 	if (taskc && taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
+		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw) {
-			/*
-			 * The CPU controller is not enabled for this cgroup.
-			 */
-			cbw_dbg("Failed to lookup a cgroup ctx: %llu", cgrp_id);
+			/* The billing cgroup has no context (e.g. it exited). */
+			cbw_dbg("Failed to lookup a cgroup ctx: %llu", bill_id);
 			return -ESRCH;
 		}
 		if (taskc)
@@ -1720,19 +2239,18 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 
 /**
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
- * @cgrp_id: cgroup id where a task belongs to.
- * @p: a task to be tested.
- * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
- *         pass 0 when no task context is available.
+ * @p: a task to be tested; must be the current op's subject task.
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
 __hidden
-int scx_cgroup_bw_throttled(u64 cgrp_id,
-			     struct task_struct *p __arg_trusted, u64 taskc)
+int scx_cgroup_bw_throttled(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc_raw)
 {
+	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
+
 	/*
 	 * Never throttle an exiting task. In do_exit(), a task is removed from
 	 * the PID map by __unhash_process() (called from exit_notify()) in the
@@ -1742,60 +2260,97 @@ int scx_cgroup_bw_throttled(u64 cgrp_id,
 	 * looks up the task pointer via bpf_task_from_pid(), which returns NULL
 	 * for an unhashed task. With no way to reenqueue it, the task is
 	 * permanently lost from all runqueues, causing a watchdog timeout.
+	 *
+	 * A NULL @p is a cache-only caller (see cbw_bill_task); skip this check.
 	 */
-	if (p->flags & PF_EXITING)
+	if (p && (p->flags & PF_EXITING))
 		return 0;
 
-	return cbw_cgroup_bw_throttled(cgrp_id, taskc);
+	if (!taskc)
+		return 0;
+
+	cbw_sync_bill_gen(taskc);
+
+	/*
+	 * Fast path for the common case: a task in the root or a fully-unlimited
+	 * subtree bills to the root, which is never throttled. bill_cgrp_id is
+	 * cached after the first resolution below.
+	 */
+	if (taskc->bill_cgrp_id == ROOT_CGID)
+		return 0;
+
+	return cbw_billed_throttled(cbw_bill_task(taskc, p), taskc);
 }
 
 /**
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
- * @cgrp_id: cgroup id where a task belongs to.
+ * @p: the task being accounted; the current op's subject task, or NULL for a
+ *     cache-only call (a non-subject op such as ops.dispatch()).
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
  * @consumed_ns: amount of time actually used.
- * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
- *             pass 0 when no task context is available.
  *
- * Return 0 for success, -errno for failure.
+ * Return 0 on success -- billed now, nothing to bill (root/unlimited), or
+ * deferred: a cache-only caller (@p == NULL) whose billing cgroup is not yet
+ * resolved has this interval carried in the task and billed on the next
+ * resolved call, so the caller never has to defer its own accounting. Returns
+ * -errno only on a hard failure.
  */
 __hidden
-int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
+int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc_raw,
+			  u64 consumed_ns)
 {
 	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_cgroup_ctx_t *cgx;
-	u64 cgx_raw, llcx_raw;
+	u64 cgx_raw, llcx_raw, carry = 0;
 	int llc_id;
 
-	/* Always go ahead with the root cgroup. */
-	if (cgrp_id == ROOT_CGID)
+	if (!taskc)
 		return 0;
 
-	if (unlikely(!taskc)) {
-		/*
-		 * No task context: fall back to map lookups.
-		 *
-		 * When exiting a scx scheduler, the sched_ext kernel shuts
-		 * down cgroup support before tasks. Hence, failing to look
-		 * up an LLC context is quite normal in this case.
-		 */
-		if ((llc_id = cbw_get_current_llc_id()) < 0) {
-			cbw_err("Invalid LLC id: %d", llc_id);
-			return -EINVAL;
-		}
-		llcx = cbw_get_llc_ctx_with_id(cgrp_id, llc_id);
-		if (!llcx)
-			return 0;
-		goto accounting_out;
-	}
+	cbw_sync_bill_gen(taskc);
 
 	/*
-	 * Ensure cgx_raw is cached; populate it on the first call.
+	 * Absorb any interval an earlier cache-only call could not attribute to a
+	 * billing cgroup (see the deferral below) and bill it together with this
+	 * one. The carry shares this interval's fate: billed at the accounting
+	 * site, re-deferred if this call also cannot resolve, or dropped if the
+	 * billing cgroup is root/unlimited or gone -- exactly what would have
+	 * happened had the carried time been measured now.
+	 */
+	if (taskc->pending_ns)
+		carry = __sync_lock_test_and_set(&taskc->pending_ns, 0);
+
+	/*
+	 * Fast path for the common case: a task in the root or a fully-unlimited
+	 * subtree bills to the root and needs no accounting. bill_cgrp_id is
+	 * cached after the first resolution below.
+	 */
+	if (taskc->bill_cgrp_id == ROOT_CGID)
+		return 0;
+
+	/*
+	 * Resolve the billing cgroup's context, cached in the task on the first
+	 * call from its billing cgroup (nearest managed ancestor-or-self).
 	 */
 	if (taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
+		u64 bill_id = cbw_bill_task(taskc, p);
+
+		/*
+		 * Cache-only caller (@p == NULL) with a cold cache: the billing
+		 * cgroup is unknown here. Defer -- carry this interval (plus any
+		 * already carried) and bill it on the next call that resolves,
+		 * which lands on @p's current billing cgroup.
+		 */
+		if (bill_id == 0) {
+			__sync_fetch_and_add(&taskc->pending_ns, carry + consumed_ns);
+			return 0;
+		}
+		if (bill_id == ROOT_CGID)
+			return 0;
+		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw)
 			return 0;
 		taskc->cgx_raw = cgx_raw;
@@ -1831,7 +2386,6 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 		llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
 	}
 
-accounting_out:
 	/*
 	 * Update the budget usage.
 	 *
@@ -1849,21 +2403,26 @@ accounting_out:
 	 * is subtracted from the next period's budget, keeping long-term CPU
 	 * bandwidth correct.
 	 */
-	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
+	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns + carry);
 
-	cbw_dbg("  cgrp_id: %llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
-		cgrp_id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
+	cbw_dbg("  bill cgid%llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
+		cgx->id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
 __hidden
-int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
+int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 {
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
 	scx_atq_t *task_atq;
 	int llc_id, ret;
+
+	/*
+	 * @bill_id is the billing cgroup (the task's nearest managed ancestor),
+	 * already resolved by the caller, whose BTQ the drain reenqueues from.
+	 */
 
 	/* Get the current LLC ID. */
 	if ((llc_id = cbw_get_current_llc_id()) < 0) {
@@ -1874,20 +2433,15 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	/*
 	 * Put aside the task to the BTQ of the LLC context.
 	 */
-	llcx = cbw_get_llc_ctx_with_id(cgrp_id, llc_id);
+	llcx = cbw_get_llc_ctx_with_id(bill_id, llc_id);
 	if (!llcx) {
 		cbw_err("Failed to lookup an LLC ctx: [%llu/%d]",
-			cgrp_id, llc_id);
+			bill_id, llc_id);
 		return -ESRCH;
 	}
 
-	/*
-	 * Snapshot llcx->btq. cbw_free_llc_ctx() nulls this field before
-	 * destroying the ATQ, so observing NULL means the ATQ is gone.
-	 */
+	/* A mapped llcx always owns a live BTQ (BTQs are never destroyed). */
 	btq = READ_ONCE(llcx->btq);
-	if (!btq)
-		return -ESRCH;
 
 	ret = scx_atq_lock(btq);
 	if (ret) {
@@ -1895,20 +2449,17 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		return -EBUSY;
 	}
 
-	scx_atq_t *btq_now = READ_ONCE(llcx->btq);
-	if (btq_now != btq) {
-		/*
-		 * If this happens, that means there is a race between
-		 * cbw_put_aside() and cbw_free_llc_ctx() since only
-		 * cbw_free_llc_ctx() can concurrently change llcx->btq.
-		 * If we continue here, we park a task in a detached BTQ,
-		 * causing a task stall. Hence, stop here after printing
-		 * the log.
-		 */
+	/*
+	 * Re-verify under the BTQ lock that bill_id still maps to this llcx.
+	 * cbw_free_llc_ctx() deletes the map entry before draining the BTQ, so
+	 * if the cgroup is exiting the re-lookup returns a different pointer (or
+	 * none) and we bail rather than park a task in a doomed BTQ. If it still
+	 * matches, a concurrent free can only drain after we unlock, and it reaps
+	 * the task we insert.
+	 */
+	if (cbw_get_llc_ctx_with_id(bill_id, llc_id) != llcx) {
 		scx_atq_unlock(btq);
-		cbw_warn("put_aside skipped: BTQ has changed in the middle: "
-			 "cgid=%llu, btq1=%llx, btq2=%llx",
-			 cgrp_id, (u64)btq, (u64)btq_now);
+		cbw_warn("put_aside skipped: cgroup exited: cgid=%llu", bill_id);
 		return -ESRCH;
 	}
 
@@ -1927,7 +2478,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	if (task_atq) {
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
-		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
+		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", bill_id);
 		return 0;
 	}
 
@@ -1937,7 +2488,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	if (unlikely(ret == -ECANCELED)) {
 		return 0;
 	} else if (unlikely(ret == -EALREADY)) {
-		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
+		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", bill_id);
 		return 0;
 	} else if (unlikely(ret)) {
 		cbw_err("Failed to insert a task to BTQ: %d", ret);
@@ -1963,10 +2514,15 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, u64 cgrp_id)
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime)
 {
 	cbw_dbg(" [%s/%d]", p->comm, p->pid);
-	return cbw_put_aside(ctx, vtime, cgrp_id);
+
+	if (ctx)
+		cbw_sync_bill_gen((scx_task_cgroup_bw_t *)ctx);
+	/* Park @p under its own billing cgroup (resolved from @p, cache-hot). */
+	return cbw_put_aside(ctx, vtime,
+			     cbw_bill_task((scx_task_cgroup_bw_t *)ctx, p));
 }
 
 static
@@ -1975,7 +2531,7 @@ bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 	scx_cgroup_llc_ctx_t *llcx;
 	int i;
 
-	if (!cgx || !cgx->has_llcx)
+	if (!cgx)
 		return false;
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
@@ -1999,7 +2555,7 @@ bool cbw_replenish_cgroup(scx_cgroup_ctx_t *cgx, u64 now)
 	/*
 	 * If the nquota_ub is infinite, we don’t need to replenish the cgroup.
 	 */
-	if (cgx->nquota_ub == CBW_RUNTUME_INF)
+	if (READ_ONCE(cgx->nquota_ub) == CBW_RUNTUME_INF)
 		goto out_no_replenish;
 
 	/*
@@ -2049,7 +2605,7 @@ bool cbw_replenish_cgroup(scx_cgroup_ctx_t *cgx, u64 now)
 		WRITE_ONCE(cgx->burst_remaining,
 			   cgx->burst_remaining - burst_credit);
 
-	budget = (s64)cgx->nquota_ub + burst_credit - debt;
+	budget = (s64)READ_ONCE(cgx->nquota_ub) + burst_credit - debt;
 	WRITE_ONCE(cgx->period_budget, budget);
 
 	/*
@@ -2290,6 +2846,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	s64 interval, jitter, period;
 	int i, ret;
 	s32 idle_cpu;
+	u32 slot;
 	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
@@ -2335,12 +2892,10 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		if (cur_cgx->has_llcx) {
-			bpf_for(i, 0, TOPO_NR(LLC)) {
-				cur_llcx = cbw_get_llc_ctx(cur_cgrp, i);
-				if (cur_llcx)
-					WRITE_ONCE(cur_llcx->runtime_total, 0);
-			}
+		bpf_for(i, 0, TOPO_NR(LLC)) {
+			cur_llcx = cbw_get_llc_ctx(cur_cgrp, i);
+			if (cur_llcx)
+				WRITE_ONCE(cur_llcx->runtime_total, 0);
 		}
 		WRITE_ONCE(cur_cgx->runtime_total_last,
 			   READ_ONCE(cur_cgx->runtime_total_sloppy));
@@ -2370,8 +2925,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		ids = MEMBER_VPTR(cbw_cgroup_ids,
-				  [cbw_nr_cgroups]);
+		slot = cbw_nr_cgroups;
+		ids = bpf_map_lookup_elem(&cbw_cgroup_ids, &slot);
 		if (!ids) {
 			cbw_err("Failed to fetch a cgroup table.");
 			continue;
@@ -2398,7 +2953,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	cbw_dbg("Start replenish %llu cgroups.", cbw_nr_cgroups);
 	nr_throttled = 0;
 	bpf_for(i, 0, cbw_nr_cgroups) {
-		ids = MEMBER_VPTR(cbw_cgroup_ids, [i]);
+		slot = i;
+		ids = bpf_map_lookup_elem(&cbw_cgroup_ids, &slot);
 		if (!ids) {
 			cbw_err("Failed to fetch a cgroup table.");
 			continue;
@@ -2444,8 +3000,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 * observes a consistent cbw_throttled_cgroup_ids[].
 		 */
 		if (cbw_replenish_cgroup(cur_cgx, now)) {
-			ids = MEMBER_VPTR(cbw_throttled_cgroup_ids,
-					  [nr_throttled]);
+			slot = nr_throttled;
+			ids = bpf_map_lookup_elem(&cbw_throttled_cgroup_ids, &slot);
 			if (!ids) {
 				cbw_err("Failed to fetch a throttled cgroup table.");
 				continue;
@@ -2539,9 +3095,9 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 	 * the main problem is that because a .dequeue() callback can happen
 	 * at any point.
 	 *
-	 * Re-read llcx->btq on every iteration. cbw_free_llc_ctx() nulls
-	 * this field before destroying the ATQ; catching NULL between
-	 * iterations prevents operating on a freed ATQ.
+	 * The BTQ comes from the mapped llcx and is never destroyed, so popping
+	 * is always safe even if the cgroup is concurrently exiting: at worst a
+	 * task is drained from a recycled BTQ and re-evaluated on reenqueue.
 	 */
 	for (i = 0; can_loop && i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
@@ -2573,15 +3129,19 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 	 * Note that we start with a random LLC to give each LLC a fair
 	 * chance to be reenqueued.
 	 */
-	if (!cgx->has_llcx)
-		return false;
 	cbw_dbg("cgid%llu", cgrp_id);
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		idx = (nuance + i) % TOPO_NR(LLC);
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, idx);
 		if (!llcx) {
-			cbw_err("Failed to lookup an LLC context: cgid%llu", cgrp_id);
+			/*
+			 * A concurrent teardown can free this cgroup's LLC
+			 * contexts while the drain runs, so a missing entry is an
+			 * expected transient here, not an error: skip it and move
+			 * on to the next LLC.
+			 */
+			cbw_dbg("Failed to lookup an LLC context: cgid%llu", cgrp_id);
 			continue;
 		}
 
@@ -2589,7 +3149,7 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 		 * If the cgroup is throttled, all its LLC contexts are
 		 * throttled too. Stop draining immediately.
 		 */
-		if (cbw_cgroup_bw_throttled(cgrp_id, 0) == -EAGAIN)
+		if (cbw_billed_throttled(cgrp_id, NULL) == -EAGAIN)
 			break;
 
 		nr_enq += cbw_drain_btq_batch(cgx, llcx);
@@ -2640,6 +3200,7 @@ int scx_cgroup_bw_reenqueue(void)
 	int i, idx, n, nr_enq = 0;
 	u64 nuance, nuance2, nr_tcgs;
 	u64 *ids, cur_cgrp_id;
+	u32 slot;
 
 	/*
 	 * If there are throttled tasks in BTQ, let’s reenqueue them.
@@ -2663,7 +3224,8 @@ int scx_cgroup_bw_reenqueue(void)
 	bpf_for(i, 0, nr_tcgs) {
 		nuance2 = nuance + i;
 		idx = nuance2 % nr_tcgs;
-		ids = MEMBER_VPTR(cbw_throttled_cgroup_ids, [idx]);
+		slot = idx;
+		ids = bpf_map_lookup_elem(&cbw_throttled_cgroup_ids, &slot);
 		if (!ids) {
 			cbw_err("Failed to fetch a throttled cgroup table.");
 			continue;
@@ -2745,20 +3307,23 @@ int scx_cgroup_bw_reenqueue(void)
 /**
  * scx_cgroup_bw_is_cgroup_throttled - Test if a cgroup is throttled or not.
  *
- * @cgrp_id: cgroup id
+ * @cgrp: the cgroup to test
  *
  * Return true if the cgroup is throttled. Otherwise, return false.
  */
 __hidden
-int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id)
+int scx_cgroup_bw_is_cgroup_throttled(struct cgroup *cgrp __arg_trusted)
 {
-	scx_cgroup_ctx_t *cgx;
+	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgroup_get_id(cgrp));
 
-	cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
+	/*
+	 * Unmanaged (e.g. infinite cpu.max): its tasks are throttled against the
+	 * nearest managed ancestor, so report that.
+	 */
 	if (!cgx)
-		return 0;
+		cgx = cbw_get_cgroup_ctx_with_id(cbw_resolve_bill_cgid(cgrp));
 
-	return READ_ONCE(cgx->is_throttled);
+	return cgx ? READ_ONCE(cgx->is_throttled) : 0;
 }
 
 
@@ -2806,8 +3371,14 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 
 	scx_arena_subprog_init();
 	/*
-	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
-	 * old cgroup and will be repopulated on the next throttle/consume call.
+	 * Drain any time an earlier cache-only call deferred (pending_ns) and
+	 * charge it to @from below, before repointing @p -- otherwise it would be
+	 * billed to @to. The atomic drain is race-safe against a concurrent
+	 * consume: only one side sees the value.
+	 *
+	 * Then invalidate the per-task cache: bill_cgrp_id, cgx_raw and llcx_raw
+	 * belong to the old cgroup. They are re-resolved from @p's new cgroup on
+	 * the next throttle/consume call.
 	 *
 	 * Use atomic exchanges instead of plain stores: LLVM folds constant
 	 * stores into base+offset addressing and omits addr_space_cast for the
@@ -2816,6 +3387,38 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	 */
 	tc = (scx_task_cgroup_bw_t *)taskc;
 	if (tc) {
+		u64 carry = __sync_lock_test_and_set(&tc->pending_ns, 0);
+
+		/*
+		 * Charge the deferred time to @from's billing cgroup, where it was
+		 * consumed. Prefer @p's cached contexts -- read before the
+		 * invalidation below, they still point at the old cgroup: the
+		 * cached LLC ctx charges with no lookup; a cached cgroup ctx (e.g.
+		 * warmed by a throttle check, which caches no LLC ctx) needs only
+		 * an LLC lookup. Fall back to resolving @from when the cache is
+		 * fully cold. Any LLC works; runtime_total rolls up to the cgroup.
+		 */
+		if (carry) {
+			u64 llcx_raw = tc->llcx_raw;
+			u64 cgx_raw = tc->cgx_raw;
+
+			if (!llcx_raw) {
+				int llc_id = cbw_get_current_llc_id();
+
+				if (!cgx_raw)
+					cgx_raw = cbw_get_cgroup_ctx_raw(
+							cbw_resolve_bill_cgid(from));
+				if (cgx_raw && llc_id >= 0)
+					llcx_raw = cbw_get_llc_ctx_raw_with_id(
+						((scx_cgroup_ctx_t *)cgx_raw)->id,
+						llc_id);
+			}
+			if (llcx_raw)
+				__sync_fetch_and_add(&((scx_cgroup_llc_ctx_t *)
+						     llcx_raw)->runtime_total, carry);
+		}
+
+		__sync_lock_test_and_set(&tc->bill_cgrp_id, 0);
 		__sync_lock_test_and_set(&tc->cgx_raw, 0);
 		__sync_lock_test_and_set(&tc->llcx_raw, 0);
 	}
@@ -2852,7 +3455,8 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	 * verifier rejects calling scx_bpf_dsq_insert_vtime() from the
 	 * ops.cgroup_move() callback.
 	 */
-	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime,
+				 cbw_resolve_bill_cgid(to)))) {
 		if (ret == -ESRCH) {
 			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
 				 p->comm, p->pid, cgroup_get_id(to));
@@ -2933,19 +3537,17 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	if (cgx->nquota_ub == CBW_RUNTUME_INF)
 		return 0;
 
-	if (cgx->has_llcx) {
-		bpf_for(i, 0, TOPO_NR(LLC)) {
-			llcx = cbw_get_llc_ctx(cgrp, i);
-			if (!llcx || !(btq = READ_ONCE(llcx->btq)))
-				continue;
-			nr_throttled_tasks += scx_atq_nr_queued(btq);
-		}
+	bpf_for(i, 0, TOPO_NR(LLC)) {
+		llcx = cbw_get_llc_ctx(cgrp, i);
+		if (!llcx || !(btq = READ_ONCE(llcx->btq)))
+			continue;
+		nr_throttled_tasks += scx_atq_nr_queued(btq);
 	}
 
 	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
-			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
+	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu", indent_str,
+			cgx->nquota, cgx->nquota_ub);
 	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d (%u/%u), nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
