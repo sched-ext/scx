@@ -28,12 +28,6 @@
  */
 #define MAX_WAKEUP_FREQ		64ULL
 
-/*
- * Enable TIMELY mode: when true, the scheduler uses TIMELY's delay-driven
- * feedback for adaptive time slices.
- */
-const volatile bool timely_enabled;
-
 char _license[] SEC("license") = "GPL";
 
 /* Allow to use bpf_printk() only when @debug is set */
@@ -121,12 +115,6 @@ const volatile u64 cpu_capacity[MAX_CPUS];
  * Scheduling statistics.
  */
 volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches,
-	nr_delay_recovery_dispatches, nr_delay_middle_add_dispatches,
-	nr_delay_fast_recovery_dispatches, nr_delay_rate_limited_dispatches,
-	nr_gain_floor_dispatches, nr_gain_ceiling_dispatches,
-	nr_delay_low_region_samples, nr_delay_mid_region_samples,
-	nr_delay_high_region_samples, nr_gain_floor_resident_samples,
-	nr_gain_mid_resident_samples, nr_gain_ceiling_resident_samples,
 	nr_idle_select_path_picks, nr_idle_enqueue_path_picks,
 	nr_idle_prev_cpu_picks, nr_idle_primary_picks, nr_idle_spill_picks,
 	nr_idle_pick_failures, nr_idle_primary_domain_misses,
@@ -149,22 +137,6 @@ volatile u64 nr_online_cpus;
  * Maximum possible CPU number.
  */
 static u64 nr_cpu_ids;
-
-/*
- * TIMELY tunables.
- */
-const volatile u64 timely_tlow_ns = 5000ULL * NSEC_PER_USEC;
-const volatile u64 timely_thigh_ns = 50000ULL * NSEC_PER_USEC;
-const volatile u32 timely_gain_min_fp = 128U;
-const volatile u32 timely_gain_max_fp = 1024U;
-const volatile u32 timely_gain_step_fp = 32U;
-const volatile u32 timely_hai_thresh_fp = 768U;
-const volatile u32 timely_hai_multiplier = 2U;
-const volatile u32 timely_backoff_low_fp = 768U;
-const volatile u32 timely_backoff_high_fp = 960U;
-const volatile u32 timely_backoff_gradient_fp = 992U;
-const volatile u64 timely_gradient_margin_ns = 125ULL * NSEC_PER_USEC;
-const volatile u64 timely_control_interval_ns = 500ULL * NSEC_PER_USEC;
 
 /*
  * Runtime throttling.
@@ -267,14 +239,6 @@ struct task_ctx {
 	u64 wakeup_freq;
 	u64 last_woke_at;
 	u64 avg_runtime;
-	/* TIMELY-specific fields (valid when timely_enabled=true) */
-	u64 timely_last_enqueued_at;
-	u32 timely_gain_fp;
-	u64 timely_last_gain_update_at;
-	u64 timely_last_delay_sample_at;
-	u64 timely_avg_queue_delay;
-	s64 timely_avg_queue_gradient;
-	u32 timely_hai_streak;
 };
 
 /* Map that contains task-local storage. */
@@ -802,8 +766,6 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 		tctx = try_lookup_task_ctx(p);
 		if (tctx) {
-			if (timely_enabled)
-				tctx->timely_last_enqueued_at = bpf_ktime_get_ns();
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
 						 task_slice(p, cpu), task_dl(p, cpu, tctx), 0);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
@@ -869,8 +831,6 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
-
-/* Forward declarations for functions used by TIMELY helpers */
 static bool keep_running(const struct task_struct *p, s32 cpu);
 static bool consume_first_task(u64 dsq_id, struct task_struct *p);
 
@@ -883,9 +843,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	if (timely_enabled)
-		tctx->timely_last_enqueued_at = bpf_ktime_get_ns();
-
 	/*
 	 * If the task is marked as sticky due to excessive rescheduling
 	 * activity, dispatch it directly to the same CPU to reduce the
@@ -893,7 +850,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_task_sticky(tctx)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu),
-				   enq_flags | (timely_enabled ? SCX_ENQ_IMMED : 0));
+				   enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -905,7 +862,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu),
-				   enq_flags | (timely_enabled ? SCX_ENQ_IMMED : 0));
+				   enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -926,7 +883,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_pcpu_task(p)) {
 		if (local_pcpu)
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu),
-					   enq_flags | (timely_enabled ? SCX_ENQ_IMMED : 0));
+					   enq_flags);
 		else
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
 						 task_slice(p, prev_cpu), task_dl(p, prev_cpu, tctx), enq_flags);
@@ -1106,30 +1063,9 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
-	 * TIMELY: Track queue delay if task was enqueued with TIMELY enabled.
+	 * Adjust target CPU frequency before the task starts to run.
 	 */
-	if (timely_enabled && tctx->timely_last_enqueued_at) {
-		u64 delay = tctx->last_run_at > tctx->timely_last_enqueued_at
-				    ? tctx->last_run_at - tctx->timely_last_enqueued_at
-				    : 1;
-		u64 prev_avg = tctx->timely_avg_queue_delay;
-		s64 gradient;
-
-		tctx->timely_avg_queue_delay =
-			(tctx->timely_avg_queue_delay * 3 + delay) >> 2;
-		gradient = (s64)tctx->timely_avg_queue_delay - (s64)prev_avg;
-		tctx->timely_avg_queue_gradient =
-			(tctx->timely_avg_queue_gradient * 3 + gradient) >> 2;
-		tctx->timely_last_delay_sample_at = tctx->last_run_at;
-		tctx->timely_last_enqueued_at = 0;
-	}
-
-	if (!timely_enabled) {
-		/*
-		 * Adjust target CPU frequency before the task starts to run.
-		 */
-		update_cpu_load(p, tctx);
-	}
+	update_cpu_load(p, tctx);
 
 	/*
 	 * Update current system's vruntime.
