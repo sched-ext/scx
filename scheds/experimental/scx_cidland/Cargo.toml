@@ -4,22 +4,23 @@ version = "1.1.3"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 edition = "2024"
 rust-version = "1.91"
-description = "A cid-based, topology-aware sched_ext scheduler, addressing CPUs by their topological CPU ID (cid). https://github.com/sched-ext/scx/tree/main"
+description = "Topology-aware scheduler that preserves task-to-CPU locality, built on EEVDF concepts and addressing CPUs by their topological CPU ID (cid). https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
 publish = false
 
 [dependencies]
 anyhow = "1"
+ctrlc = { version = "3", features = ["termination"] }
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8"
-ctrlc = { version = "3", features = ["termination"] }
 libbpf-rs = "=0.27.0"
+libc = "0.2"
 log = "0.4"
 scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "1.1.3" }
 scx_stats = { path = "../../../rust/scx_stats", version = "1.1.3" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.3" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.1.3" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.3", features = ["autopower"] }
 serde = { version = "1", features = ["derive"] }
 simplelog = "0.12"
 
