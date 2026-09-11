@@ -188,9 +188,22 @@ be turned off on the command line to compare the two rules against each other.
    synchronous wakeup from a waker that is the only runnable task on its CPU
    makes that CPU the affine target, `wake_affine_idle()`: idle alternatives
    around it still win, and only when the scan fails is the wakee stacked on
-   the waker that is about to sleep. The `record_wakee()`/`wake_wide()` flip
-   heuristic disables affinity for wide M:N wakeup patterns. A new task with
-   nowhere idle to go is placed on the shortest queue, `find_idlest_cpu()`.
+   the waker that is about to sleep. When the waking CPU and the previous one
+   are both busy the wakee stays on its previous CPU by default; `--wa-weight`
+   sends it to whichever the loads say ends up lighter, `wake_affine_weight()`:
+   the load of a CPU is the weight of what is runnable on it averaged over
+   time, `cpu_load()`, and a task's is its weight scaled by the fraction of
+   the time it is runnable, `task_h_load()`, with the previous CPU favoured by
+   half the domain's `imbalance_pct`. A waker that runs a little and sleeps a
+   lot weighs little, so its wakee lands on its CPU and runs when it sleeps,
+   instead of behind a fresh slice on the CPU it came from; on a saturated
+   machine that is a third of the wakeups, and the one case where the rule
+   has been measured to matter. Everywhere else it is within noise and costs
+   a few percent on wakeup-heavy runs, in `fair.c` as much as here, hence
+   off by default. The
+   `record_wakee()`/`wake_wide()` flip heuristic disables affinity for wide
+   M:N wakeup patterns. A new task with nowhere idle to go is placed on the
+   shortest queue, `find_idlest_cpu()`.
 
  - **Load balancing.** A CPU that runs out of work pulls from the other queues
    of its node, walking its own LLC first the way the idle balancer walks the
@@ -339,14 +352,6 @@ that has not been done.
 
 ### Wakeup placement
 
- - **`wake_affine_weight()`.** The wake affinity here is only
-   `wake_affine_idle()`'s "the waker is the only thing running" clause, and it
-   is consulted only on a synchronous wakeup. `fair.c` weighs the load of the
-   two CPUs whenever nothing is idle, which is the case that matters under
-   load. It needs a `cpu_load()` analogue, and the sum of the queued weights is
-   not one - it cannot tell a CPU running one task at 5% duty from one running
-   a spinner.
-
  - **The idle scan never gives up.** `select_idle_cpu()` looks for an idle CPU
    under a budget, `SIS_UTIL`, that shrinks as the LLC fills, and past it the
    waking task is left to queue on the target `wake_affine()` chose. Here the
@@ -365,19 +370,19 @@ that has not been done.
 
 ### Load balancing
 
- - **No load signal, and the utilization is not used for balancing.** There
-   *is* a PELT equivalent here: `ravg` is a geometric running average over a
-   32 ms half-life, `LOAD_AVG_PERIOD`, kept per task and per cid. But it
-   accumulates running time, so it is `util_avg` and nothing else. `fair.c`
-   balances on `cfs_rq->avg.load_avg`, which is runnable time scaled by the
-   weight, and distributes it with `task_h_load()`; neither the weight
-   scaling nor the hierarchical part exists here. And what is tracked is not
-   consulted anyway: `cid_util()` feeds the cpufreq governor, `task_util()`
-   decides whether a task fits a CPU, and every balancing decision reads
-   queue depth instead. So a cid running one task at 5% duty and a cid
-   running a spinner are the same number to the balancer, though not to the
-   governor. This is the missing piece underneath most of the rest of this
-   section.
+ - **The load signal is not used for balancing.** There *is* a PELT
+   equivalent here: `ravg` is a geometric running average over a 32 ms
+   half-life, `LOAD_AVG_PERIOD`, kept per task and per cid, and since the
+   wake affinity needed it there is a `cfs_rq->avg.load_avg` analogue too,
+   the runnable weight of a cid averaged over time, and a `task_h_load()`,
+   the weight scaled by the time runnable, without the hierarchical part.
+   But only the wakeup path reads them: `cid_util()` feeds the cpufreq
+   governor, `task_util()` decides whether a task fits a CPU, and every
+   balancing decision reads queue depth instead. So a cid running one task
+   at 5% duty and a cid running a spinner are the same number to the
+   balancer, though not to the governor or, with `--wa-weight`, to
+   `wake_affine_weight()`. This
+   is the missing piece underneath most of the rest of this section.
 
  - **No group classification.** `fair.c` sorts groups into overloaded, misfit,
    fully busy and has-spare and computes an imbalance from that

@@ -221,6 +221,18 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Weigh the waking CPU against the previous one when both are busy.
+    ///
+    /// By default a wakee whose previous CPU and waking CPU are both busy
+    /// stays where it last ran. With this, it goes to the one the two loads
+    /// say is lighter, the time-averaged weight of what is runnable on each,
+    /// so that a waker that runs a little and sleeps a lot takes its wakee
+    /// onto its own CPU: wake_affine_weight(). It matters on a saturated
+    /// machine with many short wakeups; elsewhere it costs a few percent of
+    /// wakeup throughput for no measured gain, as it does in fair.c.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    wa_weight: bool,
+
     /// Interrupt on the deadlines alone, without asking who is owed service.
     ///
     /// The wakeup preemption normally fires only when the woken task is owed
@@ -540,6 +552,7 @@ impl<'a> Scheduler<'a> {
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.wa_weight = opts.wa_weight;
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_eligible_scan = opts.no_eligible_scan;

@@ -106,6 +106,15 @@ const volatile bool no_newidle_cost;
 const volatile bool no_wakeup_preempt;
 
 /*
+ * Send a wakee to the waking cid when both it and its previous cid are
+ * busy and the loads say that leaves the two better balanced, the
+ * effective-load comparison of wake_affine_weight(), see
+ * wake_affine_weight_cid(). Off by default: a wakee stays on its previous
+ * cid, and the load averages behind the comparison are not kept.
+ */
+const volatile bool wa_weight;
+
+/*
  * Interrupt a running task on the deadlines alone, without asking which
  * of the two is owed service, see kick_queued_cid().
  */
@@ -244,6 +253,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
+	struct ravg_data runnable_avg;	/* fraction of wall time spent runnable, see task_load() */
 	u64 util_est;		/* what the last activation used */
 	u64 vruntime;
 	u64 deadline;
@@ -355,6 +365,7 @@ struct cid_topo {
  */
 struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
+	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
 	u64 last_balance_at;
 	u64 vsum_w;
 	u64 vref;
@@ -556,6 +567,42 @@ static u64 cid_util(s32 cid, u64 now)
 	ravg_from_arena(&rd, &cid_ctx(cid)->run_avg);
 
 	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+}
+
+/*
+ * The load of a cid, cpu_load(): what cfs_rq->avg.load_avg is, the weight
+ * of the runnable tasks averaged over time, and what wake_affine_weight()
+ * compares. The weight is the pack's, @vsum_w, the sum over the running
+ * task and the queued ones, and it is sampled into the average from the
+ * cid's own CPU, in ops.running(), ops.stopping() and ops.tick(), where
+ * the cid's utilization is: a join or a leave from another CPU changes
+ * @vsum_w atomically but cannot update a running average that is not,
+ * and the sample is at most an event behind. A read from another CPU is
+ * the same unlocked read cid_util() makes.
+ */
+static void cid_load_update(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+	struct ravg_data rd;
+
+	if (!wa_weight || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+
+	ravg_from_arena(&rd, &cctx->load_avg);
+	ravg_accumulate(&rd, cctx->vsum_w, now, UTIL_HALF_LIFE_NS);
+	ravg_to_arena(&cctx->load_avg, &rd);
+}
+
+static u64 task_load(const struct task_struct *p, struct task_ctx *tctx, u64 now);
+
+static u64 cid_load(s32 cid, u64 now)
+{
+	struct ravg_data rd;
+
+	ravg_from_arena(&rd, &cid_ctx(cid)->load_avg);
+
+	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS) >> RAVG_FRAC_BITS;
 }
 
 /*
@@ -1836,10 +1883,10 @@ static bool wake_wide_cid(const struct task_ctx *pctx, const struct task_ctx *wc
  * Pick the target around which the idle search should run.
  *
  * This is the WA_IDLE half of fair.c's wake_affine(). The effective-load
- * half has no exact counterpart here: sched_ext tasks do not maintain the
- * CFS load averages wake_affine_weight() compares. As in fair.c, affinity
- * is only considered for a wakeup, when the waking cid is allowed and is
- * in the previous cid's LLC.
+ * half, wake_affine_weight(), is there but opt-in, --wa-weight, see
+ * wake_affine_weight_cid(). As in fair.c, affinity is only considered for
+ * a wakeup, when the waking cid is allowed and is in the previous cid's
+ * LLC.
  *
  * Returning @this_cid does not select it. select_idle_sibling_cid() below
  * first looks for an idle target and previous cid, then scans around the
@@ -1847,6 +1894,85 @@ static bool wake_wide_cid(const struct task_ctx *pctx, const struct task_ctx *wc
  * distinction is what keeps wake_affine() ahead of select_idle_sibling()
  * without skipping select_idle_sibling().
  */
+/*
+ * The WA_WEIGHT half of wake_affine(): with both cids busy, the wakee goes
+ * to the waking cid when that leaves the two better balanced than its
+ * previous cid would, wake_affine_weight():
+ *
+ *	this_eff_load = cpu_load(cpu_rq(this_cpu));
+ *	if (sync) {
+ *		unsigned long current_load = task_h_load(current);
+ *		if (current_load > this_eff_load)
+ *			return this_cpu;
+ *		this_eff_load -= current_load;
+ *	}
+ *	task_load = task_h_load(p);
+ *	this_eff_load += task_load;
+ *	if (sched_feat(WA_BIAS))
+ *		this_eff_load *= 100;
+ *	this_eff_load *= capacity_of(prev_cpu);
+ *
+ *	prev_eff_load = cpu_load(cpu_rq(prev_cpu));
+ *	prev_eff_load -= task_load;
+ *	if (sched_feat(WA_BIAS))
+ *		prev_eff_load *= 100 + (sd->imbalance_pct - 100) / 2;
+ *	prev_eff_load *= capacity_of(this_cpu);
+ *	if (sync)
+ *		prev_eff_load += 1;
+ *	return this_eff_load < prev_eff_load ? this_cpu : nr_cpumask_bits;
+ *
+ * The loads are the time-averaged runnable weights, see cid_load() and
+ * task_load(), which is what makes this different from counting queued
+ * tasks: a waker that runs a little and sleeps a lot weighs little on its
+ * cid, so a wakee it has just woken lands there, where it is next in line
+ * behind a task about to sleep, rather than behind a full slice on the
+ * cid it came from. This is where a waker hands a CPU to its wakee under
+ * load, and without it a wakee on a saturated machine waited a slice on
+ * its previous cid for one wakeup in five, where fair.c waits on one in
+ * fourteen. The bias is the half of the domain's imbalance_pct fair.c
+ * uses, 117 within an LLC and 110 within a core.
+ *
+ * It is off by default and --wa-weight turns it on: that saturated
+ * wakeup pattern is the one place it has been measured to matter, and
+ * across the rest of the benchmark set it is within noise at a cost of a
+ * few percent on the wakeup-heavy runs, which fair.c pays for WA_WEIGHT
+ * too.
+ */
+static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
+				  struct task_ctx *tctx,
+				  const struct task_struct *waker,
+				  struct task_ctx *wctx, s32 prev_cid,
+				  s32 this_cid, bool sync, u64 now)
+{
+	s64 this_eff, prev_eff;
+	u64 load;
+	u32 pct;
+
+	this_eff = cid_load(this_cid, now);
+	if (sync) {
+		u64 current_load = wctx ? task_load(waker, wctx, now) : 0;
+
+		if (current_load > this_eff)
+			return this_cid;
+		this_eff -= current_load;
+	}
+
+	load = task_load(p, tctx, now);
+	this_eff += load;
+	this_eff *= 100;
+	this_eff *= cid_topo(prev_cid)->cap;
+
+	pct = smt_enabled && cid_topo(prev_cid)->core_base == cid_topo(this_cid)->core_base ?
+	      100 + (110 - 100) / 2 : 100 + (117 - 100) / 2;
+	prev_eff = (s64)cid_load(prev_cid, now) - (s64)load;
+	prev_eff *= pct;
+	prev_eff *= cid_topo(this_cid)->cap;
+	if (sync)
+		prev_eff += 1;
+
+	return this_eff < prev_eff ? this_cid : prev_cid;
+}
+
 static s32 wake_affine_cid(const struct task_struct *p, struct task_ctx *tctx,
 			   s32 prev_cid, s32 this_cid, u64 wake_flags, u64 now)
 {
@@ -1884,7 +2010,16 @@ static s32 wake_affine_cid(const struct task_struct *p, struct task_ctx *tctx,
 	    !cid_queued_test(this_cid))
 		return this_cid;
 
-	return prev_cid;
+	/*
+	 * wake_affine_idle()'s last word, an idle previous cid, and then the
+	 * loads, if asked for: both cids are busy, and the one that ends up
+	 * lighter wins.
+	 */
+	if (!wa_weight || cid_idle_test(prev_cid))
+		return prev_cid;
+
+	return wake_affine_weight_cid(p, tctx, waker, wctx, prev_cid, this_cid, sync,
+				      now);
 }
 
 /*
@@ -2201,6 +2336,21 @@ static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
 	w = w * cgw / CGROUP_WEIGHT_DFL;
 
 	return w ? w : 1;
+}
+
+/*
+ * The load of a task, task_h_load(): its weight scaled by the fraction of
+ * the time it has been runnable, se->avg.load_avg, so that a task that
+ * sleeps most of the time weighs less on a queue than one that never
+ * does. The runnable average is kept from ops.runnable() to
+ * ops.quiescent(), where util_avg is kept from ops.running() to
+ * ops.stopping().
+ */
+static u64 task_load(const struct task_struct *p, struct task_ctx *tctx, u64 now)
+{
+	u64 runnable = ravg_read(&tctx->runnable_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+
+	return task_weight(p, tctx) * MIN(runnable, 1024) / 1024;
 }
 
 /*
@@ -4023,6 +4173,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 		return;
 	if (!no_newidle_cost)
 		newidle_decay(cid_ctx(cid), now);
+	cid_load_update(cid, now);
 	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid))) {
 		/*
 		 * nohz_balancer_kick() also wakes an idle balancer when the sole
@@ -4677,6 +4828,8 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 
 	now = bpf_ktime_get_ns();
 	util_est_update(tctx, now);
+	if (wa_weight)
+		ravg_accumulate(&tctx->runnable_avg, 0, now, UTIL_HALF_LIFE_NS);
 
 	/*
 	 * Remember how far the task is from the reference as it stops being
@@ -4738,6 +4891,9 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	direct_placed = tctx->direct_placed;
 	tctx->direct_placed = false;
 	cgw_refresh(p, tctx);
+	if (wa_weight)
+		ravg_accumulate(&tctx->runnable_avg, 1, bpf_ktime_get_ns(),
+				UTIL_HALF_LIFE_NS);
 
 	/*
 	 * Drop out of the pack the task was last a member of. The lag it
@@ -4772,6 +4928,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	tctx->last_run_at = bpf_ktime_get_ns();
 	util_set_running(tctx, true, tctx->last_run_at);
 	cid_util_set_running(scx_bpf_task_cid(p), true, tctx->last_run_at);
+	cid_load_update(scx_bpf_task_cid(p), tctx->last_run_at);
 
 	cid = scx_bpf_task_cid(p);
 
@@ -4851,6 +5008,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	slice = tctx->last_stop_at - tctx->last_run_at;
 	util_set_running(tctx, false, tctx->last_stop_at);
 	cid_util_set_running(cid, false, tctx->last_stop_at);
+	cid_load_update(cid, tctx->last_stop_at);
 
 	/*
 	 * The runtime is charged as wall-clock time whatever the CPU it was
