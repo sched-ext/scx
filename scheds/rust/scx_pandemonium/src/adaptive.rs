@@ -210,15 +210,15 @@ impl LoadGraph {
                 // is the only place in this loop that acts on a prediction
                 // rather than on a completed loss. Only the positive half
                 // matters -- an oscillating CPU (r1 < 0) is already recovering.
-                if let Some(r1) = self.node_slowing.get(i).and_then(|v| *v)
-                    && r1.value > 0.0
-                {
-                    let tighten = Priced {
-                        value: 1.0 - 0.4 * r1.value.clamp(0.0, 1.0),
-                        confidence: r1.confidence,
+                if let Some(r1) = self.node_slowing.get(i).and_then(|v| *v) {
+                    if r1.value > 0.0 {
+                        let tighten = Priced {
+                            value: 1.0 - 0.4 * r1.value.clamp(0.0, 1.0),
+                            confidence: r1.confidence,
+                        }
+                        .weighted(1.0);
+                        k.preempt_thresh_ns = ((k.preempt_thresh_ns as f64) * tighten) as u64;
                     }
-                    .weighted(1.0);
-                    k.preempt_thresh_ns = ((k.preempt_thresh_ns as f64) * tighten) as u64;
                 }
 
                 // PERSISTENCE -> CoDel RESCUE THRESHOLD.
@@ -866,7 +866,7 @@ pub fn monitor_loop(
     }
 
     println!(
-        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} osc_park={}",
+        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} osc_park={} steal={} spill={} kick_declined={} stay_fare_held={} stay_move_taken={} dispatches={}",
         regime.label(),
         final_knobs.slice_ns,
         final_knobs.batch_slice_ns,
@@ -888,6 +888,12 @@ pub fn monitor_loop(
         x[6],
         x[7],
         final_stats.nr_osc_park,
+        final_stats.nr_steal,
+        final_stats.nr_spill_kick_preempt,
+        final_stats.nr_kick_declined,
+        final_stats.nr_stay_fare_held,
+        final_stats.nr_stay_move_taken,
+        final_stats.nr_dispatches,
     );
 
     // READ UEI EXIT REASON
