@@ -494,9 +494,6 @@ impl CpuTopology {
     // AN UNPROVEN BURST/MIXED DRIFT (~1.2x, p >= 0.67 AT N=2) IS TRACKED,
     // WITH A FAR_DEPTH=2 A/B QUEUED IN ROADMAP.md. CHANGE THIS VALUE ONLY
     // WITH THAT A/B IN HAND.
-    const SPILL_NEAR_DEPTH: u32 = 4;
-    const SPILL_FAR_DEPTH: u32 = 1;
-    const SPILL_MONO_DEPTH: u32 = 2;
 
     // BUILD WEIGHTED GRAPH LAPLACIAN FROM CPU TOPOLOGY
     // Conductance edge weight between two CPUs, derived from the cache hierarchy.
@@ -850,10 +847,10 @@ impl CpuTopology {
         while frontier.len() < target.max(1) {
             let mut best: Option<(usize, f64)> = None;
             for (i, node) in frontier.iter().enumerate() {
-                if let DomainNode::Cut { phi, .. } = node
-                    && best.is_none_or(|(_, bp)| *phi < bp)
-                {
-                    best = Some((i, *phi));
+                if let DomainNode::Cut { phi, .. } = node {
+                    if best.map_or(true, |(_, bp)| *phi < bp) {
+                        best = Some((i, *phi));
+                    }
                 }
             }
             let Some((idx, _)) = best else { break }; // no cuts left to split
@@ -1167,12 +1164,6 @@ impl CpuTopology {
     ) -> Result<()> {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES as usize;
         let valid = self.nr_cpus.saturating_sub(1).min(stride);
-        // SPILL-Phi: FOLD THE SAME R_eff INTO A PER-PEER DSQ-DEPTH CAP THE
-        // BPF SPILL HELPER APPLIES (NEAR PEERS ACCEPT AT HIGHER DEPTH, FAR
-        // PEERS NEAR-EMPTY ONLY). max_reff NORMALIZES DISTANCE TO [0,1];
-        // MONOLITHIC (phi_dist_scale 0) -> FLAT SPILL_MONO_DEPTH, NO DISTANCE
-        // TO PRICE.
-        let max_reff = reff.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
         for cpu in 0..self.nr_cpus {
             for slot in 0..valid {
                 let val = rank[cpu * self.nr_cpus + slot];
@@ -1218,26 +1209,11 @@ impl CpuTopology {
                         .min(u32::MAX as u64) as u32
                 };
                 sched.write_reff_value(cpu as u32, slot as u32, dist_extra)?;
-                // PLACEMENT THRESHOLD: same R_eff, applied as a depth cap not a
-                // delay. Caps by DEPTH, so it carries none of the steal side's
-                // tau-scaling exposure the clamp above exists for.
-                let spill_d = if phi_dist_scale_q16 == 0 {
-                    Self::SPILL_MONO_DEPTH
-                } else {
-                    let frac = (reff[cpu * self.nr_cpus + val as usize] / max_reff).clamp(0.0, 1.0);
-                    (Self::SPILL_NEAR_DEPTH as f64
-                        - (Self::SPILL_NEAR_DEPTH - Self::SPILL_FAR_DEPTH) as f64 * frac)
-                        .round()
-                        .clamp(Self::SPILL_FAR_DEPTH as f64, Self::SPILL_NEAR_DEPTH as f64)
-                        as u32
-                };
-                sched.write_spill_depth(cpu as u32, slot as u32, spill_d)?;
             }
             for slot in valid..stride {
                 sched.write_affinity_rank(cpu as u32, slot as u32, u32::MAX)?;
                 sched.write_reff_value(cpu as u32, slot as u32, u32::MAX)?;
                 sched.write_domain_phi(cpu as u32, slot as u32, u32::MAX)?;
-                sched.write_spill_depth(cpu as u32, slot as u32, Self::SPILL_MONO_DEPTH)?;
             }
         }
         Ok(())
@@ -1533,7 +1509,7 @@ mod t2_cut_tests {
         // CPUs 2 and 3 are the same sibling L2 pair: identical crossing price from 0.
         assert_eq!(m[0 * n + 2], m[0 * n + 3]);
         // Symmetric.
-        assert_eq!(m[0 * n + 4], m[4 * n]);
+        assert_eq!(m[0 * n + 4], m[4 * n + 0]);
     }
 
     #[test]

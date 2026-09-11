@@ -60,6 +60,20 @@ pub struct PandemoniumStats {
     // domain half, which on a two-domain box is the minority. Every steal is a
     // migration by definition, so this is the dispatch side's share of the count.
     pub nr_steal: u64,
+    // THE anchor -> target EDGE, BOTH OUTCOMES (intf.h nr_stay_fare_held /
+    // nr_stay_move_taken). The fare is the only priced term on the wake path's
+    // own move and nothing incremented when it fired, so "holds everything home"
+    // and "never runs" were indistinguishable from outside. Read as a ratio: the
+    // pair is every decision, the first is the refusals.
+    // REFUSED REQUEUE KICKS, SELF-TARGETED (intf.h nr_kick_declined). The bottom
+    // rung of the kick ladder: the price refused the act, not just its strength,
+    // and only where this CPU is the one that will dispatch. Read beside
+    // nr_soft_kicks -- a refusal is not a soft kick and must not be pooled with
+    // one, or the kick rate reports IPIs that were never issued. Its magnitude is
+    // what says whether the self-only subset is worth keeping.
+    pub nr_kick_declined: u64,
+    pub nr_stay_fare_held: u64,
+    pub nr_stay_move_taken: u64,
     // PER-CPU RUNNABLE DEPTH (intf.h rq_depth_sum / rq_depth_samples).
     // Monotonic accumulators sampled at tick rate; difference BOTH across an
     // interval and divide for the mean depth on that CPU, exactly as
@@ -72,9 +86,10 @@ pub struct PandemoniumStats {
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
 // 184 (base, after the structurally empty latcrit l2 pair) + 8*8 (nr_cross_domain)
-// + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) + 8 (nr_steal) + 8 (rq_depth_sum)
-// + 8 (rq_depth_samples) = 288.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 288);
+// + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) + 8 (nr_steal)
+// + 8 (nr_kick_declined) + 8 (nr_stay_fare_held) + 8 (nr_stay_move_taken)
+// + 8 (rq_depth_sum) + 8 (rq_depth_samples) = 312.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 312);
 // 88 - 16 (lat_cri_thresh_high/_low, removed with the classifier that read them)
 // - 8 (spill_temp_q16, computed every tick and consumed by nothing).
 const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 64);
@@ -255,6 +270,9 @@ impl<'a> Scheduler<'a> {
                 total.nr_osc_park += stats.nr_osc_park;
                 total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
                 total.nr_steal += stats.nr_steal;
+                total.nr_kick_declined += stats.nr_kick_declined;
+                total.nr_stay_fare_held += stats.nr_stay_fare_held;
+                total.nr_stay_move_taken += stats.nr_stay_move_taken;
                 // Folded so the aggregate stays complete, but the SUMMED value
                 // is close to meaningless -- it is the total depth seen across
                 // every CPU. The per-CPU pair is the point; read it from
@@ -525,21 +543,6 @@ impl<'a> Scheduler<'a> {
         self.skel
             .maps
             .reff_value
-            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
-        Ok(())
-    }
-
-    // WRITE ONE spill_depth SLOT: THE PRE-FOLDED PHI PLACEMENT THRESHOLD (DSQ
-    // DEPTH) FOR THE PEER AT affinity_rank[cpu][slot]. THE SPILL HELPER READS IT
-    // AS THE PER-PEER DEPTH CAP -- THE PLACEMENT MIRROR OF reff_value's STEAL
-    // DELAY.
-    pub fn write_spill_depth(&self, cpu: u32, slot: u32, value: u32) -> Result<()> {
-        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
-        let key = (cpu * stride + slot).to_ne_bytes();
-        let val = value.to_ne_bytes();
-        self.skel
-            .maps
-            .spill_depth
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
