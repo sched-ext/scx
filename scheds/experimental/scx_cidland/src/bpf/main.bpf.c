@@ -105,6 +105,13 @@ const volatile bool no_wakeup_preempt;
 const volatile bool no_eligibility;
 
 /*
+ * At dispatch, take the head of a deadline-ordered DSQ as the pick
+ * instead of walking it for its first eligible task, see
+ * move_first_eligible_to_local(). Implied by @no_eligibility.
+ */
+const volatile bool no_eligible_scan;
+
+/*
  * Interrupt a running task that is still owed service, when the task
  * that woke holds the earlier deadline, see kick_queued_cid().
  *
@@ -2696,6 +2703,44 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 }
 
 /*
+ * Move the earliest-deadline eligible task from @cid to this CPU. Selection
+ * and movement share the iterator cursor, so scx_bpf_dsq_move() can verify
+ * that the task did not leave the DSQ between the two operations. If every
+ * observed queued task is ineligible, fall back to the head rather than
+ * strand a runnable queue. This can happen when the current task is the
+ * pack's sole eligible member but active balance is moving it elsewhere, or
+ * when the lockless reference and DSQ snapshots race. Callers enter here only
+ * when eligible scanning and eligibility enforcement are both enabled.
+ */
+static __noinline bool move_first_eligible_to_local(s32 cid, u64 now)
+{
+	struct task_struct *head, *p;
+	struct task_ctx *tctx;
+	u64 vref;
+
+	TOUCH_ARENA();
+	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
+	if (!head)
+		return false;
+	vref = cid_vref_place(cid, now);
+	tctx = try_lookup_task_ctx(head);
+	if ((tctx && !time_after(tctx->vruntime, vref)) ||
+	    scx_bpf_dsq_nr_queued(cid_dsq(cid)) == 1)
+		return scx_bpf_dsq_move_to_local(cid_dsq(cid), 0);
+
+	bpf_for_each(scx_dsq, p, cid_dsq(cid), 0) {
+		tctx = try_lookup_task_ctx(p);
+		if (!tctx || time_after(tctx->vruntime, vref))
+			continue;
+
+		return scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+					SCX_DSQ_LOCAL, 0);
+	}
+
+	return scx_bpf_dsq_move_to_local(cid_dsq(cid), 0);
+}
+
+/*
  * Longest a task may hold a CPU across the end of its slice before the
  * queue gets its turn whatever the deadlines say, see keep_running().
  *
@@ -3523,11 +3568,13 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 *
 	 * and a curr that has lost the pick to some other queued task is
 	 * left running until its slice ends, or until a wakeup that does win
-	 * it. The dispatch takes the head of the queue, so the woken task
-	 * is the pick only if its deadline is strictly ahead of the current
-	 * head. A task already queued is not displaced by one that ties it. The
-	 * insertion is applied once this op returns, so the head seen here is
-	 * the one the task is queued against.
+	 * it. The preemption approximation treats the DSQ head as the next pick,
+	 * so the woken task must have a strictly earlier deadline. Selection at
+	 * actual dispatch can scan for eligibility, but doing so here changes the
+	 * policy using a non-atomic snapshot of current, queue, and virtual-time
+	 * state. A task already queued is not displaced by one that ties it. The
+	 * insertion is applied once this op returns, so the head seen here is the
+	 * one the task is queued against.
 	 * A preemption for a task that queues behind others only trades the
 	 * running task for the head a slice early, once for
 	 * every wakeup that lands in the queue: with sixteen tasks queued per
@@ -4209,7 +4256,9 @@ pick:
 	if (src < 0)
 		return false;
 
-	if (!scx_bpf_dsq_move_to_local(cid_dsq(src), 0)) {
+	if (!((src == dst_cid && !no_eligible_scan && !no_eligibility) ?
+	      move_first_eligible_to_local(src, now) :
+	      scx_bpf_dsq_move_to_local(cid_dsq(src), 0))) {
 		cid_queued_check(src);
 		return false;
 	}
@@ -4288,7 +4337,9 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
 		return;
 	}
-	if (!keep && scx_bpf_dsq_move_to_local(cid_dsq(cid), 0)) {
+	if (!keep && ((!no_eligible_scan && !no_eligibility) ?
+		     move_first_eligible_to_local(cid, bpf_ktime_get_ns()) :
+		     scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))) {
 		cid_queued_check(cid);
 		if (active_balance)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);

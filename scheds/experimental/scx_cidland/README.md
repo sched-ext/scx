@@ -119,6 +119,21 @@ be turned off on the command line to compare the two rules against each other.
    the CPU capacity is used to balance the load, never to discount the
    vruntime.
 
+ - **Eligible selection at dispatch.** A priority DSQ orders tasks by deadline
+   but exposes only that order, while `fair.c` augments its deadline-ordered
+   tree with each subtree's minimum vruntime and finds the earliest-deadline
+   eligible task in logarithmic time. Dispatch walks a CPU's DSQ in deadline
+   order to make the same selection when an ineligible head hides an eligible
+   task behind it; an eligible head, or a single queued task, takes the
+   constant-time path. The worst case is linear in the queue depth, which an
+   augmented sched_ext queue interface would remove; measured, the walk stays
+   within noise on every benchmark and costs about a hundred nanoseconds per
+   `ops.dispatch()`. `--no-eligible-scan` takes the head instead, and
+   `--no-eligibility` implies it. Wakeup preemption and keep-running decisions
+   remain head-based approximations: applying a queue-only scan there cannot
+   reproduce `pick_eevdf()`'s atomic view of the current task, queued
+   entities, and virtual-time frontier.
+
  - **Deadlines on time.** A slice is only enforced from `task_tick_scx()`, so
    a task whose request runs out between two ticks holds the CPU until the next
    one, up to a whole tick late, and a task waiting behind it waits that long:
@@ -145,13 +160,15 @@ be turned off on the command line to compare the two rules against each other.
    slice: `wakeup_preempt_fair()`. The woken task has to be owed service to
    qualify and the running one is left alone while it is still owed its own,
    which is what `pick_eevdf()` does when it drops an ineligible `curr` before
-   looking at the tree. And it has to be what the CPU would run next, at the
-   head of the queue: `wakeup_preempt_fair()` preempts only when the woken task
-   is the pick, `nse == pse`, and a running task that has lost the pick to some
-   other queued task is left to finish its slice. `--no-run-to-parity` drops
-   the running task's half alone, the sense the feature had when EEVDF was
-   merged; `--no-eligibility` decides on the deadlines alone; `--no-wakeup-
-   preempt` never interrupts. The policies are settled first, as
+   looking at the tree. And it has to be what the CPU would run next:
+   `wakeup_preempt_fair()` preempts only when the woken task is the pick,
+   `nse == pse`, and a running task that has lost the pick to some other queued
+   task is left to finish its slice. The preemption decision approximates that
+   pick with the DSQ head.
+   `--no-run-to-parity` drops the running task's half alone, the sense the
+   feature had when EEVDF was merged; `--no-eligibility` decides on the
+   deadlines alone; `--no-wakeup-preempt` never interrupts. The policies are
+   settled first, as
    `wakeup_preempt_fair()` settles them: a running `SCHED_IDLE` task is
    interrupted for any task that is not one, and a `SCHED_IDLE` or
    `SCHED_BATCH` task never interrupts anything.
@@ -272,19 +289,22 @@ that has not been done.
 
 ### EEVDF itself
 
- - **No eligibility filter among queued tasks.** `pick_eevdf()` considers
-   only the tasks that are owed service, `v_i <= V`, and takes the earliest
-   deadline among those. A DSQ is ordered by its key and dispatch takes the
-   head, so an over-served task already queued is not skipped. The case that
-   matters is handled where the decision is made: a running task that has had
-   its share is dropped from the wakeup comparison whatever its deadline, the
-   way `pick_eevdf()` drops an ineligible `curr`, and once displaced it has
-   its deadline reissued so it cannot sort back ahead of the task that woke.
-   Without that, a thread waking against a CPU hog on a saturated machine
-   waited for the tick on a third of its wakeups. What is left is a heavier
-   over-served queued task, whose `r_i / w_i` is smaller, sorting ahead of a
-   lighter under-served one - a bounded latency skew, not a fairness leak,
-   since the vruntime is charged either way.
+ - **The eligibility filter is head-based away from dispatch.** `pick_eevdf()`
+   considers only the tasks that are owed service, `v_i <= V`, and takes the
+   earliest deadline among those. Dispatch makes that selection, walking the
+   DSQ past an ineligible head, see above; the wakeup preemption and the
+   keep-running decision cannot, since neither sees the running task, the
+   queue and the reference at once, and both judge the head of the queue
+   alone. The case that matters is handled where the decision is made: a
+   running task that has had its share is dropped from the wakeup comparison
+   whatever its deadline, the way `pick_eevdf()` drops an ineligible `curr`,
+   and once displaced it has its deadline reissued so it cannot sort back
+   ahead of the task that woke. Without that, a thread waking against a CPU
+   hog on a saturated machine waited for the tick on a third of its wakeups.
+   What is left is a heavier over-served queued task, whose `r_i / w_i` is
+   smaller, standing at the head for those two comparisons in place of the
+   lighter under-served one behind it - a bounded latency skew, not a fairness
+   leak, since the vruntime is charged either way.
 
  - **A wakeup that does not preempt leaves the running task's protection
    whole.** `wakeup_preempt_fair()` clips it to one minimum slice ahead of the

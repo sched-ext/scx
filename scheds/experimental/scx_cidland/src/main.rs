@@ -216,6 +216,19 @@ struct Opts {
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     no_eligibility: bool,
 
+    /// Take the head of a deadline-ordered queue at dispatch, eligible or not.
+    ///
+    /// A sched_ext priority DSQ is ordered by deadline but, unlike fair.c's
+    /// augmented EEVDF tree, cannot directly find the earliest-deadline task
+    /// whose vruntime is eligible. Dispatch normally walks the queue for that
+    /// task when the head is not eligible, which matches the selection rule
+    /// there at a linear worst-case cost. This option takes the head instead;
+    /// --no-eligibility implies it. Wakeup preemption and keep-running
+    /// decisions are head-based either way because they cannot observe the
+    /// current task, queue, and virtual-time frontier atomically.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_eligible_scan: bool,
+
     /// Interrupt a running task that is still owed service.
     ///
     /// The wakeup preemption normally leaves a running task alone until it has
@@ -474,6 +487,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
+        rodata.no_eligible_scan = opts.no_eligible_scan;
         rodata.no_run_to_parity = opts.no_run_to_parity;
         rodata.no_preempt_short = opts.no_preempt_short;
         rodata.no_place_lag = opts.no_place_lag;
