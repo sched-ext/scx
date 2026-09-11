@@ -86,16 +86,20 @@ struct Opts {
 
     /// Maximum scheduling slice duration in microseconds.
     ///
-    /// The default is fair.c's normalized_sysctl_sched_base_slice. A task that
-    /// has company on its CPU is asked for the CPU when its request runs out,
-    /// by a timer armed for its deadline, see --no-hrtick, so the slice is
-    /// what it says whatever the kernel's HZ. Without the timer a slice is
-    /// only acted on from the tick, and one of exactly a tick buys two: the
-    /// task is handed the CPU a few microseconds after the tick that freed
-    /// it, so at the next tick it is those few microseconds short of its
-    /// slice and runs a whole further tick.
-    #[clap(short = 's', long, default_value = "700")]
-    slice_us: u64,
+    /// The default is fair.c's sysctl_sched_base_slice as update_sysctl()
+    /// sets it: the normalized 700 us scaled by 1 + ilog2(min(nr_cpus, 8)),
+    /// 2.8 ms on eight CPUs or more, so the two schedulers issue requests of
+    /// the same size on the same machine. A kernel that runs fair.c at some
+    /// other slice, /sys/kernel/debug/sched/base_slice_ns says which, is
+    /// matched by setting it here. A task that has company on its CPU is asked for the CPU when
+    /// its request runs out, by a timer armed for its deadline, see
+    /// --no-hrtick, so the slice is what it says whatever the kernel's HZ.
+    /// Without the timer a slice is only acted on from the tick, and one of
+    /// exactly a tick buys two: the task is handed the CPU a few microseconds
+    /// after the tick that freed it, so at the next tick it is those few
+    /// microseconds short of its slice and runs a whole further tick.
+    #[clap(short = 's', long)]
+    slice_us: Option<u64>,
 
     /// Time, in microseconds, that a task stays cache hot on the CPU it last ran on.
     ///
@@ -377,6 +381,29 @@ fn tick_ns() -> u64 {
     1_000_000
 }
 
+/// The request size fair.c hands out by default on this machine.
+///
+/// sysctl_sched_base_slice is not the 700 us the kernel is compiled with.
+/// update_sysctl() scales that at boot, and again on hotplug, by a factor
+/// taken from the number of online CPUs:
+///
+///	unsigned int cpus = min_t(unsigned int, num_online_cpus(), 8);
+///	case SCHED_TUNABLESCALING_LOG:
+///		factor = 1 + ilog2(cpus);
+///	sysctl_sched_base_slice = factor * normalized_sysctl_sched_base_slice;
+///
+/// so a machine with eight CPUs or more runs a 2.8 ms slice. This is the
+/// upstream rule with its default log scaling; a kernel whose distribution
+/// changed the normalized value or an administrator who tuned the sysctl
+/// runs fair.c at some other slice, and --slice-us is how to match it.
+fn base_slice_ns(nr_cpus: usize) -> u64 {
+    const NORMALIZED_BASE_SLICE_NS: u64 = 700_000;
+    let cpus = nr_cpus.clamp(1, 8) as u64;
+    let factor = 1 + cpus.ilog2() as u64;
+
+    factor * NORMALIZED_BASE_SLICE_NS
+}
+
 /// Assign sorted, descending CPU capacities to tiers.
 ///
 /// Each capacity is compared with the fastest CPU in the current tier rather
@@ -407,7 +434,7 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         try_set_rlimit_infinity();
 
-        if opts.slice_us == 0 {
+        if opts.slice_us == Some(0) {
             bail!("--slice-us must be greater than 0");
         }
 
@@ -443,6 +470,22 @@ impl<'a> Scheduler<'a> {
             1_000_000_000 / tick_ns()
         );
 
+        let slice_ns = match opts.slice_us {
+            Some(us) => {
+                let ns = us * 1000;
+                info!("slice: {} us (--slice-us)", us);
+                ns
+            }
+            None => {
+                let ns = base_slice_ns(topo.all_cpus.len());
+                info!(
+                    "slice: {} us (700 us scaled as update_sysctl() does)",
+                    ns / 1000
+                );
+                ns
+            }
+        };
+
         // Print command line.
         info!(
             "scheduler options: {}",
@@ -475,7 +518,7 @@ impl<'a> Scheduler<'a> {
 
         // Override default BPF scheduling parameters.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
-        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.slice_ns = slice_ns;
         rodata.tick_ns = tick_ns();
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.balance_sample = opts.balance_sample;

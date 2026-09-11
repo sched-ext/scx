@@ -269,8 +269,15 @@ be turned off on the command line to compare the two rules against each other.
    follows the capacity classes chosen by the automatic mode,
    `--uniform-capacity`, or `--asym-capacity`.
 
-Time slices are 700 us by default, `fair.c`'s
-`normalized_sysctl_sched_base_slice`, and they end when they end: the hrtick
+Time slices default to `fair.c`'s `sysctl_sched_base_slice` as
+`update_sysctl()` sets it, so the two schedulers issue requests of the same
+size on the same machine. That is not the 700 us `fair.c` is compiled with:
+`update_sysctl()` scales `normalized_sysctl_sched_base_slice` by
+`1 + ilog2(min(nr_cpus, 8))` at boot, 2.8 ms on eight CPUs or more. A kernel
+that runs `fair.c` at some other slice, a distribution that changed the
+normalized value or an administrator who tuned the sysctl,
+`/sys/kernel/debug/sched/base_slice_ns` says which, is matched with
+`--slice-us`. Slices end when they end: the hrtick
 asks the running task for the CPU at its deadline rather than at the tick that
 follows it, see above. A task can select its own slice with
 `sched_attr.sched_runtime` (subject to the kernel's limits), and setting it to
