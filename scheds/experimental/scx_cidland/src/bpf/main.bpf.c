@@ -2450,6 +2450,46 @@ static u64 cid_vref_place(s32 cid, u64 now)
 	return no_vref_update ? cid_vref(cid) : cid_vref_at(cid, now);
 }
 
+/*
+ * The reference to place a task against when it is about to join @cid.
+ *
+ * cid_vref_at() projects the running task's uncharged service over the
+ * pack's current weight W. Once a task of weight w joins, the same service
+ * is projected over W + w instead. Placing at the pre-join projection can
+ * therefore leave a zero-lag task one unit above the post-join reference
+ * through integer truncation, and incorrectly make it ineligible.
+ *
+ * Let q be the projection after the join. Place against
+ *
+ *	V' = V + q * (W + w) / W.
+ *
+ * vref_join() then contributes w * (V' - V) / (W + w), and adding q
+ * reconstructs V'. Thus a zero-lag task remains eligible after joining,
+ * with the same left bias avg_vruntime() gives fair.c's reference.
+ */
+static u64 cid_vref_before_join(s32 cid, const struct task_struct *p,
+				const struct task_ctx *tctx, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+	u64 curr_w, sum_w, join_w, delta, dv, projection;
+
+	if (no_vref_update || !cid_valid(cid) || tctx->vcid == cid)
+		return cid_vref_place(cid, now);
+	cctx = cid_ctx(cid);
+
+	curr_w = cctx->curr_w;
+	sum_w = cctx->vsum_w;
+	delta = now - cctx->curr_run_at;
+	if (!curr_w || !sum_w || delta >= cctx->curr_request)
+		return cctx->vref;
+
+	join_w = task_weight(p, tctx);
+	dv = delta * NICE_0_WEIGHT / curr_w;
+	projection = dv * curr_w / (sum_w + join_w);
+
+	return cctx->vref + projection * (sum_w + join_w) / sum_w;
+}
+
 /* Return @p's current lag against @cid, clamped as entity_lag() does. */
 static s64 task_lag_at(const struct task_struct *p,
 		       const struct task_ctx *tctx, s32 cid, u64 now)
@@ -3115,7 +3155,7 @@ static void place_task(s32 cid, const struct task_struct *p,
 		       struct task_ctx *tctx, u64 now, bool sleep)
 {
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
-		u64 vruntime = cid_vref_place(cid, now);
+		u64 vruntime = cid_vref_before_join(cid, p, tctx, now);
 
 		/*
 		 * ops.quiescent() does not run when the kernel migrates a queued
