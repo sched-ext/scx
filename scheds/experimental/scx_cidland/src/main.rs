@@ -138,6 +138,17 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "1", value_parser = clap::value_parser!(u32).range(0..=255))]
     cache_nice_tries: u32,
 
+    /// Scan for work on an idle CPU whatever the scan costs.
+    ///
+    /// An idle CPU keeps an average of how long it stays idle after a scan and
+    /// the most a scan at each level has cost, and does not start a scan its
+    /// idle time would not pay for, since a CPU its own wakeups keep bringing
+    /// back is about to have work of its own: sched_balance_newidle()'s
+    /// avg_idle against sd->max_newidle_lb_cost. This drops the budget and
+    /// scans every time.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_newidle_cost: bool,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -523,6 +534,7 @@ impl<'a> Scheduler<'a> {
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.balance_sample = opts.balance_sample;
         rodata.cache_nice_tries = opts.cache_nice_tries;
+        rodata.no_newidle_cost = opts.no_newidle_cost;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
         rodata.numa_enabled = numa_enabled;
@@ -761,6 +773,7 @@ impl<'a> Scheduler<'a> {
             nr_active_balances: bss_data.nr_active_balances,
             nr_preempts: bss_data.nr_preempts,
             nr_hrticks: bss_data.nr_hrticks,
+            nr_newidle_skips: bss_data.nr_newidle_skips,
         }
     }
 

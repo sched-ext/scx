@@ -93,6 +93,13 @@ const volatile u64 migration_cost_ns = 500000ULL;
 const volatile u32 cache_nice_tries = 1;
 
 /*
+ * Scan for work on an idle cid whatever the scan costs against how long
+ * the cid has been staying idle, dropping sched_balance_newidle()'s
+ * avg_idle budget, see newidle_cost().
+ */
+const volatile bool no_newidle_cost;
+
+/*
  * Do not interrupt a running task for one that wakes up with an earlier
  * deadline, leaving it to run until its slice ends.
  */
@@ -196,6 +203,7 @@ volatile u64 nr_steals __hot_written;
 volatile u64 nr_active_balances __hot_written;
 volatile u64 nr_preempts __hot_written;
 volatile u64 nr_hrticks __hot_written;
+volatile u64 nr_newidle_skips __hot_written;
 
 /*
  * Scheduler's exit status.
@@ -364,6 +372,11 @@ struct cid_ctx {
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
+	u64 idle_stamp;		/* when the last idle pull began, see newidle_cost() */
+	u64 avg_idle;		/* how long the cid stays idle after one, rq->avg_idle */
+	u64 max_idle_balance_cost;	/* its worst pull, rq->max_idle_balance_cost */
+	u64 newidle_cost[2];	/* worst pull per level, sd->max_newidle_lb_cost */
+	u64 newidle_decay_at[2];	/* sd->last_decay_max_lb_cost */
 	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
 	s32 active_balance_cid;	/* idle cid asking for the running task */
@@ -3775,6 +3788,126 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * newidle_cost(): the budget of an idle pull, sched_balance_newidle()'s.
+ *
+ * A cid that runs out of work looks for some, and fair.c asks first
+ * whether the look is worth it. The rq keeps avg_idle, how long the CPU
+ * has been staying idle after a newidle balance, every domain keeps
+ * max_newidle_lb_cost, the most a pull at that level has cost, and the
+ * balance is skipped before it starts and stopped at the level the
+ * budget runs out at:
+ *
+ *	if (!get_rd_overloaded(this_rq->rd) ||
+ *	    this_rq->avg_idle < sd->max_newidle_lb_cost)
+ *		goto out;
+ *	for_each_domain(this_cpu, sd) {
+ *		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost)
+ *			break;
+ *		...
+ *		domain_cost = t1 - t0;
+ *		curr_cost += domain_cost;
+ *		update_newidle_cost(sd, domain_cost, ...);
+ *	}
+ *	if (curr_cost > this_rq->max_idle_balance_cost)
+ *		this_rq->max_idle_balance_cost = curr_cost;
+ *
+ * A CPU whose idle periods are shorter than a scan is one its own wakeups
+ * keep bringing back: a task pulled for it comes off a queue whose owner
+ * was about to run it, onto a CPU about to have work of its own, and the
+ * pull costs more than the idle time it fills. The period is measured
+ * from the moment the pull begins, idle_stamp, to the moment the CPU
+ * leaves idle, update_rq_avg_idle(), as an average that moves an eighth
+ * of the way to every sample and is capped at twice the rq's worst pull,
+ * so that one long idle spell does not license scans for the next second
+ * of storm:
+ *
+ *	u64 delta = rq_clock(rq) - rq->idle_stamp;
+ *	u64 max = 2*rq->max_idle_balance_cost;
+ *	update_avg(&rq->avg_idle, delta);
+ *	if (rq->avg_idle > max)
+ *		rq->avg_idle = max;
+ *
+ * A level's cost decays by 1% a second once it stops being raised,
+ * update_newidle_cost(), so a spike does not close the budget for good,
+ * and the rq's worst pull is refreshed from the sum of the levels when
+ * they decay, floored at sysctl_sched_migration_cost. Both start where
+ * sched_init() starts them, at twice and once that cost.
+ *
+ * The levels here are the two an idle cid walks, its LLC and the rest of
+ * the node, and the climb up the capacity tiers that precedes the first
+ * is charged to it. A pull kicked for a specific waiter, see ops.tick(),
+ * is not budgeted: that is the idle balancer running for
+ * nohz_balancer_kick(), which fair.c does not gate by avg_idle either.
+ * The stamp is only read once the cid has gone idle, and every way there
+ * passes through the pull, so a stamp left behind by a pull that found
+ * something is never read.
+ */
+enum {
+	NEWIDLE_LLC,
+	NEWIDLE_NODE,
+	NEWIDLE_LEVELS,
+};
+
+#define NEWIDLE_DECAY_NS	1000000000ULL
+
+/*
+ * Decay the level costs of @cctx that have not been raised for a second,
+ * and refresh its worst pull from them: sched_balance_domains(), which
+ * does this from the tick.
+ */
+static void newidle_decay(struct cid_ctx __arena *cctx, u64 now)
+{
+	bool decayed = false;
+	u64 sum = 0;
+	int i;
+
+	for (i = 0; i < NEWIDLE_LEVELS; i++) {
+		if (time_after(now, cctx->newidle_decay_at[i] + NEWIDLE_DECAY_NS)) {
+			cctx->newidle_cost[i] = cctx->newidle_cost[i] * 253 / 256;
+			cctx->newidle_decay_at[i] = now;
+			decayed = true;
+		}
+		sum += cctx->newidle_cost[i];
+	}
+	if (decayed)
+		cctx->max_idle_balance_cost = MAX(migration_cost_ns, sum);
+}
+
+/*
+ * Charge a pull that cost @cost to level @level of @cctx,
+ * update_newidle_cost().
+ */
+static void update_newidle_cost(struct cid_ctx __arena *cctx, u32 level,
+				u64 cost, u64 now)
+{
+	if (cost > cctx->newidle_cost[level]) {
+		cctx->newidle_cost[level] = cost;
+		cctx->newidle_decay_at[level] = now;
+	} else if (time_after(now, cctx->newidle_decay_at[level] + NEWIDLE_DECAY_NS)) {
+		cctx->newidle_cost[level] = cctx->newidle_cost[level] * 253 / 256;
+		cctx->newidle_decay_at[level] = now;
+	}
+}
+
+/*
+ * @cctx leaves idle at @now: fold the period since its pull began into
+ * the average, update_rq_avg_idle().
+ */
+static void update_avg_idle(struct cid_ctx __arena *cctx, u64 now)
+{
+	u64 idle = now - cctx->idle_stamp;
+	u64 max = 2 * cctx->max_idle_balance_cost;
+
+	if (idle > cctx->avg_idle)
+		cctx->avg_idle += (idle - cctx->avg_idle) / 8;
+	else
+		cctx->avg_idle -= (cctx->avg_idle - idle) / 8;
+	if (cctx->avg_idle > max)
+		cctx->avg_idle = max;
+	cctx->idle_stamp = 0;
+}
+
+/*
  * Periodic tick on a cid that is running an scx task.
  *
  * A queue building up beside an idle CPU is nobody's job to notice, and
@@ -3814,6 +3947,8 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 
 	if (!cid_valid(cid))
 		return;
+	if (!no_newidle_cost)
+		newidle_decay(cid_ctx(cid), bpf_ktime_get_ns());
 	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid))) {
 		u64 now = bpf_ktime_get_ns();
 
@@ -4149,7 +4284,7 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  *
  * Return true if a task has been dispatched, false otherwise.
  */
-static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep)
+static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, bool kicked)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
 	struct cid_topo __arena *topo = cid_topo(dst_cid);
@@ -4160,7 +4295,8 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep)
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = bpf_ktime_get_ns(), t0 = now;
+	bool budget = false;
 	u32 start, own_nr = 0;
 	s32 src = -1;
 
@@ -4193,6 +4329,31 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep)
 	start = cctx->steal_cursor;
 	if (start >= nr_cids)
 		start = 0;
+
+	/*
+	 * sched_balance_newidle(): the idle period is measured from here,
+	 * and a cid that has not been staying idle long enough to pay for
+	 * a scan of its LLC does not start one, see newidle_cost().
+	 */
+	if (!busy) {
+		/*
+		 * A cid woken by a balance kick, for a waiter or for an active
+		 * balance, is not ending an idle period: fair.c runs the idle
+		 * balancer in softirq on the idle task and rq->avg_idle never
+		 * hears of it. Stamping here would make the wakeup that does
+		 * end the period measure it from the kick, and under a busy
+		 * tick that kicks a preferred idle core a hundred times a
+		 * second the average collapsed, the budget closed, and the
+		 * idle pull stopped: half the steals, 17% off messaging.
+		 */
+		if (!force_steal && !kicked)
+			cctx->idle_stamp = now;
+		budget = !no_newidle_cost && !force_steal && !kicked;
+		if (budget && cctx->avg_idle < cctx->newidle_cost[NEWIDLE_LLC]) {
+			__sync_fetch_and_add(&nr_newidle_skips, 1);
+			return false;
+		}
+	}
 
 	if (!busy && nr_place_tiers > 1 &&
 	    (!smt_enabled || core_is_idle(dst_cid))) {
@@ -4227,16 +4388,37 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep)
 		 * enough to stop. A domain that is the whole of the next one is
 		 * not walked twice.
 		 */
+		bool node_skipped = false;
+		u64 curr_cost = 0;
+
 		src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
 				       start + 1, now,
 				       !force_steal && failed <= cache_nice_tries,
 				       0, 0xff);
-		if (src < 0 && node_nr > topo->llc_nr)
+		if (budget) {
+			u64 t1 = bpf_ktime_get_ns();
+
+			curr_cost = t1 - t0;
+			update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
+			t0 = t1;
+			node_skipped = cctx->avg_idle <
+				       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
+		}
+		if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
 			src = steal_from_range(dst_cid, -1, node_base, node_nr,
 					       start + 1, now,
 					       !force_steal &&
 					       failed <= cache_nice_tries + 1,
 					       0, 0xff);
+			if (budget) {
+				u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
+
+				curr_cost += cost;
+				update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
+			}
+		}
+		if (curr_cost > cctx->max_idle_balance_cost)
+			cctx->max_idle_balance_cost = curr_cost;
 
 		/*
 		 * Nothing queued anywhere is a balanced node, not a failure.
@@ -4332,7 +4514,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			keep = keep_running(cid, now);
 	}
 
-	if (try_steal_task(cid, has_prev, keep)) {
+	if (try_steal_task(cid, has_prev, keep, active_balance)) {
 		if (active_balance)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
 		return;
@@ -4393,10 +4575,20 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 {
 	TOUCH_ARENA();
 
-	if (idle)
+	if (idle) {
 		cid_idle_set(cid);
-	else
+	} else if (cid_valid(cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
+
+		/*
+		 * The bit is usually gone already, claimed by the wakeup
+		 * that is bringing the cid back; the period ends here
+		 * either way.
+		 */
 		cid_idle_claim(cid);
+		if (cctx->idle_stamp)
+			update_avg_idle(cctx, bpf_ktime_get_ns());
+	}
 }
 
 void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
@@ -4867,6 +5059,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	nr_words = cmask_nr_words(idle_cids);
 
 	init_topology();
+
+	/* sched_init(): the idle pull budget starts open by a migration cost. */
+	bpf_for(cid, 0, nr_cids) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
+
+		cctx->avg_idle = 2 * migration_cost_ns;
+		cctx->max_idle_balance_cost = migration_cost_ns;
+	}
 
 	/*
 	 * fair.c compares an asymmetric scheduling group by its preferred CPU.

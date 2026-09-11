@@ -200,7 +200,13 @@ be turned off on the command line to compare the two rules against each other.
    only takes from a queue that is clearly deeper than its own, the equivalent
    of `imbalance_pct`. An idle CPU that keeps finding nothing it is allowed to
    take eventually stops honoring cache hotness, `sd->cache_nice_tries` against
-   `sd->nr_balance_failed` in `can_migrate_task()`.
+   `sd->nr_balance_failed` in `can_migrate_task()`. And an idle CPU does not
+   scan at all when its idle periods have been shorter than its scans:
+   `sched_balance_newidle()` measures how long the CPU stays idle after a
+   pull, `rq->avg_idle`, and what a pull at each level has cost at most,
+   `sd->max_newidle_lb_cost`, decaying by 1% a second, and gives up before a
+   level it cannot pay for, since a CPU its own wakeups keep bringing back is
+   about to have work of its own. `--no-newidle-cost` scans every time.
 
  - **Utilization.** What a task uses is a running average of the time it spends
    on a CPU, read as the larger of that and what it used over its last
@@ -386,11 +392,6 @@ that has not been done.
  - **No active balancing.** A *running* task is never migrated.
    `active_load_balance_cpu_stop()` exists in `fair.c` for exactly the case
    where the only thing worth moving is the task on the CPU.
-
- - **No cost budget on the idle pull.** `fair.c` does not balance for a CPU
-   that is about to be woken again, `avg_idle < sd->max_newidle_lb_cost`. An
-   idle CPU here always scans, with the cache-hotness escalation as the only
-   damper.
 
  - **No misfit detection.** `update_misfit_status()` and the balancing that
    acts on it. The pull up the capacity tiers is a partial stand-in.
