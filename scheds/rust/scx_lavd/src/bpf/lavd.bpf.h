@@ -910,7 +910,7 @@ void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc);
 
 /* Scheduler introspection-related helpers. */
 
-u64 get_est_stopping_clk(task_ctx *taskc, u64 now);
+u64 get_est_stopping_clk(task_ctx *taskc, u64 slice, u64 now);
 void try_proc_introspec_cmd(struct task_struct *p, task_ctx *taskc);
 void reset_cpu_preemption_info(struct cpu_ctx *cpuc);
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);

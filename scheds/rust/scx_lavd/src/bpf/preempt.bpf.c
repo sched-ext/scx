@@ -20,15 +20,16 @@ struct preemption_info {
 };
 
 __hidden
-u64 get_est_stopping_clk(task_ctx *taskc, u64 now)
+u64 get_est_stopping_clk(task_ctx *taskc, u64 slice, u64 now)
 {
 	/*
-	 * Estimate the future wall-clock time when the task will stop running.
-	 * avg_runtime_wall (wall clock) is used here because we are computing
-	 * a future timestamp by adding a duration to `now` (wall clock).
-	 * slice_wall is also wall-clock based, so both are in the same unit.
+	 * Estimate the future wall-clock time when the task will stop running:
+	 * its average runtime, but no later than @slice, the slice it holds or
+	 * is about to be given. avg_runtime_wall (wall clock) is used here
+	 * because we are computing a future timestamp by adding a duration to
+	 * `now` (wall clock), and a slice is a wall-clock duration too.
 	 */
-	return now + min(taskc->avg_runtime_wall, taskc->slice_wall);
+	return now + min(taskc->avg_runtime_wall, slice);
 }
 
 static bool can_x_kick_y(struct preemption_info *prm_x,
@@ -78,9 +79,9 @@ static bool can_x_kick_cpu2(struct preemption_info *prm_x,
 }
 
 static void init_prm_by_task(struct preemption_info *prm_task,
-			     task_ctx *taskc, u64 now)
+			     struct task_struct *p, task_ctx *taskc, u64 now)
 {
-	prm_task->est_stopping_clk = get_est_stopping_clk(taskc, now);
+	prm_task->est_stopping_clk = get_est_stopping_clk(taskc, p->scx.slice, now);
 	prm_task->lat_cri = taskc->lat_cri;
 	prm_task->cpuc = NULL;
 }
@@ -96,7 +97,7 @@ static bool is_worth_kick_other_task(task_ctx *taskc)
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
-				       s32 preferred_cpu,
+				       s32 preferred_cpu, struct task_struct *p,
 				       task_ctx *taskc, u64 now)
 {
 	/*
@@ -117,7 +118,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	/*
 	 * Get task's preemption information for comparison.
 	 */
-	init_prm_by_task(&prm_task, taskc, now);
+	init_prm_by_task(&prm_task, p, taskc, now);
 
 	/*
 	 * If there is a preferred CPU on which a task wants to run,
@@ -381,7 +382,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 		 */
 		duration_wall = time_delta(now, cpuc_victim->running_clk);
 		if (duration_wall >= sys_stat.slice_wall) {
-			init_prm_by_task(&prm_t, taskc, now);
+			init_prm_by_task(&prm_t, p, taskc, now);
 			if (can_x_kick_cpu2(&prm_t, &prm_c, cpuc_victim)) {
 				reset_cpu_flag(cpuc_victim, LAVD_FLAG_SLICE_BOOST);
 				goto kick_out;
@@ -424,7 +425,8 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
-	cpuc_victim = find_victim_cpu(cast_mask(cpumask), preferred_cpu, taskc, now);
+	cpuc_victim = find_victim_cpu(cast_mask(cpumask), preferred_cpu, p, taskc,
+				      now);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
