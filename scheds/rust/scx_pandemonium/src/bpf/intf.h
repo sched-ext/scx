@@ -114,6 +114,31 @@ struct pandemonium_stats {
 	// definition: the task comes off a peer's queue and runs here. One bump, no
 	// per-cause breakdown, operator-useful on any workload.
 	u64 nr_steal;
+	// THE FARE-HELD STAY: anchor_stay_beats_move refusing the anchor -> target
+	// move, so the wakee is seated on its warm anchor and waits there rather than
+	// taking a verified-idle peer one cache tier out. IT IS DELIBERATELY NOT A
+	// SPILL -- nothing was redirected onto a busy sibling -- so no existing
+	// counter moves when the fare fires, and its two possible states read
+	// identically from outside: "the fare holds everything home" and "the path
+	// never runs" both leave every other number unchanged. This is the increment
+	// that separates them. Counted beside nr_stay_move_taken so the pair gives the
+	// fare's HIT RATE rather than a bare count whose denominator is unknown.
+	// THE REFUSED REQUEUE KICK, SELF-TARGETED ONLY: requeue_kick_flag returning
+	// KICK_NONE, so no kfunc was called at all. It is deliberately NOT a soft kick
+	// -- booking it as one would report an IPI that never happened, and an absence
+	// read as a measured value is the error this project has now made twice.
+	// IT IS ALSO THE MEASUREMENT THAT SIZES THE SAFE SUBSET, which is why no peer
+	// counter sits beside it. The refusal was first built for every target and cost
+	// +42.7% wall at 8C; narrowed to self-targets, this count IS the answer to
+	// whether the surviving subset is large enough to carry the latency win. Tens
+	// of thousands at 8C means it is; a sliver means the rung was always the peer
+	// refusals and belongs out of the tree.
+	u64 nr_kick_declined;
+	u64 nr_stay_fare_held;
+	// THE SAME EDGE, PRICED AND TAKEN: the fare admitted the move and the wakee
+	// went to the idle peer. nr_stay_fare_held + this is every anchor -> target
+	// decision the wake path made.
+	u64 nr_stay_move_taken;
 	// PER-CPU RUNNABLE DEPTH, ACCUMULATED. THE ADAPTIVE LAYER HAD NO QUEUE
 	// SERIES AT ALL: IT INFERRED LOAD FROM idle_pct, ONE SYSTEM-WIDE INTEGER
 	// PERCENTAGE, WHICH IS WHY THE WHOLE CHAOS LAYER RAN OVER 16 SAMPLES OF
@@ -131,7 +156,12 @@ struct pandemonium_stats {
 };
 
 // XDOM path indices for pandemonium_stats.nr_cross_domain[] (diagnostic).
-#define XDOM_SEL_TIGHT   0   // select_cpu WAKE_SYNC tight-partner colocation
+#define XDOM_SEL_TIGHT   0   // RETIRED, READS 0. Was select_cpu's WAKE_SYNC
+                             // tight-partner colocation; the sync wake is now
+                             // exempt from the placement override. The SLOT is
+                             // kept because these are array indices and the
+                             // archive's prom labels are positional -- renaming
+                             // or renumbering orphans every stored run.
 #define XDOM_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
 #define XDOM_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
 #define XDOM_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
