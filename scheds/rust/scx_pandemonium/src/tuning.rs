@@ -137,7 +137,7 @@ const K_SOJOURN_Q16: u64 = 9830; // 0.15
 
 #[inline]
 fn scale_tau_u64(tau_ns: u64, k_q16: u64) -> u64 {
-    ((tau_ns as u128 * k_q16 as u128) >> 16) as u64
+    (tau_ns as u128 * k_q16 as u128 >> 16) as u64
 }
 
 pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64, tau_ns: u64) -> TuningKnobs {
@@ -226,7 +226,7 @@ pub fn compute_stability_score(
 
 pub fn should_print_telemetry(tick_counter: u64, stability_score: u32) -> bool {
     if stability_score >= STABILITY_THRESHOLD {
-        tick_counter.is_multiple_of(2)
+        tick_counter % 2 == 0
     } else {
         true
     }
@@ -257,7 +257,7 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
     if total == 0 {
         return 0;
     }
-    let threshold = (total * 99).div_ceil(100);
+    let threshold = (total * 99 + 99) / 100;
     let mut cumulative = 0u64;
     for i in 0..HIST_BUCKETS {
         cumulative += counts[i];
@@ -345,7 +345,7 @@ impl QuiescenceState {
     // COUNTS AS IN-BAND (NEVER FREEZE ON INSUFFICIENT DATA).
     pub fn update(&mut self, hvg_lambda: f64, rqa_det: Option<f64>, mwu_converged: bool) -> bool {
         let in_band = hvg_lambda <= crate::chaos::HVG_LAMBDA_PERIODIC_MAX
-            && rqa_det.is_some_and(|d| d >= crate::chaos::RQA_DET_STEADY_MIN)
+            && rqa_det.map_or(false, |d| d >= crate::chaos::RQA_DET_STEADY_MIN)
             && mwu_converged;
 
         if in_band {
