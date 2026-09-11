@@ -5,10 +5,23 @@
  */
 
 #include <scx/common.bpf.h>
-#include <bpf_arena_common.bpf.h>
+#include <lib/alloc/bpf_helpers_local.h>
+#include <libarena/common.h>
+#include <bpf_arena_common.h>
 #include <lib/topology.h>
 #include <lib/cgroup.h>
 #include <lib/atq.h>
+
+/*
+ * libarena used to define these; it no longer does. Guarded so the file
+ * builds against either version.
+ */
+#ifndef div_round_up
+#define div_round_up(a, b) (((a) + (b) - 1) / (b))
+#endif
+#ifndef round_up
+#define round_up(a, b) ((((a) + (b) - 1) / (b)) * (b))
+#endif
 
 #ifndef U64_MAX
 #define U64_MAX		((u64)~0ULL)
@@ -266,7 +279,7 @@ static struct scx_cgroup_bw_config cbw_config;
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
  *
  * scx_cgroup_ctx objects are allocated in the BPF arena via
- * scx_static_alloc(); the map holds only an arena pointer to each object.
+ * arena_calloc(); the map holds only an arena pointer to each object.
  */
 struct cbw_cgrp_entry {
 	u64	cgx;
@@ -285,7 +298,7 @@ struct {
  * cgroup id and LLC id (struct cgroup_llc_id).
  *
  * scx_cgroup_llc_ctx objects are allocated in the BPF arena via
- * scx_static_alloc(); the map holds only an arena pointer to each object.
+ * arena_calloc(); the map holds only an arena pointer to each object.
  */
 struct cgroup_llc_id {
 	u64		cgrp_id;
@@ -352,10 +365,11 @@ static u64 cbw_llcx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
 static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
 {
 	scx_cgroup_llc_ctx_t *llcx;
+	size_t size = round_up(sizeof(*llcx), SCX_CACHELINE_SIZE);
 
 	llcx = cbw_freelist_pop(&cbw_llcx_free_head);
 	if (!llcx)
-		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
+		llcx = arena_calloc(1, size);
 	return llcx;
 }
 
@@ -377,10 +391,11 @@ static u64 cbw_cgx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
 static inline scx_cgroup_ctx_t *cbw_alloc_cgx(void)
 {
 	scx_cgroup_ctx_t *cgx;
+	size_t size = round_up(sizeof(*cgx), SCX_CACHELINE_SIZE);
 
 	cgx = cbw_freelist_pop(&cbw_cgx_free_head);
 	if (!cgx)
-		cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
+		cgx = arena_calloc(1, size);
 	return cgx;
 }
 
@@ -570,25 +585,25 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
  * Debug macros.
  */
 #define cbw_err(fmt, ...) do { 							\
-	bpf_printk("[%s:%d] ERROR: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+	arena_stderr("[%s:%d] ERROR: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_warn(fmt, ...) do { 						\
-	bpf_printk("[%s:%d] WARNING: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+	arena_stderr("[%s:%d] WARNING: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_info(fmt, ...) do { 						\
-	bpf_printk("[%s:%d] INFO: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+	arena_stderr("[%s:%d] INFO: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_dbg(fmt, ...) do { 							\
 	if (cbw_config.verbose > 0)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+		arena_stderr("[%s:%d] " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_dbg_cgrp(fmt, ...) do { 						\
 	if (cbw_config.verbose > 0)						\
-		bpf_printk("[%s:%d/cgid%llu] " fmt, __func__, __LINE__,		\
+		arena_stderr("[%s:%d/cgid%llu] " fmt, __func__, __LINE__,		\
 			   cgrp->kn->id, ##__VA_ARGS__);			\
 } while(0)
 
@@ -860,7 +875,7 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id);
 
-static void schedule_atq_destroy(scx_atq_t *btq)
+static __always_inline void schedule_atq_destroy(scx_atq_t *btq)
 {
 	static u64 slots[CBW_DEFERRED_BTQ_SIZE] __attribute__((aligned(SCX_CACHELINE_SIZE)));
 	static u64 tail __attribute__((aligned(SCX_CACHELINE_SIZE)));
@@ -1038,7 +1053,7 @@ int cbw_set_bandwidth(u64 cgx_raw, u64 period_us, u64 quota_us, u64 burst_us)
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	cgx->period = period_us * 1000;
 	cgx->period_start_clk = scx_bpf_now();
@@ -1062,7 +1077,7 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 {
 	/*
 	 * Accept cgx as u64 rather than scx_cgroup_ctx_t * to avoid a BPF
-	 * verifier type mismatch.  When cgx comes from scx_static_alloc() the
+	 * verifier type mismatch.  When cgx comes from arena_calloc() the
 	 * compiler tracks it as a scalar; __noinline call sites with arena
 	 * pointer parameters require an arena-qualified register, which the
 	 * compiler does not emit from a scalar.  Passing u64 and casting here
@@ -2293,7 +2308,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	/*
 	 * Let's start running the top half.
@@ -2804,7 +2819,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	bool cancelled;
 	int ret;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 	/*
 	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
 	 * old cgroup and will be repopulated on the next throttle/consume call.
@@ -2916,7 +2931,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	char name[64];
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	cgx = cbw_get_cgroup_ctx(cgrp);
 	if (!cgx) {
@@ -2927,7 +2942,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max - 1) ];
 
 	bpf_probe_read_kernel_str(name, sizeof(name), BPF_CORE_READ(cgrp->kn, name));
-	bpf_printk("%s +-- %s (id: %llu, level: %d)", indent_str,
+	arena_stderr("%s +-- %s (id: %llu, level: %d)", indent_str,
 			name, cgroup_get_id(cgrp), (u32)cgrp->level);
 
 	if (cgx->nquota_ub == CBW_RUNTUME_INF)
@@ -2942,18 +2957,18 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 		}
 	}
 
-	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
+	arena_stderr("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
+	arena_stderr("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
 			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
-	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d (%u/%u), nr_throttled_tasks: %d", indent_str,
+	arena_stderr("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d (%u/%u), nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
 			cgx->nr_consec_throttled_periods, cgx->max_consec_throttled_periods,
 			nr_throttled_tasks);
-	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
+	arena_stderr("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
 			cgx->period_budget, cgx->burst_remaining);
-	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
+	arena_stderr("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
 			cgx->runtime_total_sloppy, cgx->runtime_total_last);
 					
 	return 0;

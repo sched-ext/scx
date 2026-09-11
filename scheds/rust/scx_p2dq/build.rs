@@ -4,19 +4,29 @@
 // GNU General Public License version 2.
 
 fn main() {
+    // libarena's headers (arena_malloc/arena_free and its arena primitives)
+    // must be found before scx's bundled headers, so give its include/ dir
+    // precedence over the built-in include paths.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let libarena_include = std::path::Path::new(&manifest_dir).join("../../../libarena/include");
+
     scx_cargo::BpfBuilder::new()
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
+        .add_include_path(libarena_include.to_str().unwrap())
+        // libarena gates its arena spinlock behind ENABLE_ATOMICS_TESTS.
+        .add_cflag("-DENABLE_ATOMICS_TESTS")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .add_source("../../../libarena/src/buddy.bpf.c")
+        .add_source("../../../libarena/src/common.bpf.c")
+        .add_source("../../../libarena/src/bitmap.bpf.c")
         .add_source("src/bpf/lib/arena.bpf.c")
-        .add_source("src/bpf/lib/common.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
         .add_source("src/bpf/lib/dhq.bpf.c")
-        .add_source("src/bpf/lib/bitmap.bpf.c")
         .add_source("src/bpf/lib/cpumask.bpf.c")
         .add_source("src/bpf/lib/minheap.bpf.c")
-        .add_source("src/bpf/lib/rbtree.bpf.c")
-        .add_source("src/bpf/lib/sdt_alloc.bpf.c")
+        .add_source("../../../libarena/src/rbtree.bpf.c")
+        .add_source("src/bpf/lib/urcu.bpf.c")
         .add_source("src/bpf/lib/sdt_task.bpf.c")
         .add_source("src/bpf/lib/topology.bpf.c")
         .compile_link_gen()

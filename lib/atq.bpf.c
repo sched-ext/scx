@@ -1,5 +1,6 @@
 #include <scx/common.bpf.h>
-#include <lib/sdt_task.h>
+#include <lib/alloc/bpf_helpers_local.h>
+#include <libarena/common.h>
 
 #include <lib/atq.h>
 
@@ -7,33 +8,23 @@
  * Arena task queue implementation.
  */
 
-static struct scx_allocator scx_atq_allocator;
-
-__weak
-int scx_atq_init(void)
-{
-	return scx_alloc_init(&scx_atq_allocator, sizeof(scx_atq_t),
-			      SCX_CACHELINE_SIZE);
-}
-
 __weak
 u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
 	scx_atq_t *atq;
 
-	/* Note that scx_alloc() returns a zero-initialized memory. */
-	atq = scx_alloc(&scx_atq_allocator);
+	atq = arena_calloc(1, sizeof(scx_atq_t));
 	if (unlikely(!atq))
 		return (u64)NULL;
 
+	atq->capacity = capacity;
+	atq->fifo = fifo;
+
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
 	if (!atq->tree) {
-		scx_free(&scx_atq_allocator, atq);
+		arena_free(atq);
 		return (u64)NULL;
 	}
-
-	atq->fifo = fifo;
-	atq->capacity = capacity;
 
 	return (u64)atq;
 }
@@ -41,21 +32,21 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 __weak
 int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	while (scx_atq_pop(atq, false) && can_loop) {
 		/* Do nothing. Just drain all the queued tasks. */
 	}
 	rb_destroy(atq->tree);
 
-	scx_free(&scx_atq_allocator, atq);
+	arena_free(atq);
 	return 0;
 }
 
 __hidden __inline
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	rbnode_t *node = &taskc->node;
+	struct rbnode __arena *node = &taskc->node;
 	scx_atq_t *old_atq;
 	int ret;
 
@@ -177,7 +168,7 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	return ret;
 }
 
-__hidden
+__hidden __always_inline
 u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 {
 	scx_task_common *taskc;
@@ -198,7 +189,7 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 		scx_atq_unlock(atq);
 
 		if (ret != -ENOENT)
-			bpf_printk("%s: error %d", __func__, ret);
+			arena_stderr("%s: error %d", __func__, ret);
 		return (u64)NULL;
 	}
 
@@ -308,7 +299,7 @@ int scx_atq_task_fini(scx_task_common __arg_arena *taskc)
 			return 0;
 
 		if ((ret = scx_atq_lock(atq))) {
-			bpf_printk("Failed to lock ATQ for task");
+			arena_stderr("Failed to lock ATQ for task");
 			return ret;
 		}
 

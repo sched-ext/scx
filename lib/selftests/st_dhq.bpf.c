@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/sdt_task.h>
 #include <lib/dhq.h>
@@ -181,7 +182,7 @@ int scx_selftest_dhq_alternating_and_priority_modes(u64 unused)
 	/* Test 1: Alternating mode with minimal operations */
 	dhq = dhq_prios[0];  /* ALTERNATING mode */
 
-	task = scx_static_alloc(sizeof(*task), 1);
+	task = arena_calloc(1, sizeof(*task));
 	if (!task)
 		return -ENOMEM;
 	task->vtime = 1;
@@ -189,7 +190,7 @@ int scx_selftest_dhq_alternating_and_priority_modes(u64 unused)
 	if (ret)
 		return ret;
 
-	task = scx_static_alloc(sizeof(*task), 1);
+	task = arena_calloc(1, sizeof(*task));
 	if (!task)
 		return -ENOMEM;
 	task->vtime = 2;
@@ -213,7 +214,7 @@ int scx_selftest_dhq_alternating_and_priority_modes(u64 unused)
 	dhq = dhq_prios[1];  /* PRIORITY mode */
 
 	/* Insert vtime=2 into strand A */
-	task = scx_static_alloc(sizeof(*task), 1);
+	task = arena_calloc(1, sizeof(*task));
 	if (!task)
 		return -ENOMEM;
 	task->vtime = 2;
@@ -222,7 +223,7 @@ int scx_selftest_dhq_alternating_and_priority_modes(u64 unused)
 		return ret;
 
 	/* Insert vtime=1 into strand B */
-	task = scx_static_alloc(sizeof(*task), 1);
+	task = arena_calloc(1, sizeof(*task));
 	if (!task)
 		return -ENOMEM;
 	task->vtime = 1;
@@ -511,35 +512,35 @@ __weak
 int scx_selftest_dhq(void)
 {
 	/* Allocate tasks with constant indices for tests */
-	dhq_tasks[0] = scx_static_alloc(sizeof(*dhq_tasks[0]), 1);
+	dhq_tasks[0] = arena_calloc(1, sizeof(*dhq_tasks[0]));
 	if (!dhq_tasks[0])
 		return -ENOMEM;
 
-	dhq_tasks[1] = scx_static_alloc(sizeof(*dhq_tasks[1]), 1);
+	dhq_tasks[1] = arena_calloc(1, sizeof(*dhq_tasks[1]));
 	if (!dhq_tasks[1])
 		return -ENOMEM;
 
-	dhq_tasks[2] = scx_static_alloc(sizeof(*dhq_tasks[2]), 1);
+	dhq_tasks[2] = arena_calloc(1, sizeof(*dhq_tasks[2]));
 	if (!dhq_tasks[2])
 		return -ENOMEM;
 
-	dhq_tasks[3] = scx_static_alloc(sizeof(*dhq_tasks[3]), 1);
+	dhq_tasks[3] = arena_calloc(1, sizeof(*dhq_tasks[3]));
 	if (!dhq_tasks[3])
 		return -ENOMEM;
 
-	dhq_tasks[4] = scx_static_alloc(sizeof(*dhq_tasks[4]), 1);
+	dhq_tasks[4] = arena_calloc(1, sizeof(*dhq_tasks[4]));
 	if (!dhq_tasks[4])
 		return -ENOMEM;
 
-	dhq_tasks[5] = scx_static_alloc(sizeof(*dhq_tasks[5]), 1);
+	dhq_tasks[5] = arena_calloc(1, sizeof(*dhq_tasks[5]));
 	if (!dhq_tasks[5])
 		return -ENOMEM;
 
-	dhq_tasks[6] = scx_static_alloc(sizeof(*dhq_tasks[6]), 1);
+	dhq_tasks[6] = arena_calloc(1, sizeof(*dhq_tasks[6]));
 	if (!dhq_tasks[6])
 		return -ENOMEM;
 
-	dhq_tasks[7] = scx_static_alloc(sizeof(*dhq_tasks[7]), 1);
+	dhq_tasks[7] = arena_calloc(1, sizeof(*dhq_tasks[7]));
 	if (!dhq_tasks[7])
 		return -ENOMEM;
 

@@ -181,8 +181,9 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 #include <scx/common.bpf.h>
-#include <bpf_arena_common.bpf.h>
+#include <bpf_arena_common.h>
 #include <bpf_experimental.h>
+#include <libarena/common.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
@@ -786,7 +787,8 @@ static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 }
 
-static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
+static __always_inline int cgroup_throttled(struct task_struct *p, task_ctx *taskc,
+					    bool put_aside)
 {
 	int ret, ret2;
 

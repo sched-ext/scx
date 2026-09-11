@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "power.bpf.h"

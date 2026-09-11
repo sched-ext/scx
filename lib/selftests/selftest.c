@@ -74,7 +74,6 @@ selftest_arena_init(struct selftest *skel)
 	int ret;
 
 	args = (struct arena_init_args) {
-		.static_pages = 512,
 		.task_ctx_size = sizeof(struct task_ctx_nonarena),
 	};
 

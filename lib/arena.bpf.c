@@ -3,15 +3,14 @@
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
 #include <scx/common.bpf.h>
-#include <lib/arena_map.h>
+#include <lib/alloc/bpf_helpers_local.h>
+#include <libarena/common.h>
 #include <lib/sdt_task.h>
 
 #include <lib/arena.h>
 #include <lib/percpu.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
-#include <lib/rbtree.h>
-#include <lib/atq.h>
 
 /*
  * "System-call" based API for arenas.
@@ -54,43 +53,20 @@ int arena_init(struct arena_init_args *args)
 		}
 	}
 
-	ret = scx_static_init(args->static_pages);
-	if (ret)
-		return ret;
-
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
-		bpf_printk("uninitialized nr_cpu_ids variable");
+		arena_stderr("uninitialized nr_cpu_ids variable");
 		return -ENODEV;
-	}
-
-	/* How many types to store all CPU IDs? */
-	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
-	if (ret) {
-		bpf_printk("scx_bitmap_init failed with %d", ret);
-		return ret;
 	}
 
 	ret = scx_percpu_storage_init();
 	if (ret) {
-		bpf_printk("scx_percpu_storage_init failed with %d", ret);
+		arena_stderr("scx_percpu_storage_init failed with %d", ret);
 		return ret;
 	}
 
 	ret = scx_task_init(args->task_ctx_size, args->task_ctx_align);
 	if (ret) {
-		bpf_printk("scx_task_init failed with %d", ret);
-		return ret;
-	}
-
-	ret = scx_rb_init();
-	if (ret) {
-		bpf_printk("scx_rb_init failed with %d", ret);
-		return ret;
-	}
-
-	ret = scx_atq_init();
-	if (ret) {
-		bpf_printk("scx_atq_init failed with %d", ret);
+		arena_stderr("scx_task_init failed with %d", ret);
 		return ret;
 	}
 
@@ -100,13 +76,13 @@ int arena_init(struct arena_init_args *args)
 SEC("syscall")
 int arena_alloc_mask(struct arena_alloc_mask_args *args)
 {
-	scx_bitmap_t bitmap;
+	struct arena_bitmap __arena *bitmap;
 
-	bitmap = scx_bitmap_alloc();
+	bitmap = bmp_alloc(SCX_BITMAP_NR_BITS);
 	if (!bitmap)
 		return -ENOMEM;
 
-	args->bitmap = (u64)&bitmap->bits;
+	args->bitmap = (u64)bitmap;
 
 	return 0;
 }
@@ -132,7 +108,7 @@ int arena_topology_init(struct arena_topology_init_args *args)
 SEC("syscall")
 int arena_topology_node_init(struct arena_topology_node_init_args *args)
 {
-	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(args->bitmap, struct scx_bitmap, bits);
+	struct arena_bitmap __arena *bitmap = (struct arena_bitmap __arena *)args->bitmap;
 	int ret;
 
 	ret = topo_init(bitmap, args->data_size, args->id);
@@ -145,7 +121,7 @@ int arena_topology_node_init(struct arena_topology_node_init_args *args)
 SEC("syscall")
 int arena_topology_print(void)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	topo_print();
 

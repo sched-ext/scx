@@ -7,7 +7,13 @@
 #define __LAVD_H
 
 #include <scx/common.bpf.h>
-#include <bpf_arena_common.bpf.h>
+/*
+ * libarena's arena_stderr() expands to bpf_stream_printk() and ships no
+ * declaration for the bpf_stream_vprintk() kfunc behind it; it expects a
+ * current libbpf. scx bundles an older one, so declare it locally.
+ */
+#include <lib/alloc/bpf_helpers_local.h>
+#include <bpf_arena_common.h>
 #include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
@@ -578,14 +584,14 @@ extern const volatile u8	verbose;
 #define debugln(fmt, ...)						\
 ({									\
 	if (verbose > 0)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+		arena_stderr("[%s:%d] " fmt, __func__, __LINE__,		\
 					##__VA_ARGS__);			\
 })
 
 #define traceln(fmt, ...)						\
 ({									\
 	if (verbose > 1)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+		arena_stderr("[%s:%d] " fmt, __func__, __LINE__,		\
 					##__VA_ARGS__);			\
 })
 

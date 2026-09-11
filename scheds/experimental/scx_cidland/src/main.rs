@@ -74,6 +74,19 @@ fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result
     Ok(())
 }
 
+fn run_syscall_prog_noargs(prog: &libbpf_rs::ProgramMut<'_>) -> Result<()> {
+    let output = prog.test_run(ProgramInput::default())?;
+    if output.return_value != 0 {
+        bail!(
+            "{} returned {}",
+            prog.name().to_string_lossy(),
+            output.return_value as i32
+        );
+    }
+
+    Ok(())
+}
+
 /// scx_cidland: a cid-based, topology-aware scheduler.
 ///
 /// Rather than raw CPU numbers, this scheduler addresses CPUs by their cid
@@ -298,6 +311,9 @@ impl<'a> Scheduler<'a> {
         // The cid space is num_possible_cpus() wide, so the CPU count is all
         // the BPF side needs to size itself.
         let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
+        run_syscall_prog_noargs(&skel.progs.arena_buddy_reset)
+            .context("initializing libarena buddy allocator")?;
+
         let mut args = types::cidland_arena_args {
             nr_cpus: nr_cpus as u64,
         };
