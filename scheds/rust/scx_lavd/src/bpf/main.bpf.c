@@ -517,7 +517,7 @@ static void update_stat_for_running(struct task_struct *p,
 	cpuc->flags = taskc->flags;
 	cpuc->lat_cri = taskc->lat_cri;
 	cpuc->running_clk = now;
-	cpuc->est_stopping_clk = get_est_stopping_clk(taskc, now);
+	cpuc->est_stopping_clk = get_est_stopping_clk(taskc, p->scx.slice, now);
 
 	/*
 	 * Update statistics information.
@@ -917,7 +917,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			    (cgroup_throttled(p, ictx.taskc, false) == -EAGAIN))
 				goto out;
 			scx_bpf_task_set_dsq_vtime(p, calc_when_to_run(p, ictx.taskc));
-			scx_bpf_task_set_slice(p, LAVD_SLICE_MAX_NS_DFL);
+			scx_bpf_task_set_slice(p, sys_stat.slice_wall);
 			account_queued_load(ictx.taskc, cpuc->cpdom_id);
 			account_queued_load_pcpu(ictx.taskc,
 						 get_primary_cpu(cpuc->cpu_id));
@@ -1025,7 +1025,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
 
 	scx_bpf_task_set_dsq_vtime(p, calc_when_to_run(p, taskc));
-	scx_bpf_task_set_slice(p, LAVD_SLICE_MIN_NS_DFL);
+	/*
+	 * The slice is assigned at running; until then hold the current base
+	 * slice, so anything estimating from p->scx.slice sees a sane bound.
+	 */
+	scx_bpf_task_set_slice(p, sys_stat.slice_wall);
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
@@ -1312,9 +1316,12 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 		return;
 
 	/*
-	 * Refill the time slice.
+	 * Refill the time slice, and move the stopping estimate with it: the
+	 * one made when the task started has been overrun by now.
 	 */
 	scx_bpf_task_set_slice(prev, calc_time_slice(taskc_prev, cpuc));
+	cpuc->est_stopping_clk = get_est_stopping_clk(taskc_prev, prev->scx.slice,
+						      scx_bpf_now());
 
 	/*
 	 * Reset prev task's lock and futex boost count
