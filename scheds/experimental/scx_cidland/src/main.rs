@@ -230,6 +230,16 @@ struct Opts {
     #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
     no_run_to_parity: bool,
 
+    /// Keep a longer-request running task protected from shorter wakees.
+    ///
+    /// Normally an eligible waking task that asks for a shorter request than
+    /// the task currently running can preempt it despite RUN_TO_PARITY. The
+    /// wakee is put on an available local DSQ as a one-shot short buddy,
+    /// matching the wakeup side of PREEMPT_SHORT in fair.c. This option keeps
+    /// the ordinary protection for comparison.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_preempt_short: bool,
+
     /// Do not compensate placement lag for joining a virtual-time pack.
     ///
     /// Normally cidland inflates a task's placement offset before adding its
@@ -465,6 +475,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_run_to_parity = opts.no_run_to_parity;
+        rodata.no_preempt_short = opts.no_preempt_short;
         rodata.no_place_lag = opts.no_place_lag;
         rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
         rodata.no_delay_dequeue = opts.no_delay_dequeue;

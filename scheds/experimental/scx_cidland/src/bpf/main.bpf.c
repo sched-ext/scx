@@ -124,6 +124,12 @@ const volatile bool no_eligibility;
 const volatile bool no_run_to_parity;
 
 /*
+ * Keep the running task's protection against an eligible wakee that asks
+ * for a shorter request. This is PREEMPT_SHORT turned off.
+ */
+const volatile bool no_preempt_short;
+
+/*
  * Do not inflate a placement offset to preserve it across the task joining
  * the weighted-average virtual-time reference. This restores cidland's
  * placement before its fair.c PLACE_LAG compensation was added.
@@ -3325,8 +3331,8 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  *
  * This is EEVDF's wakeup preemption. wakeup_preempt_fair() asks what the
  * runqueue would pick now and reschedules when the answer is the task
- * that just woke, and with every task asking for the same slice, as they
- * all do here, that pick comes down to what pick_eevdf() opens with:
+ * that just woke. When the two tasks ask for the same slice, that pick
+ * comes down to what pick_eevdf() opens with:
  *
  *	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
  *		curr = NULL;
@@ -3422,6 +3428,26 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	if (!no_eligibility &&
 	    time_after(tctx->vruntime, cid_vref_place(cid, now)))
 		goto queued;
+
+	/*
+	 * PREEMPT_SHORT lets an eligible task with a shorter request override
+	 * the running task's protection. fair.c makes it the short buddy so it
+	 * is selected next even when another task has an earlier deadline. The
+	 * local-DSQ insertion made after this returns is the same one-shot
+	 * override when that DSQ is available: it runs before the
+	 * deadline-ordered per-cid DSQ. An existing local waiter is not
+	 * displaced because the built-in DSQ is FIFO-only; that waiter already
+	 * requested rescheduling and the new wakee retains deadline order on
+	 * the per-cid DSQ.
+	 *
+	 * Both requests are already cached. task_dl() recorded the wakee's in
+	 * @tctx, and ops.running() or keep_charge() published the current one.
+	 * Equal default requests therefore add only this comparison and branch
+	 * to the existing wakeup path.
+	 */
+	if (!no_preempt_short && tctx->request < cctx->curr_request &&
+	    cctx->curr_w)
+		goto preempt;
 
 	/*
 	 * Is the running task still owed service? Once it has run for a
@@ -3620,11 +3646,11 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * until the tick path notices them, and wakeup-heavy loads should not pay
 	 * an idle scan and a cache-cold migration on every enqueue.
 	 *
-	 * A preempting wakee is already known to be the task @prev_cid would
-	 * pick next. Put it directly on the rq-owned local DSQ so the kernel
-	 * can expire curr's slice and request rescheduling synchronously under
-	 * the rq lock, instead of queueing it here and delivering an
-	 * SCX_KICK_PREEMPT later through irq_work.
+	 * A preempting wakee is either the EEVDF pick or PREEMPT_SHORT's
+	 * one-shot short buddy. Put it directly on the rq-owned local DSQ so
+	 * the kernel can expire curr's slice and request rescheduling
+	 * synchronously under the rq lock, instead of queueing it here and
+	 * delivering an SCX_KICK_PREEMPT later through irq_work.
 	 *
 	 * Do not combine this with SCX_ENQ_IMMED. A running task can have a
 	 * protected slice, in which case the kernel refuses the preemption.

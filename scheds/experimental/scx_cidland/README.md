@@ -156,6 +156,14 @@ be turned off on the command line to compare the two rules against each other.
    interrupted for any task that is not one, and a `SCHED_IDLE` or
    `SCHED_BATCH` task never interrupts anything.
 
+ - **Short-request preemption.** `PREEMPT_SHORT` lets an eligible wakee whose
+   request is shorter than the current task's override RUN_TO_PARITY. The
+   local-DSQ insertion acts as `set_short_buddy()` when that DSQ is empty: it
+   makes the wakee run before the deadline-ordered DSQ even if another task has
+   an earlier virtual deadline. An existing local waiter is not displaced
+   because the built-in DSQ is FIFO-only. `--no-preempt-short` keeps the
+   current task's ordinary protection for comparison.
+
  - **Idle search.** `wake_affine()` first computes the target around which
    `select_idle_sibling()` searches. The target is tried if it is idle, then
    the idle cache-affine CPU a task last ran on, then a fully idle core before
@@ -280,11 +288,10 @@ that has not been done.
 
  - **A wakeup that does not preempt leaves the running task's protection
    whole.** `wakeup_preempt_fair()` clips it to one minimum slice ahead of the
-   reference on every wakeup that fails to preempt, `update_protect_slice()`,
-   and `PREEMPT_SHORT` lets a task asking for a shorter slice than the running
-   one preempt on eligibility alone. Here the running task keeps the protection
-   it was picked with until its deadline, which the hrtick now enforces on
-   time, and the question is asked once, when the waking task is queued.
+   reference on every wakeup that fails to preempt, `update_protect_slice()`.
+   The direct `PREEMPT_SHORT` case is handled here, but a shorter ineligible
+   wakee does not shorten protection for a later decision. Doing that exactly
+   needs the minimum request across a DSQ, which sched_ext does not expose.
 
  - **`sched_yield()` costs more than it does in `fair.c`.** The rule is the
    same, `yield_task_fair()`'s: nothing happens unless someone is queued to
