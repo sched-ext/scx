@@ -3,7 +3,7 @@ name = "scx_flow"
 version = "4.2.16"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 description = "A per-CPU ordered queue scheduler for sched_ext."
 license = "GPL-2.0-only"
 
