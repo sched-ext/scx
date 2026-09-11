@@ -3316,12 +3316,12 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 }
 
 /*
- * Kick @cid, on whose DSQ the task of @tctx has just been queued with
- * deadline @dl.
+ * Prepare to queue the task of @tctx on @cid with deadline @dl, and return
+ * whether it should be inserted on the local DSQ as a preempting task.
  *
  * An idle cid only has to be told that there is work: the kick makes it
- * dispatch. A busy one is running a task of its own, and what the kick
- * has to decide is whether that task should be interrupted.
+ * dispatch. A busy one is running a task of its own, and what this has to
+ * decide is whether that task should be interrupted.
  *
  * This is EEVDF's wakeup preemption. wakeup_preempt_fair() asks what the
  * runqueue would pick now and reschedules when the answer is the task
@@ -3355,10 +3355,9 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * anything.
  *
  * All of it compares because all of it is in @cid's virtual time: the
- * running task joined that reference in ops.running() and the queued one
- * was placed against it just above. Two cids' references do not compare,
- * which is why the only cid this looks at is the one the task was queued
- * on.
+ * running task joined that reference in ops.running() and the wakee was
+ * placed against it just above. Two cids' references do not compare, which
+ * is why the only cid this looks at is the one the task will be queued on.
  *
  * Before any of that, the policies. wakeup_preempt_fair() settles a
  * SCHED_IDLE task on either side without looking at the virtual times:
@@ -3387,8 +3386,9 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * leaves the CPU with the class that owns it, which is where not kicking
  * would have left it too.
  */
-static void kick_queued_cid(s32 cid, const struct task_struct *p,
-			    const struct task_ctx *tctx, u64 dl, u64 now)
+static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
+				      const struct task_ctx *tctx, u64 dl,
+				      u64 now)
 {
 	struct cid_ctx __arena *cctx;
 	struct task_struct *head;
@@ -3460,10 +3460,10 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 	 * it. The dispatch takes the head of the queue, so the woken task
 	 * is the pick only if its deadline is strictly ahead of the current
 	 * head. A task already queued is not displaced by one that ties it. The
-	 * insertion asked for above is applied once this op returns, so the head
-	 * seen here is the one the task is queued against. A kick for a task
-	 * that queues behind others
-	 * only trades the running task for the head a slice early, once for
+	 * insertion is applied once this op returns, so the head seen here is
+	 * the one the task is queued against.
+	 * A preemption for a task that queues behind others only trades the
+	 * running task for the head a slice early, once for
 	 * every wakeup that lands in the queue: with sixteen tasks queued per
 	 * CPU that was one context switch in three, and perf bench sched
 	 * messaging ran at half its speed.
@@ -3473,10 +3473,7 @@ static void kick_queued_cid(s32 cid, const struct task_struct *p,
 		goto queued;
 
 preempt:
-	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
-	__sync_fetch_and_add(&nr_preempts, 1);
-
-	return;
+	return true;
 queued:
 	/*
 	 * The task waits behind the running one. See that the running one
@@ -3490,6 +3487,7 @@ idle:
 	/* An op executing on @cid is itself proof that @cid is not idle. */
 	if (cid != scx_bpf_this_cid())
 		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+	return false;
 }
 
 void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
@@ -3598,13 +3596,14 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	dl = task_dl(p, tctx);
 
 	/*
-	 * Queue the task on @prev_cid's DSQ, ordered by deadline.
+	 * Queue the task for @prev_cid, ordered by deadline unless it wins
+	 * wakeup preemption below.
 	 *
 	 * Any cid of the node can take it from there, but only while
 	 * dispatching: if @prev_cid went idle in the meantime and the rest
 	 * of the node is idle too, nothing would ever look at it. Kick
-	 * @prev_cid, which either wakes it or interrupts what it is running
-	 * for this task, see kick_queued_cid().
+	 * @prev_cid, which either wakes it or lets the local insertion interrupt
+	 * what it is running, see queued_cid_should_preempt().
 	 *
 	 * SCX_ENQ_LAST says the task is the only sched_ext work available to a
 	 * CPU that is about to run a higher scheduling class. The kernel keeps
@@ -3620,7 +3619,35 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * go idle again. Restrict this to a depth of one: deeper queues survive
 	 * until the tick path notices them, and wakeup-heavy loads should not pay
 	 * an idle scan and a cache-cold migration on every enqueue.
+	 *
+	 * A preempting wakee is already known to be the task @prev_cid would
+	 * pick next. Put it directly on the rq-owned local DSQ so the kernel
+	 * can expire curr's slice and request rescheduling synchronously under
+	 * the rq lock, instead of queueing it here and delivering an
+	 * SCX_KICK_PREEMPT later through irq_work.
+	 *
+	 * Do not combine this with SCX_ENQ_IMMED. A running task can have a
+	 * protected slice, in which case the kernel refuses the preemption.
+	 * An IMMED insertion would then bounce @p back through ops.enqueue(),
+	 * make the same decision, and repeat. Without IMMED, @p stays at the
+	 * head of the local DSQ and runs when the protected service ends.
+	 *
+	 * Use the fast path only while the local DSQ is empty. Built-in DSQs
+	 * are FIFO-only, so a second preempting insertion would otherwise go
+	 * ahead of the first without comparing their deadlines. The pending
+	 * local task has already requested rescheduling; later wakees retain
+	 * their deadline order on the per-cid DSQ.
 	 */
+	if (!displaced &&
+	    queued_cid_should_preempt(prev_cid, p, tctx, dl, now) &&
+	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
+				   task_request(p),
+				   enq_flags | SCX_ENQ_PREEMPT);
+		__sync_fetch_and_add(&nr_preempts, 1);
+		return;
+	}
+
 	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), task_request(p), dl,
 				 enq_flags);
 	cid_queued_set(prev_cid);
@@ -3632,9 +3659,6 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 		}
 	}
-	/* fair.c does not run wakeup_preempt() from put_prev_entity(). */
-	if (!displaced)
-		kick_queued_cid(prev_cid, p, tctx, dl, now);
 }
 
 /*
