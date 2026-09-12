@@ -7,7 +7,7 @@ struct scx_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 	scx_bitmap_t scx_bitmap;
 	cpumask_t cpumask;
-	struct scx_bitmap scx_bitmap_stack;
+	struct scx_bitmap_stack scx_bitmap_stack;
 };
 
 /*
@@ -25,11 +25,9 @@ static s32 create_save_scx_bitmap(scx_bitmap_t *maskp)
 {
 	scx_bitmap_t mask;
 
-	mask = scx_bitmap_alloc();
+	mask = bmp_alloc(SCX_BITMAP_NR_BITS);
 	if (!mask)
 		return -ENOMEM;
-
-	scx_bitmap_clear(mask);
 
 	*maskp = mask;
 
@@ -147,7 +145,7 @@ cpumask_t *scx_percpu_cpumask(void)
 }
 
 static __maybe_unused
-struct scx_bitmap *scx_percpu_scx_bitmap_stack(void)
+struct scx_bitmap_stack *scx_percpu_scx_bitmap_stack(void)
 {
 	struct scx_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
