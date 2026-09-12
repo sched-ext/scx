@@ -133,7 +133,6 @@ enum consts_internal {
  * before the task migrates. Full heat is LAVD_SCALE.
  */
 enum consts_cpu_warmth {
-	LAVD_CPU_ID_NONE		= 0xffff, /* no warm CPU, for introspection */
 	LAVD_CPU_WARM_SAT_NS		= (500ULL * NSEC_PER_USEC), /* residence to full heat */
 	LAVD_CPU_WARM_LIFETIME_NS	= (5ULL * NSEC_PER_MSEC), /* linear decay to 0 once away */
 };
@@ -169,6 +168,18 @@ enum consts_flags {
  *  - _wwgt: weighted wall clock time scaled by task's weight
  *  - _iwgt: weighted invariant time scaled by task's weight
  */
+
+/*
+ * A running average anchored to one CPU's invariant (clock_pelt) time base.
+ *
+ * clock_pelt is per-rq and not comparable across CPUs, so an entity that
+ * migrates must settle up against the domain it is leaving and re-anchor to
+ * the new one. @anchor_cpu records which domain @rd's timestamps belong to.
+ */
+struct ravg_data_invr {
+	struct ravg_data	rd;
+	u16			anchor_cpu;	/* LAVD_CPU_ID_NONE = unanchored */
+};
 
 /*
  * Task context
@@ -248,12 +259,13 @@ struct task_ctx {
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 
 	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
 	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
 					/* Estimated task util using ravg duty cycle */
-	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
-	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
+	struct ravg_data_invr avg_util_ravg;
+					/* Running average of task utilization using ravg */
 
 	/* --- per-CPU warmth (cache/TLB state) --- */
 	u64	last_stopping_clk;	/* when cpu_heat was last integrated (task stopped) */
@@ -549,7 +561,8 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
-	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
+	struct ravg_data_invr avg_util_ravg;
+				/* Running average of CPU utilization using ravg */
 	volatile u32	util_est;	/* Estimated CPU utilization from ravg tracking */
 
 	/* --- cacheline 7 boundary (448 bytes): cross-CPU write-heavy accumulator --- */
@@ -751,8 +764,9 @@ bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 
 /*
  * Return the task's load contribution for queued load tracking.
- * Uses RAVG util_est: [0, 1024], 128ms half-life, tracks duty cycle.
- * Updated in lavd_runnable/lavd_quiescent — active under sched_ext.
+ * Uses RAVG util_est: [0, 1024], 128ms half-life, tracks the runnable
+ * duty cycle (running + queued), so contention shows in the sum.
+ * Updated in lavd_running/lavd_stopping — active under sched_ext.
  *
  * Note: kernel PELT p->se.avg.util_avg is NOT updated when sched_ext
  * is enabled (tasks bypass CFS), so it cannot be used here.

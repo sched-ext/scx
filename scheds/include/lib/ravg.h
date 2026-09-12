@@ -124,7 +124,8 @@ static RAVG_FN_ATTRS void ravg_transfer(struct ravg_data *base, u64 base_new_val
 
 static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg_data *from)
 {
-	*to = *from;
+	for (int i = 0; i < sizeof(*to) && can_loop; i++)
+		((char __arena *)to)[i] = ((char *)from)[i];
 
 	return 0;
 }
@@ -132,7 +133,8 @@ static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg
 
 static RAVG_FN_ATTRS int ravg_from_arena(struct ravg_data *to, struct ravg_data __arena *from)
 {
-	*to = *from;
+	for (int i = 0; i < sizeof(*to) && can_loop; i++)
+		((char *)to)[i] = ((char __arena *)from)[i];
 
 	return 0;
 }
