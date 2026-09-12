@@ -26,7 +26,14 @@
  */
 #define FAKE_FLAT_CELL_LLC 0
 
+#include <libarena/common.h>
 #include <lib/sdt_cgroup.h>
+#include <lib/urcu.h>
+
+/* libarena used to define this; it no longer does. */
+#ifndef div_round_up
+#define div_round_up(a, b) (((a) + (b) - 1) / (b))
+#endif
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
 #include "slice_shrinking.bpf.h"
@@ -66,7 +73,6 @@ union shard_cmask __arena *idle_masks;
 union shard_cmask __arena *idle_smt_masks;
 struct scx_cmask __arena *topo_cids;
 /* Cell cmask generations, published in cell_masks and freed via scx_urcu */
-static struct scx_allocator cell_cmask_allocator;
 static struct scx_urcu cell_cmask_urcu;
 
 struct cell_cmasks __arena *cell_masks;
@@ -74,7 +80,7 @@ struct cell_cmasks __arena *cell_masks;
 /* A fresh generation with every mask initialized empty. */
 static __always_inline struct cell_cmasks __arena *cell_cmasks_alloc(u32 nr_cids)
 {
-	struct cell_cmasks __arena *gen = scx_alloc(&cell_cmask_allocator);
+	struct cell_cmasks __arena *gen = arena_calloc(1, sizeof(*gen));
 	u32 i;
 
 	if (!gen)
@@ -96,7 +102,7 @@ static __always_inline void cell_cmasks_publish(struct cell_cmasks __arena *gen)
 	u64 old = __sync_lock_test_and_set((u64 *)&cell_masks, (u64)gen);
 
 	if (old)
-		scx_urcu_free(&cell_cmask_urcu, &cell_cmask_allocator, (void __arena *)old);
+		scx_urcu_free(&cell_cmask_urcu, (void __arena *)old);
 }
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
@@ -960,7 +966,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	struct cpu_ctx __arena *cctx;
 	u32 cell;
@@ -1332,7 +1338,7 @@ void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *f
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	int ret;
 	if (!cpu_controller_disabled)
@@ -1407,7 +1413,7 @@ int scx_urcu_cellmask_pending(void *ctx)
 SEC("syscall")
 int scx_urcu_cellmask_reclaim(void *ctx)
 {
-	return scx_urcu_reclaim(&cell_cmask_urcu, &cell_cmask_allocator);
+	return scx_urcu_reclaim(&cell_cmask_urcu);
 }
 
 static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
@@ -1550,7 +1556,7 @@ static void dump_cell_cmask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	dsq_id_t dsq_id;
 	int i;
@@ -1785,9 +1791,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	 * userspace pushes the first explicit cell configuration immediately
 	 * after attach. Borrowables start empty.
 	 */
-	ret = scx_alloc_init(&cell_cmask_allocator, sizeof(struct cell_cmasks), 8);
-	if (ret)
-		return ret;
 	gen = cell_cmasks_alloc(nr_cids);
 	if (!gen)
 		return -ENOMEM;
@@ -2020,7 +2023,7 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 SEC("syscall")
 int apply_cell_config(void *ctx)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	struct cgrp_ctx __arena *cgc;
 	struct cell __arena *cell;
@@ -2065,7 +2068,7 @@ int apply_cell_config(void *ctx)
 		return -ENOMEM;
 	ret = apply_cell_cmasks(gen, num_cells);
 	if (ret) {
-		scx_free(&cell_cmask_allocator, gen);
+		arena_free(gen);
 		return ret;
 	}
 	/*
