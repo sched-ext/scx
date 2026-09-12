@@ -122,9 +122,24 @@ static RAVG_FN_ATTRS void ravg_transfer(struct ravg_data *base, u64 base_new_val
 	}
 }
 
+/*
+ * Keep this a sequence of naturally aligned u64s. A struct assignment through
+ * an arena pointer becomes a memcpy that clang expands after the pass which
+ * marks the pointer as arena-resident, so up to clang 19 the expansion can
+ * lose the address-space cast and make the verifier see a scalar dereference.
+ * Explicit, unrolled word accesses retain the cast while covering newly added
+ * words without another field-by-field copy list.
+ */
+_Static_assert(sizeof(struct ravg_data) == 4 * sizeof(u64),
+	       "update the ravg_data word-layout assertion");
+_Static_assert(_Alignof(struct ravg_data) >= _Alignof(u64),
+	       "ravg_data must remain naturally aligned");
+
 static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg_data *from)
 {
-	*to = *from;
+	#pragma unroll
+	for (u32 i = 0; i < sizeof(*to) / sizeof(u64); i++)
+		((__u64_alias_t __arena *)to)[i] = ((__u64_alias_t *)from)[i];
 
 	return 0;
 }
@@ -132,7 +147,9 @@ static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg
 
 static RAVG_FN_ATTRS int ravg_from_arena(struct ravg_data *to, struct ravg_data __arena *from)
 {
-	*to = *from;
+	#pragma unroll
+	for (u32 i = 0; i < sizeof(*to) / sizeof(u64); i++)
+		((__u64_alias_t *)to)[i] = ((__u64_alias_t __arena *)from)[i];
 
 	return 0;
 }

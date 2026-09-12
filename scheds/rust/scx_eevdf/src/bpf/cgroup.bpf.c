@@ -444,7 +444,7 @@ __noinline int grp_free_drain(void)
 		if (!next)
 			break;
 		hdr = (struct grp_hdr __arena *)next;
-		bpf_arena_free_pages(&arena, hdr, hdr->pages);
+		arena_free(hdr);
 	}
 
 	return 0;
@@ -964,7 +964,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_cpuctl_init, struct cgroup *cgrp,
 	grp_q_t *ents, *pents = NULL;
 	struct grp_hdr __arena *hdr;
 	struct cgroup *parent;
-	u64 bytes, pages;
+	u64 bytes;
 	u32 depth = 1, cid;
 
 	TOUCH_ARENA();
@@ -996,16 +996,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_cpuctl_init, struct cgroup *cgrp,
 
 	bytes = sizeof(struct grp_hdr) + (u64)nr_cids * sizeof(struct grp_q) +
 		(u64)((nr_cids + 63) / 64) * sizeof(u64);
-	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-	hdr = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
+	hdr = arena_calloc(1, bytes);
 	if (!hdr)
 		return -ENOMEM;
 	hdr->idle = cgrp_is_idle(cgrp);
 	hdr->weight = hdr->idle ? WEIGHT_IDLEPRIO : cgrp_load_weight(args->weight);
-	hdr->pages = pages;
 	ents = (grp_q_t *)((char __arena *)hdr + sizeof(struct grp_hdr));
 
-	/* Fresh arena pages read as zero: only what is not zero is stored. */
+	/* arena_calloc() zeroed the block: only what is not zero is stored. */
 	bpf_for(cid, 0, nr_cids) {
 		grp_q_t *gq = &ents[cid];
 
@@ -1101,7 +1099,7 @@ void BPF_STRUCT_OPS(eevdf_cpuctl_exit, struct cgroup *cgrp)
 	 * frees it once its walk is over, see grp_free_drain().
 	 */
 	if (__sync_val_compare_and_swap(&grp_sweep_lock, 0, 1) == 0) {
-		bpf_arena_free_pages(&arena, hdr, hdr->pages);
+		arena_free(hdr);
 		WRITE_ONCE(grp_sweep_lock, 0);
 	} else {
 		grp_free_defer(hdr);

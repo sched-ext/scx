@@ -528,9 +528,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init_task, struct task_struct *p,
 				   BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!ref)
 		return -ENOMEM;
-	tctx = scx_alloc(&task_ctx_allocator);
-	if (!tctx)
+	tctx = arena_calloc(1, sizeof(struct task_ctx));
+	if (!tctx) {
+		__sync_fetch_and_add(&alloc_stats.alloc_nomem, 1);
 		return -ENOMEM;
+	}
+	__sync_fetch_and_add(&alloc_stats.active_allocs, 1);
 	at = &tctx->se.edq;
 	/*
 	 * No memset: LLVM 19 expands one on arena memory through the uncast
@@ -581,5 +584,6 @@ void BPF_STRUCT_OPS(eevdf_exit_task, struct task_struct *p,
 		scx_bpf_error("EDQ detach failed for pid %d: %d", p->pid, ret);
 		return;
 	}
-	scx_free(&task_ctx_allocator, tctx);
+	arena_free(tctx);
+	__sync_fetch_and_sub(&alloc_stats.active_allocs, 1);
 }

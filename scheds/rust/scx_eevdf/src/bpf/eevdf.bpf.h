@@ -16,13 +16,12 @@
 #pragma once
 
 #include <scx/common.bpf.h>
-#include <lib/arena_map.h>
+#include <libarena/common.h>
 #include <lib/cid_topology.h>
 #include <lib/cid_idle.h>
 #include <lib/edq.h>
 #include <lib/ravg.h>
 #include <lib/arena_loop.h>
-#include <lib/sdt_alloc.h>
 #include "intf.h"
 
 #ifndef __BPF_FEATURE_ADDR_SPACE_CAST
@@ -203,8 +202,6 @@ struct task_ctx {
 };
 
 typedef struct task_ctx __arena task_ctx_t;
-
-static struct scx_allocator task_ctx_allocator;
 
 struct task_ctx_ref {
 	task_ctx_t *tctx;

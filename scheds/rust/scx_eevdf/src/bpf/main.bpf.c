@@ -330,6 +330,12 @@ u32 arena_map_id;
 u64 arena_pages_allocated;
 u64 arena_pages_freed;
 
+/* Per-task allocation counters exposed through the existing stats ABI. */
+struct {
+	u64 active_allocs;
+	u64 alloc_nomem;
+} alloc_stats;
+
 /*
  * Cids whose current task counts as SCHED_IDLE work, kept by ops.running()
  * and ops.stopping(). A wakeup asks this before it looks at any cid for
@@ -880,10 +886,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 	}
 
 	if (cgroup_enabled) {
-		grp_hdrs = bpf_arena_alloc_pages(&arena, NULL,
-						 (GRP_MAX_CGROUPS * sizeof(u64) +
-						  PAGE_SIZE - 1) / PAGE_SIZE,
-						 NUMA_NO_NODE, 0);
+		grp_hdrs = arena_calloc(GRP_MAX_CGROUPS, sizeof(u64));
 		if (!grp_hdrs)
 			return -ENOMEM;
 	}
