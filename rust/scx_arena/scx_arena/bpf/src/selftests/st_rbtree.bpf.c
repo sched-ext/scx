@@ -1,3 +1,4 @@
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
@@ -230,7 +231,7 @@ __weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
 	for (i = 0; i < numkeys && can_loop; i++) {
 		key = keys[i];
 		if (rbtree->alloc != RB_ALLOC) {
-			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			taskc = arena_calloc(1, sizeof(*taskc));
 			if (!taskc) {
 				bpf_printk("out of memory");
 				return -ENOMEM;
@@ -344,7 +345,7 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 	bpf_for(i, 0, numkeys) {
 		key = morekeys[i];
 		if (rbtree->alloc != RB_ALLOC) {
-			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			taskc = arena_calloc(1, sizeof(*taskc));
 			if (!taskc) {
 				bpf_printk("out of memory");
 				return -ENOMEM;
