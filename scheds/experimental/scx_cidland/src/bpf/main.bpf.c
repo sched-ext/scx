@@ -5261,6 +5261,17 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
 	if (cid_valid(cid)) {
+		/*
+		 * update_curr() first: dequeue_entity() charges the service
+		 * the task has taken before it measures the lag, and this op
+		 * runs before ops.stopping() does the charging here. Without
+		 * it the lag is taken against a reference that has the last
+		 * run projected in, from a vruntime that has not, and comes
+		 * out too generous by that run. The charge is real and once;
+		 * ops.stopping() finds nothing left to add.
+		 */
+		if (scx_bpf_task_running(p) && cid == scx_bpf_task_cid(p))
+			keep_charge(p, cid, cid_clock_task_owned(cid, now));
 		lag = task_lag_at(p, tctx, cid, now);
 		tctx->vlag = lag;
 	}
