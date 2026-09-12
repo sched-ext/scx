@@ -2,8 +2,9 @@
  * SPDX-License-Identifier: GPL-2.0
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
+#include <libarena/common.h>
+#include <libarena/buddy.h>
 #include <scx/common.bpf.h>
-#include <lib/arena_map.h>
 #include <lib/sdt_task.h>
 
 #include <lib/arena.h>
@@ -29,7 +30,8 @@ struct task_ctx;
  * same way as libbpf places the __arena globals there.
  */
 enum {
-	NULL_GUARD_PAGES	= 8192,	/* 32MB with 4k pages */
+	/* libarena starts allocating at BUDDY_VADDR_OFFSET. */
+	NULL_GUARD_PAGES	= BUDDY_VADDR_OFFSET / PAGE_SIZE,
 };
 
 SEC("syscall")
@@ -54,10 +56,6 @@ int arena_init(struct arena_init_args *args)
 		}
 	}
 
-	ret = scx_static_init(args->static_pages);
-	if (ret)
-		return ret;
-
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
 		bpf_printk("uninitialized nr_cpu_ids variable");
 		return -ENODEV;
@@ -79,18 +77,6 @@ int arena_init(struct arena_init_args *args)
 	ret = scx_task_init(args->task_ctx_size, args->task_ctx_align);
 	if (ret) {
 		bpf_printk("scx_task_init failed with %d", ret);
-		return ret;
-	}
-
-	ret = scx_rb_init();
-	if (ret) {
-		bpf_printk("scx_rb_init failed with %d", ret);
-		return ret;
-	}
-
-	ret = scx_atq_init();
-	if (ret) {
-		bpf_printk("scx_atq_init failed with %d", ret);
 		return ret;
 	}
 
@@ -145,7 +131,7 @@ int arena_topology_node_init(struct arena_topology_node_init_args *args)
 SEC("syscall")
 int arena_topology_print(void)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	topo_print();
 
