@@ -29,7 +29,7 @@ use libbpf_rs::skel::Skel;
 use log::debug;
 use log::info;
 use log::warn;
-use scx_arena::ScxLibArena as ArenaLib;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::NR_CPUS_POSSIBLE;
