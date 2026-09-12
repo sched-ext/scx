@@ -182,6 +182,13 @@ const volatile bool no_vref_update;
 const volatile bool no_delay_dequeue;
 
 /*
+ * Wake a task that blocked over-served through the wakeup placement
+ * instead of on the cid it blocked on, see delay_requeue_cid(). Implied by
+ * @no_delay_dequeue.
+ */
+const volatile bool no_delay_requeue;
+
+/*
  * Notice the end of a request at the tick that follows it rather than
  * when it happens, without the timer fair.c runs as HRTICK, see
  * hrtick_start().
@@ -212,6 +219,7 @@ const volatile u32 balance_sample = 2;
 volatile u64 nr_steals __hot_written;
 volatile u64 nr_active_balances __hot_written;
 volatile u64 nr_preempts __hot_written;
+volatile u64 nr_delay_requeues __hot_written;
 volatile u64 nr_hrticks __hot_written;
 volatile u64 nr_newidle_skips __hot_written;
 
@@ -3422,35 +3430,79 @@ static void set_vruntime(struct task_ctx *tctx, u64 vruntime, bool sleep)
  * left to pick, and what it would do a moment later anyway, V being the
  * task's own vruntime once nothing else is there.
  *
- * What is not followed is where the task wakes. ttwu_runnable() finds a
- * delayed task on its runqueue and requeues it there, without going
- * through select_task_rq(); here it is placed by the wakeup path like
- * any other, and gets the idle CPU it would have had to wait for a
- * balance to be moved to.
+ * Where the task wakes follows too, see delay_requeue_cid().
  */
-static void delay_settle(struct task_ctx *tctx, u64 now)
+static s64 delay_debt(const struct task_ctx *tctx, u64 now)
 {
-	struct cid_ctx __arena *cctx;
-	s64 adv, lag = tctx->vlag;
 	s32 cid = tctx->delay_cid;
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	s64 adv, lag = tctx->vlag;
 
-	if (!cid_valid(cid))
-		return;
-	tctx->delay_cid = -1;
-	cctx = cid_ctx(cid);
-
-	if (cctx->empty_gen != tctx->delay_gen || lag >= 0) {
-		tctx->vlag = 0;
-		return;
-	}
+	if (cctx->empty_gen != tctx->delay_gen || lag >= 0)
+		return 0;
 
 	adv = (s64)(cid_vref_place(cid, cid_clock_task_at(cid, now)) - tctx->delay_vref);
 	if (adv <= 0)
-		return;
+		return lag;
 	adv = vdiv(adv * (s64)tctx->delay_w, tctx->delay_w + tctx->vw);
 
 	lag += adv;
-	tctx->vlag = lag > 0 ? 0 : lag;
+	return lag > 0 ? 0 : lag;
+}
+
+static void delay_settle(struct task_ctx *tctx, u64 now)
+{
+	if (!cid_valid(tctx->delay_cid))
+		return;
+	tctx->vlag = delay_debt(tctx, now);
+	tctx->delay_cid = -1;
+}
+
+/*
+ * The cid a waking task goes back to without being placed, or -1.
+ *
+ * ttwu_runnable() runs before select_task_rq(). A delayed task is still on
+ * the runqueue it blocked on, so its wakeup requeues it there,
+ *
+ *	if (task_on_rq_queued(p)) {
+ *		if (p->se.sched_delayed)
+ *			enqueue_task(rq, p, ENQUEUE_NOCLOCK | ENQUEUE_DELAYED);
+ *		if (!task_on_cpu(rq, p))
+ *			wakeup_preempt(rq, p, wake_flags);
+ *		ttwu_do_wakeup(p);
+ *		return 1;
+ *	}
+ *
+ * and no CPU is chosen for it: not the waker's, not an idle one. It runs
+ * where it was once it is picked there, or wherever a balance moves it.
+ *
+ * The task is "still on the runqueue it blocked on" for as long as fair.c
+ * would have kept it in the tree: while the pack it left is still there
+ * and the debt it owes that pack is not yet paid, see delay_settle(). A
+ * task whose debt is paid was dequeued by the pick that would have run
+ * it, and wakes through the placement like any other. So is a task whose
+ * affinity no longer covers the cid: a change of affinity takes a queued
+ * task off its runqueue.
+ *
+ * The cid is handed back to the kernel and the task reaches ops.enqueue()
+ * on it, where place_task() settles what is left of the debt and the
+ * wakeup preemption test runs, which is requeue_delayed_entity() followed
+ * by wakeup_preempt(). What is skipped is wake_affine() and the idle
+ * scan, as ttwu_runnable() skips select_task_rq().
+ */
+static s32 delay_requeue_cid(const struct task_struct *p,
+			     const struct task_ctx *tctx, u64 now)
+{
+	s32 cid = tctx->delay_cid;
+
+	if (no_delay_requeue || !cid_valid(cid))
+		return -1;
+	if (is_restricted(p) && !cid_allowed(p, cid))
+		return -1;
+	if (!delay_debt(tctx, now))
+		return -1;
+
+	return cid;
 }
 
 /*
@@ -3679,13 +3731,25 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 		prev_cid = near;
 	}
 
+	now = bpf_ktime_get_ns();
+
+	/*
+	 * A task that blocked over-served and is still owed to the pack it
+	 * left goes back to it, the way ttwu_runnable() requeues a delayed
+	 * task on its runqueue before select_task_rq() is ever asked.
+	 */
+	cid = delay_requeue_cid(p, tctx, now);
+	if (cid >= 0) {
+		__sync_fetch_and_add(&nr_delay_requeues, 1);
+		return cid;
+	}
+
 	/*
 	 * Follow select_task_rq_fair()'s fast path: wake_affine() computes a
 	 * target, then select_idle_sibling() looks around that target. An
 	 * affine target is not itself a selection; if it is busy, an idle
 	 * previous cid or an idle sibling still wins.
 	 */
-	now = bpf_ktime_get_ns();
 	target = wake_affine_cid(p, tctx, prev_cid, this_cid, wake_flags, now);
 
 	/*

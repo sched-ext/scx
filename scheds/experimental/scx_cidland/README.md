@@ -106,11 +106,16 @@ be turned off on the command line to compare the two rules against each other.
    where the pack stood and what it weighed without it; when it is placed
    again the pack's progress since, scaled to what it would have been with the
    task's weight still counted, is credited to the debt and not a unit more,
-   and a pack that has emptied since forgives it whole. What is not followed
-   is where the task wakes: `ttwu_runnable()` requeues a delayed task on the
-   runqueue it slept on without going through `select_task_rq()`; here it is
-   placed by the wakeup path like any other. `--no-delay-dequeue` carries the
-   whole debt across the sleep instead.
+   and a pack that has emptied since forgives it whole. Where the task wakes
+   follows too: `ttwu_runnable()` requeues a delayed task on the runqueue it
+   slept on, before `select_task_rq()` is asked, so a task woken while it is
+   still owed to the pack it left goes back to that CPU, with the debt that
+   is left and through the wakeup preemption test, and neither the waker's
+   CPU nor an idle one is looked at for it. A task whose debt has been paid
+   was dequeued by the pick that would have run it, and wakes through the
+   placement like any other. `--no-delay-requeue` places every wakeup, and
+   `--no-delay-dequeue` carries the whole debt across the sleep instead,
+   which implies it.
 
  - **Relative deadline.** A task that is placed again without having slept,
    moved to another CPU or queued again after a preemption by a higher

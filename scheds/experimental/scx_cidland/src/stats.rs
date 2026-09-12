@@ -24,6 +24,9 @@ pub struct Metrics {
     #[stat(desc = "Running tasks interrupted for a woken task")]
     pub nr_preempts: u64,
 
+    #[stat(desc = "Wakeups sent back to the CPU the task blocked on while over-served")]
+    pub nr_delay_requeues: u64,
+
     #[stat(desc = "Running tasks asked to give the CPU up at their deadline")]
     pub nr_hrticks: u64,
 
@@ -35,11 +38,12 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] steals={} active_balances={} preempts={} hrticks={} newidle_skips={}",
+            "[{}] steals={} active_balances={} preempts={} delay_requeues={} hrticks={} newidle_skips={}",
             crate::SCHEDULER_NAME,
             self.nr_steals,
             self.nr_active_balances,
             self.nr_preempts,
+            self.nr_delay_requeues,
             self.nr_hrticks,
             self.nr_newidle_skips,
         )?;
@@ -51,6 +55,7 @@ impl Metrics {
             nr_steals: self.nr_steals - rhs.nr_steals,
             nr_active_balances: self.nr_active_balances - rhs.nr_active_balances,
             nr_preempts: self.nr_preempts - rhs.nr_preempts,
+            nr_delay_requeues: self.nr_delay_requeues - rhs.nr_delay_requeues,
             nr_hrticks: self.nr_hrticks - rhs.nr_hrticks,
             nr_newidle_skips: self.nr_newidle_skips - rhs.nr_newidle_skips,
         }

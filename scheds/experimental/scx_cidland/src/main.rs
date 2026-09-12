@@ -325,6 +325,19 @@ struct Opts {
     /// against each other.
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     no_delay_dequeue: bool,
+    /// Wake a task that blocked over-served through the placement.
+    ///
+    /// A task that blocks while it is over-served is still on the runqueue it
+    /// blocked on as far as fair.c is concerned, and a wakeup that comes
+    /// before its debt is paid requeues it there, ttwu_runnable(), without
+    /// choosing a CPU for it: it runs there once it is picked, or wherever a
+    /// balance moves it. That is what happens here too. This option sends
+    /// such a task through wake_affine() and the idle scan like any other
+    /// wakeup instead, so it gets an idle CPU when there is one. Implied by
+    /// --no-delay-dequeue. For comparing the two rules against each other.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_delay_requeue: bool,
+
     /// Notice the end of a request at the tick after it, not when it happens.
     ///
     /// A request is normally ended on the spot by a timer armed for the
@@ -578,6 +591,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_place_lag = opts.no_place_lag;
         rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
         rodata.no_delay_dequeue = opts.no_delay_dequeue;
+        rodata.no_delay_requeue = opts.no_delay_requeue;
         rodata.no_hrtick = opts.no_hrtick;
         rodata.no_vref_update = opts.no_vref_update;
 
@@ -802,6 +816,7 @@ impl<'a> Scheduler<'a> {
             nr_steals: bss_data.nr_steals,
             nr_active_balances: bss_data.nr_active_balances,
             nr_preempts: bss_data.nr_preempts,
+            nr_delay_requeues: bss_data.nr_delay_requeues,
             nr_hrticks: bss_data.nr_hrticks,
             nr_newidle_skips: bss_data.nr_newidle_skips,
         }
