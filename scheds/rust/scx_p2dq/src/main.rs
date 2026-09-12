@@ -21,7 +21,7 @@ use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::Skel;
-use scx_arena::ArenaLib;
+use scx_arena::ScxLibArena as ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::Topology;
