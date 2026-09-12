@@ -15,8 +15,10 @@
 #include <scx/common.bpf.h>
 #include <scx/percpu.bpf.h>
 #include <lib/arena_map.h>
+#include <lib/edq.h>
 #include <lib/ravg.h>
 #include <lib/arena_loop.h>
+#include <lib/sdt_alloc.h>
 #include "intf.h"
 
 #ifndef __BPF_FEATURE_ADDR_SPACE_CAST
@@ -122,7 +124,7 @@ const volatile bool no_task_clock;
 const volatile bool no_eligibility;
 
 /*
- * At dispatch, take the head of a deadline-ordered DSQ as the pick
+ * At dispatch, take the head of a deadline-ordered EDQ as the pick
  * instead of walking it for its first eligible task, see
  * move_first_eligible_to_local(). Implied by @no_eligibility.
  */
@@ -255,6 +257,9 @@ static u32 nr_capacity_tiers;
 static bool asym_capacity;
 static bool asym_packing;
 
+struct cid_edq_task;
+typedef struct cid_edq_task __arena cid_edq_task_t;
+
 /*
  * Per-task context.
  */
@@ -287,7 +292,32 @@ struct task_ctx {
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
 	bool direct_placed;	/* select_cid() already placed and joined it */
+	cid_edq_task_t *edq_task;
 };
+
+/*
+ * EDQ membership has to live in arena memory. Keep the intrusive node there
+ * and cache only its pointer in cidland's existing task storage. This avoids
+ * a second task-storage map and lookup without moving the hot scheduling
+ * fields out of kernel task-storage memory.
+ */
+enum cid_edq_task_state {
+	CID_EDQ_NONE,
+	CID_EDQ_ENQUEUED,
+	CID_EDQ_DISPATCHING,
+	CID_EDQ_DISPATCHED,
+};
+
+struct cid_edq_task {
+	struct scx_edq_task common;
+	u64 tid;
+	s32 cid;
+	u32 state;
+	u64 slice;
+	u64 enq_flags;
+};
+
+static struct scx_allocator cid_edq_task_allocator;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -401,6 +431,7 @@ struct cid_ctx {
 	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
 	s32 active_balance_cid;	/* idle cid asking for the running task */
+	struct scx_edq edq;
 };
 
 /*
@@ -703,26 +734,236 @@ static u64 cid_clock_task_at(s32 cid, u64 now)
 }
 
 /*
- * Return the DSQ of @cid.
- *
- * Every cid owns a deadline ordered DSQ where the tasks that last ran on
- * it are queued, and a cid that runs out of work pulls from the DSQs of
- * its node (see try_steal_task()). All the keys are built on the same
- * vruntime reference, so the queues behave as a single node-wide deadline
- * queue, without the single lock that a single queue puts in the path of
- * every wakeup.
- */
-static inline u64 cid_dsq(s32 cid)
-{
-	return cid;
-}
-
-/*
  * Return true if @p still wants to run, false otherwise.
  */
 static bool is_task_queued(const struct task_struct *p)
 {
 	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+static __always_inline bool cid_allowed(const struct task_struct *p, s32 cid);
+static inline bool is_restricted(const struct task_struct *p);
+
+static cid_edq_task_t *cid_edq_task(const struct task_ctx *tctx)
+{
+	return tctx ? tctx->edq_task : NULL;
+}
+
+/*
+ * Queue inspection is advisory. Never join a contended lock wait from a
+ * preemption decision or a remote steal scan; the queue owner will make
+ * progress and a later dispatch can try again.
+ */
+static int cid_edq_try_peek(s32 cid, cid_edq_task_t **atp)
+{
+	u64 task;
+	int ret;
+
+	*atp = NULL;
+	ret = scx_edq_try_peek_hold(&cid_ctx(cid)->edq, &task);
+	if (ret) {
+		if (ret != -EBUSY)
+			scx_bpf_error("EDQ peek failed for cid %d: %d", cid, ret);
+		return ret;
+	}
+	*atp = (cid_edq_task_t *)task;
+	return 0;
+}
+
+static void cid_edq_mark_dispatched(struct task_ctx *tctx)
+{
+	cid_edq_task_t *at;
+
+	at = cid_edq_task(tctx);
+	if (at)
+		WRITE_ONCE(at->state, CID_EDQ_DISPATCHED);
+}
+
+static u32 cid_queue_nr(s32 cid)
+{
+	return scx_edq_nr_queued(&cid_ctx(cid)->edq);
+}
+
+/*
+ * Return the sched_ext tid at the EDQ head, or 0. For the cid's own ops
+ * only: they hold the rq lock, so the only other holder of the lock is a
+ * remote trylocker in a short peek or remove, and waiting for it is
+ * cheaper than skipping the decision. peek_hold keeps the arena object
+ * alive across the unlocked tid load; the caller resolves it under RCU.
+ */
+static u64 cid_edq_peek_tid_owned(s32 cid)
+{
+	cid_edq_task_t *at;
+	u64 tid = 0;
+
+	at = (cid_edq_task_t *)scx_edq_peek_hold(&cid_ctx(cid)->edq);
+	if (at) {
+		tid = at->tid;
+		scx_edq_task_drop(&at->common);
+	}
+	return tid;
+}
+
+/*
+ * scx_bpf_tid_to_task() returns an RCU-protected pointer. Every lookup below
+ * runs from a non-sleepable struct_ops callback, which BPF treats as an
+ * implicit RCU read-side critical section. Keep lookups out of sleepable ops.
+ */
+static __noinline bool cid_edq_dispatch_popped(cid_edq_task_t *at,
+					       struct task_struct *p, s32 dst_cid)
+{
+	if (__sync_val_compare_and_swap(&at->state, CID_EDQ_ENQUEUED,
+					CID_EDQ_DISPATCHING) != CID_EDQ_ENQUEUED) {
+		scx_edq_task_drop(&at->common);
+		return false;
+	}
+	if (!p)
+		p = scx_bpf_tid_to_task(at->tid);
+	if (!p) {
+		/*
+		 * The sched_ext tid remains resolvable through task exit. Failure here
+		 * means the queue entry outlived the task or was otherwise corrupted;
+		 * fail into scheduler rescue rather than silently losing its only
+		 * runnable-queue entry.
+		 */
+		scx_bpf_error("EDQ cannot resolve queued tid %llu", at->tid);
+		scx_edq_task_drop(&at->common);
+		return false;
+	}
+	if (!is_task_queued(p)) {
+		scx_edq_task_drop(&at->common);
+		return false;
+	}
+	if (READ_ONCE(at->state) != CID_EDQ_DISPATCHING) {
+		scx_edq_task_drop(&at->common);
+		return false;
+	}
+	/*
+	 * The task's affinity can change after EDQ selected it. Unlike a DSQ
+	 * move, a direct LOCAL insertion with a now-invalid destination is a
+	 * scheduler error. A changed affinity belongs to a scheduler-property
+	 * workflow: drop this old pop and let the core's matching enqueue place the
+	 * task again, as fair's sched_change dequeue/enqueue pair does.
+	 */
+	if (is_restricted(p) && !cid_allowed(p, dst_cid)) {
+		scx_edq_task_drop(&at->common);
+		return false;
+	}
+
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, at->slice, at->enq_flags);
+	scx_edq_task_drop(&at->common);
+	return true;
+}
+
+enum cid_edq_move_result {
+	CID_EDQ_MOVE_MISS,
+	CID_EDQ_MOVE_MOVED,
+	CID_EDQ_MOVE_BUSY,
+};
+
+static __noinline enum cid_edq_move_result
+cid_edq_remove_held_to_local(s32 src_cid, s32 dst_cid, cid_edq_task_t *at,
+				    struct task_struct *p)
+{
+	int ret;
+
+	ret = scx_edq_try_remove(&cid_ctx(src_cid)->edq, &at->common);
+	if (ret) {
+		if (ret != -EINVAL && ret != -EBUSY)
+			scx_bpf_error("EDQ exact remove failed for tid %llu: %d",
+				      at->tid, ret);
+		scx_edq_task_drop(&at->common);
+		return ret == -EBUSY ? CID_EDQ_MOVE_BUSY : CID_EDQ_MOVE_MISS;
+	}
+
+	return cid_edq_dispatch_popped(at, p, dst_cid) ? CID_EDQ_MOVE_MOVED :
+							 CID_EDQ_MOVE_MISS;
+}
+
+/*
+ * A pop that fails to dispatch has still removed its node: the task it
+ * chose is in the hands of a concurrent dequeue, and the core enqueues it
+ * again. The rest of the queue is not, so pop again rather than end the
+ * round and leave the CPU idle over tasks that are ready to run. Every
+ * iteration removes a node, so the queue depth bounds the loop.
+ */
+static __noinline bool cid_queue_move_head_to_local(s32 cid)
+{
+	struct scx_edq __arena *edq = &cid_ctx(cid)->edq;
+	cid_edq_task_t *at;
+
+	while (can_loop) {
+		at = (cid_edq_task_t *)scx_edq_pop(edq, true);
+		if (!at)
+			return false;
+		if (cid_edq_dispatch_popped(at, NULL, cid))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Atomically remove the earliest-deadline task whose vruntime is eligible.
+ * If a lockless V snapshot finds none, retain the existing head fallback so
+ * a transiently all-ineligible queue cannot be stranded. Pops again after a
+ * failed dispatch, see cid_queue_move_head_to_local().
+ */
+static __noinline bool cid_edq_move_first_eligible_to_local(s32 cid, u64 vref)
+{
+	struct scx_edq __arena *edq = &cid_ctx(cid)->edq;
+	cid_edq_task_t *at;
+
+	while (can_loop) {
+		at = (cid_edq_task_t *)scx_edq_pop_first_eligible_or_first(
+								edq, vref, true);
+		if (!at)
+			return false;
+		if (cid_edq_dispatch_popped(at, NULL, cid))
+			return true;
+	}
+	return false;
+}
+
+static bool cid_queue_insert(struct task_struct *p, struct task_ctx *tctx,
+			     s32 cid, u64 slice,
+			     u64 deadline, u64 vruntime, u64 enq_flags)
+{
+	cid_edq_task_t *at;
+	int ret;
+
+	at = cid_edq_task(tctx);
+	if (!at) {
+		scx_bpf_error("missing EDQ task for pid %d", p->pid);
+		return false;
+	}
+	/*
+	 * A held node was popped by an older enqueue workflow. A property-change
+	 * dequeue can end that workflow and re-enqueue the task before the old
+	 * dispatcher drops its hold. Do not let the one intrusive node represent
+	 * both workflows: direct-dispatch the new one and make the stale pop fail
+	 * its state check.
+	 */
+	if (READ_ONCE(at->common.holdcnt)) {
+		WRITE_ONCE(at->state, CID_EDQ_DISPATCHED);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice, enq_flags);
+		return false;
+	}
+	if (READ_ONCE(at->state) == CID_EDQ_ENQUEUED)
+		scx_bpf_error("EDQ double enqueue for pid %d", p->pid);
+	at->slice = slice;
+	at->enq_flags = enq_flags;
+	at->cid = cid;
+	/* Publish custody before the node becomes visible to another CPU's pop. */
+	WRITE_ONCE(at->state, CID_EDQ_ENQUEUED);
+	ret = scx_edq_insert(&cid_ctx(cid)->edq, &at->common, deadline,
+			      vruntime);
+	if (ret) {
+		__sync_val_compare_and_swap(&at->state, CID_EDQ_ENQUEUED,
+					CID_EDQ_NONE);
+		scx_bpf_error("EDQ insert failed for pid %d: %d", p->pid, ret);
+		return false;
+	}
+	return true;
 }
 
 /*
@@ -953,13 +1194,12 @@ static void cid_idle_set(s32 cid)
 /*
  * Queued cid tracking.
  *
- * One bit per cid whose DSQ holds at least one task, kept next to the
+ * One bit per cid whose EDQ holds at least one task, kept next to the
  * idle bitmap and scanned the same way, so that a cid looking for work
- * to pull walks a word of it instead of peeking at the DSQ of every cid
- * of the node, a kfunc call and a hash lookup each.
+ * to pull walks a word of it instead of peeking at every EDQ of the node.
  *
  * The bit is set after a task is queued and cleared by whoever finds the
- * DSQ empty, with a second look after the clear in case a task was queued
+ * EDQ empty, with a second look after the clear in case a task was queued
  * in between. It is a hint: the kernel can dequeue a task behind the
  * scheduler's back, and a bit left set is cleared by the first cid that
  * peeks and finds nothing.
@@ -972,7 +1212,7 @@ static bool cid_queued_test(s32 cid)
 /*
  * fair.c's choose_sched_idle_rq(): a normal task may share a CPU whose
  * runqueue contains only SCHED_IDLE work instead of waiting on a normal
- * task elsewhere. Cidland cannot count policy classes in a remote DSQ, so
+ * task elsewhere. Cidland does not count policy classes in a remote EDQ, so
  * recognize the exact cheap case: a SCHED_IDLE current with no waiter.
  */
 static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
@@ -994,15 +1234,15 @@ static void cid_queued_set(s32 cid)
 }
 
 /*
- * Clear the queued bit of @cid if its DSQ is empty, looking again after
+ * Clear the queued bit of @cid if its EDQ is empty, looking again after
  * the clear for a task queued in the meantime.
  */
 static void cid_queued_check(s32 cid)
 {
-	if (!cid_valid(cid) || scx_bpf_dsq_nr_queued(cid_dsq(cid)))
+	if (!cid_valid(cid) || cid_queue_nr(cid))
 		return;
 	cid_bit_clear(cid, queued_cids);
-	if (scx_bpf_dsq_nr_queued(cid_dsq(cid)))
+	if (cid_queue_nr(cid))
 		cid_bit_set(cid, queued_cids);
 }
 
@@ -1717,37 +1957,80 @@ static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid,
 		     u64 now);
 
 /*
+ * Validate and remove the same EDQ head. Holding the node across the affinity
+ * and hotness checks and removing that exact node prevents a concurrent
+ * enqueue from substituting a different task before the steal, giving EDQ
+ * the same validate-the-entity semantics as fair's locked detach.
+ */
+static __noinline enum cid_edq_move_result
+cid_edq_move_usable_head_to_local(s32 dst_cid, s32 src_cid, u64 now,
+				  bool check_hot)
+{
+	cid_edq_task_t *at;
+	struct task_struct *p;
+	int ret;
+
+	ret = cid_edq_try_peek(src_cid, &at);
+	if (ret)
+		return ret == -EBUSY ? CID_EDQ_MOVE_BUSY : CID_EDQ_MOVE_MISS;
+	if (!at)
+		return CID_EDQ_MOVE_MISS;
+	p = scx_bpf_tid_to_task(at->tid);
+	if (!p || READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
+	    !cid_allowed(p, dst_cid) ||
+	    (check_hot && task_hot(p, src_cid, dst_cid, now))) {
+		scx_edq_task_drop(&at->common);
+		return CID_EDQ_MOVE_MISS;
+	}
+
+	return cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
+}
+
+/*
  * Detach one eligible queued task from the selected source. Unlike the normal
- * steal path, walk past an affinity-restricted or cache-hot DSQ head, as
+ * steal path, inspect an affinity-restricted or cache-hot EDQ head, as
  * fair.c's detach_tasks() walks the CFS task list looking for a candidate.
  */
 static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 					     u64 now)
 {
+	cid_edq_task_t *at;
+	enum cid_edq_move_result move;
 	struct task_struct *p;
 	bool movable = false, pinned = false;
+	int ret;
 
 	TOUCH_ARENA();
-
-	bpf_for_each(scx_dsq, p, cid_dsq(src_cid), 0) {
-		if (is_pcpu_task(p) ||
-		    !bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr)) {
-			pinned = true;
-			continue;
-		}
-		movable = true;
-		if (task_hot(p, src_cid, dst_cid, now))
-			continue;
-		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL, 0)) {
-			__sync_fetch_and_add(&nr_steals, 1);
-			cid_queued_check(src_cid);
-			return ACTIVE_BALANCE_MOVED;
-		}
-		break;
+	ret = cid_edq_try_peek(src_cid, &at);
+	if (ret == -EBUSY)
+		return ACTIVE_BALANCE_MISS;
+	if (!at) {
+		cid_queued_check(src_cid);
+		return ACTIVE_BALANCE_MISS;
 	}
-	cid_queued_check(src_cid);
-
-	return pinned && !movable ? ACTIVE_BALANCE_PINNED : ACTIVE_BALANCE_MISS;
+	p = scx_bpf_tid_to_task(at->tid);
+	if (!p || READ_ONCE(at->state) != CID_EDQ_ENQUEUED) {
+		scx_edq_task_drop(&at->common);
+		cid_queued_check(src_cid);
+		return ACTIVE_BALANCE_MISS;
+	}
+	if (is_pcpu_task(p) ||
+	    !bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr))
+		pinned = true;
+	else if (!task_hot(p, src_cid, dst_cid, now))
+		movable = true;
+	move = movable ? cid_edq_remove_held_to_local(src_cid, dst_cid, at, p) :
+			 CID_EDQ_MOVE_MISS;
+	if (move == CID_EDQ_MOVE_MOVED) {
+		__sync_fetch_and_add(&nr_steals, 1);
+		cid_queued_check(src_cid);
+		return ACTIVE_BALANCE_MOVED;
+	}
+	if (!movable)
+		scx_edq_task_drop(&at->common);
+	if (move != CID_EDQ_MOVE_BUSY)
+		cid_queued_check(src_cid);
+	return pinned ? ACTIVE_BALANCE_PINNED : ACTIVE_BALANCE_MISS;
 }
 
 /*
@@ -1784,7 +2067,7 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 
 		if (!type)
 			continue;
-		nr_running = scx_bpf_dsq_nr_queued(cid_dsq(src_cid)) +
+		nr_running = cid_queue_nr(src_cid) +
 			     !!READ_ONCE(src->curr_w);
 		if (!nr_running)
 			continue;
@@ -2210,7 +2493,7 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
 			break;
 		if (restricted && !cid_allowed(p, cid))
 			continue;
-		nr_queued = scx_bpf_dsq_nr_queued(cid_dsq(cid));
+		nr_queued = cid_queue_nr(cid);
 		if (best < 0 || nr_queued < best_nr ||
 		    (nr_queued == best_nr && asym_capacity &&
 		     cid_topo(cid)->capacity_tier < cid_topo(best)->capacity_tier)) {
@@ -2507,28 +2790,12 @@ static u64 task_request(const struct task_struct *p)
  * not buy a task a longer time slice, it buys it an earlier deadline, so it
  * runs more often instead of running longer.
  *
- * The deadline is the DSQ key and nothing else. The kernel stores what is
- * passed to scx_bpf_dsq_insert_vtime() in p->scx.dsq_vtime, so the
- * vruntime has to live somewhere the key cannot overwrite it, see
- * task_ctx.vruntime.
+ * The deadline is the EDQ key and nothing else. The vruntime is stored
+ * separately in task_ctx.vruntime and copied into the EDQ augmentation.
  *
  * pick_eevdf() considers only the eligible tasks, v_i <= V, and picks the
- * earliest deadline among them. A DSQ cannot skip a task and its key is
- * fixed at insertion, so the filter is not applied here. It is mostly not
- * needed: a task that is over-served carries the excess in its key and
- * sorts after the under-served tasks of the same weight, and stays there
- * until V has moved past it, which is the wait pick_eevdf() would impose
- * anyway. What is lost is the case of a heavier over-served task, whose
- * r_i / w_i is smaller, sorting ahead of a lighter under-served one: it
- * wins by at most the difference between the two requests, a bounded
- * latency skew, not a fairness leak, since the vruntime is charged all
- * the same.
- *
- * Pushing the ineligible tasks further back with an offset, to apply the
- * filter exactly, would starve them instead. V advances by the service
- * delivered divided by the total weight, so under load it barely moves,
- * and a task waiting for V to cover a fixed offset waits for seconds
- * while every newly woken task keeps being queued ahead of it.
+ * earliest deadline among them. The EDQ subtree augmentation applies that
+ * filter at dispatch without changing the deadline key.
  *
  * The deadline stands until the request it was issued for is consumed,
  * which is the test update_deadline() opens with:
@@ -3009,41 +3276,19 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 }
 
 /*
- * Move the earliest-deadline eligible task from @cid to this CPU. Selection
- * and movement share the iterator cursor, so scx_bpf_dsq_move() can verify
- * that the task did not leave the DSQ between the two operations. If every
- * observed queued task is ineligible, fall back to the head rather than
- * strand a runnable queue. This can happen when the current task is the
- * pack's sole eligible member but active balance is moving it elsewhere, or
- * when the lockless reference and DSQ snapshots race. Callers enter here only
- * when eligible scanning and eligibility enforcement are both enabled.
+ * Move the earliest-deadline eligible task from @cid to this CPU. EDQ selects
+ * and removes under its lock. If every observed queued task is ineligible,
+ * fall back to the head rather than strand a runnable queue. This can happen
+ * when the current task is the pack's sole eligible member but active balance
+ * is moving it elsewhere, or when the lockless reference and queue snapshots
+ * race. Callers enter here only when eligible scanning and eligibility
+ * enforcement are both enabled.
  */
 static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow)
 {
-	struct task_struct *head, *p;
-	struct task_ctx *tctx;
-	u64 vref;
-
 	TOUCH_ARENA();
-	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
-	if (!head)
-		return false;
-	vref = cid_vref_place(cid, tnow);
-	tctx = try_lookup_task_ctx(head);
-	if ((tctx && !time_after(tctx->vruntime, vref)) ||
-	    scx_bpf_dsq_nr_queued(cid_dsq(cid)) == 1)
-		return scx_bpf_dsq_move_to_local(cid_dsq(cid), 0);
-
-	bpf_for_each(scx_dsq, p, cid_dsq(cid), 0) {
-		tctx = try_lookup_task_ctx(p);
-		if (!tctx || time_after(tctx->vruntime, vref))
-			continue;
-
-		return scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
-					SCX_DSQ_LOCAL, 0);
-	}
-
-	return scx_bpf_dsq_move_to_local(cid_dsq(cid), 0);
+	return cid_edq_move_first_eligible_to_local(
+		cid, cid_vref_place(cid, tnow));
 }
 
 /*
@@ -3093,8 +3338,8 @@ static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow)
 static bool keep_running(s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
-	struct task_struct *head;
-	u64 w, v, dl;
+	bool keep;
+	u64 w, v, dl, head_dl;
 
 	w = cctx->curr_w;
 	if (!w)
@@ -3124,16 +3369,17 @@ static bool keep_running(s32 cid, u64 now)
 		return false;
 
 	/*
-	 * Only now the head: the DSQ lookup is the expensive step, and a
+	 * Only now the head: the queue lookup is the expensive step, and a
 	 * yielder that has just forfeited its request fails the test above.
 	 *
 	 * Nothing queued here to be preferred to. Say so rather than keep
 	 * the task: the queued bitmap is the only thing consulted, and the
-	 * dispatch that follows has a lookup of the DSQ itself to fall back
+	 * dispatch that follows has a lookup of the EDQ itself to fall back
 	 * on for the races the bitmap loses.
 	 */
-	head = cid_queued_test(cid) ? __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid)) : NULL;
-	if (!head)
+	if (!cid_queued_test(cid))
+		return false;
+	if (scx_edq_first_deadline(&cctx->edq, &head_dl))
 		return false;
 
 	/*
@@ -3150,7 +3396,8 @@ static bool keep_running(s32 cid, u64 now)
 	}
 
 	/* A tie is kept: giving the CPU up costs a switch. */
-	return !time_after(dl, head->scx.dsq_vtime);
+	keep = !time_after(dl, head_dl);
+	return keep;
 }
 
 /*
@@ -3410,7 +3657,7 @@ static void set_vruntime(struct task_ctx *tctx, u64 vruntime, bool sleep)
  * on waking, against a pack that may have long since moved on.
  *
  * There is no tree to leave the task in: ops.quiescent() is the end of
- * the kernel's interest in it, and the DSQ holds runnable tasks. So the
+ * the kernel's interest in it, and the EDQ holds runnable tasks. So the
  * task leaves its pack, and what is remembered is where the pack stood
  * when it left, @delay_vref, and what the pack weighed without it,
  * @delay_w. When the task is placed again the pack's reference has
@@ -3643,10 +3890,10 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
  * Direct dispatch @p to the local DSQ of @cid from ops.select_cid().
  *
  * Insert with SCX_ENQ_IMMED so that the kernel bounces @p back through
- * ops.enqueue() (and from there into a per-cid DSQ, where the deadline
+ * ops.enqueue() (and from there into a per-cid EDQ, where the deadline
  * ordering applies) whenever @p can't run on @cid right away. This keeps
  * the local DSQ a pure "run now" fast path instead of an unbounded queue
- * that outranks the deadline-ordered DSQs.
+ * that outranks the deadline-ordered EDQs.
  *
  * @cid is idle here, so the bounce is the exception: the kernel triggers
  * it (rq_is_open() in dispatch_one()) whenever a task is waiting on @cid
@@ -3661,6 +3908,7 @@ static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, 
 	cgw_refresh(p, tctx);
 	place_task(cid, p, tctx, now, true);
 	tctx->direct_placed = true;
+	cid_edq_mark_dispatched(tctx);
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
 
@@ -3853,8 +4101,8 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 				      u64 now)
 {
 	struct cid_ctx __arena *cctx;
-	struct task_struct *head;
-	bool owed, p_idle;
+	bool owed, p_idle, has_head;
+	u64 head_dl;
 
 	if (cid_idle_test(cid))
 		goto idle;
@@ -3891,10 +4139,10 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * is selected next even when another task has an earlier deadline. The
 	 * local-DSQ insertion made after this returns is the same one-shot
 	 * override when that DSQ is available: it runs before the
-	 * deadline-ordered per-cid DSQ. An existing local waiter is not
+	 * deadline-ordered per-cid EDQ. An existing local waiter is not
 	 * displaced because the built-in DSQ is FIFO-only; that waiter already
 	 * requested rescheduling and the new wakee retains deadline order on
-	 * the per-cid DSQ.
+	 * the per-cid EDQ.
 	 *
 	 * Both requests are already cached. task_dl() recorded the wakee's in
 	 * @tctx, and ops.running() or keep_charge() published the current one.
@@ -3939,7 +4187,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 *
 	 * and a curr that has lost the pick to some other queued task is
 	 * left running until its slice ends, or until a wakeup that does win
-	 * it. The preemption approximation treats the DSQ head as the next pick,
+	 * it. The preemption approximation treats the EDQ head as the next pick,
 	 * so the woken task must have a strictly earlier deadline. Selection at
 	 * actual dispatch can scan for eligibility, but doing so here changes the
 	 * policy using a non-atomic snapshot of current, queue, and virtual-time
@@ -3952,9 +4200,13 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * CPU that was one context switch in three, and perf bench sched
 	 * messaging ran at half its speed.
 	 */
-	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
-	if (head && !time_before(dl, head->scx.dsq_vtime))
-		goto queued;
+	has_head = !scx_edq_first_deadline(&cctx->edq, &head_dl);
+	if (has_head) {
+		bool loses = !time_before(dl, head_dl);
+
+		if (loses)
+			goto queued;
+	}
 
 preempt:
 	return true;
@@ -4003,6 +4255,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		cid = claim_idle_cid(p, cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx, now, false);
+			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
 			__sync_fetch_and_add(&nr_active_balances, 1);
@@ -4047,6 +4300,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		cid = pick_idle_cid(p, prev_cid, prev_cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
+			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
 			return;
@@ -4062,7 +4316,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * can be the earlier one: the kick that displaced it was issued
 	 * because it is no longer owed service, not because it lost on the
 	 * deadline. pick_eevdf() would leave it in the tree and skip it as
-	 * ineligible. A DSQ takes its head, so it would be picked straight
+	 * ineligible. Head-only selection would pick it straight
 	 * back and the task that displaced it would wait for the tick.
 	 *
 	 * Reissue its deadline from where its vruntime has reached, which is
@@ -4121,11 +4375,12 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * are FIFO-only, so a second preempting insertion would otherwise go
 	 * ahead of the first without comparing their deadlines. The pending
 	 * local task has already requested rescheduling; later wakees retain
-	 * their deadline order on the per-cid DSQ.
+	 * their deadline order on the per-cid EDQ.
 	 */
 	if (!displaced &&
 	    queued_cid_should_preempt(prev_cid, p, tctx, dl, tnow) &&
 	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
+		cid_edq_mark_dispatched(tctx);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
 				   task_request(p),
 				   enq_flags | SCX_ENQ_PREEMPT);
@@ -4133,11 +4388,12 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	scx_bpf_dsq_insert_vtime(p, cid_dsq(prev_cid), task_request(p), dl,
-				 enq_flags);
+	if (!cid_queue_insert(p, tctx, prev_cid, task_request(p), dl,
+			      tctx->vruntime, enq_flags))
+		return;
 	cid_queued_set(prev_cid);
 	if ((enq_flags & SCX_ENQ_LAST) &&
-	    scx_bpf_dsq_nr_queued(cid_dsq(prev_cid)) == 1) {
+	    cid_queue_nr(prev_cid) == 1) {
 		cid = idle_peer_cid(p, prev_cid);
 		if (cid >= 0 && cid != prev_cid) {
 			WRITE_ONCE(cid_ctx(cid)->force_steal, 1);
@@ -4301,7 +4557,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 {
 	s32 cid = scx_bpf_this_cid(), peer;
 	struct task_struct *head;
-	u64 now;
+	u64 now, tid;
 
 	TOUCH_ARENA();
 	now = bpf_ktime_get_ns();
@@ -4311,7 +4567,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	if (!no_newidle_cost)
 		newidle_decay(cid_ctx(cid), now);
 	cid_load_update(cid, now);
-	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid))) {
+	if (!cid_queue_nr(cid)) {
 		/*
 		 * nohz_balancer_kick() also wakes an idle balancer when the sole
 		 * runnable task is on a lower-priority or undersized CPU. Serialize
@@ -4328,7 +4584,15 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 		return;
 	}
 
-	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
+	/*
+	 * The head is only looked up for idle_peer_cid(), which has nothing
+	 * to offer when no cid is idle; that is the common case on a busy
+	 * machine, and the lookup is the expensive part of this tick.
+	 */
+	if (cmask_empty(idle_cids))
+		return;
+	tid = cid_edq_peek_tid_owned(cid);
+	head = tid ? scx_bpf_tid_to_task(tid) : NULL;
 	if (!head)
 		return;
 
@@ -4496,11 +4760,12 @@ static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid, u64 now)
  * Look at the queued cids of @w, word @k rotated by @s (packed in @ks as
  * k << 16 | s), and return the first one whose head @dst_cid can take,
  * or -1, in the low 32 bits, with the number of queues still allowed in
- * the high 32 bits. @ctl packs, from the top, the depth of @dst_cid's
- * own queue, the number of queues to look at and whether a head still
- * hot on its CPU is skipped. A queue found empty has its bit cleared. A
- * busy @dst_cid only takes from a queue more than twice as deep as its
- * own and at least two tasks deeper.
+ * the high 32 bits. The EDQ head is held, revalidated and dispatched here.
+ * @ctl packs,
+ * from the top, the depth of @dst_cid's own queue, the number of queues to
+ * look at and whether a head still hot on its CPU is skipped. A queue found
+ * empty has its bit cleared. A busy @dst_cid only takes from a queue more
+ * than twice as deep as its own and at least two tasks deeper.
  *
  * A global function: it is verified once, not once per call site and
  * loop iteration, which keeps ops.dispatch() within the verifier's
@@ -4517,7 +4782,7 @@ __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
 
 	w = rotr64(w, s);
 	while (w && limit && can_loop) {
-		struct task_struct *p;
+		enum cid_edq_move_result move;
 		s32 cid;
 
 		cid = k * 64 + ((__builtin_ctzll(w) + s) & 63);
@@ -4527,22 +4792,19 @@ __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
 		limit--;
 
 		if (own_nr) {
-			u32 nr = scx_bpf_dsq_nr_queued(cid_dsq(cid));
+			u32 nr = cid_queue_nr(cid);
 
 			if (nr < own_nr + 2 || nr <= 2 * own_nr)
 				continue;
 		}
-		p = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
-		if (!p) {
-			cid_queued_check(cid);
-			continue;
+		move = cid_edq_move_usable_head_to_local(dst_cid, cid, now,
+							     check_hot);
+		if (move == CID_EDQ_MOVE_MOVED) {
+			ret = cid;
+			break;
 		}
-		if (!bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr) ||
-		    (check_hot && task_hot(p, cid, dst_cid, now)))
-			continue;
-
-		ret = cid;
-		break;
+		if (move != CID_EDQ_MOVE_BUSY)
+			cid_queued_check(cid);
 	}
 
 	return ((u64)limit << 32) | (u32)ret;
@@ -4591,11 +4853,11 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
 }
 
 /*
- * Dispatch on @dst_cid a task from its own DSQ or from the DSQ of another
+ * Dispatch on @dst_cid a task from its own EDQ or from the EDQ of another
  * cid of the node.
  *
  * @has_prev says the CPU still has the task it was running: @prev is
- * runnable and merely off the DSQ while dispatch decides whether to renew
+ * runnable and merely off the EDQ while dispatch decides whether to renew
  * its slice. A cid in that state is busy, not idle, and fair.c draws the
  * line in the same place, in pick_task_fair():
  *
@@ -4657,8 +4919,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 {
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
 	struct cid_topo __arena *topo = cid_topo(dst_cid);
-	bool own = !keep && cid_queued_test(dst_cid) &&
-		   __COMPAT_scx_bpf_dsq_peek(cid_dsq(dst_cid));
+	bool own = !keep && cid_queued_test(dst_cid) && cid_queue_nr(dst_cid);
 	bool busy = own || has_prev;
 	bool force_steal = !busy && READ_ONCE(cctx->force_steal);
 	u32 node_base = numa_enabled ? topo->node_base : 0;
@@ -4689,7 +4950,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	if (busy) {
 		if (time_before(now, cctx->last_balance_at + slice_ns))
 			goto own;
-		own_nr = scx_bpf_dsq_nr_queued(cid_dsq(dst_cid));
+		own_nr = cid_queue_nr(dst_cid);
 		if (!own_nr)
 			goto own;
 		cctx->last_balance_at = now;
@@ -4807,11 +5068,14 @@ pick:
 	if (src < 0)
 		return false;
 
-	if (!((src == dst_cid && !no_eligible_scan && !no_eligibility) ?
-	      move_first_eligible_to_local(src, cid_clock_task_at(src, now)) :
-	      scx_bpf_dsq_move_to_local(cid_dsq(src), 0))) {
-		cid_queued_check(src);
-		return false;
+	/* Remote scans already validated, removed and dispatched one node. */
+	if (src == dst_cid) {
+		if (!((src == dst_cid && !no_eligible_scan && !no_eligibility) ?
+		      move_first_eligible_to_local(src, cid_clock_task_at(src, now)) :
+		      cid_queue_move_head_to_local(src))) {
+			cid_queued_check(src);
+			return false;
+		}
 	}
 	cid_queued_check(src);
 
@@ -4855,7 +5119,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 
 	/*
 	 * Take a task from this cid's queue or from a deeper one on the
-	 * node, then fall back to this cid's own DSQ in case the pick raced
+	 * node, then fall back to this cid's own EDQ in case the pick raced
 	 * with another cid. An idle cid that failed to pull queued work may have
 	 * requested this running task through asymmetric active balance. Consume
 	 * and validate that one destination before renewing the task; otherwise
@@ -4891,7 +5155,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	}
 	if (!keep && ((!no_eligible_scan && !no_eligibility) ?
 		     move_first_eligible_to_local(cid, tnow) :
-		     scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))) {
+		     cid_queue_move_head_to_local(cid))) {
 		cid_queued_check(cid);
 		if (active_balance)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
@@ -4963,6 +5227,7 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 
 void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
+	cid_edq_task_t *at;
 	struct task_ctx *tctx;
 	s64 lag;
 	u64 now;
@@ -4973,6 +5238,9 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	at = cid_edq_task(tctx);
+	if (at)
+		WRITE_ONCE(at->state, CID_EDQ_NONE);
 
 	now = bpf_ktime_get_ns();
 	util_est_update(tctx, now);
@@ -5235,7 +5503,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
  *
  * A task that was on the runqueue has been dequeued for this, running or
  * not: enqueue_task_scx() sends a restored curr straight to the local
- * DSQ, so for a running task this is the only callback between the
+ * queue, so for a running task this is the only callback between the
  * dequeue and ops.running() that sees the change at all. A sleeping task
  * was not dequeued and is only rescaled.
  */
@@ -5255,12 +5523,29 @@ void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
+	cid_edq_task_t *at;
 	struct task_ctx *tctx;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
+	at = scx_alloc(&cid_edq_task_allocator);
+	if (!at)
+		return -ENOMEM;
+	/*
+	 * No memset: LLVM 19 expands one on arena memory through the uncast
+	 * pointer and the verifier rejects the program, see
+	 * scx_edq_task_init(). Adjacent zero stores can be folded into the
+	 * same thing, hence WRITE_ONCE for the two that are.
+	 */
+	scx_edq_task_init(&at->common);
+	tctx->edq_task = at;
+	at->tid = p->scx.tid;
+	at->cid = -1;
+	at->state = CID_EDQ_NONE;
+	WRITE_ONCE(at->slice, 0);
+	WRITE_ONCE(at->enq_flags, 0);
 	tctx->vcid = -1;
 	tctx->delay_cid = -1;
 	tctx->recent_used_cid = -1;
@@ -5275,6 +5560,64 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	tctx->initial = args->fork;
 
 	return 0;
+}
+
+void BPF_STRUCT_OPS(cidland_dequeue, struct task_struct *p, u64 deq_flags)
+{
+	cid_edq_task_t *at;
+	struct task_ctx *tctx;
+	u32 state;
+	s32 cid;
+	int ret;
+
+	TOUCH_ARENA();
+	tctx = try_lookup_task_ctx(p);
+	at = cid_edq_task(tctx);
+	if (!at)
+		return;
+	cid = at->cid;
+	state = READ_ONCE(at->state);
+	if (deq_flags & SCX_DEQ_SCHED_CHANGE) {
+		/*
+		 * A property change ends this enqueue workflow. Publish NONE before
+		 * unlinking so a concurrent pop cannot dispatch the old workflow.
+		 * Its held intrusive node prevents a later enqueue from reusing the
+		 * queue entry until that pop drops its reference.
+		 */
+		WRITE_ONCE(at->state, CID_EDQ_NONE);
+	} else if (state == CID_EDQ_ENQUEUED ||
+		   state == CID_EDQ_DISPATCHING) {
+		/* The task is leaving BPF custody for a terminal DSQ or execution. */
+		WRITE_ONCE(at->state, CID_EDQ_DISPATCHED);
+	}
+	ret = scx_edq_task_fini(&at->common);
+	if (ret < 0) {
+		scx_bpf_error("EDQ dequeue failed for pid %d: %d", p->pid, ret);
+		return;
+	}
+	if (ret > 0)
+		cid_queued_check(cid);
+}
+
+void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
+{
+	cid_edq_task_t *at;
+	struct task_ctx *tctx;
+	int ret;
+
+	TOUCH_ARENA();
+	tctx = try_lookup_task_ctx(p);
+	at = cid_edq_task(tctx);
+	if (!at)
+		return;
+	tctx->edq_task = NULL;
+	ret = scx_edq_task_detach(&at->common);
+	if (ret) {
+		scx_bpf_error("EDQ detach failed for pid %d: %d", p->pid, ret);
+		return;
+	}
+	scx_free(&cid_edq_task_allocator, at);
 }
 
 /*
@@ -5473,8 +5816,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	}
 
 	/*
-	 * Build the packing- and capacity-tier bitmaps, create the per-cid DSQs
-	 * and start with every cid idle, the way the kernel resets its own
+	 * Build the packing- and capacity-tier bitmaps and start with every cid
+	 * idle, the way the kernel resets its own
 	 * idle masks: a CPU that is busy clears its bit as soon as a task
 	 * runs there, while a CPU that sits idle from the start never
 	 * transitions, and left with its bit clear it would never be
@@ -5490,11 +5833,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 		__cmask_set(cid, place_tier_mask(topo->place_tier));
 		__cmask_set(cid, capacity_tier_mask(topo->capacity_tier));
 
-		err = scx_bpf_create_dsq(cid_dsq(cid), -1);
-		if (err) {
-			scx_bpf_error("failed to create DSQ for cid %d: %d", cid, err);
-			return err;
-		}
 		cid_idle_set(cid);
 
 		ht = bpf_map_lookup_elem(&hrticks, &cid);
@@ -5549,6 +5887,7 @@ SEC("syscall")
 int cidland_arena_init(struct cidland_arena_args *args)
 {
 	u64 nr = args->nr_cpus, mask, bytes, pages;
+	int ret;
 
 	if (!nr || !args->nr_place_tiers || !args->nr_capacity_tiers)
 		return -EINVAL;
@@ -5586,6 +5925,11 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in)
 		return -ENOMEM;
+	ret = scx_alloc_init(&cid_edq_task_allocator,
+			     sizeof(struct cid_edq_task),
+			     __alignof__(struct cid_edq_task));
+	if (ret)
+		return ret;
 
 	nr_cids_max = nr;
 	nr_place_tiers = args->nr_place_tiers;
@@ -5665,6 +6009,7 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 SCX_OPS_CID_DEFINE(cidland_ops,
 		   .select_cid		= (void *)cidland_select_cid,
 		   .enqueue		= (void *)cidland_enqueue,
+		   .dequeue		= (void *)cidland_dequeue,
 		   .tick		= (void *)cidland_tick,
 		   .yield		= (void *)cidland_yield,
 		   .dispatch		= (void *)cidland_dispatch,
@@ -5676,6 +6021,7 @@ SCX_OPS_CID_DEFINE(cidland_ops,
 		   .enable		= (void *)cidland_enable,
 		   .set_weight		= (void *)cidland_set_weight,
 		   .init_task		= (void *)cidland_init_task,
+		   .exit_task		= (void *)cidland_exit_task,
 		   .cpuctl_init		= (void *)cidland_cpuctl_init,
 		   .cpuctl_set_weight	= (void *)cidland_cpuctl_set_weight,
 		   .cpuctl_move		= (void *)cidland_cpuctl_move,
