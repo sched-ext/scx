@@ -349,7 +349,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 static u64 calc_compete_window(void)
 {
 	u64 nr_q = sys_stat.nr_queued_task;
-	u64 nr_a = max(sys_stat.nr_active, 1);
+	u64 nr_c = nr_cpus_onln;
 
 	/*
 	 * The compete window is meant to boost bursty tasks that wake and
@@ -362,8 +362,8 @@ static u64 calc_compete_window(void)
 	 * oversubscription ratio so that the window scales inversely with the
 	 * number of enqueued tasks.
 	 */
-	if (nr_q > nr_a)
-		return (LAVD_DL_COMPETE_WINDOW * nr_a) / nr_q;
+	if (nr_q > nr_c)
+		return (LAVD_DL_COMPETE_WINDOW * nr_c) / nr_q;
 	return LAVD_DL_COMPETE_WINDOW;
 }
 
