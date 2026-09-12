@@ -233,6 +233,14 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     wa_weight: bool,
 
+    /// Service is charged in rq_clock_task(), the clock update_curr() uses:
+    /// wall time less the interrupt time and the hypervisor steal time the
+    /// CPU spent on something else. This charges plain wall time,
+    /// bpf_ktime_get_ns(), instead, so a task pays for the interrupts that
+    /// land on its CPU and for the time the host took from its vCPU.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_task_clock: bool,
+
     /// Interrupt on the deadlines alone, without asking who is owed service.
     ///
     /// The wakeup preemption normally fires only when the woken task is owed
@@ -553,6 +561,15 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;
+        rodata.no_task_clock = opts.no_task_clock;
+        info!(
+            "service clock: {}",
+            if opts.no_task_clock {
+                "ktime"
+            } else {
+                "rq_clock_task"
+            }
+        );
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
         rodata.no_eligible_scan = opts.no_eligible_scan;

@@ -65,6 +65,7 @@ be turned off on the command line to compare the two rules against each other.
    runqueue under its lock, so a task is not charged for interrupts landing
    on its CPU or for time the host took from its vCPU. The running averages,
    cache hotness and the balance intervals stay on the monotonic clock.
+   `--no-task-clock` charges wall time instead, for comparing the two.
 
  - **Lag.** How far a task is from the reference is taken when it stops being
    runnable and restored when it comes back or migrates, the way

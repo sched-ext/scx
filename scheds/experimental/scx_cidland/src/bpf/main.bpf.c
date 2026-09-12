@@ -113,6 +113,7 @@ const volatile bool no_wakeup_preempt;
  * cid, and the load averages behind the comparison are not kept.
  */
 const volatile bool wa_weight;
+const volatile bool no_task_clock;
 
 /*
  * Interrupt a running task on the deadlines alone, without asking which
@@ -665,12 +666,17 @@ static void update_cpufreq(s32 cid, u64 now)
  * offset moves by the interrupt time the cid takes between two owned
  * reads, microseconds, where the remote clock itself would sit still
  * between that CPU's scheduling events and for the whole of its idle.
+ *
+ * --no-task-clock charges wall time, interrupts and steal included: both
+ * return @now and the offset stays zero.
  */
 static u64 cid_clock_task_owned(s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	u64 tnow;
 
+	if (no_task_clock)
+		return now;
 	tnow = scx_clock_task(cid_topo(cid)->cpu);
 	cctx->clock_off = now - tnow;
 
@@ -681,6 +687,8 @@ static u64 cid_clock_task_at(s32 cid, u64 now)
 {
 	u64 off;
 
+	if (no_task_clock)
+		return now;
 	off = READ_ONCE(cid_ctx(cid)->clock_off);
 
 	return now >= off ? now - off : 0;
