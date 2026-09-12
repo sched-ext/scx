@@ -4,7 +4,7 @@
  */
 #include <scx/common.bpf.h>
 
-#include <lib/rbtree.h>
+#include <libarena/rbtree.h>
 
 #include "selftest.h"
 
