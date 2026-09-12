@@ -644,6 +644,7 @@ extern volatile u64		powersave_mode_ns;
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 extern const volatile u64	pinned_slice_ns;
+extern const volatile u8	no_ovrflw_extend;
 
 extern volatile bool		reinit_cpumask_for_performance;
 extern volatile bool		no_preemption;
@@ -695,6 +696,42 @@ static __always_inline  bool is_per_cpu_dsq_migratable(void)
 static __always_inline bool use_cpdom_dsq(void)
 {
 	return !per_cpu_dsq;
+}
+
+static __always_inline bool is_turbulent_cpu(struct cpu_ctx *cpuc)
+{
+	/*
+	 * A CPU is turbulent when its latency headroom (inversely related
+	 * to IRQ/steal time) falls below the latency-sensitive threshold.
+	 * Turbulent CPUs primarily serve the turbulent DSQ (non-latency-
+	 * critical tasks); steady CPUs serve latency-critical work.
+	 */
+	return cpuc->lat_headroom < LAVD_LC_LATENCY_SENSITIVE_THRESH;
+}
+
+static __always_inline bool is_steady_cpu(struct cpu_ctx *cpuc)
+{
+	return !is_turbulent_cpu(cpuc);
+}
+
+static __always_inline bool
+can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
+{
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+	bool turbulent = cpuc && is_turbulent_cpu(cpuc);
+
+	/*
+	 * Whether the current CPU should consume or steal from a cpdom's
+	 * steady (non-turbulent) DSQ. A steady CPU always can. A turbulent
+	 * CPU -- a poor home for the latency-critical tasks that live on
+	 * the steady DSQ -- can do so only to prevent starvation: when the
+	 * steady DSQ is more backed up than the turbulent DSQ, or no steady
+	 * CPU is available to drain it.
+	 */
+	return !turbulent ||
+	       scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdomc->id)) >
+		       scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdomc->id)) ||
+	       cpdomc->nr_steady_cpus == 0;
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
@@ -772,12 +809,36 @@ extern struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent 
 
 struct dsq_entry {
 	u64 dsq_id;
-	u64 vtime;
-	bool eligible;
+	u64 vtime;	/* head-task vtime, or U64_MAX when this CPU should
+			 * not consume this DSQ (sorts last, skipped). */
 };
 
 u64 peek_dsq_vtime(u64 dsq_id);
 void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
+
+/* Overflow-set bookkeeping helpers. */
+
+/*
+ * Atomically add @cpu to the global overflow cpumask. Mirrors the return
+ * semantics of bpf_cpumask_test_and_set_cpu(): true if the bit was
+ * already set, false if it was newly set.
+ */
+static __always_inline bool
+ovrflw_test_and_set(struct bpf_cpumask *ovrflw, s32 cpu)
+{
+	return bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+}
+
+/*
+ * Atomically remove @cpu from the global overflow cpumask. Mirrors the
+ * return semantics of bpf_cpumask_test_and_clear_cpu(): true if the bit
+ * was set before this call, false if it was already clear.
+ */
+static __always_inline bool
+ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
+{
+	return bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+}
 
 /* Load balancer helpers. */
 
@@ -859,9 +920,9 @@ struct pick_ctx {
 
 
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
-s32  pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle);
+s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
 
-bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
+bool consume_task(u64 cpdom_id);
 
 extern u64 cur_logical_clk;
 u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
