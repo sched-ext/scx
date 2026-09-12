@@ -104,6 +104,8 @@ enum consts_internal {
 
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
 	LAVD_CPU_UTIL_THR_FOR_MAX_FREQ	= p2s(80), /* cpu utilization threshold to update max freq */
+	LAVD_CPUPERF_UP_SHIFT		= 6, /* raise in steps of capacity / 64 */
+	LAVD_CPUPERF_DOWN_SHIFT		= 5, /* lower only past a capacity / 32 deadband */
 
 	LAVD_CC_REQ_CAPACITY_HEADROOM	= p2s(25), /* 25%: inflate required capacity by 25% to handle sudden spikes */
 	LAVD_CC_PER_CPU_UTIL		= p2s(50), /* 50%: maximum per-CPU utilization */
@@ -385,7 +387,6 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
 	u8		__pad0[2];
-	u32		cpuperf_cur;	/* CPU's current performance target */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -460,6 +461,9 @@ struct cpu_ctx {
 	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
+	volatile u32	cpuperf_target;	/* performance target computed at the last sys_stat
+					   interval, committed at ops.running() */
+	u32		cpuperf_cur;	/* CPU's current performance target */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
