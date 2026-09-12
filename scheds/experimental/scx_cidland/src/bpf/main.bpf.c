@@ -575,12 +575,16 @@ static u64 cid_util(s32 cid, u64 now)
  * of what runs on it demands. This is what the fair class passes, see
  * cpu_util_cfs_boost() in sugov_get_util().
  */
-static void update_cpufreq(s32 cid)
+static void update_cpufreq(s32 cid, u64 now)
 {
 	if (!cpufreq_enabled || !cid_valid(cid))
 		return;
 
-	scx_bpf_cidperf_set(cid, cid_util(cid, bpf_ktime_get_ns()));
+	/*
+	 * cpu_util_cfs() reads the average as of the last update, and
+	 * ops.running() has just brought it up to @now: no second clock read.
+	 */
+	scx_bpf_cidperf_set(cid, cid_util(cid, now));
 }
 
 /*
@@ -961,7 +965,7 @@ enum pick_idle_flags {
  * Only asymmetric machines ask at all, as asym_fits_cpu() does with
  * sched_asym_cpucap_active().
  */
-static bool task_fits_cid(const struct task_struct *p, s32 cid)
+static bool task_fits_cid(const struct task_struct *p, s32 cid, u64 now)
 {
 	struct task_ctx *tctx;
 
@@ -972,8 +976,7 @@ static bool task_fits_cid(const struct task_struct *p, s32 cid)
 	if (!tctx)
 		return true;
 
-	return util_fits_cap(task_util(tctx, bpf_ktime_get_ns()),
-			     cid_topo(cid)->cap);
+	return util_fits_cap(task_util(tctx, now), cid_topo(cid)->cap);
 }
 
 /*
@@ -1049,6 +1052,8 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	s32 best = -EBUSY;
 	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
 	u32 t;
+	/* Only an asymmetric machine asks task_fits_cid() for the clock. */
+	u64 now = asym_capacity ? bpf_ktime_get_ns() : 0;
 
 	TOUCH_ARENA();
 
@@ -1058,7 +1063,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	restricted = is_restricted(p);
 	if (is_prev_allowed && cid_idle_test(prev_cid) &&
 	    (!whole_core || core_is_idle(prev_cid)) &&
-	    task_fits_cid(p, prev_cid)) {
+	    task_fits_cid(p, prev_cid, now)) {
 		best = prev_cid;
 		goto claim;
 	}
@@ -1775,17 +1780,15 @@ static bool wake_wide_cid(const struct task_struct *p,
  * without skipping select_idle_sibling().
  */
 static s32 wake_affine_cid(const struct task_struct *p, s32 prev_cid,
-			   s32 this_cid, u64 wake_flags)
+			   s32 this_cid, u64 wake_flags, u64 now)
 {
 	const struct task_struct *waker;
 	bool sync;
-	u64 now;
 
 	if (!(wake_flags & SCX_WAKE_TTWU) || !cid_valid(this_cid))
 		return prev_cid;
 
 	waker = (void *)bpf_get_current_task_btf();
-	now = bpf_ktime_get_ns();
 	record_wakee_cid(p, waker, now);
 
 	if (!cid_allowed(p, this_cid) || wake_wide_cid(p, waker, this_cid) ||
@@ -1820,28 +1823,28 @@ static s32 wake_affine_cid(const struct task_struct *p, s32 prev_cid,
  * whole-core and idle-cid scan around @target.
  */
 static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
-				   s32 target, bool *direct)
+				   s32 target, bool *direct, u64 now)
 {
 	struct task_ctx *tctx;
 	s32 cid;
 	s32 recent = -1;
 
 	if (cid_idle_test(target) && cid_allowed(p, target) &&
-	    task_fits_cid(p, target)) {
+	    task_fits_cid(p, target, now)) {
 		cid = claim_idle_cid(p, target);
 		if (cid >= 0) {
 			*direct = true;
 			return cid;
 		}
 	}
-	if (cid_allowed(p, target) && task_fits_cid(p, target) &&
+	if (cid_allowed(p, target) && task_fits_cid(p, target, now) &&
 	    cid_sched_idle_target(p, target))
 		return target;
 
 	if (prev_cid != target &&
 	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
-	    task_fits_cid(p, prev_cid)) {
+	    task_fits_cid(p, prev_cid, now)) {
 		cid = claim_idle_cid(p, prev_cid);
 		if (cid >= 0) {
 			*direct = true;
@@ -1850,7 +1853,7 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	}
 	if (prev_cid != target &&
 	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
-	    cid_allowed(p, prev_cid) && task_fits_cid(p, prev_cid) &&
+	    cid_allowed(p, prev_cid) && task_fits_cid(p, prev_cid, now) &&
 	    cid_sched_idle_target(p, prev_cid))
 		return prev_cid;
 
@@ -1863,7 +1866,7 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
 	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(recent) && cid_allowed(p, recent) &&
-	    task_fits_cid(p, recent)) {
+	    task_fits_cid(p, recent, now)) {
 		cid = claim_idle_cid(p, recent);
 		if (cid >= 0) {
 			*direct = true;
@@ -1872,7 +1875,7 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	}
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
 	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
-	    cid_allowed(p, recent) && task_fits_cid(p, recent) &&
+	    cid_allowed(p, recent) && task_fits_cid(p, recent, now) &&
 	    cid_sched_idle_target(p, recent))
 		return recent;
 
@@ -3311,11 +3314,12 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
  * a cid that is idle, never to stack @p behind a task that is running: the
  * bounce would be certain and the direct dispatch pure overhead.
  */
-static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid)
+static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid,
+				  u64 now)
 {
 	/* ops.runnable() follows select_cid(), so refresh before spending lag. */
 	cgw_refresh(p, tctx);
-	place_task(cid, p, tctx, bpf_ktime_get_ns(), true);
+	place_task(cid, p, tctx, now, true);
 	tctx->direct_placed = true;
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
@@ -3366,6 +3370,7 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	bool direct = false;
 	s32 cid, target, this_cid = scx_bpf_this_cid();
 	struct task_ctx *tctx;
+	u64 now;
 
 	TOUCH_ARENA();
 
@@ -3392,16 +3397,17 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	 * affine target is not itself a selection; if it is busy, an idle
 	 * previous cid or an idle sibling still wins.
 	 */
-	target = wake_affine_cid(p, prev_cid, this_cid, wake_flags);
+	now = bpf_ktime_get_ns();
+	target = wake_affine_cid(p, prev_cid, this_cid, wake_flags, now);
 
 	/*
 	 * Try to find an idle cid and dispatch the task directly to it,
 	 * without bouncing it through ops.enqueue().
 	 */
-	cid = select_idle_sibling_cid(p, prev_cid, target, &direct);
+	cid = select_idle_sibling_cid(p, prev_cid, target, &direct, now);
 	if (cid >= 0) {
 		if (direct)
-			direct_dispatch_local(p, tctx, cid);
+			direct_dispatch_local(p, tctx, cid, now);
 		return cid;
 	}
 
@@ -3942,16 +3948,16 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 {
 	s32 cid = scx_bpf_this_cid(), peer;
 	struct task_struct *head;
+	u64 now;
 
 	TOUCH_ARENA();
+	now = bpf_ktime_get_ns();
 
 	if (!cid_valid(cid))
 		return;
 	if (!no_newidle_cost)
-		newidle_decay(cid_ctx(cid), bpf_ktime_get_ns());
+		newidle_decay(cid_ctx(cid), now);
 	if (!scx_bpf_dsq_nr_queued(cid_dsq(cid))) {
-		u64 now = bpf_ktime_get_ns();
-
 		/*
 		 * nohz_balancer_kick() also wakes an idle balancer when the sole
 		 * runnable task is on a lower-priority or undersized CPU. Serialize
@@ -3974,8 +3980,6 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 
 	peer = idle_peer_cid(head, cid);
 	if (peer >= 0 && peer != cid) {
-		u64 now = bpf_ktime_get_ns();
-
 		/*
 		 * If the ordinary head pull fails, let the idle cid walk past a
 		 * pinned or cache-hot head before considering active balance. The
@@ -4284,7 +4288,8 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  *
  * Return true if a task has been dispatched, false otherwise.
  */
-static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, bool kicked)
+static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
+			   bool kicked)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(dst_cid);
 	struct cid_topo __arena *topo = cid_topo(dst_cid);
@@ -4295,7 +4300,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, bool kicked)
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
-	u64 now = bpf_ktime_get_ns(), t0 = now;
+	u64 t0 = now;
 	bool budget = false;
 	u32 start, own_nr = 0;
 	s32 src = -1;
@@ -4475,12 +4480,13 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
 	bool has_prev, keep = false, active_balance = false;
 	s32 migrate_cid = -EBUSY;
-	u64 now = 0;
+	u64 now;
 
 	TOUCH_ARENA();
 
 	if (!cid_valid(cid))
 		return;
+	now = bpf_ktime_get_ns();
 
 	/*
 	 * Take a task from this cid's queue or from a deeper one on the
@@ -4500,7 +4506,6 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			active_balance = true;
 	}
 	if (has_prev) {
-		now = bpf_ktime_get_ns();
 		migrate_cid = active_balance_target(prev, cid, now);
 		if (migrate_cid >= 0) {
 			struct task_ctx *tctx = try_lookup_task_ctx(prev);
@@ -4514,13 +4519,13 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			keep = keep_running(cid, now);
 	}
 
-	if (try_steal_task(cid, has_prev, keep, active_balance)) {
+	if (try_steal_task(cid, has_prev, keep, now, active_balance)) {
 		if (active_balance)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
 		return;
 	}
 	if (!keep && ((!no_eligible_scan && !no_eligibility) ?
-		     move_first_eligible_to_local(cid, bpf_ktime_get_ns()) :
+		     move_first_eligible_to_local(cid, now) :
 		     scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))) {
 		cid_queued_check(cid);
 		if (active_balance)
@@ -4567,7 +4572,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	 * detach_tasks() fails.
 	 */
 	cid_idle_rearm(cid);
-	if (active_balance && request_active_balance(cid, bpf_ktime_get_ns()))
+	if (active_balance && request_active_balance(cid, now))
 		return;
 }
 
@@ -4595,6 +4600,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct task_ctx *tctx;
 	s64 lag;
+	u64 now;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -4603,7 +4609,8 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!tctx)
 		return;
 
-	util_est_update(tctx, bpf_ktime_get_ns());
+	now = bpf_ktime_get_ns();
+	util_est_update(tctx, now);
 
 	/*
 	 * Remember how far the task is from the reference as it stops being
@@ -4619,7 +4626,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
 	if (cid_valid(cid)) {
-		lag = task_lag_at(p, tctx, cid, bpf_ktime_get_ns());
+		lag = task_lag_at(p, tctx, cid, now);
 		tctx->vlag = lag;
 	}
 	vref_leave(tctx);
@@ -4755,7 +4762,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	/*
 	 * Refresh cpufreq performance level.
 	 */
-	update_cpufreq(cid);
+	update_cpufreq(cid, tctx->last_run_at);
 }
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
