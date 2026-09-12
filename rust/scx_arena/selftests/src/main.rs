@@ -132,7 +132,23 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
-fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
+/// Number of u64 words in a mask of `nr_cpus` bits. The BPF side allocates its
+/// bitmaps to exactly this size, so userspace must not write past it.
+fn nr_cpumask_words(nr_cpus: usize) -> usize {
+    nr_cpus.div_ceil(64)
+}
+
+fn setup_topology_node(skel: &mut BpfSkel<'_>, nr_cpus: usize, mask: &[u64]) -> Result<()> {
+    let nr_words = nr_cpumask_words(nr_cpus);
+    if mask.len() < nr_words {
+        bail!(
+            "CPU mask has {} words, expected at least {}",
+            mask.len(),
+            nr_words
+        );
+    }
+    let mask = &mask[..nr_words];
+
     let mut args = types::arena_alloc_mask_args {
         bitmap: 0 as c_ulong,
     };
@@ -155,12 +171,13 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
         );
     }
 
-    let ptr = unsafe {
-        &mut *std::ptr::with_exposed_provenance_mut::<[u64; 10]>(args.bitmap.try_into().unwrap())
+    let valid_mask = unsafe {
+        std::slice::from_raw_parts_mut(
+            std::ptr::with_exposed_provenance_mut::<u64>(args.bitmap.try_into().unwrap()),
+            nr_words,
+        )
     };
-
-    let (valid_mask, _) = ptr.split_at_mut(mask.len());
-    valid_mask.clone_from_slice(mask);
+    valid_mask.copy_from_slice(mask);
 
     let mut args = types::arena_topology_node_init_args {
         bitmap: args.bitmap as c_ulong,
@@ -190,6 +207,7 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
 }
 
 fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
+    let nr_cpus = *NR_CPU_IDS;
     let topo = Topology::new().expect("Failed to build host topology");
 
     // Set per-level max children before registering any topology nodes.
@@ -228,15 +246,16 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
         );
     }
 
-    setup_topology_node(skel, topo.span.as_raw_slice())?;
+    setup_topology_node(skel, nr_cpus, topo.span.as_raw_slice())?;
 
     for (_, node) in topo.nodes {
-        setup_topology_node(skel, node.span.as_raw_slice())?;
+        setup_topology_node(skel, nr_cpus, node.span.as_raw_slice())?;
     }
 
     for (_, llc) in topo.all_llcs {
         setup_topology_node(
             skel,
+            nr_cpus,
             Arc::<Llc>::into_inner(llc)
                 .expect("missing llc")
                 .span
@@ -247,6 +266,7 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     for (_, core) in topo.all_cores {
         setup_topology_node(
             skel,
+            nr_cpus,
             Arc::<Core>::into_inner(core)
                 .expect("missing core")
                 .span
@@ -254,9 +274,9 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
         )?;
     }
     for (_, cpu) in topo.all_cpus {
-        let mut mask = [0; 9];
+        let mut mask = vec![0; nr_cpumask_words(nr_cpus)];
         mask[cpu.id / 64] |= 1 << (cpu.id % 64);
-        setup_topology_node(skel, &mask)?;
+        setup_topology_node(skel, nr_cpus, &mask)?;
     }
 
     Ok(())
