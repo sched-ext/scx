@@ -1,5 +1,5 @@
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
-#include <lib/sdt_task.h>
 
 #include <lib/atq.h>
 
@@ -7,33 +7,23 @@
  * Arena task queue implementation.
  */
 
-static struct scx_allocator scx_atq_allocator;
-
-__weak
-int scx_atq_init(void)
-{
-	return scx_alloc_init(&scx_atq_allocator, sizeof(scx_atq_t),
-			      SCX_CACHELINE_SIZE);
-}
-
 __weak
 u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
 	scx_atq_t *atq;
 
-	/* Note that scx_alloc() returns a zero-initialized memory. */
-	atq = scx_alloc(&scx_atq_allocator);
+	atq = arena_calloc(sizeof(scx_atq_t));
 	if (unlikely(!atq))
 		return (u64)NULL;
 
+	atq->capacity = capacity;
+	atq->fifo = fifo;
+
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
 	if (!atq->tree) {
-		scx_free(&scx_atq_allocator, atq);
+		arena_free(atq);
 		return (u64)NULL;
 	}
-
-	atq->fifo = fifo;
-	atq->capacity = capacity;
 
 	return (u64)atq;
 }
@@ -48,7 +38,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 	}
 	rb_destroy(atq->tree);
 
-	scx_free(&scx_atq_allocator, atq);
+	arena_free(atq);
 	return 0;
 }
 

@@ -6,9 +6,9 @@
  */
 #pragma once
 
-#include "sdt_alloc.h"
-
 #ifdef __BPF__
+
+#include <bpf_arena_spin_lock.h>
 
 void __arena *__scx_task_data(struct task_struct *p);
 void __arena *scx_task_data(struct task_struct *p);
