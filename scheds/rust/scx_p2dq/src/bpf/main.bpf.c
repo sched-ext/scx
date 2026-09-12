@@ -10,25 +10,18 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/bpf_arena_common.bpf.h"
 #include "../../../../include/scx/percpu.bpf.h"
-#include "../../../../include/lib/atq.h"
-#include "../../../../include/lib/cpumask.h"
-#include "../../../../include/lib/dhq.h"
-#include "../../../../include/lib/minheap.h"
-#include "../../../../include/lib/sdt_task.h"
-#include "../../../../include/lib/topology.h"
 #else
 #include <scx/common.bpf.h>
-#include <bpf_arena_common.bpf.h>
 #include <scx/percpu.bpf.h>
+#endif
+
 #include <lib/atq.h>
 #include <lib/cpumask.h>
 #include <lib/dhq.h>
 #include <lib/minheap.h>
 #include <lib/sdt_task.h>
 #include <lib/topology.h>
-#endif
 
 #include "intf.h"
 #include "types.h"
