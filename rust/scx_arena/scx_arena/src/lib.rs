@@ -12,6 +12,9 @@ mod bpf_skel;
 mod arenalib;
 pub use arenalib::ArenaLib;
 
+#[cfg(feature = "build-support")]
+pub mod build_support;
+
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
