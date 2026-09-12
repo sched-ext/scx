@@ -4,8 +4,8 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/sdt_task.h>
 #include <lib/atq.h>

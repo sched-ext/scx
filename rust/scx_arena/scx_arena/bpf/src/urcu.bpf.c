@@ -3,8 +3,8 @@
  * Copyright (c) 2026 Meta Platforms, Inc. and affiliates.
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/urcu.h>
 
