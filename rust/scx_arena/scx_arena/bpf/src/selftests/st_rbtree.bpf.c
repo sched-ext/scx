@@ -324,7 +324,12 @@ u64 remove_key(struct rbtree __arena *rbtree __arg_arena, task_ctx __arg_arena *
 		return (u64)NULL;
 	}
 
-	tmp = taskc->next->next;
+	/*
+	 * Skip to the element after the next one, which is the next key to
+	 * remove. The list is walked two at a time, so with an odd number of
+	 * keys the last removal has no successor at all.
+	 */
+	tmp = taskc->next ? taskc->next->next : NULL;
 	*ret = rb_remove_node(rbtree, &taskc->rbnode);
 
 	return (u64)tmp;
