@@ -378,6 +378,7 @@ struct cid_ctx {
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
+	u64 clock_off;		/* monotonic clock minus task clock, see cid_clock_task_owned() */
 	u64 active_balance_next;	/* destination: next asymmetric balance */
 	u32 active_balance_interval_ms; /* destination: balance backoff */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
@@ -632,6 +633,57 @@ static void update_cpufreq(s32 cid, u64 now)
 	 * ops.running() has just brought it up to @now: no second clock read.
 	 */
 	scx_bpf_cidperf_set(cid, cid_util(cid, now));
+}
+
+/*
+ * rq_clock_task(): the clock update_curr() charges service in, read off
+ * the runqueue behind @cid. It is rq->clock less the interrupt time and
+ * the hypervisor steal time that CPU has accumulated, so a task is not
+ * charged for interrupts that land on its CPU or for time the host took
+ * from its vCPU, and it is a per-CPU clock: two cids' task clocks differ
+ * by the difference of what they have lost, seconds over an uptime, and
+ * are never compared. Everything in a cid's virtual time is in its task
+ * clock: the stamp a pick is charged from, ops.running() to
+ * ops.stopping(), keep_charge(), the projections cid_vref_at() and
+ * cid_vref_place() make of the running task's progress, the hrtick's
+ * distance to the deadline. Everything measured between CPUs or against
+ * a timer stays on the monotonic clock: the running averages, cache
+ * hotness, the newidle budget, the balance intervals, the wakee-flip
+ * decay, and the absolute time an hrtick is armed for, which
+ * hrtick_start() converts with the offset between the two clocks, see
+ * @clock_off.
+ *
+ * The runqueue's clock is read only by an op that holds that runqueue's
+ * lock, which is what scx_clock_task() asks for: ops.running(),
+ * ops.stopping(), ops.dispatch(), ops.yield() and ops.enqueue() on the
+ * task's own cid, and each such read publishes the offset between the
+ * two clocks, cid_clock_task_owned(). Everything else, a lag against
+ * the pack a task left, a delayed dequeue settling up, a placement on a
+ * migration target, the source of an idle pull, the hrtick timer,
+ * converts the monotonic clock it already holds through that offset,
+ * cid_clock_task_at(), and never touches another CPU's runqueue. The
+ * offset moves by the interrupt time the cid takes between two owned
+ * reads, microseconds, where the remote clock itself would sit still
+ * between that CPU's scheduling events and for the whole of its idle.
+ */
+static u64 cid_clock_task_owned(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	u64 tnow;
+
+	tnow = scx_clock_task(cid_topo(cid)->cpu);
+	cctx->clock_off = now - tnow;
+
+	return tnow;
+}
+
+static u64 cid_clock_task_at(s32 cid, u64 now)
+{
+	u64 off;
+
+	off = READ_ONCE(cid_ctx(cid)->clock_off);
+
+	return now >= off ? now - off : 0;
 }
 
 /*
@@ -2739,7 +2791,7 @@ static s64 task_lag_at(const struct task_struct *p,
 	if (!cid_valid(cid))
 		return tctx->vlag;
 
-	lag = (s64)(cid_vref_place(cid, now) - tctx->vruntime);
+	lag = (s64)(cid_vref_place(cid, cid_clock_task_at(cid, now)) - tctx->vruntime);
 	if (lag > limit)
 		lag = limit;
 	else if (lag < -limit)
@@ -2853,24 +2905,30 @@ static s64 curr_dl_in(struct cid_ctx __arena *cctx, u64 now)
  * either, so one left behind by a task that blocked fires once for
  * nothing, and hrtick_fire() finds nothing running and lets it lapse.
  */
-static void hrtick_start(s32 cid, u64 now)
+static void hrtick_start(s32 cid, u64 tnow)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	struct hrtick *ht;
 	u32 key = cid;
 	s64 delta;
-	u64 at;
+	u64 now, at;
 
 	if (no_hrtick || !cctx->curr_w)
 		return;
 
-	delta = curr_dl_in(cctx, now);
+	delta = curr_dl_in(cctx, tnow);
 	if (!delta) {
 		scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
 		return;
 	}
 	if (delta < HRTICK_MIN_NS)
 		delta = HRTICK_MIN_NS;
+
+	/*
+	 * The distance is in the task clock; the timer is armed on the
+	 * monotonic one, through the offset ops.stopping() last sampled.
+	 */
+	now = tnow + cctx->clock_off;
 	at = now + delta;
 
 	/*
@@ -2921,7 +2979,7 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 		return 0;
 
 	now = bpf_ktime_get_ns();
-	delta = curr_dl_in(cctx, now);
+	delta = curr_dl_in(cctx, now - cctx->clock_off);
 	if (delta > HRTICK_MIN_NS) {
 		cctx->hrtick_at = now + delta;
 		bpf_timer_start(&ht->timer, now + delta, BPF_F_TIMER_ABS);
@@ -2944,7 +3002,7 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
  * when the lockless reference and DSQ snapshots race. Callers enter here only
  * when eligible scanning and eligibility enforcement are both enabled.
  */
-static __noinline bool move_first_eligible_to_local(s32 cid, u64 now)
+static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow)
 {
 	struct task_struct *head, *p;
 	struct task_ctx *tctx;
@@ -2954,7 +3012,7 @@ static __noinline bool move_first_eligible_to_local(s32 cid, u64 now)
 	head = __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid));
 	if (!head)
 		return false;
-	vref = cid_vref_place(cid, now);
+	vref = cid_vref_place(cid, tnow);
 	tctx = try_lookup_task_ctx(head);
 	if ((tctx && !time_after(tctx->vruntime, vref)) ||
 	    scx_bpf_dsq_nr_queued(cid_dsq(cid)) == 1)
@@ -3375,7 +3433,7 @@ static void delay_settle(struct task_ctx *tctx, u64 now)
 		return;
 	}
 
-	adv = (s64)(cid_vref_place(cid, now) - tctx->delay_vref);
+	adv = (s64)(cid_vref_place(cid, cid_clock_task_at(cid, now)) - tctx->delay_vref);
 	if (adv <= 0)
 		return;
 	adv = vdiv(adv * (s64)tctx->delay_w, tctx->delay_w + tctx->vw);
@@ -3431,8 +3489,11 @@ static s64 compensate_place_offset(s32 cid, const struct task_struct *p,
 static void place_task(s32 cid, const struct task_struct *p,
 		       struct task_ctx *tctx, u64 now, bool sleep)
 {
+	/* The pack's progress is in its own task clock. */
+	u64 tnow = cid_valid(cid) ? cid_clock_task_at(cid, now) : now;
+
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
-		u64 vruntime = cid_vref_before_join(cid, p, tctx, now);
+		u64 vruntime = cid_vref_before_join(cid, p, tctx, tnow);
 
 		/*
 		 * ops.quiescent() does not run when the kernel migrates a queued
@@ -3492,8 +3553,7 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
 	if (w == old)
 		return;
 	if (dequeued && cid_valid(tctx->vcid))
-		tctx->vlag = task_lag_at(p, tctx, tctx->vcid,
-					 bpf_ktime_get_ns());
+		tctx->vlag = task_lag_at(p, tctx, tctx->vcid, bpf_ktime_get_ns());
 	tctx->vw = w;
 	if (!old)
 		return;
@@ -3507,7 +3567,8 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
 		return;
 	cid = scx_bpf_task_cid((struct task_struct *)p);
 	if (cid_valid(cid)) {
-		u64 vruntime = cid_vref_place(cid, bpf_ktime_get_ns());
+		u64 now = bpf_ktime_get_ns();
+		u64 vruntime = cid_vref_place(cid, cid_clock_task_at(cid, now));
 
 		if (cid_pack_weight(cid))
 			vruntime -= tctx->vlag;
@@ -3843,7 +3904,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct task_ctx *tctx;
 	bool displaced;
-	u64 dl, now;
+	u64 dl, now, tnow;
 
 	TOUCH_ARENA();
 
@@ -3917,6 +3978,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
+	tnow = cid_clock_task_owned(prev_cid, now);
 	place_task(prev_cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
 
 	/*
@@ -3938,7 +4000,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * vruntime against the reference, which is entity_eligible().
 	 */
 	if (displaced && !no_eligibility &&
-	    time_after(tctx->vruntime, cid_vref_place(prev_cid, now)))
+	    time_after(tctx->vruntime, cid_vref_place(prev_cid, tnow)))
 		tctx->deadline = 0;
 
 	dl = task_dl(p, tctx);
@@ -3987,7 +4049,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * their deadline order on the per-cid DSQ.
 	 */
 	if (!displaced &&
-	    queued_cid_should_preempt(prev_cid, p, tctx, dl, now) &&
+	    queued_cid_should_preempt(prev_cid, p, tctx, dl, tnow) &&
 	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
 				   task_request(p),
@@ -4262,7 +4324,7 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 {
 	s32 cid = scx_bpf_this_cid();
 	struct task_ctx *tctx;
-	u64 now;
+	u64 now, tnow;
 
 	TOUCH_ARENA();
 
@@ -4305,9 +4367,10 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 	 * The reference read below is then exact rather than projected.
 	 */
 	now = bpf_ktime_get_ns();
-	keep_charge(from, cid, now);
+	tnow = cid_clock_task_owned(cid, now);
+	keep_charge(from, cid, tnow);
 
-	if (time_after(tctx->vruntime, cid_vref_place(cid, now)))
+	if (time_after(tctx->vruntime, cid_vref_place(cid, tnow)))
 		return false;
 
 	tctx->vruntime = tctx->deadline;
@@ -4318,7 +4381,7 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 	 * and it is a consumed request as far as the deadline is concerned.
 	 * Both are what this second settle-up is for.
 	 */
-	keep_charge(from, cid, now);
+	keep_charge(from, cid, tnow);
 
 	return false;
 }
@@ -4661,7 +4724,7 @@ pick:
 		return false;
 
 	if (!((src == dst_cid && !no_eligible_scan && !no_eligibility) ?
-	      move_first_eligible_to_local(src, now) :
+	      move_first_eligible_to_local(src, cid_clock_task_at(src, now)) :
 	      scx_bpf_dsq_move_to_local(cid_dsq(src), 0))) {
 		cid_queued_check(src);
 		return false;
@@ -4697,13 +4760,14 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
 	bool has_prev, keep = false, active_balance = false;
 	s32 migrate_cid = -EBUSY;
-	u64 now;
+	u64 now, tnow;
 
 	TOUCH_ARENA();
 
 	if (!cid_valid(cid))
 		return;
 	now = bpf_ktime_get_ns();
+	tnow = cid_clock_task_owned(cid, now);
 
 	/*
 	 * Take a task from this cid's queue or from a deeper one on the
@@ -4733,7 +4797,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 				migrate_cid = -EBUSY;
 		}
 		if (migrate_cid < 0)
-			keep = keep_running(cid, now);
+			keep = keep_running(cid, tnow);
 	}
 
 	if (try_steal_task(cid, has_prev, keep, now, active_balance)) {
@@ -4742,7 +4806,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		return;
 	}
 	if (!keep && ((!no_eligible_scan && !no_eligibility) ?
-		     move_first_eligible_to_local(cid, now) :
+		     move_first_eligible_to_local(cid, tnow) :
 		     scx_bpf_dsq_move_to_local(cid_dsq(cid), 0))) {
 		cid_queued_check(cid);
 		if (active_balance)
@@ -4773,10 +4837,10 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		/* Let ops.stopping() charge it and ops.enqueue() perform the handoff. */
 		if (migrate_cid >= 0)
 			return;
-		keep_charge(prev, cid, now);
+		keep_charge(prev, cid, tnow);
 		scx_bpf_task_set_slice(prev, task_request(prev));
 		if (cid_queued_test(cid))
-			hrtick_start(cid, now);
+			hrtick_start(cid, tnow);
 		return;
 	}
 
@@ -4913,6 +4977,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
+	u64 now;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -4920,17 +4985,18 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	cid = scx_bpf_task_cid(p);
 
 	/*
-	 * Save a timestamp when the task begins to run (used to evaluate
-	 * the used time slice).
+	 * The stamp the service is charged from is in the task clock,
+	 * update_curr(); the running averages are fractions of wall time
+	 * and follow the monotonic clock, which a task carries across CPUs.
 	 */
-	tctx->last_run_at = bpf_ktime_get_ns();
-	util_set_running(tctx, true, tctx->last_run_at);
-	cid_util_set_running(scx_bpf_task_cid(p), true, tctx->last_run_at);
-	cid_load_update(scx_bpf_task_cid(p), tctx->last_run_at);
-
-	cid = scx_bpf_task_cid(p);
+	now = bpf_ktime_get_ns();
+	tctx->last_run_at = cid_valid(cid) ? cid_clock_task_owned(cid, now) : now;
+	util_set_running(tctx, true, now);
+	cid_util_set_running(cid, true, now);
+	cid_load_update(cid, now);
 
 	/*
 	 * A task that was moved here from another cid's queue, by the
@@ -4942,8 +5008,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * far it is placed from the pack it joins.
 	 */
 	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
-		s64 lag = task_lag_at(p, tctx, tctx->vcid,
-				      tctx->last_run_at);
+		s64 lag = task_lag_at(p, tctx, tctx->vcid, now);
 
 		set_vruntime(tctx, cid_vref_place(cid, tctx->last_run_at) - lag,
 			     false);
@@ -4985,13 +5050,13 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	/*
 	 * Refresh cpufreq performance level.
 	 */
-	update_cpufreq(cid, tctx->last_run_at);
+	update_cpufreq(cid, now);
 }
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *tctx;
-	u64 slice;
+	u64 slice, tnow;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -5004,8 +5069,15 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
+	/*
+	 * The service is charged in the task clock, update_curr(); the stop
+	 * stamp cache hotness reads from other CPUs stays on the monotonic
+	 * one.
+	 */
 	tctx->last_stop_at = bpf_ktime_get_ns();
-	slice = tctx->last_stop_at - tctx->last_run_at;
+	tnow = cid_valid(cid) ? cid_clock_task_owned(cid, tctx->last_stop_at) :
+			       tctx->last_stop_at;
+	slice = tnow - tctx->last_run_at;
 	util_set_running(tctx, false, tctx->last_stop_at);
 	cid_util_set_running(cid, false, tctx->last_stop_at);
 	cid_load_update(cid, tctx->last_stop_at);

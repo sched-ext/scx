@@ -59,7 +59,12 @@ be turned off on the command line to compare the two rules against each other.
    more than a request behind; what it has taken since is added on the spot
    before every placement and every eligibility test, the way `update_curr()`
    runs ahead of `place_entity()`. `--no-vref-update` reads it as stored
-   instead.
+   instead. Service is charged in `rq_clock_task()`, the clock
+   `update_curr()` charges it in: wall time less the interrupt time and the
+   hypervisor steal time the CPU spent on something else, read off the
+   runqueue under its lock, so a task is not charged for interrupts landing
+   on its CPU or for time the host took from its vCPU. The running averages,
+   cache hotness and the balance intervals stay on the monotonic clock.
 
  - **Lag.** How far a task is from the reference is taken when it stops being
    runnable and restored when it comes back or migrates, the way
