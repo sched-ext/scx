@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0
-//
-// Copyright (c) 2026 Galih Tama <galpt@v.recipes>
-//
-// This software may be used and distributed according to the terms of the GNU
-// General Public License version 2.
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ *
+ * Generated skeleton for the BPF object. The file only
+ * includes the generated skeleton from the build dir.
+ */
 include!(concat!(env!("OUT_DIR"), "/bpf_skel.rs"));
