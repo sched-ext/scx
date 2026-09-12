@@ -60,12 +60,12 @@ const MAX_CPU_SUPPORTED: usize = 640;
 /// and joins the library's background threads.
 #[must_use]
 #[derive(Debug)]
-pub struct ArenaLib {
+pub struct ScxLibArena {
     _watcher: crate::Daemon,
     _urcu: Option<crate::Daemon>,
 }
 
-impl ArenaLib {
+impl ScxLibArena {
     /// Number of u64 words needed to hold a mask of @nr_cpus bits. The arena
     /// side allocates its bitmaps to this size, so writes into them must be
     /// bounded by it rather than by MAX_CPU_SUPPORTED.
@@ -311,7 +311,7 @@ impl ArenaLib {
         task_size: usize,
         task_align: usize,
         nr_cpus: usize,
-    ) -> Result<ArenaLib> {
+    ) -> Result<ScxLibArena> {
         if nr_cpus >= MAX_CPU_SUPPORTED {
             bail!("Scheduler specifies too many CPUs");
         }
@@ -328,8 +328,8 @@ impl ArenaLib {
     ///
     /// Use this instead of setup() when a scheduler has its own BPF-side arena
     /// initialization and does not use the generic arena topology.
-    pub fn start(obj: &Object) -> Result<ArenaLib> {
-        Ok(ArenaLib {
+    pub fn start(obj: &Object) -> Result<ScxLibArena> {
+        Ok(ScxLibArena {
             _watcher: crate::stream_watcher_spawn(obj)?,
             _urcu: crate::urcu_spawn(obj)?,
         })
