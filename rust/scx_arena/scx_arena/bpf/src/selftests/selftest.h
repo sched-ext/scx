@@ -1,7 +1,7 @@
 #pragma once
 
 #include <lib/atq.h>
-#include <lib/rbtree.h>
+#include <libarena/rbtree.h>
 
 /*
  * Test IDs for arena_selftest's selftest_run_id selector.

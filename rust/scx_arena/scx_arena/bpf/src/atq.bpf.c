@@ -12,7 +12,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
 	scx_atq_t *atq;
 
-	atq = arena_calloc(sizeof(scx_atq_t));
+	atq = arena_calloc(1, sizeof(scx_atq_t));
 	if (unlikely(!atq))
 		return (u64)NULL;
 
@@ -31,7 +31,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 __weak
 int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	while (scx_atq_pop(atq, false) && can_loop) {
 		/* Do nothing. Just drain all the queued tasks. */
@@ -45,7 +45,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 __hidden __inline
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	rbnode_t *node = &taskc->node;
+	struct rbnode __arena *node = &taskc->node;
 	scx_atq_t *old_atq;
 	int ret;
 

@@ -35,7 +35,7 @@ static const u64 morekeys[] = { 173, 636, 1201, 8642, 5957, 3617, 4586, 8053, 65
 	7501, 9514, 394, 2339, 4993, 5606, 6060, 1297, 8273, 3012, 157, 8181, 6765, 7207, 1005, 8833, 1914,
 	7456, 1846, 8375, 2741, 2074, 1712, 5286 };
 
-__weak int scx_selftest_rbtree_find_nonexistent(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_find_nonexistent(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key = 0xdeadbeef;
 	u64 value = 0;
@@ -52,7 +52,7 @@ __weak int scx_selftest_rbtree_find_nonexistent(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_insert_existing(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_insert_existing(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key = 525252;
 	u64 value = 24;
@@ -75,7 +75,7 @@ __weak int scx_selftest_rbtree_insert_existing(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_update_existing(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_update_existing(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key = 33333;
 	u64 value;
@@ -116,7 +116,7 @@ __weak int scx_selftest_rbtree_update_existing(rbtree_t __arg_arena *rbtree)
 }
 
 
-__weak int scx_selftest_rbtree_insert_one(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_insert_one(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key = 202020;
 	u64 value = 0xbadcafe;
@@ -136,7 +136,7 @@ __weak int scx_selftest_rbtree_insert_one(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_insert_ten(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_insert_ten(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key, value;
 	int ret, i;
@@ -174,7 +174,7 @@ __weak int scx_selftest_rbtree_insert_ten(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_duplicate(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_duplicate(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key = 0x121212;
 	u64 value;
@@ -217,7 +217,7 @@ __weak int scx_selftest_rbtree_duplicate(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_insert_many(struct rbtree __arena *rbtree __arg_arena)
 {
 	const size_t numkeys = sizeof(keys) / sizeof(keys[0]);
 	task_ctx *taskc;
@@ -269,7 +269,7 @@ __weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_remove_one(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_remove_one(struct rbtree __arena *rbtree __arg_arena)
 {
 	u64 key = 20, value = 5, newvalue;
 	int ret;
@@ -307,7 +307,7 @@ __weak int scx_selftest_rbtree_remove_one(rbtree_t __arg_arena *rbtree)
  * of if-else paths within the for loop.
  */
 __weak
-u64 remove_key(rbtree_t __arg_arena *rbtree, task_ctx __arg_arena *taskc, u64 key, int *ret)
+u64 remove_key(struct rbtree __arena *rbtree __arg_arena, task_ctx __arg_arena *taskc, u64 key, int *ret)
 {
 	task_ctx *tmp;
 	
@@ -330,7 +330,7 @@ u64 remove_key(rbtree_t __arg_arena *rbtree, task_ctx __arg_arena *taskc, u64 ke
 	return (u64)tmp;
 }
 
-__weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_remove_many(struct rbtree __arena *rbtree __arg_arena)
 {
 	const size_t numkeys = sizeof(morekeys) / sizeof(morekeys[0]);
 	task_ctx *taskc = NULL, *first = NULL, *last = NULL;
@@ -466,7 +466,7 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_add_remove_circular(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_add_remove_circular(struct rbtree __arena *rbtree __arg_arena)
 {
 	const size_t iters = 60;
 	const size_t prefill = 10;
@@ -552,7 +552,7 @@ __weak int scx_selftest_rbtree_add_remove_circular(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_add_remove_circular_reverse(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_add_remove_circular_reverse(struct rbtree __arena *rbtree __arg_arena)
 {
 	const size_t iters = 110;
 	const size_t prefill = 10;
@@ -642,7 +642,7 @@ __weak int scx_selftest_rbtree_add_remove_circular_reverse(rbtree_t __arg_arena 
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_least_pop(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_least_pop(struct rbtree __arena *rbtree __arg_arena)
 {
 	const size_t keys = 10;
 	u64 key, value;
@@ -699,10 +699,10 @@ __weak int scx_selftest_rbtree_least_pop(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_alloc_check(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_alloc_check(struct rbtree __arena *rbtree __arg_arena)
 {
-	rbtree_t *alloc, *noalloc;
-	rbnode_t *node;
+	struct rbtree __arena *alloc, *noalloc;
+	struct rbnode __arena *node;
 
 	alloc = rb_create(RB_ALLOC, RB_DEFAULT);
 	if (!alloc)
@@ -716,13 +716,9 @@ __weak int scx_selftest_rbtree_alloc_check(rbtree_t __arg_arena *rbtree)
 	 * Can't allocate a node for a tree that allocates it itself. 
 	 * Ditto for noalloc.
 	 */
-	node = rb_node_alloc(alloc, 0, 0);
-	if (node)
-		return 3;
-
-	node = rb_node_alloc(noalloc, 0, 0);
+	node = rb_node_alloc(0, 0);
 	if (!node)
-		return 4;
+		return 3;
 
 	/* 
 	 * RB_ALLOC trees can use rb_insert, RB_NOALLOC trees can
@@ -761,7 +757,7 @@ __weak int scx_selftest_rbtree_alloc_check(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
-__weak int scx_selftest_rbtree_print(rbtree_t __arg_arena *rbtree)
+__weak int scx_selftest_rbtree_print(struct rbtree __arena *rbtree __arg_arena)
 {
 	rb_print(rbtree);
 	return 0;
@@ -772,7 +768,7 @@ __weak int scx_selftest_rbtree_print(rbtree_t __arg_arena *rbtree)
 __weak
 int scx_selftest_rbtree(void)
 {
-	rbtree_t *standard, *update, *duplicate, *noalloc;
+	struct rbtree __arena *standard, *update, *duplicate, *noalloc;
 
 	standard = rb_create(RB_ALLOC, RB_DEFAULT);
 	if (!standard)
