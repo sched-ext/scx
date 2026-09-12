@@ -965,15 +965,9 @@ enum pick_idle_flags {
  * Only asymmetric machines ask at all, as asym_fits_cpu() does with
  * sched_asym_cpucap_active().
  */
-static bool task_fits_cid(const struct task_struct *p, s32 cid, u64 now)
+static bool task_fits_cid(struct task_ctx *tctx, s32 cid, u64 now)
 {
-	struct task_ctx *tctx;
-
-	if (!asym_capacity)
-		return true;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
+	if (!asym_capacity || !tctx)
 		return true;
 
 	return util_fits_cap(task_util(tctx, now), cid_topo(cid)->cap);
@@ -1052,7 +1046,8 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	s32 best = -EBUSY;
 	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
 	u32 t;
-	/* Only an asymmetric machine asks task_fits_cid() for the clock. */
+	/* Only an asymmetric machine asks task_fits_cid() anything. */
+	struct task_ctx *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
 	u64 now = asym_capacity ? bpf_ktime_get_ns() : 0;
 
 	TOUCH_ARENA();
@@ -1063,7 +1058,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	restricted = is_restricted(p);
 	if (is_prev_allowed && cid_idle_test(prev_cid) &&
 	    (!whole_core || core_is_idle(prev_cid)) &&
-	    task_fits_cid(p, prev_cid, now)) {
+	    task_fits_cid(tctx, prev_cid, now)) {
 		best = prev_cid;
 		goto claim;
 	}
@@ -1714,14 +1709,9 @@ out:
 #define WAKEE_DECAY_NS NSEC_PER_SEC
 
 /* The record_wakee() half of fair.c's wake-affinity heuristic. */
-static void record_wakee_cid(const struct task_struct *p,
-			     const struct task_struct *waker, u64 now)
+static void record_wakee_cid(const struct task_struct *p, struct task_ctx *wctx,
+			     u64 now)
 {
-	struct task_ctx *wctx;
-
-	if (!waker)
-		return;
-	wctx = try_lookup_task_ctx(waker);
 	if (!wctx)
 		return;
 
@@ -1738,16 +1728,11 @@ static void record_wakee_cid(const struct task_struct *p,
 }
 
 /* The wake_wide() half; cid LLC width stands in for sd_llc_size. */
-static bool wake_wide_cid(const struct task_struct *p,
-			  const struct task_struct *waker, s32 this_cid)
+static bool wake_wide_cid(const struct task_ctx *pctx, const struct task_ctx *wctx,
+			  s32 this_cid)
 {
-	struct task_ctx *wctx, *pctx;
 	u32 master, slave, factor;
 
-	if (!waker)
-		return false;
-	wctx = try_lookup_task_ctx(waker);
-	pctx = try_lookup_task_ctx(p);
 	if (!wctx || !pctx)
 		return false;
 
@@ -1779,19 +1764,21 @@ static bool wake_wide_cid(const struct task_struct *p,
  * distinction is what keeps wake_affine() ahead of select_idle_sibling()
  * without skipping select_idle_sibling().
  */
-static s32 wake_affine_cid(const struct task_struct *p, s32 prev_cid,
-			   s32 this_cid, u64 wake_flags, u64 now)
+static s32 wake_affine_cid(const struct task_struct *p, struct task_ctx *tctx,
+			   s32 prev_cid, s32 this_cid, u64 wake_flags, u64 now)
 {
 	const struct task_struct *waker;
+	struct task_ctx *wctx;
 	bool sync;
 
 	if (!(wake_flags & SCX_WAKE_TTWU) || !cid_valid(this_cid))
 		return prev_cid;
 
 	waker = (void *)bpf_get_current_task_btf();
-	record_wakee_cid(p, waker, now);
+	wctx = waker ? try_lookup_task_ctx(waker) : NULL;
+	record_wakee_cid(p, wctx, now);
 
-	if (!cid_allowed(p, this_cid) || wake_wide_cid(p, waker, this_cid) ||
+	if (!cid_allowed(p, this_cid) || wake_wide_cid(tctx, wctx, this_cid) ||
 	    cid_topo(this_cid)->llc_base != cid_topo(prev_cid)->llc_base)
 		return prev_cid;
 
@@ -1822,29 +1809,28 @@ static s32 wake_affine_cid(const struct task_struct *p, s32 prev_cid,
  * an idle cache-affine @prev_cid. pick_idle_cid() supplies the remaining
  * whole-core and idle-cid scan around @target.
  */
-static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
-				   s32 target, bool *direct, u64 now)
+static s32 select_idle_sibling_cid(const struct task_struct *p, struct task_ctx *tctx,
+				   s32 prev_cid, s32 target, bool *direct, u64 now)
 {
-	struct task_ctx *tctx;
 	s32 cid;
 	s32 recent = -1;
 
 	if (cid_idle_test(target) && cid_allowed(p, target) &&
-	    task_fits_cid(p, target, now)) {
+	    task_fits_cid(tctx, target, now)) {
 		cid = claim_idle_cid(p, target);
 		if (cid >= 0) {
 			*direct = true;
 			return cid;
 		}
 	}
-	if (cid_allowed(p, target) && task_fits_cid(p, target, now) &&
+	if (cid_allowed(p, target) && task_fits_cid(tctx, target, now) &&
 	    cid_sched_idle_target(p, target))
 		return target;
 
 	if (prev_cid != target &&
 	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
-	    task_fits_cid(p, prev_cid, now)) {
+	    task_fits_cid(tctx, prev_cid, now)) {
 		cid = claim_idle_cid(p, prev_cid);
 		if (cid >= 0) {
 			*direct = true;
@@ -1853,20 +1839,17 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	}
 	if (prev_cid != target &&
 	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
-	    cid_allowed(p, prev_cid) && task_fits_cid(p, prev_cid, now) &&
+	    cid_allowed(p, prev_cid) && task_fits_cid(tctx, prev_cid, now) &&
 	    cid_sched_idle_target(p, prev_cid))
 		return prev_cid;
 
 	/* Check and rotate p->recent_used_cpu at the same point fair.c does. */
-	tctx = try_lookup_task_ctx(p);
-	if (tctx) {
-		recent = tctx->recent_used_cid;
-		tctx->recent_used_cid = prev_cid;
-	}
+	recent = tctx->recent_used_cid;
+	tctx->recent_used_cid = prev_cid;
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
 	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
 	    cid_idle_test(recent) && cid_allowed(p, recent) &&
-	    task_fits_cid(p, recent, now)) {
+	    task_fits_cid(tctx, recent, now)) {
 		cid = claim_idle_cid(p, recent);
 		if (cid >= 0) {
 			*direct = true;
@@ -1875,7 +1858,7 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, s32 prev_cid,
 	}
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
 	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
-	    cid_allowed(p, recent) && task_fits_cid(p, recent, now) &&
+	    cid_allowed(p, recent) && task_fits_cid(tctx, recent, now) &&
 	    cid_sched_idle_target(p, recent))
 		return recent;
 
@@ -3398,13 +3381,13 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	 * previous cid or an idle sibling still wins.
 	 */
 	now = bpf_ktime_get_ns();
-	target = wake_affine_cid(p, prev_cid, this_cid, wake_flags, now);
+	target = wake_affine_cid(p, tctx, prev_cid, this_cid, wake_flags, now);
 
 	/*
 	 * Try to find an idle cid and dispatch the task directly to it,
 	 * without bouncing it through ops.enqueue().
 	 */
-	cid = select_idle_sibling_cid(p, prev_cid, target, &direct, now);
+	cid = select_idle_sibling_cid(p, tctx, prev_cid, target, &direct, now);
 	if (cid >= 0) {
 		if (direct)
 			direct_dispatch_local(p, tctx, cid, now);
