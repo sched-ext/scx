@@ -78,7 +78,7 @@ jobs:
           - name: scx__stable__6_13
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.13.y
-            veristat-disable: scx_layered scx_lavd scx_arena_selftests scx_mlfq scx_flow
+            veristat-disable: scx_layered scx_lavd scx_arena_selftests scx_arena_libarena_selftests scx_mlfq scx_flow
           - name: scx__stable__6_16
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.16.y
@@ -318,7 +318,7 @@ jobs:
           disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Build
-        run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium -p scx_eevdf
+        run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_arena_libarena_selftests -p scx_cake -p scx_pandemonium -p scx_eevdf
       - name: Arena selftests and scheduler tests
         uses: likewhatevs/vng-action@v0.7.0
         with:
@@ -336,6 +336,8 @@ jobs:
             set +e
             target/ci/scx_arena_selftests
             arena_rc=$?
+            target/ci/scx_arena_libarena_selftests
+            libarena_rc=$?
             passed=""
             failed=""
             declare -A results
@@ -345,6 +347,13 @@ jobs:
             else
               results[arena_selftests]="PASS"
               passed="${passed} arena_selftests"
+            fi
+            if [ $libarena_rc -ne 0 ]; then
+              results[libarena_selftests]="FAIL"
+              failed="${failed} libarena_selftests"
+            else
+              results[libarena_selftests]="PASS"
+              passed="${passed} libarena_selftests"
             fi
             for sched in cake pandemonium eevdf; do
               echo "=== Testing ${sched} ==="
@@ -375,7 +384,7 @@ jobs:
             {
               echo "| Scheduler | Result |"
               echo "|-----------|--------|"
-              for sched in arena_selftests cake pandemonium eevdf; do
+              for sched in arena_selftests libarena_selftests cake pandemonium eevdf; do
                 if [ "${results[$sched]}" = "PASS" ]; then
                   echo "| ${sched} | ✅ |"
                 else
