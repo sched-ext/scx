@@ -6,8 +6,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-pub use crate::bpf_skel::types;
-
 use scx_utils::Topology;
 use scx_utils::{Core, Llc};
 
@@ -23,6 +21,33 @@ use libbpf_rs::Object;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::ProgramMut;
 use libbpf_rs::libbpf_sys;
+
+mod types {
+    use std::os::raw::c_ulong;
+
+    #[repr(C)]
+    pub(super) struct ArenaInitArgs {
+        pub task_ctx_size: c_ulong,
+        pub task_ctx_align: c_ulong,
+    }
+
+    #[repr(C)]
+    pub(super) struct ArenaAllocMaskArgs {
+        pub bitmap: c_ulong,
+    }
+
+    #[repr(C)]
+    pub(super) struct ArenaTopologyNodeInitArgs {
+        pub bitmap: c_ulong,
+        pub data_size: c_ulong,
+        pub id: c_ulong,
+    }
+
+    #[repr(C)]
+    pub(super) struct ArenaTopologyInitArgs {
+        pub max_children: [u32; 5],
+    }
+}
 
 // Upper bound on the CPU count the library accepts. Masks handed to the arena
 // are sized from the caller's actual nr_cpus, see nr_cpumask_words(), so this
@@ -76,7 +101,7 @@ impl ArenaLib {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
-        let mut args = types::arena_init_args {
+        let mut args = types::ArenaInitArgs {
             task_ctx_size: task_size as c_ulong,
             task_ctx_align: task_align as c_ulong,
         };
@@ -120,7 +145,7 @@ impl ArenaLib {
         }
         let mask = &mask[..nr_words];
 
-        let mut args = types::arena_alloc_mask_args {
+        let mut args = types::ArenaAllocMaskArgs {
             bitmap: 0 as c_ulong,
         };
 
@@ -156,7 +181,7 @@ impl ArenaLib {
         };
         valid_mask.copy_from_slice(mask);
 
-        let mut args = types::arena_topology_node_init_args {
+        let mut args = types::ArenaTopologyNodeInitArgs {
             bitmap: args.bitmap as c_ulong,
             data_size: 0 as c_ulong,
             id: id as c_ulong,
@@ -212,7 +237,7 @@ impl ArenaLib {
             0,
         ];
 
-        let mut args = types::arena_topology_init_args { max_children };
+        let mut args = types::ArenaTopologyInitArgs { max_children };
 
         let input = ProgramInput {
             context_in: Some(unsafe {
