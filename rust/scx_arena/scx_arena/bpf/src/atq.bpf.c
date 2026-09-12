@@ -171,7 +171,7 @@ __hidden __always_inline
 u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 {
 	scx_task_common *taskc;
-	u64 vtime, taskc_ptr;
+	u64 taskc_ptr;
 	int ret;
 
 	ret = scx_atq_lock(atq);
@@ -183,7 +183,7 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 		return (u64)NULL;
 	}
 
-	ret = rb_pop(atq->tree, &vtime, &taskc_ptr);
+	ret = rb_least(atq->tree, NULL, &taskc_ptr);
 	if (ret) {
 		scx_atq_unlock(atq);
 
@@ -192,9 +192,16 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 		return (u64)NULL;
 	}
 
+	taskc = (scx_task_common *)taskc_ptr;
+	ret = rb_remove_node(atq->tree, &taskc->node);
+	if (ret) {
+		scx_atq_unlock(atq);
+		bpf_printk("%s: failed to remove least node: %d", __func__, ret);
+		return (u64)NULL;
+	}
+
 	atq->size -= 1;
 
-	taskc = (scx_task_common *)taskc_ptr;
 	if (hold)
 		scx_atq_task_hold(taskc);
 
