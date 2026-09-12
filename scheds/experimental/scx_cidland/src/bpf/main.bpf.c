@@ -3087,16 +3087,6 @@ static bool keep_running(s32 cid, u64 now)
 	if (now - cctx->curr_since >= KEEP_RUNNING_MAX_NS)
 		return false;
 
-	/*
-	 * Nothing queued here to be preferred to. Say so rather than keep
-	 * the task: the queued bitmap is the only thing consulted, and the
-	 * dispatch that follows has a lookup of the DSQ itself to fall back
-	 * on for the races the bitmap loses.
-	 */
-	head = cid_queued_test(cid) ? __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid)) : NULL;
-	if (!head)
-		return false;
-
 	v = cctx->curr_v + (now - cctx->curr_run_at) * NICE_0_WEIGHT / w;
 
 	/*
@@ -3115,6 +3105,19 @@ static bool keep_running(s32 cid, u64 now)
 	 * waited 1.6 ms for that on one wakeup in four, 0.3 ms under fair.c.
 	 */
 	if (!no_eligibility && time_after(v, cid_vref_at(cid, now)))
+		return false;
+
+	/*
+	 * Only now the head: the DSQ lookup is the expensive step, and a
+	 * yielder that has just forfeited its request fails the test above.
+	 *
+	 * Nothing queued here to be preferred to. Say so rather than keep
+	 * the task: the queued bitmap is the only thing consulted, and the
+	 * dispatch that follows has a lookup of the DSQ itself to fall back
+	 * on for the races the bitmap loses.
+	 */
+	head = cid_queued_test(cid) ? __COMPAT_scx_bpf_dsq_peek(cid_dsq(cid)) : NULL;
+	if (!head)
 		return false;
 
 	/*
@@ -4298,18 +4301,25 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
  * every time it is picked would run its vruntime away. The same guard is
  * kept here for the same reason.
  *
- * The slice goes with it. Without this op the kernel zeroes it,
+ * Whether the CPU changes hands is then the pick's decision, not the
+ * yield's: yield_task_fair() ends in schedule(), and pick_eevdf() hands
+ * the CPU back to the yielder when, forfeit and all, it is still the
+ * eligible task with the earliest deadline. Without this op the kernel
+ * zeroes the slice,
  *
  *	if (SCX_HAS_OP(sch, yield))
  *		SCX_CALL_OP_2TASKS_RET(sch, yield, rq, p, NULL);
  *	else
  *		scx_set_task_slice(p, 0);
  *
- * so installing one takes that over. It is not decoration: a task whose
- * slice is still standing is one the pick hands straight back, and the
- * yield would forfeit a request and change nothing about who runs.
- * yield_task_scx() has already called scx_task_slice_ended(), which drops
- * the %SCX_TASK_PROTECTED that would otherwise refuse the write.
+ * so installing one takes that over, and the slice is ended only when
+ * the dispatch would not keep the task, which is the same question
+ * keep_running() answers there: a task that would be handed straight
+ * back keeps its slice and the schedule() picks it on the cheap path,
+ * where a forced slice end cost it a full dispatch for nothing. A task
+ * on the local DSQ has already won a preemption and is the pick.
+ * yield_task_scx() has already called scx_task_slice_ended(), which
+ * drops the %SCX_TASK_PROTECTED that would otherwise refuse the write.
  *
  * @to is a directed yield, yield_to(), and it is refused. fair.c honours
  * one with set_next_buddy(), which pick_next_entity() reads under
@@ -4355,12 +4365,6 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 		return false;
 
 	/*
-	 * Without an ops.yield the kernel ends the slice itself; with one
-	 * that is this op's job, see yield_task_scx().
-	 */
-	scx_bpf_task_set_slice(from, 0);
-
-	/*
 	 * update_curr(), which leaves a deadline ahead of the vruntime
 	 * whether or not the one it was issued has been consumed, and the
 	 * cid's published view of what it is running up to date with both.
@@ -4371,7 +4375,7 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 	keep_charge(from, cid, tnow);
 
 	if (time_after(tctx->vruntime, cid_vref_place(cid, tnow)))
-		return false;
+		goto pick;
 
 	tctx->vruntime = tctx->deadline;
 
@@ -4382,6 +4386,14 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 	 * Both are what this second settle-up is for.
 	 */
 	keep_charge(from, cid, tnow);
+
+pick:
+	/*
+	 * pick_eevdf(): the yielder keeps the CPU only if it is still the
+	 * eligible task with the earliest deadline, see keep_running().
+	 */
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) || !keep_running(cid, tnow))
+		scx_bpf_task_set_slice(from, 0);
 
 	return false;
 }
