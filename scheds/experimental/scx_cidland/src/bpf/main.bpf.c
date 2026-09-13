@@ -271,13 +271,34 @@ static u32 nr_capacity_tiers;
 static bool asym_capacity;
 static bool asym_packing;
 
-struct cid_edq_task;
 typedef struct cid_edq_task __arena cid_edq_task_t;
 
 /*
- * Per-task context.
+ * EDQ membership state, embedded at the start of struct task_ctx.
+ */
+enum cid_edq_task_state {
+	CID_EDQ_NONE,
+	CID_EDQ_ENQUEUED,
+	CID_EDQ_DISPATCHING,
+	CID_EDQ_DISPATCHED,
+};
+
+struct cid_edq_task {
+	struct scx_edq_task common;
+	u64 tid;
+	s32 cid;
+	u32 state;
+	u64 slice;
+	u64 enq_flags;
+};
+
+/*
+ * Per-task context. It lives in the arena, like the EDQ node it embeds, so
+ * anything holding the node reaches the whole context. Task storage only maps
+ * the task to it, see try_lookup_task_ctx().
  */
 struct task_ctx {
+	struct cid_edq_task edq;	/* first, EDQ pops return its address */
 	u64 last_run_at;
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
@@ -306,47 +327,33 @@ struct task_ctx {
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
 	bool direct_placed;	/* select_cid() already placed and joined it */
-	cid_edq_task_t *edq_task;
 };
 
-/*
- * EDQ membership has to live in arena memory. Keep the intrusive node there
- * and cache only its pointer in cidland's existing task storage. This avoids
- * a second task-storage map and lookup without moving the hot scheduling
- * fields out of kernel task-storage memory.
- */
-enum cid_edq_task_state {
-	CID_EDQ_NONE,
-	CID_EDQ_ENQUEUED,
-	CID_EDQ_DISPATCHING,
-	CID_EDQ_DISPATCHED,
-};
+typedef struct task_ctx __arena task_ctx_t;
 
-struct cid_edq_task {
-	struct scx_edq_task common;
-	u64 tid;
-	s32 cid;
-	u32 state;
-	u64 slice;
-	u64 enq_flags;
-};
+static struct scx_allocator task_ctx_allocator;
 
-static struct scx_allocator cid_edq_task_allocator;
+struct task_ctx_ref {
+	task_ctx_t *tctx;
+};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, struct task_ctx);
+	__type(value, struct task_ctx_ref);
 } task_ctx_stor SEC(".maps");
 
 /*
  * Return a local task context from a generic task.
  */
-struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
+static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct *p)
 {
-	return bpf_task_storage_get(&task_ctx_stor,
-					(struct task_struct *)p, 0, 0);
+	struct task_ctx_ref *ref;
+
+	TOUCH_ARENA();
+	ref = bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
+	return ref ? ref->tctx : NULL;
 }
 
 /*
@@ -538,11 +545,47 @@ static __always_inline struct cid_ctx __arena *cid_ctx(s32 cid)
 #define util_fits_cap(util, cap)	((util) * 1280 < (cap) * 1024)
 
 /*
+ * ravg_accumulate() and ravg_read() on a running average in the arena, which
+ * they cannot be handed a pointer into, staged through the stack.
+ *
+ * Copy field by field rather than with ravg_from_arena() and ravg_to_arena():
+ * LLVM 19 drops the address space cast on their word casts when @ard is a task
+ * context pointer, and the verifier sees a scalar dereference.
+ */
+static void ravg_accumulate_arena(struct ravg_data __arena *ard, u64 new_val, u64 now)
+{
+	struct ravg_data rd = {
+		.val = ard->val,
+		.val_at = ard->val_at,
+		.old = ard->old,
+		.cur = ard->cur,
+	};
+
+	ravg_accumulate(&rd, new_val, now, UTIL_HALF_LIFE_NS);
+	ard->val = rd.val;
+	ard->val_at = rd.val_at;
+	ard->old = rd.old;
+	ard->cur = rd.cur;
+}
+
+static u64 ravg_read_arena(struct ravg_data __arena *ard, u64 now)
+{
+	struct ravg_data rd = {
+		.val = ard->val,
+		.val_at = ard->val_at,
+		.old = ard->old,
+		.cur = ard->cur,
+	};
+
+	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS);
+}
+
+/*
  * Note that @p started or stopped running at @now.
  */
-static void util_set_running(struct task_ctx *tctx, bool running, u64 now)
+static void util_set_running(task_ctx_t *tctx, bool running, u64 now)
 {
-	ravg_accumulate(&tctx->run_avg, running, now, UTIL_HALF_LIFE_NS);
+	ravg_accumulate_arena(&tctx->run_avg, running, now);
 }
 
 /*
@@ -555,9 +598,9 @@ static void util_set_running(struct task_ctx *tctx, bool running, u64 now)
  * and the running average alone would call it small at exactly the moment
  * it is about to ask for a whole CPU again.
  */
-static u64 task_util(struct task_ctx *tctx, u64 now)
+static u64 task_util(task_ctx_t *tctx, u64 now)
 {
-	u64 util = ravg_read(&tctx->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+	u64 util = ravg_read_arena(&tctx->run_avg, now) >> UTIL_SHIFT;
 
 	return MAX(util, tctx->util_est);
 }
@@ -577,9 +620,9 @@ static u64 task_util(struct task_ctx *tctx, u64 now)
  * less, over several activations; it is taken at its word that it needs
  * more.
  */
-static void util_est_update(struct task_ctx *tctx, u64 now)
+static void util_est_update(task_ctx_t *tctx, u64 now)
 {
-	u64 dequeued = ravg_read(&tctx->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+	u64 dequeued = ravg_read_arena(&tctx->run_avg, now) >> UTIL_SHIFT;
 
 	if (tctx->util_est <= dequeued)
 		tctx->util_est = dequeued;
@@ -590,15 +633,9 @@ static void util_est_update(struct task_ctx *tctx, u64 now)
 /*
  * Note that @cid started or stopped running a task at @now, and fold the
  * interval that just ended into how busy it has been.
- *
- * The per-cid context lives in the arena, which ravg_accumulate() cannot
- * be handed a pointer into, so it is staged through the stack.
  */
 static void cid_util_set_running(s32 cid, bool running, u64 now)
 {
-	struct cid_ctx __arena *cctx;
-	struct ravg_data rd;
-
 	/*
 	 * Placement uses this signal too, so keep it even when frequency
 	 * control is disabled. update_cpufreq() independently honors
@@ -606,11 +643,7 @@ static void cid_util_set_running(s32 cid, bool running, u64 now)
 	 */
 	if (!cid_valid(cid))
 		return;
-	cctx = cid_ctx(cid);
-
-	ravg_from_arena(&rd, &cctx->run_avg);
-	ravg_accumulate(&rd, running, now, UTIL_HALF_LIFE_NS);
-	ravg_to_arena(&cctx->run_avg, &rd);
+	ravg_accumulate_arena(&cid_ctx(cid)->run_avg, running, now);
 }
 
 /*
@@ -619,11 +652,7 @@ static void cid_util_set_running(s32 cid, bool running, u64 now)
  */
 static u64 cid_util(s32 cid, u64 now)
 {
-	struct ravg_data rd;
-
-	ravg_from_arena(&rd, &cid_ctx(cid)->run_avg);
-
-	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+	return ravg_read_arena(&cid_ctx(cid)->run_avg, now) >> UTIL_SHIFT;
 }
 
 /*
@@ -640,26 +669,19 @@ static u64 cid_util(s32 cid, u64 now)
 static void cid_load_update(s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx;
-	struct ravg_data rd;
 
 	if (!wa_weight || !cid_valid(cid))
 		return;
 	cctx = cid_ctx(cid);
 
-	ravg_from_arena(&rd, &cctx->load_avg);
-	ravg_accumulate(&rd, cctx->vsum_w, now, UTIL_HALF_LIFE_NS);
-	ravg_to_arena(&cctx->load_avg, &rd);
+	ravg_accumulate_arena(&cctx->load_avg, cctx->vsum_w, now);
 }
 
-static u64 task_load(const struct task_struct *p, struct task_ctx *tctx, u64 now);
+static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now);
 
 static u64 cid_load(s32 cid, u64 now)
 {
-	struct ravg_data rd;
-
-	ravg_from_arena(&rd, &cid_ctx(cid)->load_avg);
-
-	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS) >> RAVG_FRAC_BITS;
+	return ravg_read_arena(&cid_ctx(cid)->load_avg, now) >> RAVG_FRAC_BITS;
 }
 
 /*
@@ -762,9 +784,9 @@ static bool is_task_queued(const struct task_struct *p)
 static __always_inline bool cid_allowed(const struct task_struct *p, s32 cid);
 static inline bool is_restricted(const struct task_struct *p);
 
-static cid_edq_task_t *cid_edq_task(const struct task_ctx *tctx)
+static cid_edq_task_t *cid_edq_task(task_ctx_t *tctx)
 {
-	return tctx ? tctx->edq_task : NULL;
+	return tctx ? &tctx->edq : NULL;
 }
 
 /*
@@ -788,7 +810,7 @@ static int cid_edq_try_peek(s32 cid, cid_edq_task_t **atp)
 	return 0;
 }
 
-static void cid_edq_mark_dispatched(struct task_ctx *tctx)
+static void cid_edq_mark_dispatched(task_ctx_t *tctx)
 {
 	cid_edq_task_t *at;
 
@@ -942,7 +964,7 @@ static __noinline bool cid_edq_move_first_eligible_to_local(s32 cid, u64 vref)
 	return false;
 }
 
-static bool cid_queue_insert(struct task_struct *p, struct task_ctx *tctx,
+static bool cid_queue_insert(struct task_struct *p, task_ctx_t *tctx,
 			     s32 cid, u64 slice,
 			     u64 deadline, u64 vruntime, u64 enq_flags)
 {
@@ -1379,7 +1401,7 @@ enum pick_idle_flags {
  * Only asymmetric machines ask at all, as asym_fits_cpu() does with
  * sched_asym_cpucap_active().
  */
-static bool task_fits_cid(struct task_ctx *tctx, s32 cid, u64 now)
+static bool task_fits_cid(task_ctx_t *tctx, s32 cid, u64 now)
 {
 	if (!asym_capacity || !tctx)
 		return true;
@@ -1481,7 +1503,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
 	u32 t;
 	/* Only an asymmetric machine asks task_fits_cid() anything. */
-	struct task_ctx *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
+	task_ctx_t *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
 	u64 now = asym_capacity ? scx_bpf_now() : 0;
 
 	TOUCH_ARENA();
@@ -1826,7 +1848,7 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 				 u64 now)
 {
 	struct cid_topo __arena *src;
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	bool restricted;
 	u32 base, nr, nr_tiers, sibling, t;
 
@@ -1899,7 +1921,7 @@ parent:
  */
 static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 {
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	bool restricted;
 	u64 util, src_cap, max_cap = 0;
 	s32 best = -EBUSY;
@@ -2213,7 +2235,7 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 {
 	struct cid_ctx __arena *cctx = cid_ctx(src_cid);
 	struct cid_topo __arena *src, *dst;
-	struct task_ctx *tctx = NULL;
+	task_ctx_t *tctx = NULL;
 	s32 dst_cid = READ_ONCE(cctx->active_balance_cid);
 	s32 target = -EBUSY;
 	u32 outcome = ACTIVE_BALANCE_MISS;
@@ -2285,7 +2307,7 @@ out:
 #define WAKEE_DECAY_NS NSEC_PER_SEC
 
 /* The record_wakee() half of fair.c's wake-affinity heuristic. */
-static void record_wakee_cid(const struct task_struct *p, struct task_ctx *wctx,
+static void record_wakee_cid(const struct task_struct *p, task_ctx_t *wctx,
 			     u64 now)
 {
 	if (!wctx)
@@ -2304,7 +2326,7 @@ static void record_wakee_cid(const struct task_struct *p, struct task_ctx *wctx,
 }
 
 /* The wake_wide() half; cid LLC width stands in for sd_llc_size. */
-static bool wake_wide_cid(const struct task_ctx *pctx, const struct task_ctx *wctx,
+static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
 			  s32 this_cid)
 {
 	u32 master, slave, factor;
@@ -2385,9 +2407,9 @@ static bool wake_wide_cid(const struct task_ctx *pctx, const struct task_ctx *wc
  * too.
  */
 static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
-				  struct task_ctx *tctx,
+				  task_ctx_t *tctx,
 				  const struct task_struct *waker,
-				  struct task_ctx *wctx, s32 prev_cid,
+				  task_ctx_t *wctx, s32 prev_cid,
 				  s32 this_cid, bool sync, u64 now)
 {
 	s64 this_eff, prev_eff;
@@ -2419,11 +2441,11 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	return this_eff < prev_eff ? this_cid : prev_cid;
 }
 
-static s32 wake_affine_cid(const struct task_struct *p, struct task_ctx *tctx,
+static s32 wake_affine_cid(const struct task_struct *p, task_ctx_t *tctx,
 			   s32 prev_cid, s32 this_cid, u64 wake_flags, u64 now)
 {
 	const struct task_struct *waker;
-	struct task_ctx *wctx;
+	task_ctx_t *wctx;
 	bool sync;
 
 	if (!(wake_flags & SCX_WAKE_TTWU) || !cid_valid(this_cid))
@@ -2473,7 +2495,7 @@ static s32 wake_affine_cid(const struct task_struct *p, struct task_ctx *tctx,
  * an idle cache-affine @prev_cid. pick_idle_cid() supplies the remaining
  * whole-core and idle-cid scan around @target.
  */
-static s32 select_idle_sibling_cid(const struct task_struct *p, struct task_ctx *tctx,
+static s32 select_idle_sibling_cid(const struct task_struct *p, task_ctx_t *tctx,
 				   s32 prev_cid, s32 target, bool *direct, u64 now)
 {
 	s32 cid;
@@ -2753,7 +2775,7 @@ static u32 cgrp_weight(struct cgroup *cgrp)
  * yet, or one under --disable-cgroups, weighs what its nice level says and
  * nothing else.
  */
-static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
+static u64 task_weight(const struct task_struct *p, const task_ctx_t *tctx)
 {
 	u64 w;
 	u32 idx, cgw;
@@ -2787,9 +2809,9 @@ static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
  * ops.quiescent(), where util_avg is kept from ops.running() to
  * ops.stopping().
  */
-static u64 task_load(const struct task_struct *p, struct task_ctx *tctx, u64 now)
+static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now)
 {
-	u64 runnable = ravg_read(&tctx->runnable_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
+	u64 runnable = ravg_read_arena(&tctx->runnable_avg, now) >> UTIL_SHIFT;
 
 	return task_weight(p, tctx) * MIN(runnable, 1024) / 1024;
 }
@@ -2801,7 +2823,7 @@ static u64 task_load(const struct task_struct *p, struct task_ctx *tctx, u64 now
  *	delta_fair = delta * NICE_0_LOAD / se->load.weight
  */
 static u64 calc_delta_fair(const struct task_struct *p,
-			   const struct task_ctx *tctx, u64 delta)
+			   const task_ctx_t *tctx, u64 delta)
 {
 	return delta * NICE_0_WEIGHT / task_weight(p, tctx);
 }
@@ -2820,7 +2842,7 @@ static u64 calc_delta_fair(const struct task_struct *p,
 #define MIN_DL_WEIGHT	(NICE_0_WEIGHT / 4)
 
 static u64 scale_by_dl_weight(const struct task_struct *p,
-			      const struct task_ctx *tctx, u64 value)
+			      const task_ctx_t *tctx, u64 value)
 {
 	u64 weight = task_weight(p, tctx);
 
@@ -2849,7 +2871,7 @@ static u64 scale_by_dl_weight(const struct task_struct *p,
  */
 static u64 task_request(const struct task_struct *p);
 
-static u64 lag_limit(const struct task_struct *p, const struct task_ctx *tctx)
+static u64 lag_limit(const struct task_struct *p, const task_ctx_t *tctx)
 {
 	u64 request = task_request(p);
 
@@ -2902,7 +2924,7 @@ static u64 task_request(const struct task_struct *p)
  * drift apart, so what is carried is its distance from the vruntime, not
  * the value, and only for a task that did not sleep.
  */
-static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
+static u64 task_dl(const struct task_struct *p, task_ctx_t *tctx)
 {
 	u64 request = task_request(p);
 
@@ -3132,7 +3154,7 @@ static u64 cid_vref_place(s32 cid, u64 now)
  * with the same left bias avg_vruntime() gives fair.c's reference.
  */
 static u64 cid_vref_before_join(s32 cid, const struct task_struct *p,
-				const struct task_ctx *tctx, u64 now)
+				const task_ctx_t *tctx, u64 now)
 {
 	struct cid_ctx __arena *cctx;
 	u64 curr_w, sum_w, join_w, delta, dv, projection;
@@ -3156,7 +3178,7 @@ static u64 cid_vref_before_join(s32 cid, const struct task_struct *p,
 
 /* Return @p's current lag against @cid, clamped as entity_lag() does. */
 static s64 task_lag_at(const struct task_struct *p,
-		       const struct task_ctx *tctx, s32 cid, u64 now)
+		       const task_ctx_t *tctx, s32 cid, u64 now)
 {
 	s64 limit = (s64)lag_limit(p, tctx);
 	s64 lag;
@@ -3494,7 +3516,7 @@ static bool keep_running(s32 cid, u64 now)
 /*
  * Drop @tctx out of its pack's reference, see cid_vref().
  */
-static void vref_leave(struct task_ctx *tctx)
+static void vref_leave(task_ctx_t *tctx)
 {
 	struct cid_ctx __arena *cctx;
 	u64 w;
@@ -3525,7 +3547,7 @@ static void vref_leave(struct task_ctx *tctx)
 /*
  * Fold @p into @cid's reference, see cid_vref().
  */
-static void vref_join(s32 cid, const struct task_struct *p, struct task_ctx *tctx)
+static void vref_join(s32 cid, const struct task_struct *p, task_ctx_t *tctx)
 {
 	struct cid_ctx __arena *cctx;
 	u64 w;
@@ -3575,10 +3597,10 @@ static void vref_join(s32 cid, const struct task_struct *p, struct task_ctx *tct
  * leave and rejoin for the sums to mean anything. Leaving is done here;
  * both callers rejoin, one through place_task() and one directly.
  */
-static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
+static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 			  bool dequeued);
 
-static void cgw_refresh(const struct task_struct *p, struct task_ctx *tctx)
+static void cgw_refresh(const struct task_struct *p, task_ctx_t *tctx)
 {
 	struct cgroup *cgrp;
 	u32 w;
@@ -3613,7 +3635,7 @@ static void cgw_refresh(const struct task_struct *p, struct task_ctx *tctx)
  * carry the remainder. Only the cid the task ran on is touched, so the
  * carry needs no atomic.
  */
-static void vref_charge(struct task_ctx *tctx)
+static void vref_charge(task_ctx_t *tctx)
 {
 	struct cid_ctx __arena *cctx;
 	u64 acc, delta, w;
@@ -3656,7 +3678,7 @@ static void vref_charge(struct task_ctx *tctx)
 static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
-	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	task_ctx_t *tctx = try_lookup_task_ctx(p);
 
 	if (!tctx)
 		return;
@@ -3711,7 +3733,7 @@ static u64 cid_pack_weight(s32 cid)
  * deadline the vruntime has already reached is a consumed request, and
  * is dropped either way, as update_deadline() would reissue it.
  */
-static void set_vruntime(struct task_ctx *tctx, u64 vruntime, bool sleep)
+static void set_vruntime(task_ctx_t *tctx, u64 vruntime, bool sleep)
 {
 	u64 rel = 0;
 
@@ -3770,7 +3792,7 @@ static void set_vruntime(struct task_ctx *tctx, u64 vruntime, bool sleep)
  *
  * Where the task wakes follows too, see delay_requeue_cid().
  */
-static s64 delay_debt(const struct task_ctx *tctx, u64 now)
+static s64 delay_debt(const task_ctx_t *tctx, u64 now)
 {
 	s32 cid = tctx->delay_cid;
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
@@ -3788,7 +3810,7 @@ static s64 delay_debt(const struct task_ctx *tctx, u64 now)
 	return lag > 0 ? 0 : lag;
 }
 
-static void delay_settle(struct task_ctx *tctx, u64 now)
+static void delay_settle(task_ctx_t *tctx, u64 now)
 {
 	if (!cid_valid(tctx->delay_cid))
 		return;
@@ -3829,7 +3851,7 @@ static void delay_settle(struct task_ctx *tctx, u64 now)
  * scan, as ttwu_runnable() skips select_task_rq().
  */
 static s32 delay_requeue_cid(const struct task_struct *p,
-			     const struct task_ctx *tctx, u64 now)
+			     const task_ctx_t *tctx, u64 now)
 {
 	s32 cid = tctx->delay_cid;
 
@@ -3877,7 +3899,7 @@ static s32 delay_requeue_cid(const struct task_struct *p,
  * vref_join() is a no-op for it. Its offset therefore needs no correction.
  */
 static s64 compensate_place_offset(s32 cid, const struct task_struct *p,
-				   const struct task_ctx *tctx, s64 offset)
+				   const task_ctx_t *tctx, s64 offset)
 {
 	u64 weight, load = cid_pack_weight(cid);
 
@@ -3888,7 +3910,7 @@ static s64 compensate_place_offset(s32 cid, const struct task_struct *p,
 	return offset + vdiv(offset * (s64)weight, load);
 }
 static void place_task(s32 cid, const struct task_struct *p,
-		       struct task_ctx *tctx, u64 now, bool sleep)
+		       task_ctx_t *tctx, u64 now, bool sleep)
 {
 	/* The pack's progress is in its own task clock. */
 	u64 tnow = cid_valid(cid) ? cid_clock_task_at(cid, now) : now;
@@ -3945,7 +3967,7 @@ static void place_task(s32 cid, const struct task_struct *p,
  * against the cid it lands on. A sleeping task is only rescaled, what it
  * carries is spent when it wakes.
  */
-static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
+static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 			  bool dequeued)
 {
 	u64 w = task_weight(p, tctx), old = tctx->vw;
@@ -3992,7 +4014,7 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
  * a cid that is idle, never to stack @p behind a task that is running: the
  * bounce would be certain and the direct dispatch pure overhead.
  */
-static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, s32 cid,
+static void direct_dispatch_local(struct task_struct *p, task_ctx_t *tctx, s32 cid,
 				  u64 now)
 {
 	/* ops.runnable() follows select_cid(), so refresh before spending lag. */
@@ -4048,7 +4070,7 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 {
 	bool direct = false;
 	s32 cid, target, this_cid = scx_bpf_this_cid();
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	u64 now;
 
 	TOUCH_ARENA();
@@ -4188,7 +4210,7 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * would have left it too.
  */
 static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
-				      const struct task_ctx *tctx, u64 dl,
+				      const task_ctx_t *tctx, u64 dl,
 				      u64 now)
 {
 	struct cid_ctx __arena *cctx;
@@ -4320,7 +4342,7 @@ idle:
 void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	bool displaced;
 	u64 dl, now, tnow;
 
@@ -4770,7 +4792,7 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 		    struct task_struct *to)
 {
 	s32 cid = scx_bpf_this_cid();
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	u64 now, tnow;
 
 	TOUCH_ARENA();
@@ -4846,7 +4868,7 @@ pick:
  */
 static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid, u64 now)
 {
-	const struct task_ctx *tctx;
+	const task_ctx_t *tctx;
 
 	if (smt_enabled &&
 	    cid_topo(src_cid)->core_base == cid_topo(dst_cid)->core_base)
@@ -5245,7 +5267,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 	if (has_prev) {
 		migrate_cid = active_balance_target(prev, cid, now);
 		if (migrate_cid >= 0) {
-			struct task_ctx *tctx = try_lookup_task_ctx(prev);
+			task_ctx_t *tctx = try_lookup_task_ctx(prev);
 
 			if (tctx)
 				tctx->dispatch_migrate_cid = migrate_cid;
@@ -5345,7 +5367,7 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	cid_edq_task_t *at;
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	s64 lag;
 	u64 now;
 	s32 cid;
@@ -5362,7 +5384,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	now = scx_bpf_now();
 	util_est_update(tctx, now);
 	if (wa_weight)
-		ravg_accumulate(&tctx->runnable_avg, 0, now, UTIL_HALF_LIFE_NS);
+		ravg_accumulate_arena(&tctx->runnable_avg, 0, now);
 
 	/*
 	 * Remember how far the task is from the reference as it stops being
@@ -5423,7 +5445,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	bool direct_placed;
 
 	TOUCH_ARENA();
@@ -5436,8 +5458,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->direct_placed = false;
 	cgw_refresh(p, tctx);
 	if (wa_weight)
-		ravg_accumulate(&tctx->runnable_avg, 1, scx_bpf_now(),
-				UTIL_HALF_LIFE_NS);
+		ravg_accumulate_arena(&tctx->runnable_avg, 1, scx_bpf_now());
 
 	/*
 	 * Drop out of the pack the task was last a member of. The lag it
@@ -5456,7 +5477,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	u64 now;
 	s32 cid;
 
@@ -5535,7 +5556,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 {
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	u64 slice, tnow;
 	s32 cid;
 
@@ -5595,7 +5616,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 {
-	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	task_ctx_t *tctx = try_lookup_task_ctx(p);
 	s32 cid = scx_bpf_task_cid(p);
 
 	TOUCH_ARENA();
@@ -5636,7 +5657,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
 {
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 
 	TOUCH_ARENA();
 
@@ -5650,16 +5671,18 @@ void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
+	struct task_ctx_ref *ref;
 	cid_edq_task_t *at;
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	ref = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				   BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!ref)
+		return -ENOMEM;
+	tctx = scx_alloc(&task_ctx_allocator);
 	if (!tctx)
 		return -ENOMEM;
-	at = scx_alloc(&cid_edq_task_allocator);
-	if (!at)
-		return -ENOMEM;
+	at = &tctx->edq;
 	/*
 	 * No memset: LLVM 19 expands one on arena memory through the uncast
 	 * pointer and the verifier rejects the program, see
@@ -5667,7 +5690,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	 * same thing, hence WRITE_ONCE for the two that are.
 	 */
 	scx_edq_task_init(&at->common);
-	tctx->edq_task = at;
 	at->tid = p->scx.tid;
 	at->cid = -1;
 	at->state = CID_EDQ_NONE;
@@ -5685,6 +5707,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	 * nothing else does, see task_dl().
 	 */
 	tctx->initial = args->fork;
+	ref->tctx = tctx;
 
 	return 0;
 }
@@ -5692,7 +5715,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(cidland_dequeue, struct task_struct *p, u64 deq_flags)
 {
 	cid_edq_task_t *at;
-	struct task_ctx *tctx;
+	task_ctx_t *tctx;
 	u32 state;
 	s32 cid;
 	int ret;
@@ -5729,22 +5752,22 @@ void BPF_STRUCT_OPS(cidland_dequeue, struct task_struct *p, u64 deq_flags)
 void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-	cid_edq_task_t *at;
-	struct task_ctx *tctx;
+	struct task_ctx_ref *ref;
+	task_ctx_t *tctx;
 	int ret;
 
 	TOUCH_ARENA();
-	tctx = try_lookup_task_ctx(p);
-	at = cid_edq_task(tctx);
-	if (!at)
+	ref = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!ref || !ref->tctx)
 		return;
-	tctx->edq_task = NULL;
-	ret = scx_edq_task_detach(&at->common);
+	tctx = ref->tctx;
+	ref->tctx = NULL;
+	ret = scx_edq_task_detach(&tctx->edq.common);
 	if (ret) {
 		scx_bpf_error("EDQ detach failed for pid %d: %d", p->pid, ret);
 		return;
 	}
-	scx_free(&cid_edq_task_allocator, at);
+	scx_free(&task_ctx_allocator, tctx);
 }
 
 /*
@@ -5792,7 +5815,7 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
 void BPF_STRUCT_OPS(cidland_cpuctl_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
-	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	task_ctx_t *tctx = try_lookup_task_ctx(p);
 
 	if (tctx)
 		tctx->cgw_gen = 0;
@@ -6052,9 +6075,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in)
 		return -ENOMEM;
-	ret = scx_alloc_init(&cid_edq_task_allocator,
-			     sizeof(struct cid_edq_task),
-			     __alignof__(struct cid_edq_task));
+	ret = scx_alloc_init(&task_ctx_allocator, sizeof(struct task_ctx),
+			     __alignof__(struct task_ctx));
 	if (ret)
 		return ret;
 
