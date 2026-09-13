@@ -123,6 +123,63 @@ static __always_inline void cmask_reframe(struct scx_cmask __arena *m, u32 base,
 }
 
 /**
+ * cmask_nr_words - Words of bits[] that @m's active range spans
+ * @m: cmask to measure
+ *
+ * @m->base need not be word aligned: bits[0] covers the whole word @m->base
+ * falls in, so the count is taken from that word, not from @m->base.
+ */
+static __always_inline u32 cmask_nr_words(const struct scx_cmask __arena *m)
+{
+	u32 wbase = m->base / 64;
+
+	return m->nr_cids ? (m->base + m->nr_cids - 1) / 64 - wbase + 1 : 0;
+}
+
+/**
+ * cmask_word - Read word @k of @m
+ * @m: cmask to read
+ * @k: word index, counted from the word @m->base falls in
+ *
+ * A word past the active range reads as 0, so a scan that looks one word
+ * ahead (at an SMT sibling that falls in the next word, say) needs no bound
+ * of its own.
+ */
+static __always_inline u64 cmask_word(const struct scx_cmask __arena *m, u32 k)
+{
+	if (k >= cmask_nr_words(m))
+		return 0;
+	return m->bits[k];
+}
+
+/**
+ * cmask_range_word - Bits of word @k of @m that fall in [@start, @start + @nr)
+ * @m: cmask the word belongs to
+ * @k: word index, counted from the word @m->base falls in
+ * @start: first cid of the range
+ * @nr: number of cids in the range
+ *
+ * Scoping a scan to a domain that is contiguous in cid space, an LLC or a
+ * node, is then one AND per word, rather than a test of the ends of the
+ * range at every bit or a mask kept per domain.
+ */
+static __always_inline u64 cmask_range_word(const struct scx_cmask __arena *m,
+					    u32 k, u32 start, u32 nr)
+{
+	u64 wlo = (u64)(m->base / 64 + k) * 64, whi = wlo + 64;
+	u64 lo = start, hi = (u64)start + nr;
+
+	if (lo < wlo)
+		lo = wlo;
+	if (hi > whi)
+		hi = whi;
+	if (lo >= hi)
+		return 0;
+
+	return GENMASK_U64(hi - wlo - 1, lo - wlo);
+}
+
+/**
  * __cmask_test - Test a cid without checking it against the active range
  * @cid: cid to test
  * @m: cmask to test
@@ -501,9 +558,7 @@ static __always_inline void cmask_fill(struct scx_cmask __arena *m)
  */
 static __always_inline bool cmask_empty(const struct scx_cmask __arena *m)
 {
-	u32 wbase = m->base / 64, i;
-	u32 nr_words = m->nr_cids ?
-		(m->base + m->nr_cids - 1) / 64 - wbase + 1 : 0;
+	u32 nr_words = cmask_nr_words(m), i;
 
 	bpf_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= nr_words)

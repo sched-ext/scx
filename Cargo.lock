@@ -5893,6 +5893,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "libbpf-rs 0.27.0",
+ "libc",
  "log",
  "scx_arena",
  "scx_cargo",

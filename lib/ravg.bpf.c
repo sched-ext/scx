@@ -1,8 +1,5 @@
 #include <scx/common.bpf.h>
 
-#include <bpf_arena_common.bpf.h>
-#include <bpf_arena_spin_lock.h>
-
 #include <lib/ravg.h>
 
 /*
