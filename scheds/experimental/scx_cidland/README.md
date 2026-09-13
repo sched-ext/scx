@@ -340,6 +340,16 @@ be turned off on the command line to compare the two rules against each other.
    comparisons, since equal threads otherwise leave the choice to timing, not
    a performance policy.
 
+   `--smt-whole-core` lets a wakeup leave its LLC to find a whole idle
+   core rather than settle for the idle sibling of a busy one. Off by default,
+   because `select_idle_sibling()` stops at the LLC and takes that sibling.
+   Turning it on trades cache locality for core throughput, and only while a
+   whole idle core exists somewhere. It is meant for machines whose LLC spans
+   a whole NUMA node: once that node is saturated, every wakeup lands on one
+   of its busy cores' siblings and halves the thread already running there,
+   while another node's cores sit fully idle. Barrier-synchronized workloads
+   pay for that many times over, since every thread waits for the halved one.
+
 Time slices default to `fair.c`'s `sysctl_sched_base_slice` as
 `update_sysctl()` sets it, so the two schedulers issue requests of the same
 size on the same machine. That is not the 700 us `fair.c` is compiled with:

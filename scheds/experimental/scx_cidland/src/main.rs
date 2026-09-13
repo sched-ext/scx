@@ -226,6 +226,30 @@ struct Opts {
     )]
     smt_asym_packing: bool,
 
+    /// Let a wakeup leave its LLC to find a whole idle core.
+    ///
+    /// An idle SMT sibling of a busy core is half of a core that is already
+    /// working: placing a task there costs the thread running on the other
+    /// sibling about half its throughput for as long as the two overlap. By
+    /// default the idle scan follows select_idle_sibling() and takes that
+    /// sibling, because fair.c stops at the LLC and leaves the rest to the
+    /// periodic balancer. This makes the scan prefer a whole idle core in
+    /// another LLC instead, trading cache locality for core throughput, and
+    /// only while such a core exists.
+    ///
+    /// It matters on machines whose LLC spans a whole NUMA node: once that
+    /// node is saturated, everything the machine wakes lands on its busy
+    /// cores' siblings while another node's cores sit fully idle. Barrier-
+    /// synchronized workloads pay for it many times over, since every thread
+    /// waits for the halved one. Balancing cannot repair it, as those visits
+    /// are far shorter than any balance interval.
+    #[clap(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "disable_smt"
+    )]
+    smt_whole_core: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -586,6 +610,10 @@ impl<'a> Scheduler<'a> {
         rodata.force_smt_asym_packing = opts.smt_asym_packing;
         if opts.smt_asym_packing {
             info!("SMT sibling priority: lower CPU IDs first (--smt-asym-packing)");
+        }
+        rodata.smt_whole_core = opts.smt_whole_core && smt_enabled;
+        if opts.smt_whole_core && smt_enabled {
+            info!("Idle scan: a whole idle core wins over a busy core's sibling, across LLCs");
         }
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;

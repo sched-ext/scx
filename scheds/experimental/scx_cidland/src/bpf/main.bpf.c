@@ -61,6 +61,14 @@ const volatile bool smt_enabled = true;
 const volatile bool force_smt_asym_packing;
 
 /*
+ * Let a wakeup leave its LLC for a whole idle core rather than settle for
+ * the idle sibling of a busy one. See pick_idle_cid(). Off by default:
+ * select_idle_sibling() stops at the LLC, and this is the one place the
+ * scan deliberately does not.
+ */
+const volatile bool smt_whole_core;
+
+/*
  * Honor the weight of the cpu controller's cgroups, cpu.weight, on top of
  * the weight a task gets from its nice level. See cgrp_weight().
  */
@@ -1559,7 +1567,31 @@ static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
  * Scan for an idle cid in fair.c's order within the target LLC: a fully idle
  * core when the LLC says one exists, otherwise an idle sibling of @prev_cid,
  * then any idle CPU. Cidland's node/global extensions follow only if the LLC
- * has no idle CPU at all.
+ * has no whole idle core left to offer.
+ *
+ * Under @smt_whole_core the order departs from select_idle_sibling()
+ * in one place: a whole idle core outside the target LLC is taken before a
+ * half-busy core inside it. An idle sibling of a busy core is not a free CPU;
+ * it is half of a core that is already working, and taking it costs the
+ * thread running there about half its throughput for as long as the two
+ * overlap. fair.c never has to choose, because select_idle_sibling() stops at
+ * the LLC and leaves the rest to the periodic balancer; this scan does cross
+ * LLCs, so it has to say which it prefers.
+ *
+ * Measured on a 2-node 176-core Olympus SMT machine with one LLC per node:
+ * with node 0 saturated by an 88-thread NVPL SGEMM, everything else the
+ * machine woke landed on node 0's idle siblings while node 1's 88 fully idle
+ * cores sat unused. The workers themselves were placed correctly, and it
+ * still cost 10-14% of throughput, because the hierarchical barrier makes
+ * every worker wait for the halved one: about 1 s of dual-thread operation
+ * over a run turned into 4.4 s per thread of extra barrier wait. Repairing it
+ * from the balance side cannot work - those visits have a median length of
+ * 24 us against an active-balance interval of the domain weight in ms - so
+ * placement is the only point at which it can be prevented.
+ *
+ * The trade is cache locality for core throughput, so it is spent only when
+ * there is a whole idle core to be had. The idle_core_llcs hint says whether
+ * any LLC has one, which makes "no" a single word test.
  */
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 {
@@ -1594,12 +1626,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 	 */
 	for (i = 0; i < CLAIM_RETRIES; i++) {
 		bool has_idle_core = smt_enabled && test_idle_cores(target);
-
-		if (!has_idle_core && !asym_capacity) {
-			cid = select_idle_smt(p, prev_cid, target);
-			if (cid >= 0)
-				return cid;
-		}
+		bool whole_scanned = false;
 
 		if (has_idle_core) {
 			cid = pick_idle_cid_topology((struct task_struct *)p, target,
@@ -1612,15 +1639,17 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 			set_idle_cores(target, false);
 		}
 
-		cid = pick_idle_cid_topology((struct task_struct *)p, target,
-					   flags | PICK_IDLE_LLC_ONLY);
-		if (cid >= 0)
-			return cid;
-		if (cid == -EAGAIN)
-			continue;
-
-		/* Cidland extends select_idle_sibling() beyond the target LLC. */
-		if (smt_enabled) {
+		/*
+		 * Cidland extends select_idle_sibling() beyond the target LLC.
+		 * The extension goes first while a whole idle core is left
+		 * anywhere: everything below this settles for an idle sibling
+		 * of a busy core, which halves the thread already running on
+		 * it. The hint mask has no bit set once no LLC has an idle
+		 * core, which is the loaded case this must not slow down.
+		 */
+		if (smt_whole_core && smt_enabled &&
+		    !cmask_empty(idle_core_llcs)) {
+			whole_scanned = true;
 			cid = pick_idle_cid_topology((struct task_struct *)p, target,
 						   flags | PICK_IDLE_WHOLE_CORE);
 			if (cid >= 0)
@@ -1628,6 +1657,36 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 			if (cid == -EAGAIN)
 				continue;
 		}
+
+		if (!has_idle_core && !asym_capacity) {
+			cid = select_idle_smt(p, prev_cid, target);
+			if (cid >= 0)
+				return cid;
+		}
+
+		cid = pick_idle_cid_topology((struct task_struct *)p, target,
+					   flags | PICK_IDLE_LLC_ONLY);
+		if (cid >= 0)
+			return cid;
+		if (cid == -EAGAIN)
+			continue;
+
+		/*
+		 * The same extension in its original place, still ahead of
+		 * taking any idle cid at all, unless the pass above has just
+		 * run this scan and failed. With the option on it is reached
+		 * when the hint said no LLC had an idle core, and the scan
+		 * still runs there because the hint is only a hint.
+		 */
+		if (smt_enabled && !whole_scanned) {
+			cid = pick_idle_cid_topology((struct task_struct *)p, target,
+						   flags | PICK_IDLE_WHOLE_CORE);
+			if (cid >= 0)
+				return cid;
+			if (cid == -EAGAIN)
+				continue;
+		}
+
 		cid = pick_idle_cid_topology((struct task_struct *)p, target, flags);
 		if (cid != -EAGAIN)
 			return cid >= 0 ? cid : -EBUSY;
