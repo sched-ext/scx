@@ -346,12 +346,22 @@ struct {
 
 /*
  * Return a local task context from a generic task.
+ *
+ * PROTOTYPE: cidland never orders a DSQ by vtime, so @p->scx.dsq_vtime is
+ * free to carry the context pointer, set in ops.enable(), and a lookup is a
+ * load instead of a task-storage helper call. The kernel zeroes the field
+ * when @p leaves the scheduler, so fall back to task storage while it is
+ * zero, from ops.init_task() to ops.enable() and after ops.disable().
  */
 static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct *p)
 {
 	struct task_ctx_ref *ref;
+	u64 ptr;
 
 	TOUCH_ARENA();
+	ptr = p->scx.dsq_vtime;
+	if (likely(ptr))
+		return (task_ctx_t *)ptr;
 	ref = bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
 	return ref ? ref->tctx : NULL;
 }
@@ -5622,6 +5632,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 	TOUCH_ARENA();
 
 	if (tctx) {
+		scx_bpf_task_set_dsq_vtime(p, (u64)tctx);
 		/*
 		 * ops.enable() is also called when a task switches back from a
 		 * higher scheduling class at run time. Place it at the current
