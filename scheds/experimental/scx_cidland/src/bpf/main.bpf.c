@@ -1135,7 +1135,7 @@ static bool siblings_idle(s32 cid)
 	if (!cid_valid(cid))
 		return false;
 	topo = cid_topo(cid);
-	bpf_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
 		if (sibling != (u32)cid && !cid_idle_test(sibling))
 			return false;
 	}
@@ -1427,7 +1427,7 @@ static s32 select_idle_smt_cpu(const struct task_struct *p, s32 cid)
 	if (!topo->smt_asym_packing)
 		return cid;
 
-	bpf_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
 		if (sibling == (u32)best || !cid_idle_test(sibling) ||
 		    !cid_allowed(p, sibling))
 			continue;
@@ -1553,7 +1553,7 @@ static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
 	if (prev->llc_base != dst->llc_base)
 		return -EBUSY;
 
-	bpf_for(sibling, prev->core_base, prev->core_base + prev->core_nr) {
+	bpf_arena_for(sibling, prev->core_base, prev->core_base + prev->core_nr) {
 		s32 cid;
 
 		if (sibling == (u32)prev_cid || !cid_idle_test(sibling) ||
@@ -1786,7 +1786,7 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 	restricted = is_restricted(p);
 
 	if (smt_enabled && src->smt_asym_packing) {
-		bpf_for(sibling, src->core_base, src->core_base + src->core_nr) {
+		bpf_arena_for(sibling, src->core_base, src->core_base + src->core_nr) {
 			if (sibling != (u32)src_cid && cid_idle_test(sibling) &&
 			    cid_topo(sibling)->place_tier < src->place_tier &&
 			    (!restricted || cid_allowed(p, sibling)) &&
@@ -1864,7 +1864,7 @@ static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	src_cap = cid_topo(src_cid)->cap;
 	restricted = is_restricted(p);
 
-	bpf_for(cid, 0, nr_cids) {
+	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_topo __arena *dst;
 
 		if (restricted && !cid_allowed(p, cid))
@@ -1876,7 +1876,7 @@ static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	if (src_cap == max_cap || util_fits_cap(util, src_cap))
 		return -EBUSY;
 
-	bpf_for(cid, 0, nr_cids) {
+	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_topo __arena *dst = cid_topo(cid);
 
 		if (dst->cap != max_cap || cid == (u32)src_cid ||
@@ -2171,7 +2171,7 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 		u64 max_cap = 0;
 		u32 cid;
 
-		bpf_for(cid, 0, nr_cids) {
+		bpf_arena_for(cid, 0, nr_cids) {
 			if ((!restricted || cid_allowed(p, cid)) &&
 			    cid_topo(cid)->cap > max_cap)
 				max_cap = cid_topo(cid)->cap;
@@ -2480,13 +2480,8 @@ static s32 shallowest_queue_cid(const struct task_struct *p, s32 prev_cid)
 		}
 	}
 
-	/*
-	 * Every queue has something: look for the shallowest, a lookup per
-	 * cid. The cid is a kfunc argument, which the verifier tracks
-	 * precisely and cannot widen, so a may_goto loop would be unrolled:
-	 * this cold path takes the open-coded iterator instead.
-	 */
-	bpf_for(k, base, base + nr) {
+	/* Every queue has something: look for the shallowest, a lookup per cid. */
+	bpf_arena_for(k, base, base + nr) {
 		s32 cid = k, nr_queued;
 
 		if (cid >= nr_cids)
@@ -2609,7 +2604,7 @@ static u32 cgrp_weight(struct cgroup *cgrp)
 	 * Level 0 is the root, which has no cpu.weight of its own, and the
 	 * last level is @cgrp itself.
 	 */
-	bpf_for(level, 1, cgrp->level + 1) {
+	bpf_arena_for(level, 1, cgrp->level + 1) {
 		struct cgroup *anc = bpf_cgroup_ancestor(cgrp, level);
 		struct cgrp_ctx *acgc;
 
@@ -5697,7 +5692,7 @@ static void init_topology(void)
 	u32 core_nr = 0, llc_nr = 0, node_nr = 0;
 	u32 i;
 
-	bpf_for(i, 0, nr_cids) {
+	bpf_arena_for(i, 0, nr_cids) {
 		struct scx_cid_topo *ct = &init_topo;
 		s32 cid = nr_cids - 1 - i;
 		struct cid_topo __arena *topo = cid_topo(cid);
@@ -5792,9 +5787,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	cmask_init(idle_cids, 0, nr_cids);
 	cmask_init(idle_core_llcs, 0, nr_cids);
 	cmask_init(queued_cids, 0, nr_cids);
-	bpf_for(cid, 0, nr_place_tiers)
+	bpf_arena_for(cid, 0, nr_place_tiers)
 		cmask_init(place_tier_mask(cid), 0, nr_cids);
-	bpf_for(cid, 0, nr_capacity_tiers)
+	bpf_arena_for(cid, 0, nr_capacity_tiers)
 		cmask_init(capacity_tier_mask(cid), 0, nr_cids);
 
 	nr_words = cmask_nr_words(idle_cids);
@@ -5802,7 +5797,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	init_topology();
 
 	/* sched_init(): the idle pull budget starts open by a migration cost. */
-	bpf_for(cid, 0, nr_cids) {
+	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
 
 		cctx->avg_idle = 2 * migration_cost_ns;
@@ -5815,7 +5810,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	 * topologies cidland models, so cache its best tier for parent-domain
 	 * source and destination comparisons.
 	 */
-	bpf_for(cid, 0, nr_cids) {
+	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_topo __arena *topo = cid_topo(cid);
 		u32 best = nr_place_tiers - 1;
 		u32 i;
@@ -5834,7 +5829,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	 * transitions, and left with its bit clear it would never be
 	 * picked, so never transition, for good.
 	 */
-	bpf_for(cid, 0, nr_cids) {
+	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_topo __arena *topo = cid_topo(cid);
 
 		if (topo->place_tier >= nr_place_tiers)
