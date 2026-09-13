@@ -418,6 +418,7 @@ struct cid_ctx {
 	u64 curr_request;	/* request for which it was picked */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
 	u64 clock_off;		/* rq clock minus task clock, see cid_clock_task_owned() */
+	u32 requeue_pending;	/* the task that was running comes back to the queue, see cid_queued_check() */
 	u64 active_balance_next;	/* destination: next asymmetric balance */
 	u32 active_balance_interval_ms; /* destination: balance backoff */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
@@ -1170,6 +1171,19 @@ static void cid_queued_set(s32 cid)
 static void cid_queued_check(s32 cid)
 {
 	if (!cid_valid(cid) || cid_queue_nr(cid))
+		return;
+	/*
+	 * The queue is empty because ops.dispatch() has just taken its head
+	 * while the task that was running is still runnable: that task is
+	 * enqueued back here as soon as ops.dispatch() returns,
+	 * put_prev_task_scx(). Clearing the bit now and setting it again
+	 * then is two atomic writes per switch to a word every CPU shares,
+	 * and the cacheline bouncing between CPUs each switching between
+	 * two of their own tasks ran a pinned pair of yielders per CPU five
+	 * times slower than fair.c. Leave the bit alone: the enqueue finds
+	 * it set and writes nothing, and clears the flag.
+	 */
+	if (READ_ONCE(cid_ctx(cid)->requeue_pending))
 		return;
 	cmask_clear(cid, queued_cids);
 	if (cid_queue_nr(cid))
@@ -4167,6 +4181,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 
 	now = scx_bpf_now();
 	displaced = !(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p);
+	if (displaced)
+		WRITE_ONCE(cid_ctx(prev_cid)->requeue_pending, 0);
 
 	/*
 	 * An idle preferred destination asked @prev_cid for this running task.
@@ -4185,6 +4201,9 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
 			__sync_fetch_and_add(&nr_active_balances, 1);
+			/* The requeue ops.dispatch() expected went elsewhere. */
+			if (displaced)
+				cid_queued_check(prev_cid);
 			return;
 		}
 	}
@@ -4229,6 +4248,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
+			if (displaced)
+				cid_queued_check(prev_cid);
 			return;
 		}
 	}
@@ -4315,8 +4336,11 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (!cid_queue_insert(p, tctx, prev_cid, task_request(p), dl,
-			      tctx->vruntime, enq_flags))
+			      tctx->vruntime, enq_flags)) {
+		if (displaced)
+			cid_queued_check(prev_cid);
 		return;
+	}
 	cid_queued_set(prev_cid);
 	if ((enq_flags & SCX_ENQ_LAST) &&
 	    cid_queue_nr(prev_cid) == 1) {
@@ -5081,6 +5105,13 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			keep = keep_running(cid, tnow);
 	}
 
+	/*
+	 * If the hand-over below takes the queue's head, @prev is enqueued
+	 * back here right after this op returns: tell cid_queued_check()
+	 * not to clear the queued bit in between, see there.
+	 */
+	if (has_prev && !keep)
+		WRITE_ONCE(cid_ctx(cid)->requeue_pending, 1);
 	if (try_steal_task(cid, has_prev, keep, now, active_balance)) {
 		if (active_balance)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
@@ -5118,6 +5149,8 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		/* Let ops.stopping() charge it and ops.enqueue() perform the handoff. */
 		if (migrate_cid >= 0)
 			return;
+		/* Nothing to hand over: @prev stays, and no requeue follows. */
+		WRITE_ONCE(cid_ctx(cid)->requeue_pending, 0);
 		keep_charge(prev, cid, tnow);
 		scx_bpf_task_set_slice(prev, task_request(prev));
 		if (cid_queued_test(cid))
