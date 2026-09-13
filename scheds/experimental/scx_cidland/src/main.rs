@@ -212,6 +212,20 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_asym_packing: bool,
 
+    /// Prefer lower-numbered CPUs within each SMT core.
+    ///
+    /// When the kernel exposes no priority between the threads of a core,
+    /// pick the lowest-numbered idle sibling of the selected core, at wakeup
+    /// and for balance destinations. Placement only: cores are not ranked by
+    /// CPU ID and no task is migrated between the threads of one core. A
+    /// determinism aid for comparisons, not a performance policy.
+    #[clap(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "disable_smt"
+    )]
+    smt_asym_packing: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -569,6 +583,10 @@ impl<'a> Scheduler<'a> {
         rodata.cgroup_enabled = cgroup_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
+        rodata.force_smt_asym_packing = opts.smt_asym_packing;
+        if opts.smt_asym_packing {
+            info!("SMT sibling priority: lower CPU IDs first (--smt-asym-packing)");
+        }
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;
         rodata.no_task_clock = opts.no_task_clock;

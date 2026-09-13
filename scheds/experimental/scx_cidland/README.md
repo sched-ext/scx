@@ -332,6 +332,13 @@ be turned off on the command line to compare the two rules against each other.
    `--disable-asym-packing` disables that independent policy, so placement
    follows the capacity classes chosen by the automatic mode,
    `--uniform-capacity`, or `--asym-capacity`.
+   `--smt-asym-packing` ranks the threads of a core by CPU ID when the kernel
+   exposes no priority between them: among the idle siblings of the selected
+   physical core the lowest CPU ID is preferred, at wakeup and when a balance
+   destination is picked. It never ranks different cores and never migrates a
+   running task between the threads of one core. It is a determinism aid for
+   comparisons, since equal threads otherwise leave the choice to timing, not
+   a performance policy.
 
 Time slices default to `fair.c`'s `sysctl_sched_base_slice` as
 `update_sysctl()` sets it, so the two schedulers issue requests of the same

@@ -55,6 +55,12 @@ const volatile bool numa_enabled;
 const volatile bool smt_enabled = true;
 
 /*
+ * Rank the threads of a core by CPU id when the kernel exposes no priority
+ * between them, for placement only: a determinism aid, see the option.
+ */
+const volatile bool force_smt_asym_packing;
+
+/*
  * Honor the weight of the cpu controller's cgroups, cpu.weight, on top of
  * the weight a task gets from its nice level. See cgrp_weight().
  */
@@ -1075,6 +1081,23 @@ static bool siblings_idle(s32 cid)
 	return true;
 }
 
+static bool smt_asym_active(s32 cid)
+{
+	return smt_enabled && cid_valid(cid) &&
+	       (force_smt_asym_packing || cid_topo(cid)->smt_asym_packing);
+}
+
+static bool smt_prefer(s32 a, s32 b)
+{
+	if (!cid_valid(a) || !cid_valid(b))
+		return false;
+	if (force_smt_asym_packing)
+		return cid_topo(a)->cpu < cid_topo(b)->cpu;
+	return cid_topo(a)->place_tier < cid_topo(b)->place_tier;
+}
+
+static bool active_balance_due(s32 cid, u64 now);
+
 /* fair.c's sd_balance_shared::has_idle_cores hint, keyed by LLC base cid. */
 static bool test_idle_cores(s32 cid)
 {
@@ -1366,17 +1389,37 @@ static s32 select_idle_smt_cpu(const struct task_struct *p, s32 cid)
 	s32 best = cid;
 	u32 sibling;
 
-	if (!smt_enabled || !cid_valid(cid))
+	if (!smt_asym_active(cid))
 		return cid;
 	topo = cid_topo(cid);
-	if (!topo->smt_asym_packing)
-		return cid;
 
 	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
 		if (sibling == (u32)best || !cid_idle_test(sibling) ||
 		    !cid_allowed(p, sibling))
 			continue;
-		if (cid_topo(sibling)->place_tier < cid_topo(best)->place_tier)
+		if (smt_prefer(sibling, best))
+			best = sibling;
+	}
+
+	return best;
+}
+
+/* select_idle_smt_cpu(), restricted to active-balance destinations that are due. */
+static s32 select_idle_smt_balance_cid(const struct task_struct *p, s32 cid,
+				       u64 now)
+{
+	struct cid_topo __arena *topo;
+	s32 best = cid;
+	u32 sibling;
+
+	if (!smt_asym_active(cid))
+		return cid;
+	topo = cid_topo(cid);
+	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+		if (sibling == (u32)best || !cid_idle_test(sibling) ||
+		    !cid_allowed(p, sibling) || !active_balance_due(sibling, now))
+			continue;
+		if (smt_prefer(sibling, best))
 			best = sibling;
 	}
 
@@ -1866,7 +1909,7 @@ static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 						 src->llc_nr, is_restricted(p),
 						 now);
 			if (cid >= 0)
-				return cid;
+				return select_idle_smt_balance_cid(p, cid, now);
 		}
 	} else if (smt_enabled) {
 		cid_ctx(src_cid)->smt_busy_since = 0;
@@ -1875,8 +1918,10 @@ static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	if (!asym_packing && !asym_capacity)
 		return -EBUSY;
 	cid = idle_asym_packing_cid(p, src_cid, now);
+	if (cid < 0)
+		cid = idle_misfit_cid(p, src_cid, now);
 
-	return cid >= 0 ? cid : idle_misfit_cid(p, src_cid, now);
+	return cid >= 0 ? select_idle_smt_balance_cid(p, cid, now) : cid;
 }
 
 enum active_balance_type {
@@ -1901,15 +1946,20 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 		return ACTIVE_BALANCE_NONE;
 	dst = cid_topo(dst_cid);
 	src = cid_topo(src_cid);
+	/*
+	 * Between the threads of one core only a kernel-provided priority
+	 * moves a running task; --smt-asym-packing ranks equal threads for
+	 * placement and never migrates between them.
+	 */
+	if (dst->core_base == src->core_base)
+		return asym_packing && dst->smt_asym_packing &&
+		       dst->place_tier < src->place_tier ?
+		       ACTIVE_BALANCE_LOCAL_PACKING : ACTIVE_BALANCE_NONE;
 	if (smt_enabled && dst->llc_base == src->llc_base &&
 	    core_is_idle(dst_cid) && !siblings_idle(src_cid))
 		return ACTIVE_BALANCE_LOCAL_SMT;
 
 	if (asym_packing) {
-		if (dst->core_base == src->core_base)
-			return dst->place_tier < src->place_tier &&
-			       dst->smt_asym_packing ? ACTIVE_BALANCE_LOCAL_PACKING :
-			       ACTIVE_BALANCE_NONE;
 		if (dst->llc_base == src->llc_base &&
 		    (!smt_enabled || core_is_idle(dst_cid))) {
 			if (dst->place_tier < src->place_tier)
