@@ -235,9 +235,9 @@ struct Opts {
 
     /// Service is charged in rq_clock_task(), the clock update_curr() uses:
     /// wall time less the interrupt time and the hypervisor steal time the
-    /// CPU spent on something else. This charges plain wall time,
-    /// bpf_ktime_get_ns(), instead, so a task pays for the interrupts that
-    /// land on its CPU and for the time the host took from its vCPU.
+    /// CPU spent on something else. This charges plain wall time, the rq
+    /// clock, instead, so a task pays for the interrupts that land on its
+    /// CPU and for the time the host took from its vCPU.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_task_clock: bool,
 

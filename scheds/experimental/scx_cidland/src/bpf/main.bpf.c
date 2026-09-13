@@ -417,7 +417,7 @@ struct cid_ctx {
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
-	u64 clock_off;		/* monotonic clock minus task clock, see cid_clock_task_owned() */
+	u64 clock_off;		/* rq clock minus task clock, see cid_clock_task_owned() */
 	u64 active_balance_next;	/* destination: next asymmetric balance */
 	u32 active_balance_interval_ms; /* destination: balance backoff */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
@@ -686,12 +686,14 @@ static void update_cpufreq(s32 cid, u64 now)
  * clock: the stamp a pick is charged from, ops.running() to
  * ops.stopping(), keep_charge(), the projections cid_vref_at() and
  * cid_vref_place() make of the running task's progress, the hrtick's
- * distance to the deadline. Everything measured between CPUs or against
- * a timer stays on the monotonic clock: the running averages, cache
- * hotness, the newidle budget, the balance intervals, the wakee-flip
- * decay, and the absolute time an hrtick is armed for, which
- * hrtick_start() converts with the offset between the two clocks, see
- * @clock_off.
+ * distance to the deadline. Everything measured between CPUs stays on
+ * the rq clock, scx_bpf_now(): the running averages, cache hotness, the
+ * idle time, the balance intervals, the wakee-flip decay, and the time an
+ * hrtick is due at, which hrtick_start() converts with the offset between
+ * the two clocks, see @clock_off. The rq clock is the one fair.c keeps
+ * those in too, and it is read off the runqueue for the price of a load
+ * from every op that holds the lock; the cost of a newidle pull is the
+ * one thing measured on a fresh clock, see try_steal_task().
  *
  * The runqueue's clock is read only by an op that holds that runqueue's
  * lock, which is what scx_clock_task() asks for: ops.running(),
@@ -700,7 +702,7 @@ static void update_cpufreq(s32 cid, u64 now)
  * two clocks, cid_clock_task_owned(). Everything else, a lag against
  * the pack a task left, a delayed dequeue settling up, a placement on a
  * migration target, the source of an idle pull, the hrtick timer,
- * converts the monotonic clock it already holds through that offset,
+ * converts the rq clock it already holds through that offset,
  * cid_clock_task_at(), and never touches another CPU's runqueue. The
  * offset moves by the interrupt time the cid takes between two owned
  * reads, microseconds, where the remote clock itself would sit still
@@ -1414,7 +1416,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	u32 t;
 	/* Only an asymmetric machine asks task_fits_cid() anything. */
 	struct task_ctx *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
-	u64 now = asym_capacity ? bpf_ktime_get_ns() : 0;
+	u64 now = asym_capacity ? scx_bpf_now() : 0;
 
 	TOUCH_ARENA();
 
@@ -3131,8 +3133,9 @@ static void hrtick_start(s32 cid, u64 tnow)
 		delta = HRTICK_MIN_NS;
 
 	/*
-	 * The distance is in the task clock; the timer is armed on the
-	 * monotonic one, through the offset ops.stopping() last sampled.
+	 * The distance is in the task clock. The timer is armed relative
+	 * to now; @at, the rq clock it fires at through the offset
+	 * ops.stopping() last sampled, is what the check below compares.
 	 */
 	now = tnow + cctx->clock_off;
 	at = now + delta;
@@ -3154,7 +3157,7 @@ static void hrtick_start(s32 cid, u64 tnow)
 		return;
 
 	cctx->hrtick_at = at;
-	bpf_timer_start(&ht->timer, at, BPF_F_TIMER_ABS);
+	bpf_timer_start(&ht->timer, delta, 0);
 }
 
 /*
@@ -3184,11 +3187,11 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 	if (!cctx->curr_w || !cid_queued_test(cid))
 		return 0;
 
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	delta = curr_dl_in(cctx, now - cctx->clock_off);
 	if (delta > HRTICK_MIN_NS) {
 		cctx->hrtick_at = now + delta;
-		bpf_timer_start(&ht->timer, now + delta, BPF_F_TIMER_ABS);
+		bpf_timer_start(&ht->timer, delta, 0);
 		return 0;
 	}
 
@@ -3786,7 +3789,7 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
 	if (w == old)
 		return;
 	if (dequeued && cid_valid(tctx->vcid))
-		tctx->vlag = task_lag_at(p, tctx, tctx->vcid, bpf_ktime_get_ns());
+		tctx->vlag = task_lag_at(p, tctx, tctx->vcid, scx_bpf_now());
 	tctx->vw = w;
 	if (!old)
 		return;
@@ -3800,7 +3803,7 @@ static void reweight_task(const struct task_struct *p, struct task_ctx *tctx,
 		return;
 	cid = scx_bpf_task_cid((struct task_struct *)p);
 	if (cid_valid(cid)) {
-		u64 now = bpf_ktime_get_ns();
+		u64 now = scx_bpf_now();
 		u64 vruntime = cid_vref_place(cid, cid_clock_task_at(cid, now));
 
 		if (cid_pack_weight(cid))
@@ -3902,7 +3905,7 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 		prev_cid = near;
 	}
 
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 
 	/*
 	 * A task that blocked over-served and is still owed to the pack it
@@ -4162,7 +4165,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx || !cid_valid(prev_cid))
 		return;
 
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	displaced = !(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p);
 
 	/*
@@ -4483,7 +4486,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	u64 now, tid;
 
 	TOUCH_ARENA();
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 
 	if (!cid_valid(cid))
 		return;
@@ -4629,7 +4632,7 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 	 * cid's published view of what it is running up to date with both.
 	 * The reference read below is then exact rather than projected.
 	 */
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	tnow = cid_clock_task_owned(cid, now);
 	keep_charge(from, cid, tnow);
 
@@ -4848,8 +4851,8 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
-	u64 t0 = now;
 	bool budget = false;
+	u64 t0 = 0;
 	u32 start, own_nr = 0;
 	s32 src = -1;
 
@@ -4902,6 +4905,13 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 		if (!force_steal && !kicked)
 			cctx->idle_stamp = now;
 		budget = !no_newidle_cost && !force_steal && !kicked;
+		/*
+		 * The cost is measured on a fresh clock, sched_clock_cpu() in
+		 * sched_balance_newidle(): the rq clock stands still under the
+		 * lock and would read every pull as free.
+		 */
+		if (budget)
+			t0 = bpf_ktime_get_ns();
 		if (budget && cctx->avg_idle < cctx->newidle_cost[NEWIDLE_LLC]) {
 			__sync_fetch_and_add(&nr_newidle_skips, 1);
 			return false;
@@ -5037,7 +5047,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 
 	if (!cid_valid(cid))
 		return;
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	tnow = cid_clock_task_owned(cid, now);
 
 	/*
@@ -5144,7 +5154,7 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 		 */
 		cid_idle_claim(cid);
 		if (cctx->idle_stamp)
-			update_avg_idle(cctx, bpf_ktime_get_ns());
+			update_avg_idle(cctx, scx_bpf_now());
 	}
 }
 
@@ -5165,7 +5175,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	if (at)
 		WRITE_ONCE(at->state, CID_EDQ_NONE);
 
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	util_est_update(tctx, now);
 	if (wa_weight)
 		ravg_accumulate(&tctx->runnable_avg, 0, now, UTIL_HALF_LIFE_NS);
@@ -5242,7 +5252,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->direct_placed = false;
 	cgw_refresh(p, tctx);
 	if (wa_weight)
-		ravg_accumulate(&tctx->runnable_avg, 1, bpf_ktime_get_ns(),
+		ravg_accumulate(&tctx->runnable_avg, 1, scx_bpf_now(),
 				UTIL_HALF_LIFE_NS);
 
 	/*
@@ -5276,9 +5286,9 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	/*
 	 * The stamp the service is charged from is in the task clock,
 	 * update_curr(); the running averages are fractions of wall time
-	 * and follow the monotonic clock, which a task carries across CPUs.
+	 * and follow the rq clock, which a task carries across CPUs.
 	 */
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	tctx->last_run_at = cid_valid(cid) ? cid_clock_task_owned(cid, now) : now;
 	util_set_running(tctx, true, now);
 	cid_util_set_running(cid, true, now);
@@ -5357,10 +5367,9 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 */
 	/*
 	 * The service is charged in the task clock, update_curr(); the stop
-	 * stamp cache hotness reads from other CPUs stays on the monotonic
-	 * one.
+	 * stamp cache hotness reads from other CPUs stays on the rq clock.
 	 */
-	tctx->last_stop_at = bpf_ktime_get_ns();
+	tctx->last_stop_at = scx_bpf_now();
 	tnow = cid_valid(cid) ? cid_clock_task_owned(cid, tctx->last_stop_at) :
 			       tctx->last_stop_at;
 	slice = tnow - tctx->last_run_at;
