@@ -925,10 +925,15 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 	return 0;
 }
 
+/*
+ * @cgrp's kernfs id, as a CO-RE read so it accepts any cgroup pointer: a
+ * trusted op argument, or an unreferenced one from cbw_task_cgroup() or
+ * cbw_cgroup_ancestor().
+ */
 static
 u64 cgroup_get_id(struct cgroup *cgrp)
 {
-	return cgrp->kn->id;
+	return BPF_CORE_READ(cgrp, kn, id);
 }
 
 static __always_inline
@@ -1263,25 +1268,68 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 }
 
 /*
+ * @p's cgroup, read straight from the task the way the kernel's
+ * scx_bpf_task_cgroup() does (tg_cgrp()): a NULL task_group (CGROUP_SCHED off)
+ * or a NULL css.cgroup (autogroup) is the root cgroup, reported as NULL.
+ *
+ * Unlike scx_bpf_task_cgroup(), this places no requirement on which task the
+ * current op is operating on, so it is usable from any op -- including
+ * ops.tick(), which kernels before v6.14 invoke without registering a subject.
+ * The pointer is borrowed, not referenced: nothing to release. It is valid
+ * because every caller holds @p's rq lock, which pins sched_task_group
+ * (cgroup migration takes it) and keeps the cgroup alive.
+ */
+static __always_inline
+struct cgroup *cbw_task_cgroup(struct task_struct *p)
+{
+	struct task_group *tg;
+
+	if (unlikely(!bpf_core_field_exists(struct task_struct, sched_task_group)))
+		return NULL;
+
+	tg = BPF_CORE_READ(p, sched_task_group);
+	if (unlikely(!tg))
+		return NULL;
+
+	return BPF_CORE_READ(tg, css.cgroup);
+}
+
+/*
+ * @cgrp's ancestor at @ancestor_level, the kernel's cgroup_ancestor() as
+ * CO-RE reads: NULL when the level is out of range. Accepts an unreferenced
+ * cgroup (cbw_task_cgroup()) as well as a trusted op argument, and takes no
+ * reference: an ancestor outlives every descendant, so the caller's live
+ * @cgrp pins the result.
+ */
+static __always_inline
+struct cgroup *cbw_cgroup_ancestor(struct cgroup *cgrp, int ancestor_level)
+{
+	if (ancestor_level < 0 || ancestor_level > BPF_CORE_READ(cgrp, level))
+		return NULL;
+
+	return BPF_CORE_READ(cgrp, ancestors[ancestor_level]);
+}
+
+/*
  * Id of @cgrp's effective parent -- the nearest ancestor that has a context:
  * the nearest limited (finite cpu.max) ancestor, or the root; infinite
  * ancestors are skipped. 0 if @cgrp is the root (it has no ancestor).
- * Ref-counted walk, so no RCU read lock is required.
+ * Walks cbw_cgroup_ancestor(), so it accepts an unreferenced cgroup and
+ * needs no reference or RCU read lock.
  */
 static __always_inline
 u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
 {
 	struct cgroup *anc;
 	u64 id = 0;
-	int i, level = cgrp->level;
+	int i, level = BPF_CORE_READ(cgrp, level);
 
 	bpf_for(i, 1, level + 1) {
-		anc = bpf_cgroup_ancestor(cgrp, level - i);
+		anc = cbw_cgroup_ancestor(cgrp, level - i);
 		if (!anc)
 			break;
 		if (cbw_get_cgroup_ctx(anc))
 			id = cgroup_get_id(anc);
-		bpf_cgroup_release(anc);
 		if (id)
 			break;
 	}
@@ -1295,7 +1343,7 @@ u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
  * root. @cgrp is borrowed, not released.
  *
  * @cgrp must come from a source that is not filtered by the caller's cgroup
- * namespace -- scx_bpf_task_cgroup() (from the task) or a trusted cgroup
+ * namespace -- cbw_task_cgroup() (from the task) or a trusted cgroup
  * argument -- never bpf_cgroup_from_id(), which returns NULL for an id outside
  * current's namespace on kernels before v6.18.
  */
@@ -1316,9 +1364,10 @@ u64 cbw_resolve_bill_cgid(struct cgroup *cgrp)
  * Resolve and cache a task's billing cgroup id from its own cgroup. Resolved
  * once (0 = unresolved) and reused; invalidated when the task changes cgroup
  * (scx_cgroup_bw_move) or its cgroup context is torn down (cbw_free_llc_ctx).
- * Resolution uses scx_bpf_task_cgroup(), so @p must be the task the current op
- * is operating on. A NULL @p is a cache-only caller (a non-subject op): return
- * the cached id, or 0 (unknown) when the cache is cold, without resolving.
+ * The cgroup is read from the task itself (cbw_task_cgroup()), so resolution
+ * works from any op regardless of which task it operates on. A NULL @p is a
+ * cache-only caller: return the cached id, or 0 (unknown) when the cache is
+ * cold, without resolving.
  */
 static __always_inline
 u64 cbw_bill_task(scx_task_cgroup_bw_t *taskc, struct task_struct *p)
@@ -1330,21 +1379,16 @@ u64 cbw_bill_task(scx_task_cgroup_bw_t *taskc, struct task_struct *p)
 		return taskc->bill_cgrp_id;
 
 	/*
-	 * A NULL @p marks a cache-only caller: a non-subject op (e.g.
-	 * ops.dispatch() accounting the previous task) where scx_bpf_task_cgroup()
-	 * is illegal. With the cache cold, report the billing cgroup as unknown
-	 * (0); the caller then skips, and it is resolved on @p's next subject op.
+	 * A NULL @p marks a cache-only caller. With the cache cold, report the
+	 * billing cgroup as unknown (0); the caller carries the interval and it
+	 * is resolved on @p's next resolving call.
 	 */
 	if (!p)
 		return 0;
 
-	cgrp = scx_bpf_task_cgroup(p);
-	if (!cgrp) {
-		scx_bpf_error("cgroup_bw: failed to get cgroup for task %d", p->pid);
-		return 0;
-	}
-	bill = cbw_resolve_bill_cgid(cgrp);
-	bpf_cgroup_release(cgrp);
+	/* A NULL cgroup is the root (see cbw_task_cgroup()): bill to the root. */
+	cgrp = cbw_task_cgroup(p);
+	bill = cgrp ? cbw_resolve_bill_cgid(cgrp) : ROOT_CGID;
 
 	if (taskc)
 		taskc->bill_cgrp_id = bill;

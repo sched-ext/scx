@@ -582,11 +582,10 @@ static void account_task_runtime(struct task_struct *p,
 	task_time_iwgt = task_time_invr / p->scx.weight;
 
 	/*
-	 * Under cpu.max, report the consumed time. On a non-subject op
-	 * (@may_resolve == false, e.g. ops.dispatch()) bill cache-only (NULL @p)
-	 * so scx_bpf_task_cgroup() never runs on a task that is not the op's
-	 * subject; the library carries any interval it cannot yet attribute and
-	 * bills it once @p's billing cgroup resolves.
+	 * Under cpu.max, report the consumed time. A cache-only call (NULL @p,
+	 * @may_resolve == false) bills only an already-resolved cgroup; the
+	 * library carries any interval it cannot yet attribute and bills it once
+	 * @p's billing cgroup resolves on a resolving call.
 	 */
 	if (enable_cpu_bw && (p->pid != lavd_pid))
 		scx_cgroup_bw_consume(may_resolve ? p : NULL, (u64)taskc,
