@@ -1028,78 +1028,6 @@ static bool cid_idle_test(s32 cid)
  * Return true if the whole core of @cid is idle, i.e. @cid is idle and so
  * are its SMT siblings, if any.
  */
-/*
- * The shared cmask_set(), cmask_clear() and cmask_test_and_clear() spin
- * under a bpf_for, whose open-coded iterator is three kfunc calls per
- * call, and cmask_full_range() walks the words under one too. The idle
- * and queued bits flip at every wakeup and every switch, and their loops
- * end on the first pass nearly always: they take a plain bounded loop
- * first, may_goto bounded, and the shared helper only if it runs out,
- * which is where the shared helper's own error handling is. On a
- * wakeup-bound load the iterators were 5% of every cycle.
- */
-#define CID_BIT_SPINS	64
-
-static __always_inline void cid_bit_set(u32 cid, struct scx_cmask __arena *m)
-{
-	u64 __arena *w;
-	u64 bit, old;
-	int i;
-
-	if (!__cmask_contains(cid, m))
-		return;
-	w = __cmask_word(cid, m);
-	bit = BIT_U64(cid & 63);
-	for (i = 0; i < CID_BIT_SPINS && can_loop; i++) {
-		old = *w;
-		if (old & bit)
-			return;
-		if (__sync_val_compare_and_swap(w, old, old | bit) == old)
-			return;
-	}
-	cmask_set(cid, m);
-}
-
-static __always_inline void cid_bit_clear(u32 cid, struct scx_cmask __arena *m)
-{
-	u64 __arena *w;
-	u64 bit, old;
-	int i;
-
-	if (!__cmask_contains(cid, m))
-		return;
-	w = __cmask_word(cid, m);
-	bit = BIT_U64(cid & 63);
-	for (i = 0; i < CID_BIT_SPINS && can_loop; i++) {
-		old = *w;
-		if (!(old & bit))
-			return;
-		if (__sync_val_compare_and_swap(w, old, old & ~bit) == old)
-			return;
-	}
-	cmask_clear(cid, m);
-}
-
-static __always_inline bool cid_bit_test_and_clear(u32 cid, struct scx_cmask __arena *m)
-{
-	u64 __arena *w;
-	u64 bit, old;
-	int i;
-
-	if (!__cmask_contains(cid, m))
-		return false;
-	w = __cmask_word(cid, m);
-	bit = BIT_U64(cid & 63);
-	for (i = 0; i < CID_BIT_SPINS && can_loop; i++) {
-		old = *w;
-		if (!(old & bit))
-			return false;
-		if (__sync_val_compare_and_swap(w, old, old & ~bit) == old)
-			return true;
-	}
-	return cmask_test_and_clear(cid, m);
-}
-
 static bool core_is_idle(s32 cid)
 {
 	struct cid_topo __arena *topo;
@@ -1163,9 +1091,9 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
 		return;
 	topo = cid_topo(cid);
 	if (has_idle_core)
-		cid_bit_set(topo->llc_base, idle_core_llcs);
+		cmask_set(topo->llc_base, idle_core_llcs);
 	else
-		cid_bit_clear(topo->llc_base, idle_core_llcs);
+		cmask_clear(topo->llc_base, idle_core_llcs);
 }
 
 /*
@@ -1175,7 +1103,7 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
  */
 static bool cid_idle_claim(s32 cid)
 {
-	return cid_valid(cid) && cid_bit_test_and_clear(cid, idle_cids);
+	return cid_valid(cid) && cmask_test_and_clear(cid, idle_cids);
 }
 
 /*
@@ -1186,7 +1114,7 @@ static void cid_idle_set(s32 cid)
 	if (!cid_valid(cid))
 		return;
 
-	cid_bit_set(cid, idle_cids);
+	cmask_set(cid, idle_cids);
 	if (smt_enabled && !test_idle_cores(cid) && core_is_idle(cid))
 		set_idle_cores(cid, true);
 }
@@ -1230,7 +1158,7 @@ static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
 static void cid_queued_set(s32 cid)
 {
 	if (cid_valid(cid))
-		cid_bit_set(cid, queued_cids);
+		cmask_set(cid, queued_cids);
 }
 
 /*
@@ -1241,9 +1169,9 @@ static void cid_queued_check(s32 cid)
 {
 	if (!cid_valid(cid) || cid_queue_nr(cid))
 		return;
-	cid_bit_clear(cid, queued_cids);
+	cmask_clear(cid, queued_cids);
 	if (cid_queue_nr(cid))
-		cid_bit_set(cid, queued_cids);
+		cmask_set(cid, queued_cids);
 }
 
 /*
