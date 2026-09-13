@@ -259,6 +259,12 @@ be turned off on the command line to compare the two rules against each other.
    `sd->max_newidle_lb_cost`, decaying by 1% a second, and gives up before a
    level it cannot pay for, since a CPU its own wakeups keep bringing back is
    about to have work of its own. `--no-newidle-cost` scans every time.
+   SMT contention is repaired independently of CPU capacity and
+   `SD_ASYM_PACKING`, matching `fair.c`'s `group_smt_balance`: a task whose
+   sibling has been busy for a slice asks a fully idle core in the same LLC to
+   balance, and that core moves one queued task or requests a running one
+   after queued pulling fails. This makes one runnable task per physical core
+   the steady state whenever affinity allows it.
 
  - **Utilization.** What a task uses is a running average of the time it spends
    on a CPU, read as the larger of that and what it used over its last

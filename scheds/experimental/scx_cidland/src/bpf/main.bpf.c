@@ -406,6 +406,7 @@ struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
 	u64 last_balance_at;
+	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
 	u64 vsum_w;
 	u64 vref;
 	u64 vref_rem;
@@ -1682,7 +1683,7 @@ static void active_balance_complete(s32 cid, u32 outcome)
  * separate atomic step immediately before the kick.
  */
 static __always_inline s32
-balance_scan_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
+balance_scan_range(const struct task_struct *p, s32 t, u32 base, u32 nr,
 		   bool restricted, u64 now)
 {
 	u32 k, last;
@@ -1691,8 +1692,11 @@ balance_scan_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 		return -EBUSY;
 	last = (base + nr - 1) / 64;
 	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = cmask_word(idle_cids, k) & place_tier_word(t, k) &
+		u64 w = cmask_word(idle_cids, k) &
 			cmask_range_word(idle_cids, k, base, nr);
+
+		if (t >= 0)
+			w &= place_tier_word(t, k);
 
 		while (w && can_loop) {
 			s32 cid = k * 64 + __builtin_ctzll(w);
@@ -1838,9 +1842,37 @@ static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 
 static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 {
+	struct cid_topo __arena *src;
 	s32 cid;
 
-	if ((!asym_packing && !asym_capacity) || cmask_empty(idle_cids))
+	if (cmask_empty(idle_cids) || !cid_valid(src_cid) || is_pcpu_task(p))
+		return -EBUSY;
+
+	/*
+	 * fair.c's group_smt_balance: a task sharing its core is moved to a
+	 * fully idle core of the LLC first. The tick asks every millisecond
+	 * and fair.c samples once a balance interval, so the contention has
+	 * to have lasted a slice before a core is asked to split it: a
+	 * sibling that is busy for one wakeup is not a core worth splitting.
+	 */
+	src = cid_topo(src_cid);
+	if (smt_enabled && !siblings_idle(src_cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(src_cid);
+
+		if (!cctx->smt_busy_since)
+			cctx->smt_busy_since = now;
+		else if (!time_before(now, cctx->smt_busy_since + slice_ns)) {
+			cid = balance_scan_range(p, -1, src->llc_base,
+						 src->llc_nr, is_restricted(p),
+						 now);
+			if (cid >= 0)
+				return cid;
+		}
+	} else if (smt_enabled) {
+		cid_ctx(src_cid)->smt_busy_since = 0;
+	}
+
+	if (!asym_packing && !asym_capacity)
 		return -EBUSY;
 	cid = idle_asym_packing_cid(p, src_cid, now);
 
@@ -1869,6 +1901,9 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 		return ACTIVE_BALANCE_NONE;
 	dst = cid_topo(dst_cid);
 	src = cid_topo(src_cid);
+	if (smt_enabled && dst->llc_base == src->llc_base &&
+	    core_is_idle(dst_cid) && !siblings_idle(src_cid))
+		return ACTIVE_BALANCE_LOCAL_SMT;
 
 	if (asym_packing) {
 		if (dst->core_base == src->core_base)
@@ -1997,7 +2032,8 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 	s32 best = -1;
 	u32 i;
 
-	if ((!asym_packing && !asym_capacity) || !cid_idle_test(dst_cid))
+	if ((!smt_enabled && !asym_packing && !asym_capacity) ||
+	    !cid_idle_test(dst_cid))
 		return false;
 	if (start < base || start >= base + nr)
 		start = base;
@@ -2072,6 +2108,7 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 	s32 dst_cid = READ_ONCE(cctx->active_balance_cid);
 	s32 target = -EBUSY;
 	u32 outcome = ACTIVE_BALANCE_MISS;
+	u32 type;
 	bool restricted;
 
 	if (dst_cid < 0 ||
@@ -2089,9 +2126,14 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 	src = cid_topo(src_cid);
 	dst = cid_topo(dst_cid);
 
-	if (active_balance_type(dst_cid, src_cid) > ACTIVE_BALANCE_CAPACITY) {
+	type = active_balance_type(dst_cid, src_cid);
+	if (type > ACTIVE_BALANCE_CAPACITY) {
 		/* Preferred SMT siblings remain fair.c's direct priority case. */
 		if (dst->core_base == src->core_base) {
+			target = dst_cid;
+			goto out;
+		}
+		if (type == ACTIVE_BALANCE_LOCAL_SMT) {
 			target = dst_cid;
 			goto out;
 		}
