@@ -187,7 +187,7 @@ const volatile bool no_place_rel_deadline;
 /*
  * Place tasks and test them for eligibility against the pack reference as
  * it stands, without the service the task running there has taken since
- * it was picked, see cid_vref_at().
+ * it was picked, see pack_vref_at().
  */
 const volatile bool no_vref_update;
 
@@ -287,31 +287,44 @@ struct cid_edq_task {
 	u64 enq_flags;
 };
 
+typedef struct pack __arena pack_t;
+
+/*
+ * What EEVDF keeps of one member of a pack, sched_entity. The EDQ node comes
+ * first, so an EDQ pop returns the address of the entity, and of the context
+ * that embeds the entity first.
+ */
+struct sched_ent {
+	struct cid_edq_task edq;
+	u64 vruntime;
+	u64 deadline;
+	u64 request;
+	s64 vlag;
+	u64 vw;			/* weight @vlag and @deadline are scaled to */
+	u64 vjoin_w;		/* weight it joined @vpack with, see vref_join() */
+	u64 vjoin_v;		/* vruntime last folded into @vpack */
+	pack_t *vpack;		/* pack it is a member of, or NULL */
+};
+
+typedef struct sched_ent __arena sched_ent_t;
+
 /*
  * Per-task context. It lives in the arena, like the EDQ node it embeds, so
  * anything holding the node reaches the whole context. Task storage only maps
  * the task to it, see try_lookup_task_ctx().
  */
 struct task_ctx {
-	struct cid_edq_task edq;	/* first, EDQ pops return its address */
+	struct sched_ent se;	/* first, EDQ pops return its address */
 	u64 last_run_at;
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	struct ravg_data runnable_avg;	/* fraction of wall time spent runnable, see task_load() */
 	u64 util_est;		/* what the last activation used */
-	u64 vruntime;
-	u64 deadline;
-	u64 request;
-	s64 vlag;
-	u64 vw;			/* weight @vlag and @deadline are scaled to */
-	s32 vcid;
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */
 	u64 delay_w;		/* its weight without the task */
 	u64 delay_gen;		/* its @empty_gen then */
 	u32 cgw;		/* weight of its cgroup, see cgrp_weight() */
-	u64 vjoin_w;
-	u64 vjoin_v;
 	u64 cgw_gen;		/* the @cgrp_gen @cgw was taken at */
 	u64 wakee_decay_at;
 	u32 wakee_flips;
@@ -463,20 +476,31 @@ enum newidle_level {
 	NEWIDLE_LEVELS,
 };
 
-struct cid_ctx {
-	struct ravg_data run_avg;	/* fraction of wall time spent running */
-	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
-	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
+/*
+ * A pack, cfs_rq: the entities queued on one cid, in deadline order, and the
+ * one running there, with the reference all of them are placed against and
+ * tested against, see pack_vref().
+ */
+struct pack {
 	u64 vsum_w;
 	u64 vref;
 	u64 vref_rem;
 	u64 empty_gen;		/* bumped when the last member leaves */
-	u64 curr_dl;		/* deadline of the task running here */
+	u64 curr_dl;		/* deadline of the entity running here */
 	u64 curr_v;		/* its vruntime when it was picked */
 	u64 curr_w;		/* its weight */
 	u64 curr_run_at;	/* when its service was last charged */
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
+	s32 cid;		/* the cid whose task clock the pack runs in */
+	struct scx_edq edq;
+};
+
+struct cid_ctx {
+	struct ravg_data run_avg;	/* fraction of wall time spent running */
+	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
+	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
+	struct pack pack;	/* the tasks of this cid */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
 	u64 clock_off;		/* rq clock minus task clock, see cid_clock_task_owned() */
 	u32 requeue_pending;	/* the task that was running comes back to the queue, see cid_queued_check() */
@@ -501,7 +525,6 @@ struct cid_ctx {
 	u64 busy_balance_budget; /* load left in this deferred balance pass */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
 	s32 active_balance_cid;	/* idle cid asking for the running task */
-	struct scx_edq edq;
 };
 
 /*
@@ -569,6 +592,19 @@ static __always_inline struct cid_topo __arena *cid_topo(s32 cid)
 static __always_inline struct cid_ctx __arena *cid_ctx(s32 cid)
 {
 	return &cctxs[cid];
+}
+
+static __always_inline pack_t *cid_pack(s32 cid)
+{
+	return &cctxs[cid].pack;
+}
+
+/*
+ * The pack the task of @tctx is queued in and runs in on @cid.
+ */
+static __always_inline pack_t *task_pack(const task_ctx_t *tctx, s32 cid)
+{
+	return cid_pack(cid);
 }
 
 /*
@@ -723,7 +759,7 @@ static void cid_load_accumulate(s32 cid, u64 now)
 		return;
 	cctx = cid_ctx(cid);
 
-	ravg_accumulate_arena(&cctx->load_avg, cctx->vsum_w, now);
+	ravg_accumulate_arena(&cctx->load_avg, cctx->pack.vsum_w, now);
 }
 
 static void cid_load_update(s32 cid, u64 now)
@@ -777,8 +813,8 @@ static void update_cpufreq(s32 cid, u64 now)
  * by the difference of what they have lost, seconds over an uptime, and
  * are never compared. Everything in a cid's virtual time is in its task
  * clock: the stamp a pick is charged from, ops.running() to
- * ops.stopping(), keep_charge(), the projections cid_vref_at() and
- * cid_vref_place() make of the running task's progress, the hrtick's
+ * ops.stopping(), keep_charge(), the projections pack_vref_at() and
+ * pack_vref_place() make of the running task's progress, the hrtick's
  * distance to the deadline. Everything measured between CPUs stays on
  * the rq clock, scx_bpf_now(): the running averages, cache hotness, the
  * idle time, the balance intervals, the wakee-flip decay, and the time an
@@ -841,7 +877,7 @@ static inline bool is_restricted(const struct task_struct *p);
 
 static cid_edq_task_t *cid_edq_task(task_ctx_t *tctx)
 {
-	return tctx ? &tctx->edq : NULL;
+	return tctx ? &tctx->se.edq : NULL;
 }
 
 /*
@@ -855,7 +891,7 @@ static int cid_edq_try_peek(s32 cid, cid_edq_task_t **atp)
 	int ret;
 
 	*atp = NULL;
-	ret = scx_edq_try_peek_hold(&cid_ctx(cid)->edq, &task);
+	ret = scx_edq_try_peek_hold(&cid_pack(cid)->edq, &task);
 	if (ret) {
 		if (ret != -EBUSY)
 			scx_bpf_error("EDQ peek failed for cid %d: %d", cid, ret);
@@ -873,7 +909,7 @@ static int cid_edq_try_peek_nth(s32 cid, u32 nth, cid_edq_task_t **atp)
 	if (!nth)
 		return cid_edq_try_peek(cid, atp);
 	*atp = NULL;
-	ret = scx_edq_try_peek_nth_hold(&cid_ctx(cid)->edq, nth, &task);
+	ret = scx_edq_try_peek_nth_hold(&cid_pack(cid)->edq, nth, &task);
 	if (ret) {
 		if (ret != -EBUSY)
 			scx_bpf_error("EDQ nth peek failed for cid %d: %d", cid, ret);
@@ -894,7 +930,7 @@ static void cid_edq_mark_dispatched(task_ctx_t *tctx)
 
 static u32 cid_queue_nr(s32 cid)
 {
-	return scx_edq_nr_queued(&cid_ctx(cid)->edq);
+	return scx_edq_nr_queued(&cid_pack(cid)->edq);
 }
 
 /*
@@ -909,7 +945,7 @@ static u64 cid_edq_peek_tid_owned(s32 cid)
 	cid_edq_task_t *at;
 	u64 tid = 0;
 
-	at = (cid_edq_task_t *)scx_edq_peek_hold(&cid_ctx(cid)->edq);
+	at = (cid_edq_task_t *)scx_edq_peek_hold(&cid_pack(cid)->edq);
 	if (at) {
 		tid = at->tid;
 		scx_edq_task_drop(&at->common);
@@ -980,7 +1016,7 @@ cid_edq_remove_held_to_local(s32 src_cid, s32 dst_cid, cid_edq_task_t *at,
 {
 	int ret;
 
-	ret = scx_edq_try_remove(&cid_ctx(src_cid)->edq, &at->common);
+	ret = scx_edq_try_remove(&cid_pack(src_cid)->edq, &at->common);
 	if (ret) {
 		if (ret != -EINVAL && ret != -EBUSY)
 			scx_bpf_error("EDQ exact remove failed for tid %llu: %d",
@@ -1002,7 +1038,7 @@ cid_edq_remove_held_to_local(s32 src_cid, s32 dst_cid, cid_edq_task_t *at,
  */
 static __noinline bool cid_queue_move_head_to_local(s32 cid)
 {
-	struct scx_edq __arena *edq = &cid_ctx(cid)->edq;
+	struct scx_edq __arena *edq = &cid_pack(cid)->edq;
 	cid_edq_task_t *at;
 
 	while (can_loop) {
@@ -1023,7 +1059,7 @@ static __noinline bool cid_queue_move_head_to_local(s32 cid)
  */
 static __noinline bool cid_edq_move_first_eligible_to_local(s32 cid, u64 vref)
 {
-	struct scx_edq __arena *edq = &cid_ctx(cid)->edq;
+	struct scx_edq __arena *edq = &cid_pack(cid)->edq;
 	cid_edq_task_t *at;
 
 	while (can_loop) {
@@ -1068,7 +1104,7 @@ static bool cid_queue_insert(struct task_struct *p, task_ctx_t *tctx,
 	at->cid = cid;
 	/* Publish custody before the node becomes visible to another CPU's pop. */
 	WRITE_ONCE(at->state, CID_EDQ_ENQUEUED);
-	ret = scx_edq_insert(&cid_ctx(cid)->edq, &at->common, deadline,
+	ret = scx_edq_insert(&cid_pack(cid)->edq, &at->common, deadline,
 			      vruntime);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_ENQUEUED,
@@ -1282,7 +1318,7 @@ static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
 		return false;
 	cctx = cid_ctx(cid);
 
-	return cctx->curr_w && cctx->curr_idle;
+	return cctx->pack.curr_w && cctx->curr_idle;
 }
 
 static void cid_queued_set(s32 cid)
@@ -2279,7 +2315,7 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 		if (!type)
 			continue;
 		nr_running = cid_queue_nr(src_cid) +
-			     !!READ_ONCE(src->curr_w);
+			     !!READ_ONCE(src->pack.curr_w);
 		if (!nr_running)
 			continue;
 		util = cid_util(src_cid, now);
@@ -2315,7 +2351,7 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 			return true;
 		}
 	}
-	if (!READ_ONCE(cid_ctx(best)->curr_w) ||
+	if (!READ_ONCE(cid_pack(best)->curr_w) ||
 	    __sync_val_compare_and_swap(&cid_ctx(best)->active_balance_cid, -1,
 					    dst_cid) != -1) {
 		active_balance_complete(dst_cid, detach);
@@ -3024,7 +3060,7 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 			break;
 		}
 		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-		    ((task_ctx_t *)at)->vjoin_w > budget ||
+		    ((task_ctx_t *)at)->se.vjoin_w > budget ||
 		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
 			scx_edq_task_drop(&at->common);
 			continue;
@@ -3428,13 +3464,13 @@ static u64 task_dl(const struct task_struct *p, task_ctx_t *tctx)
 	 * enqueues. A deadline belongs to the request that created it, so do
 	 * not carry one calculated from the old request into the new one.
 	 */
-	if (tctx->request != request) {
-		tctx->request = request;
-		tctx->deadline = 0;
+	if (tctx->se.request != request) {
+		tctx->se.request = request;
+		tctx->se.deadline = 0;
 	}
 
-	if (tctx->deadline && time_before(tctx->vruntime, tctx->deadline))
-		return tctx->deadline;
+	if (tctx->se.deadline && time_before(tctx->se.vruntime, tctx->se.deadline))
+		return tctx->se.deadline;
 
 	/*
 	 * A task that has just been forked asks for half a request the
@@ -3456,9 +3492,9 @@ static u64 task_dl(const struct task_struct *p, task_ctx_t *tctx)
 		request /= 2;
 	}
 
-	tctx->deadline = tctx->vruntime + scale_by_dl_weight(p, tctx, request);
+	tctx->se.deadline = tctx->se.vruntime + scale_by_dl_weight(p, tctx, request);
 
-	return tctx->deadline;
+	return tctx->se.deadline;
 }
 
 /*
@@ -3564,21 +3600,16 @@ static s64 vdiv(s64 v, u64 d)
 }
 
 /*
- * The reference of @cid's pack. Callers pass a cid they have checked; the
- * guard is there so a stray one indexes nothing, and its answer is not
- * meant to be placed against.
+ * The reference of @pk.
  */
-static u64 cid_vref(s32 cid)
+static u64 pack_vref(pack_t *pk)
 {
-	if (!cid_valid(cid))
-		return 0;
-
-	return cid_ctx(cid)->vref;
+	return pk->vref;
 }
 
 /*
- * The reference of @cid's pack at @now, with the service the task running
- * there has taken since it was picked folded in, see cid_vref().
+ * The reference of @pk at @now, with the service the task running there
+ * has taken since it was picked folded in, see pack_vref().
  *
  * A running task's vruntime is only charged in ops.stopping(), so between
  * two context switches the reference stands still while the CPU goes on
@@ -3602,39 +3633,35 @@ static u64 cid_vref(s32 cid)
  * point, see cidland_dispatch(), so the estimate would be running past
  * what it can know.
  */
-static u64 cid_vref_at(s32 cid, u64 now)
+static u64 pack_vref_at(pack_t *pk, u64 now)
 {
-	struct cid_ctx __arena *cctx;
 	u64 w, sum_w, delta, dv;
 
-	if (!cid_valid(cid))
-		return 0;
-	cctx = cid_ctx(cid);
-
-	w = cctx->curr_w;
-	sum_w = cctx->vsum_w;
-	delta = now - cctx->curr_run_at;
-	if (!w || !sum_w || delta >= cctx->curr_request)
-		return cctx->vref;
+	w = pk->curr_w;
+	sum_w = pk->vsum_w;
+	delta = now - pk->curr_run_at;
+	if (!w || !sum_w || delta >= pk->curr_request)
+		return pk->vref;
 
 	dv = delta * NICE_0_WEIGHT / w;
 
-	return cctx->vref + dv * w / sum_w;
+	return pk->vref + dv * w / sum_w;
 }
 
 /*
  * The reference to place a task against and to test it against, which is
- * cid_vref_at() unless --no-vref-update pins it to the stored value.
+ * pack_vref_at() unless --no-vref-update pins it to the stored value.
  */
-static u64 cid_vref_place(s32 cid, u64 now)
+static u64 pack_vref_place(pack_t *pk, u64 now)
 {
-	return no_vref_update ? cid_vref(cid) : cid_vref_at(cid, now);
+	return no_vref_update ? pack_vref(pk) : pack_vref_at(pk, now);
 }
 
 /*
- * The reference to place a task against when it is about to join @cid.
+ * The reference to place @se against when it is about to join @pk with
+ * weight @join_w.
  *
- * cid_vref_at() projects the running task's uncharged service over the
+ * pack_vref_at() projects the running task's uncharged service over the
  * pack's current weight W. Once a task of weight w joins, the same service
  * is projected over W + w instead. Placing at the pre-join projection can
  * therefore leave a zero-lag task one unit above the post-join reference
@@ -3648,40 +3675,35 @@ static u64 cid_vref_place(s32 cid, u64 now)
  * reconstructs V'. Thus a zero-lag task remains eligible after joining,
  * with the same left bias avg_vruntime() gives fair.c's reference.
  */
-static u64 cid_vref_before_join(s32 cid, const struct task_struct *p,
-				const task_ctx_t *tctx, u64 now)
+static u64 pack_vref_before_join(pack_t *pk, const sched_ent_t *se,
+				 u64 join_w, u64 now)
 {
-	struct cid_ctx __arena *cctx;
-	u64 curr_w, sum_w, join_w, delta, dv, projection;
+	u64 curr_w, sum_w, delta, dv, projection;
 
-	if (no_vref_update || !cid_valid(cid) || tctx->vcid == cid)
-		return cid_vref_place(cid, now);
-	cctx = cid_ctx(cid);
+	if (no_vref_update || se->vpack == pk)
+		return pack_vref_place(pk, now);
 
-	curr_w = cctx->curr_w;
-	sum_w = cctx->vsum_w;
-	delta = now - cctx->curr_run_at;
-	if (!curr_w || !sum_w || delta >= cctx->curr_request)
-		return cctx->vref;
+	curr_w = pk->curr_w;
+	sum_w = pk->vsum_w;
+	delta = now - pk->curr_run_at;
+	if (!curr_w || !sum_w || delta >= pk->curr_request)
+		return pk->vref;
 
-	join_w = task_weight(p, tctx);
 	dv = delta * NICE_0_WEIGHT / curr_w;
 	projection = dv * curr_w / (sum_w + join_w);
 
-	return cctx->vref + projection * (sum_w + join_w) / sum_w;
+	return pk->vref + projection * (sum_w + join_w) / sum_w;
 }
 
-/* Return @p's current lag against @cid, clamped as entity_lag() does. */
-static s64 task_lag_at(const struct task_struct *p,
-		       const task_ctx_t *tctx, s32 cid, u64 now)
+/*
+ * Return the lag of @se against @pk at @now, rq clock, clamped to @limit
+ * both ways as entity_lag() does.
+ */
+static s64 ent_lag_at(const sched_ent_t *se, pack_t *pk, s64 limit, u64 now)
 {
-	s64 limit = (s64)lag_limit(p, tctx);
 	s64 lag;
 
-	if (!cid_valid(cid))
-		return tctx->vlag;
-
-	lag = (s64)(cid_vref_place(cid, cid_clock_task_at(cid, now)) - tctx->vruntime);
+	lag = (s64)(pack_vref_place(pk, cid_clock_task_at(pk->cid, now)) - se->vruntime);
 	if (lag > limit)
 		lag = limit;
 	else if (lag < -limit)
@@ -3690,27 +3712,33 @@ static s64 task_lag_at(const struct task_struct *p,
 	return lag;
 }
 
+/* Return @p's current lag against @pk, clamped as entity_lag() does. */
+static s64 task_lag_at(const struct task_struct *p,
+		       const task_ctx_t *tctx, pack_t *pk, u64 now)
+{
+	return ent_lag_at(&tctx->se, pk, (s64)lag_limit(p, tctx), now);
+}
+
 /*
- * Is the task running on @cid still owed service at @now?
+ * Is the entity running in @pk still owed service at @now?
  *
  * Its vruntime is only charged in ops.stopping() too, so the service it
  * has taken since it was picked is added to it here, and to the reference
- * it is measured against by cid_vref_at(). This is what
+ * it is measured against by pack_vref_at(). This is what
  * wakeup_preempt_fair() calls update_curr_fair() for before deciding
  * anything. A task that has run for a whole request is past its deadline
  * as well and has no protection left either way.
  */
-static bool curr_owed_service(s32 cid, u64 now)
+static bool curr_owed_service(pack_t *pk, u64 now)
 {
-	struct cid_ctx __arena *cctx = cid_ctx(cid);
-	u64 w = cctx->curr_w, delta = now - cctx->curr_run_at;
+	u64 w = pk->curr_w, delta = now - pk->curr_run_at;
 	u64 dv;
 
-	if (!w || delta >= cctx->curr_request)
+	if (!w || delta >= pk->curr_request)
 		return false;
 	dv = delta * NICE_0_WEIGHT / w;
 
-	return !time_after(cctx->curr_v + dv, cid_vref_at(cid, now));
+	return !time_after(pk->curr_v + dv, pack_vref_at(pk, now));
 }
 
 /*
@@ -3722,16 +3750,16 @@ static bool curr_owed_service(s32 cid, u64 now)
 #define HRTICK_MIN_NS	10000ULL
 
 /*
- * Wall-clock time the task running on @cid needs to reach its deadline,
- * read off @cid's published view of it, or 0 if it is there already or
+ * Wall-clock time the entity running in @pk needs to reach its deadline,
+ * read off @pk's published view of it, or 0 if it is there already or
  * nothing is running.
  *
  * The view is read without a lock, from other cids too, and can be of a
  * task picked after @now was taken: that task has consumed nothing yet.
  */
-static s64 curr_dl_in(struct cid_ctx __arena *cctx, u64 now)
+static s64 curr_dl_in(pack_t *pk, u64 now)
 {
-	u64 w = cctx->curr_w, run_at = cctx->curr_run_at, v;
+	u64 w = pk->curr_w, run_at = pk->curr_run_at, v;
 	s64 vdelta;
 
 	if (!w)
@@ -3739,8 +3767,8 @@ static s64 curr_dl_in(struct cid_ctx __arena *cctx, u64 now)
 
 	if (time_before(now, run_at))
 		now = run_at;
-	v = cctx->curr_v + (now - run_at) * NICE_0_WEIGHT / w;
-	vdelta = (s64)(cctx->curr_dl - v);
+	v = pk->curr_v + (now - run_at) * NICE_0_WEIGHT / w;
+	vdelta = (s64)(pk->curr_dl - v);
 	if (vdelta <= 0)
 		return 0;
 
@@ -3803,10 +3831,10 @@ static void hrtick_start(s32 cid, u64 tnow)
 	s64 delta;
 	u64 now, at;
 
-	if (no_hrtick || !cctx->curr_w)
+	if (no_hrtick || !cctx->pack.curr_w)
 		return;
 
-	delta = curr_dl_in(cctx, tnow);
+	delta = curr_dl_in(&cctx->pack, tnow);
 	if (!delta) {
 		scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
 		return;
@@ -3866,11 +3894,11 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 		return 0;
 
 	cctx = cid_ctx(cid);
-	if (!cctx->curr_w || !cid_queued_test(cid))
+	if (!cctx->pack.curr_w || !cid_queued_test(cid))
 		return 0;
 
 	now = scx_bpf_now();
-	delta = curr_dl_in(cctx, now - cctx->clock_off);
+	delta = curr_dl_in(&cctx->pack, now - cctx->clock_off);
 	if (delta > HRTICK_MIN_NS) {
 		cctx->hrtick_at = now + delta;
 		bpf_timer_start(&ht->timer, delta, 0);
@@ -3896,7 +3924,7 @@ static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow)
 {
 	TOUCH_ARENA();
 	return cid_edq_move_first_eligible_to_local(
-		cid, cid_vref_place(cid, tnow));
+		cid, pack_vref_place(cid_pack(cid), tnow));
 }
 
 /*
@@ -3917,22 +3945,21 @@ static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow)
 #define KEEP_RUNNING_MAX_NS	100000000ULL
 
 /*
- * The deadline the task running on @cid would be picked again with at @now,
+ * The deadline the entity running in @pk would be picked again with at @now,
  * or false when it is not in the pick at all.
  */
-static bool curr_pick_dl(s32 cid, u64 now, u64 *dlp)
+static bool curr_pick_dl(pack_t *pk, u64 now, u64 *dlp)
 {
-	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	u64 w, v, dl;
 
-	w = cctx->curr_w;
+	w = pk->curr_w;
 	if (!w)
 		return false;
 
-	if (now - cctx->curr_since >= KEEP_RUNNING_MAX_NS)
+	if (now - pk->curr_since >= KEEP_RUNNING_MAX_NS)
 		return false;
 
-	v = cctx->curr_v + (now - cctx->curr_run_at) * NICE_0_WEIGHT / w;
+	v = pk->curr_v + (now - pk->curr_run_at) * NICE_0_WEIGHT / w;
 
 	/*
 	 * A task that has had more than its share is not in the pick at all,
@@ -3949,7 +3976,7 @@ static bool curr_pick_dl(s32 cid, u64 now, u64 *dlp)
 	 * and got a whole new slice out of it. A probe waking next to a hog
 	 * waited 1.6 ms for that on one wakeup in four, 0.3 ms under fair.c.
 	 */
-	if (!no_eligibility && time_after(v, cid_vref_at(cid, now)))
+	if (!no_eligibility && time_after(v, pack_vref_at(pk, now)))
 		return false;
 
 	/*
@@ -3958,11 +3985,11 @@ static bool curr_pick_dl(s32 cid, u64 now, u64 *dlp)
 	 * has reached, which is what puts a task that has had its turn behind
 	 * the ones that have not.
 	 */
-	dl = cctx->curr_dl;
+	dl = pk->curr_dl;
 	if (!dl || !time_before(v, dl)) {
 		if (w < MIN_DL_WEIGHT)
 			w = MIN_DL_WEIGHT;
-		dl = v + cctx->curr_request * NICE_0_WEIGHT / w;
+		dl = v + pk->curr_request * NICE_0_WEIGHT / w;
 	}
 
 	*dlp = dl;
@@ -3998,10 +4025,10 @@ static bool curr_pick_dl(s32 cid, u64 now, u64 *dlp)
  */
 static bool keep_running(s32 cid, u64 now)
 {
-	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	pack_t *pk = cid_pack(cid);
 	u64 dl, head_dl;
 
-	if (!curr_pick_dl(cid, now, &dl))
+	if (!curr_pick_dl(pk, now, &dl))
 		return false;
 
 	/*
@@ -4015,7 +4042,7 @@ static bool keep_running(s32 cid, u64 now)
 	 */
 	if (!cid_queued_test(cid))
 		return false;
-	if (scx_edq_first_deadline(&cctx->edq, &head_dl))
+	if (scx_edq_first_deadline(&pk->edq, &head_dl))
 		return false;
 
 	/* A tie is kept: giving the CPU up costs a switch. */
@@ -4023,66 +4050,74 @@ static bool keep_running(s32 cid, u64 now)
 }
 
 /*
- * Drop @tctx out of its pack's reference, see cid_vref().
+ * Drop @se out of its pack's reference, see pack_vref().
  */
-static void vref_leave(task_ctx_t *tctx)
+static void vref_leave(sched_ent_t *se)
 {
-	struct cid_ctx __arena *cctx;
+	pack_t *pk = se->vpack;
 	u64 w;
 	s64 d;
 
-	if (!cid_valid(tctx->vcid))
+	if (!pk)
 		return;
-	cctx = cid_ctx(tctx->vcid);
 
-	w = __sync_fetch_and_sub(&cctx->vsum_w, tctx->vjoin_w);
+	w = __sync_fetch_and_sub(&pk->vsum_w, se->vjoin_w);
 
 	/*
 	 * V' = V + w_i*(V - v_i) / (W - w_i), and the last one out leaves
 	 * the reference standing where it is.
 	 */
-	if (w > tctx->vjoin_w) {
-		d = (s64)(cctx->vref - tctx->vjoin_v);
-		__sync_fetch_and_add(&cctx->vref,
-				     vdiv((s64)tctx->vjoin_w * d, w - tctx->vjoin_w));
+	if (w > se->vjoin_w) {
+		d = (s64)(pk->vref - se->vjoin_v);
+		__sync_fetch_and_add(&pk->vref,
+				     vdiv((s64)se->vjoin_w * d, w - se->vjoin_w));
 	} else {
 		/* Nothing left to pay a debt off, see delay_settle(). */
-		__sync_fetch_and_add(&cctx->empty_gen, 1);
+		__sync_fetch_and_add(&pk->empty_gen, 1);
 	}
 
-	tctx->vcid = -1;
+	se->vpack = NULL;
 }
 
 /*
- * Fold @p into @cid's reference, see cid_vref().
+ * Fold @se, of weight @join_w, into @pk's reference, see pack_vref(). The
+ * entity is not a member of any pack.
  */
-static void vref_join(s32 cid, const struct task_struct *p, task_ctx_t *tctx)
+static void vref_join(pack_t *pk, sched_ent_t *se, u64 join_w)
 {
-	struct cid_ctx __arena *cctx;
 	u64 w;
 	s64 d;
 
-	if (tctx->vcid == cid)
-		return;
-	vref_leave(tctx);
-
-	if (!cid_valid(cid))
-		return;
-	cctx = cid_ctx(cid);
-
-	tctx->vjoin_w = task_weight(p, tctx);
-	tctx->vjoin_v = tctx->vruntime;
-	tctx->vcid = cid;
+	se->vjoin_w = join_w;
+	se->vjoin_v = se->vruntime;
+	se->vpack = pk;
 
 	/*
 	 * V' = V + w_i*(v_i - V) / (W + w_i). On an empty pack W is 0 and
 	 * the increment is exactly v_i - V, so the first member becomes the
 	 * reference, which is what the average of one is.
 	 */
-	w = __sync_fetch_and_add(&cctx->vsum_w, tctx->vjoin_w);
-	d = (s64)(tctx->vruntime - cctx->vref);
-	__sync_fetch_and_add(&cctx->vref,
-			     vdiv((s64)tctx->vjoin_w * d, w + tctx->vjoin_w));
+	w = __sync_fetch_and_add(&pk->vsum_w, join_w);
+	d = (s64)(se->vruntime - pk->vref);
+	__sync_fetch_and_add(&pk->vref, vdiv((s64)join_w * d, w + join_w));
+}
+
+/*
+ * Make @p a member of its pack on @cid, leaving the one it was in, see
+ * vref_join().
+ */
+static void task_vref_join(s32 cid, const struct task_struct *p,
+			   task_ctx_t *tctx)
+{
+	pack_t *pk = cid_valid(cid) ? task_pack(tctx, cid) : NULL;
+
+	if (tctx->se.vpack == pk)
+		return;
+	vref_leave(&tctx->se);
+
+	if (!pk)
+		return;
+	vref_join(pk, &tctx->se, task_weight(p, tctx));
 }
 
 /*
@@ -4128,13 +4163,13 @@ static void cgw_refresh(const struct task_struct *p, task_ctx_t *tctx)
 		return;
 
 	tctx->cgw = w;
-	tctx->deadline = 0;
+	tctx->se.deadline = 0;
 	reweight_task(p, tctx, false);
-	vref_leave(tctx);
+	vref_leave(&tctx->se);
 }
 
 /*
- * Bring the contribution of @tctx up to date with its vruntime.
+ * Bring the contribution of @se up to date with its vruntime.
  *
  *	dV = w_i * dv_i / W
  *
@@ -4144,30 +4179,29 @@ static void cgw_refresh(const struct task_struct *p, task_ctx_t *tctx)
  * carry the remainder. Only the cid the task ran on is touched, so the
  * carry needs no atomic.
  */
-static void vref_charge(task_ctx_t *tctx)
+static void vref_charge(sched_ent_t *se)
 {
-	struct cid_ctx __arena *cctx;
+	pack_t *pk = se->vpack;
 	u64 acc, delta, w;
 	s64 dv;
 
-	if (!cid_valid(tctx->vcid))
+	if (!pk)
 		return;
-	cctx = cid_ctx(tctx->vcid);
 
-	dv = (s64)(tctx->vruntime - tctx->vjoin_v);
+	dv = (s64)(se->vruntime - se->vjoin_v);
 	if (dv <= 0)
 		return;
-	tctx->vjoin_v = tctx->vruntime;
+	se->vjoin_v = se->vruntime;
 
-	w = cctx->vsum_w;
+	w = pk->vsum_w;
 	if (!w)
 		return;
 
-	acc = tctx->vjoin_w * (u64)dv + cctx->vref_rem;
+	acc = se->vjoin_w * (u64)dv + pk->vref_rem;
 	delta = acc / w;
-	cctx->vref_rem = acc - delta * w;
+	pk->vref_rem = acc - delta * w;
 	if (delta)
-		__sync_fetch_and_add(&cctx->vref, delta);
+		__sync_fetch_and_add(&pk->vref, delta);
 }
 
 /*
@@ -4188,32 +4222,26 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
+	pack_t *pk;
 
 	if (!tctx)
 		return;
+	pk = task_pack(tctx, cid);
 
-	tctx->vruntime += calc_delta_fair(p, tctx, now - tctx->last_run_at);
+	tctx->se.vruntime += calc_delta_fair(p, tctx, now - tctx->last_run_at);
 	tctx->last_run_at = now;
-	vref_charge(tctx);
+	vref_charge(&tctx->se);
 
-	cctx->curr_dl = task_dl(p, tctx);
-	cctx->curr_v = tctx->vruntime;
-	cctx->curr_w = task_weight(p, tctx);
-	cctx->curr_run_at = now;
-	cctx->curr_request = task_request(p);
+	pk->curr_dl = task_dl(p, tctx);
+	pk->curr_v = tctx->se.vruntime;
+	pk->curr_w = task_weight(p, tctx);
+	pk->curr_run_at = now;
+	pk->curr_request = task_request(p);
 	cctx->curr_idle = p->policy == SCHED_IDLE;
 }
 
 /*
- * Return the total weight of the pack queued on @cid, 0 if it is empty.
- */
-static u64 cid_pack_weight(s32 cid)
-{
-	return cid_valid(cid) ? cid_ctx(cid)->vsum_w : 0;
-}
-
-/*
- * Move @tctx's vruntime to @vruntime, where it has just been placed against
+ * Move @se's vruntime to @vruntime, where it has just been placed against
  * a pack, and decide what becomes of its deadline.
  *
  * A task that slept gets a new request when it wakes: place_entity()
@@ -4242,16 +4270,16 @@ static u64 cid_pack_weight(s32 cid)
  * deadline the vruntime has already reached is a consumed request, and
  * is dropped either way, as update_deadline() would reissue it.
  */
-static void set_vruntime(task_ctx_t *tctx, u64 vruntime, bool sleep)
+static void set_vruntime(sched_ent_t *se, u64 vruntime, bool sleep)
 {
 	u64 rel = 0;
 
-	if (!sleep && !no_place_rel_deadline && tctx->deadline &&
-	    time_before(tctx->vruntime, tctx->deadline))
-		rel = tctx->deadline - tctx->vruntime;
+	if (!sleep && !no_place_rel_deadline && se->deadline &&
+	    time_before(se->vruntime, se->deadline))
+		rel = se->deadline - se->vruntime;
 
-	tctx->vruntime = vruntime;
-	tctx->deadline = rel ? vruntime + rel : 0;
+	se->vruntime = vruntime;
+	se->deadline = rel ? vruntime + rel : 0;
 }
 
 /*
@@ -4304,16 +4332,16 @@ static void set_vruntime(task_ctx_t *tctx, u64 vruntime, bool sleep)
 static s64 delay_debt(const task_ctx_t *tctx, u64 now)
 {
 	s32 cid = tctx->delay_cid;
-	struct cid_ctx __arena *cctx = cid_ctx(cid);
-	s64 adv, lag = tctx->vlag;
+	pack_t *pk = task_pack(tctx, cid);
+	s64 adv, lag = tctx->se.vlag;
 
-	if (cctx->empty_gen != tctx->delay_gen || lag >= 0)
+	if (pk->empty_gen != tctx->delay_gen || lag >= 0)
 		return 0;
 
-	adv = (s64)(cid_vref_place(cid, cid_clock_task_at(cid, now)) - tctx->delay_vref);
+	adv = (s64)(pack_vref_place(pk, cid_clock_task_at(cid, now)) - tctx->delay_vref);
 	if (adv <= 0)
 		return lag;
-	adv = vdiv(adv * (s64)tctx->delay_w, tctx->delay_w + tctx->vw);
+	adv = vdiv(adv * (s64)tctx->delay_w, tctx->delay_w + tctx->se.vw);
 
 	lag += adv;
 	return lag > 0 ? 0 : lag;
@@ -4323,7 +4351,7 @@ static void delay_settle(task_ctx_t *tctx, u64 now)
 {
 	if (!cid_valid(tctx->delay_cid))
 		return;
-	tctx->vlag = delay_debt(tctx, now);
+	tctx->se.vlag = delay_debt(tctx, now);
 	tctx->delay_cid = -1;
 }
 
@@ -4407,14 +4435,13 @@ static s32 delay_requeue_cid(const struct task_struct *p,
  * A task already in this pack is only being re-placed, not joined, because
  * vref_join() is a no-op for it. Its offset therefore needs no correction.
  */
-static s64 compensate_place_offset(s32 cid, const struct task_struct *p,
-				   const task_ctx_t *tctx, s64 offset)
+static s64 compensate_place_offset(pack_t *pk, const sched_ent_t *se,
+				   u64 weight, s64 offset)
 {
-	u64 weight, load = cid_pack_weight(cid);
+	u64 load = pk->vsum_w;
 
-	if (no_place_lag || !load || tctx->vcid == cid || !offset)
+	if (no_place_lag || !load || se->vpack == pk || !offset)
 		return offset;
-	weight = task_weight(p, tctx);
 
 	return offset + vdiv(offset * (s64)weight, load);
 }
@@ -4425,25 +4452,27 @@ static void place_task(s32 cid, const struct task_struct *p,
 	u64 tnow = cid_valid(cid) ? cid_clock_task_at(cid, now) : now;
 
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
-		u64 vruntime = cid_vref_before_join(cid, p, tctx, tnow);
+		pack_t *pk = task_pack(tctx, cid);
+		u64 w = task_weight(p, tctx);
+		u64 vruntime = pack_vref_before_join(pk, &tctx->se, w, tnow);
 
 		/*
 		 * ops.quiescent() does not run when the kernel migrates a queued
 		 * task. Refresh its lag against the pack it is leaving instead of
 		 * reusing the value saved at its last sleep.
 		 */
-		if (!sleep && cid_valid(tctx->vcid))
-			tctx->vlag = task_lag_at(p, tctx, tctx->vcid, now);
+		if (!sleep && tctx->se.vpack)
+			tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, now);
 		delay_settle(tctx, now);
-		if (cid_pack_weight(cid)) {
-			s64 offset = tctx->vlag;
+		if (pk->vsum_w) {
+			s64 offset = tctx->se.vlag;
 
-			offset = compensate_place_offset(cid, p, tctx, offset);
+			offset = compensate_place_offset(pk, &tctx->se, w, offset);
 			vruntime -= offset;
 		}
-		set_vruntime(tctx, vruntime, sleep);
+		set_vruntime(&tctx->se, vruntime, sleep);
 	}
-	vref_join(cid, p, tctx);
+	task_vref_join(cid, p, tctx);
 }
 
 /*
@@ -4479,32 +4508,33 @@ static void place_task(s32 cid, const struct task_struct *p,
 static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 			  bool dequeued)
 {
-	u64 w = task_weight(p, tctx), old = tctx->vw;
+	u64 w = task_weight(p, tctx), old = tctx->se.vw;
 	s32 cid;
 
 	if (w == old)
 		return;
-	if (dequeued && cid_valid(tctx->vcid))
-		tctx->vlag = task_lag_at(p, tctx, tctx->vcid, scx_bpf_now());
-	tctx->vw = w;
+	if (dequeued && tctx->se.vpack)
+		tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, scx_bpf_now());
+	tctx->se.vw = w;
 	if (!old)
 		return;
 
-	tctx->vlag = vdiv(tctx->vlag * (s64)old, w);
-	if (tctx->deadline && time_before(tctx->vruntime, tctx->deadline))
-		tctx->deadline = tctx->vruntime +
-				 (tctx->deadline - tctx->vruntime) * old / w;
+	tctx->se.vlag = vdiv(tctx->se.vlag * (s64)old, w);
+	if (tctx->se.deadline && time_before(tctx->se.vruntime, tctx->se.deadline))
+		tctx->se.deadline = tctx->se.vruntime +
+				 (tctx->se.deadline - tctx->se.vruntime) * old / w;
 
 	if (!dequeued)
 		return;
 	cid = scx_bpf_task_cid((struct task_struct *)p);
 	if (cid_valid(cid)) {
+		pack_t *pk = task_pack(tctx, cid);
 		u64 now = scx_bpf_now();
-		u64 vruntime = cid_vref_place(cid, cid_clock_task_at(cid, now));
+		u64 vruntime = pack_vref_place(pk, cid_clock_task_at(cid, now));
 
-		if (cid_pack_weight(cid))
-			vruntime -= tctx->vlag;
-		set_vruntime(tctx, vruntime, false);
+		if (pk->vsum_w)
+			vruntime -= tctx->se.vlag;
+		set_vruntime(&tctx->se, vruntime, false);
 	}
 }
 
@@ -4682,7 +4712,7 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  *
  * Nothing here reads a reference that is behind: the service the running
  * task has taken since it was picked is folded into both sides of every
- * comparison, see cid_vref_at() and curr_owed_service(), the way
+ * comparison, see pack_vref_at() and curr_owed_service(), the way
  * wakeup_preempt_fair() calls update_curr_fair() before deciding
  * anything.
  *
@@ -4725,11 +4755,13 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	struct cid_ctx __arena *cctx;
 	bool owed, p_idle, has_head;
 	u64 head_dl;
+	pack_t *pk;
 
 	if (cid_idle_test(cid))
 		goto idle;
 
 	cctx = cid_ctx(cid);
+	pk = task_pack(tctx, cid);
 
 	if (no_wakeup_preempt)
 		goto queued;
@@ -4752,7 +4784,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * pick_eevdf() only ever looks at the eligible part of the tree.
 	 */
 	if (!no_eligibility &&
-	    time_after(tctx->vruntime, cid_vref_place(cid, now)))
+	    time_after(tctx->se.vruntime, pack_vref_place(pk, now)))
 		goto queued;
 
 	/*
@@ -4771,8 +4803,8 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * Equal default requests therefore add only this comparison and branch
 	 * to the existing wakeup path.
 	 */
-	if (!no_preempt_short && tctx->request < cctx->curr_request &&
-	    cctx->curr_w)
+	if (!no_preempt_short && tctx->se.request < pk->curr_request &&
+	    pk->curr_w)
 		goto preempt;
 
 	/*
@@ -4781,7 +4813,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * has no protection left. This is the half of the pick that
 	 * RUN_TO_PARITY governed, and --no-run-to-parity drops it alone.
 	 */
-	owed = !no_eligibility && curr_owed_service(cid, now);
+	owed = !no_eligibility && curr_owed_service(pk, now);
 	if (owed && !no_run_to_parity)
 		goto queued;
 
@@ -4795,7 +4827,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * has had its share loses to the queued task whatever the deadlines
 	 * say. --no-eligibility keeps deciding on the deadlines alone.
 	 */
-	if ((owed || no_eligibility) && !time_before(dl, cctx->curr_dl))
+	if ((owed || no_eligibility) && !time_before(dl, pk->curr_dl))
 		goto queued;
 
 	/*
@@ -4822,7 +4854,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * CPU that was one context switch in three, and perf bench sched
 	 * messaging ran at half its speed.
 	 */
-	has_head = !scx_edq_first_deadline(&cctx->edq, &head_dl);
+	has_head = !scx_edq_first_deadline(&pk->edq, &head_dl);
 	if (has_head) {
 		bool loses = !time_before(dl, head_dl);
 
@@ -4958,8 +4990,9 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * vruntime against the reference, which is entity_eligible().
 	 */
 	if (displaced && !no_eligibility &&
-	    time_after(tctx->vruntime, cid_vref_place(prev_cid, tnow)))
-		tctx->deadline = 0;
+	    time_after(tctx->se.vruntime,
+		       pack_vref_place(task_pack(tctx, prev_cid), tnow)))
+		tctx->se.deadline = 0;
 
 	dl = task_dl(p, tctx);
 
@@ -5018,7 +5051,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (!cid_queue_insert(p, tctx, prev_cid, task_request(p), dl,
-			      tctx->vruntime, enq_flags)) {
+			      tctx->se.vruntime, enq_flags)) {
 		if (displaced)
 			cid_queued_check(prev_cid);
 		return;
@@ -5355,10 +5388,11 @@ bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
 	tnow = cid_clock_task_owned(cid, now);
 	keep_charge(from, cid, tnow);
 
-	if (time_after(tctx->vruntime, cid_vref_place(cid, tnow)))
+	if (time_after(tctx->se.vruntime,
+		       pack_vref_place(task_pack(tctx, cid), tnow)))
 		goto pick;
 
-	tctx->vruntime = tctx->deadline;
+	tctx->se.vruntime = tctx->se.deadline;
 
 	/*
 	 * The jump is service as far as the pack is concerned, the way
@@ -5758,10 +5792,10 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 	bool retry = false;
 	u32 nth;
 
-	if (has_prev && curr_pick_dl(dst_cid, tnow, &rival_dl))
+	if (has_prev && curr_pick_dl(cid_pack(dst_cid), tnow, &rival_dl))
 		rival = true;
 	if (cid_queued_test(dst_cid) &&
-	    !scx_edq_first_deadline(&dst->edq, &head_dl) &&
+	    !scx_edq_first_deadline(&dst->pack.edq, &head_dl) &&
 	    (!rival || time_before(head_dl, rival_dl))) {
 		rival_dl = head_dl;
 		rival = true;
@@ -5781,7 +5815,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 				cid_queued_check(src_cid);
 			break;
 		}
-		weight = ((task_ctx_t *)at)->vjoin_w;
+		weight = ((task_ctx_t *)at)->se.vjoin_w;
 		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
 		    weight > READ_ONCE(dst->busy_balance_budget) ||
 		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
@@ -5793,8 +5827,9 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
-		lag = task_lag_at(p, (task_ctx_t *)at, src_cid, now);
-		v = cid_vref_place(dst_cid, tnow) - lag;
+		lag = task_lag_at(p, (task_ctx_t *)at,
+				  task_pack((task_ctx_t *)at, src_cid), now);
+		v = pack_vref_place(task_pack((task_ctx_t *)at, dst_cid), tnow) - lag;
 		dl = v + (at->common.node.deadline -
 			  at->common.node.eligibility);
 		if (rival && ((!no_eligibility && lag < 0) ||
@@ -6010,6 +6045,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	cid_edq_task_t *at;
 	task_ctx_t *tctx;
+	pack_t *pk;
 	s64 lag;
 	u64 now;
 	s32 cid;
@@ -6040,8 +6076,11 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 * against the reference alone would hand every task that sleeps long
 	 * enough the full credit, no matter whether it had earned it.
 	 */
-	cid = cid_valid(tctx->vcid) ? tctx->vcid : scx_bpf_task_cid(p);
+	pk = tctx->se.vpack;
+	cid = pk ? pk->cid : scx_bpf_task_cid(p);
 	if (cid_valid(cid)) {
+		if (!pk)
+			pk = task_pack(tctx, cid);
 		/*
 		 * update_curr() first: dequeue_entity() charges the service
 		 * the task has taken before it measures the lag, and this op
@@ -6053,10 +6092,10 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 		 */
 		if (scx_bpf_task_running(p) && cid == scx_bpf_task_cid(p))
 			keep_charge(p, cid, cid_clock_task_owned(cid, now));
-		lag = task_lag_at(p, tctx, cid, now);
-		tctx->vlag = lag;
+		lag = task_lag_at(p, tctx, pk, now);
+		tctx->se.vlag = lag;
 	}
-	vref_leave(tctx);
+	vref_leave(&tctx->se);
 
 	/*
 	 * A task that blocks over-served is what fair.c keeps in the tree,
@@ -6075,13 +6114,11 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	 * since that is the value that goes on moving.
 	 */
 	if (!no_delay_dequeue && (deq_flags & SCX_DEQ_SLEEP) && lag < 0 &&
-	    cid_valid(cid)) {
-		struct cid_ctx __arena *cctx = cid_ctx(cid);
-
+	    pk) {
 		tctx->delay_cid = cid;
-		tctx->delay_vref = cctx->vref;
-		tctx->delay_w = cctx->vsum_w;
-		tctx->delay_gen = cctx->empty_gen;
+		tctx->delay_vref = pk->vref;
+		tctx->delay_w = pk->vsum_w;
+		tctx->delay_gen = pk->empty_gen;
 	}
 }
 
@@ -6114,7 +6151,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	 * with no credit, while one that was still owed service keeps it.
 	 */
 	if (!direct_placed)
-		vref_leave(tctx);
+		vref_leave(&tctx->se);
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
@@ -6150,10 +6187,13 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * place_entity(): how far the task was from the pack it left is how
 	 * far it is placed from the pack it joins.
 	 */
-	if (cid_valid(tctx->vcid) && tctx->vcid != cid) {
-		s64 lag = task_lag_at(p, tctx, tctx->vcid, now);
+	if (tctx->se.vpack && cid_valid(cid) &&
+	    tctx->se.vpack != task_pack(tctx, cid)) {
+		s64 lag = task_lag_at(p, tctx, tctx->se.vpack, now);
 
-		set_vruntime(tctx, cid_vref_place(cid, tctx->last_run_at) - lag,
+		set_vruntime(&tctx->se,
+			     pack_vref_place(task_pack(tctx, cid),
+					     tctx->last_run_at) - lag,
 			     false);
 	}
 
@@ -6162,7 +6202,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * leaving, and before the join that snapshots what it weighs.
 	 */
 	cgw_refresh(p, tctx);
-	vref_join(cid, p, tctx);
+	task_vref_join(cid, p, tctx);
 
 	/*
 	 * Publish what this cid is running. A task queued here later is
@@ -6171,13 +6211,14 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 */
 	if (cid_valid(cid)) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
+		pack_t *pk = task_pack(tctx, cid);
 
-		cctx->curr_dl = task_dl(p, tctx);
-		cctx->curr_v = tctx->vruntime;
-		cctx->curr_run_at = tctx->last_run_at;
-		cctx->curr_since = tctx->last_run_at;
-		cctx->curr_request = task_request(p);
-		cctx->curr_w = task_weight(p, tctx);
+		pk->curr_dl = task_dl(p, tctx);
+		pk->curr_v = tctx->se.vruntime;
+		pk->curr_run_at = tctx->last_run_at;
+		pk->curr_since = tctx->last_run_at;
+		pk->curr_request = task_request(p);
+		pk->curr_w = task_weight(p, tctx);
 		cctx->curr_idle = p->policy == SCHED_IDLE;
 
 		/*
@@ -6240,16 +6281,16 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 *
 	 *	se->vruntime += calc_delta_fair(delta_exec, se);
 	 */
-	tctx->vruntime += calc_delta_fair(p, tctx, slice);
-	vref_charge(tctx);
+	tctx->se.vruntime += calc_delta_fair(p, tctx, slice);
+	vref_charge(&tctx->se);
 
 	/*
 	 * The service just charged is in the reference for real now, so
-	 * there is nothing left for cid_vref_at() to project on this cid
+	 * there is nothing left for pack_vref_at() to project on this cid
 	 * until ops.running() picks the next task.
 	 */
 	if (cid_valid(cid))
-		cid_ctx(cid)->curr_w = 0;
+		task_pack(tctx, cid)->curr_w = 0;
 
 	/*
 	 * Update per-cid statistics.
@@ -6271,10 +6312,11 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		 * pack reference instead of at the zero used during scheduler
 		 * startup; an old pack may have advanced arbitrarily far by then.
 		 */
-		tctx->vruntime = cid_valid(cid) ? cid_vref(cid) : 0;
-		tctx->vlag = 0;
-		tctx->deadline = 0;
-		tctx->vcid = -1;
+		tctx->se.vruntime = cid_valid(cid) ?
+				    pack_vref(task_pack(tctx, cid)) : 0;
+		tctx->se.vlag = 0;
+		tctx->se.deadline = 0;
+		tctx->se.vpack = NULL;
 		tctx->delay_cid = -1;
 		tctx->recent_used_cid = -1;
 		tctx->dispatch_migrate_cid = -1;
@@ -6325,7 +6367,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	tctx = scx_alloc(&task_ctx_allocator);
 	if (!tctx)
 		return -ENOMEM;
-	at = &tctx->edq;
+	at = &tctx->se.edq;
 	/*
 	 * No memset: LLVM 19 expands one on arena memory through the uncast
 	 * pointer and the verifier rejects the program, see
@@ -6338,10 +6380,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	at->state = CID_EDQ_NONE;
 	WRITE_ONCE(at->slice, 0);
 	WRITE_ONCE(at->enq_flags, 0);
-	tctx->vcid = -1;
+	WRITE_ONCE(tctx->se.vpack, NULL);
 	tctx->delay_cid = -1;
 	tctx->recent_used_cid = -1;
-	tctx->vw = task_weight(p, tctx);
+	tctx->se.vw = task_weight(p, tctx);
 
 	/*
 	 * @fork tells a task that is being created apart from one that was
@@ -6405,7 +6447,7 @@ void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
 		return;
 	tctx = ref->tctx;
 	ref->tctx = NULL;
-	ret = scx_edq_task_detach(&tctx->edq.common);
+	ret = scx_edq_task_detach(&tctx->se.edq.common);
 	if (ret) {
 		scx_bpf_error("EDQ detach failed for pid %d: %d", p->pid, ret);
 		return;
@@ -6486,6 +6528,7 @@ static void init_topology(void)
 		s32 cpu = scx_bpf_cid_to_cpu(cid);
 
 		cid_ctx(cid)->busy_balance_cid = -1;
+		cid_pack(cid)->cid = cid;
 		cid_ctx(cid)->active_balance_cid = -1;
 
 		scx_bpf_cid_topo(cid, ct);
