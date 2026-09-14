@@ -326,7 +326,7 @@ struct task_ctx {
 	u64 delay_w;		/* its weight without the task */
 	u64 delay_gen;		/* its @empty_gen then */
 	struct grp_q __arena *grp;	/* its cgroup's queues, NULL at the root */
-	struct grp_q __arena *gq;	/* the one it is a member of, see grp_load_add() */
+	struct grp_q __arena *gq;	/* the one it is a member of, see grp_contrib_sync() */
 	u64 gw;				/* the weight it is a member with */
 	u64 wakee_decay_at;
 	u32 wakee_flips;
@@ -397,15 +397,24 @@ static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct 
 #define GRP_MAX_DEPTH	8
 
 struct grp_hdr {
-	u64 weight;		/* cpu.weight as a load weight: the group's shares */
+	u64 weight;		/* cpu.weight as a load weight, tg->shares */
 	u64 pages;		/* arena pages of this block */
+	u64 load_avg;		/* sum of the queues' averaged loads, tg->load_avg */
+	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
 };
 
 struct grp_q {
 	u64 load;
 	u64 contrib;
+	u64 shares;		/* the group's weight in its parent on this cid */
+	u64 nr;			/* tasks queued in the group or below it on this cid */
 	struct grp_q __arena *parent;	/* NULL for a child of the root */
 	struct grp_hdr __arena *hdr;
+	struct ravg_data load_avg;	/* @load averaged, cfs_rq->avg.load_avg */
+	struct ravg_data nr_avg;	/* @nr averaged, cfs_rq->avg.runnable_avg */
+	u64 load_avg_contrib;	/* what @hdr->load_avg holds of this queue */
+	u64 nr_avg_contrib;	/* what @hdr->nr_avg holds of this queue */
+	u64 shares_at;		/* when @shares was last computed */
 };
 
 typedef struct grp_q __arena grp_q_t;
@@ -443,8 +452,9 @@ struct {
 } hrticks SEC(".maps");
 
 /*
- * Add @delta to the load of @gq and bring what each group above adds to its
- * parent in line, the sums of enqueue_hierarchy() and dequeue_hierarchy().
+ * Bring what @gq and each group above it add to their parents in line with
+ * their loads and shares, the sums of enqueue_hierarchy() and
+ * dequeue_hierarchy().
  *
  * The loads are changed from whichever cid a task joins or leaves a pack
  * from, without a lock, so a group's @contrib is moved by compare and swap to
@@ -452,17 +462,15 @@ struct {
  * the group is looked at again before going up: whoever changes a load last
  * also leaves the contributions above it matching.
  */
-static void grp_load_add(grp_q_t *gq, s64 delta)
+static void grp_contrib_sync(grp_q_t *gq)
 {
 	bool moved = false;
 	int i;
 
-	__sync_fetch_and_add(&gq->load, delta);
-
 	for (i = 0; i < 4 * GRP_MAX_DEPTH && gq && gq->parent; i++) {
 		grp_q_t *parent = gq->parent;
 		u64 load = READ_ONCE(gq->load);
-		u64 target = load ? READ_ONCE(gq->hdr->weight) : 0;
+		u64 target = load ? READ_ONCE(gq->shares) : 0;
 		u64 cur = READ_ONCE(gq->contrib);
 
 		if (cur != target) {
@@ -480,6 +488,15 @@ static void grp_load_add(grp_q_t *gq, s64 delta)
 }
 
 /*
+ * Add @delta to the load of @gq and take the change up the hierarchy.
+ */
+static void grp_load_add(grp_q_t *gq, s64 delta)
+{
+	__sync_fetch_and_add(&gq->load, delta);
+	grp_contrib_sync(gq);
+}
+
+/*
  * The effective weight of a member of @gq that weighs @w in it: @w scaled by
  * shares / load at every level, __calc_prop_weight(). With @joining, the
  * weight it will have once it has joined, its own weight and those of the
@@ -491,7 +508,7 @@ static u64 grp_h_weight(grp_q_t *gq, u64 w, bool joining)
 	int i;
 
 	for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
-		u64 shares = READ_ONCE(gq->hdr->weight);
+		u64 shares = READ_ONCE(gq->shares);
 		u64 load = READ_ONCE(gq->load) + add;
 
 		add = joining && !READ_ONCE(gq->contrib) ? shares : 0;
@@ -745,6 +762,101 @@ static u64 ravg_read_arena(struct ravg_data __arena *ard, u64 now)
 	};
 
 	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS);
+}
+
+/*
+ * Count a task in or out of @gq and every group above it on the cid,
+ * cfs_rq->h_nr_runnable.
+ */
+static void grp_nr_add(grp_q_t *gq, s64 delta)
+{
+	int i;
+
+	for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
+		__sync_fetch_and_add(&gq->nr, delta);
+		gq = gq->parent;
+	}
+}
+
+/*
+ * The smallest weight a group can have on a cid, MIN_SHARES.
+ */
+#define GRP_MIN_SHARES		2
+
+/*
+ * How long the per-cgroup sums are left alone after an update, and by how
+ * much a queue's average has to move to update them, update_tg_load_avg().
+ */
+#define GRP_SUM_NS		1000000ULL
+
+/*
+ * Bring what @gq adds to its cgroup's sums up to date, and recompute the
+ * group's shares on the cid, update_cfs_group() with fair.c's default
+ * cgroup_mode, "concur", calc_concur_shares():
+ *
+ *	nr = min(tg_tasks(tg), tg_cpus(tg));
+ *	return __calc_smp_shares(cfs_rq, nr * tg_shares, nr * tg_shares);
+ *
+ * which is the load-proportional share of the group's weight on this cid,
+ * the "icky" shares_weight approximation of __calc_smp_shares(),
+ *
+ *	load   = max(grq->load.weight, grq->avg.load_avg)
+ *	shares = tg->weight * load / (tg->load_avg - contrib + load)
+ *
+ * with the weight scaled by how many CPUs' worth of tasks the group runs.
+ * cpu.weight then means the weight per active CPU: a group of one task has
+ * its cpu.weight on the cid the task runs on, and a group running a task on
+ * every CPU has it on every CPU. Without the scaling, the shares of a group
+ * spread over N cids would average 1/N of the weight and nested groups
+ * 1/N^depth, which a single runqueue cannot afford. tg_cpus() counts the
+ * CPUs of the group's cpuset; the cids of the scheduler stand in for them.
+ *
+ * The averages are kept from the owner of the cid, where the tick runs, and
+ * the sums shared by every cid of the cgroup are written at most once a
+ * millisecond per queue, and only for a move of more than a 64th.
+ */
+static void grp_update_shares(grp_q_t *gq, u64 now)
+{
+	struct grp_hdr __arena *hdr = gq->hdr;
+	u64 load = READ_ONCE(gq->load), la, na, nr, total, tg_load, shares;
+	s64 d;
+
+	ravg_accumulate_arena(&gq->load_avg, load, now);
+	ravg_accumulate_arena(&gq->nr_avg, READ_ONCE(gq->nr), now);
+	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
+	na = ravg_read_arena(&gq->nr_avg, now);
+
+	if (now - gq->shares_at < GRP_SUM_NS)
+		return;
+	gq->shares_at = now;
+
+	d = (s64)(la - gq->load_avg_contrib);
+	if ((u64)(d < 0 ? -d : d) > gq->load_avg_contrib / 64) {
+		__sync_fetch_and_add(&hdr->load_avg, d);
+		gq->load_avg_contrib = la;
+	}
+	d = (s64)(na - gq->nr_avg_contrib);
+	if ((u64)(d < 0 ? -d : d) > gq->nr_avg_contrib / 64) {
+		__sync_fetch_and_add(&hdr->nr_avg, d);
+		gq->nr_avg_contrib = na;
+	}
+
+	nr = READ_ONCE(hdr->nr_avg) >> RAVG_FRAC_BITS;
+	nr = MIN(MAX(nr, 1ULL), (u64)nr_cids);
+	total = nr * READ_ONCE(hdr->weight);
+
+	load = MAX(load, la);
+	tg_load = READ_ONCE(hdr->load_avg);
+	tg_load = (tg_load > gq->load_avg_contrib ? tg_load - gq->load_avg_contrib : 0) +
+		  load;
+	shares = tg_load ? total * load / tg_load : total;
+	shares = MIN(MAX(shares, (u64)GRP_MIN_SHARES), total);
+
+	if (shares != READ_ONCE(gq->shares)) {
+		WRITE_ONCE(gq->shares, shares);
+		/* Take the new shares to the parent's load. */
+		grp_contrib_sync(gq);
+	}
 }
 
 /*
@@ -4172,6 +4284,7 @@ static void task_vref_leave(task_ctx_t *tctx)
 	if (gq) {
 		tctx->gq = NULL;
 		grp_load_add(gq, -(s64)tctx->gw);
+		grp_nr_add(gq, -1);
 	}
 }
 
@@ -4196,6 +4309,7 @@ static void task_vref_join(s32 cid, const struct task_struct *p,
 		tctx->gw = task_nice_weight(p);
 		tctx->gq = &tctx->grp[cid];
 		grp_load_add(tctx->gq, tctx->gw);
+		grp_nr_add(tctx->gq, 1);
 		w = grp_h_weight(tctx->gq, tctx->gw, false);
 		task_rescale(tctx, w);
 	} else {
@@ -5315,6 +5429,14 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	 */
 	if (cgroup_enabled) {
 		task_ctx_t *tctx = try_lookup_task_ctx(p);
+		grp_q_t *gq = tctx ? tctx->gq : NULL;
+		int i;
+
+		/* update_cfs_group() for every level the task runs in. */
+		for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
+			grp_update_shares(gq, now);
+			gq = gq->parent;
+		}
 
 		if (tctx && tctx->gq && tctx->se.vpack &&
 		    grp_h_weight(tctx->gq, tctx->gw, false) != tctx->se.vjoin_w) {
@@ -6645,6 +6767,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
 		grp_q_t *gq = &ents[cid];
 
 		gq->hdr = hdr;
+		gq->shares = hdr->weight;
 		if (pents)
 			gq->parent = &pents[cid];
 	}
@@ -6685,9 +6808,8 @@ void BPF_STRUCT_OPS(cidland_cpuctl_exit, struct cgroup *cgrp)
 }
 
 /*
- * Somebody wrote cpu.weight: the shares of the cgroup's groups change, and
- * each one takes them to its parent's load the next time a member joins or
- * leaves it, see grp_load_add().
+ * Somebody wrote cpu.weight: the shares of the cgroup's groups follow the
+ * next time the tick recomputes them, see grp_update_shares().
  */
 void BPF_STRUCT_OPS(cidland_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
 {
