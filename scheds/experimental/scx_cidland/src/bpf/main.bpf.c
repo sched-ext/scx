@@ -7056,27 +7056,100 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	return 0;
 }
 
-SCX_OPS_CID_DEFINE(cidland_ops,
-		   .select_cid		= (void *)cidland_select_cid,
-		   .enqueue		= (void *)cidland_enqueue,
-		   .dequeue		= (void *)cidland_dequeue,
-		   .tick		= (void *)cidland_tick,
-		   .yield		= (void *)cidland_yield,
-		   .dispatch		= (void *)cidland_dispatch,
-		   .runnable		= (void *)cidland_runnable,
-		   .quiescent		= (void *)cidland_quiescent,
-		   .running		= (void *)cidland_running,
-		   .stopping		= (void *)cidland_stopping,
-		   .update_idle		= (void *)cidland_update_idle,
-		   .enable		= (void *)cidland_enable,
-		   .set_weight		= (void *)cidland_set_weight,
-		   .init_task		= (void *)cidland_init_task,
-		   .exit_task		= (void *)cidland_exit_task,
-		   .cpuctl_init		= (void *)cidland_cpuctl_init,
-		   .cpuctl_exit		= (void *)cidland_cpuctl_exit,
-		   .cpuctl_set_weight	= (void *)cidland_cpuctl_set_weight,
-		   .cpuctl_move		= (void *)cidland_cpuctl_move,
-		   .init		= (void *)cidland_init,
-		   .exit		= (void *)cidland_exit,
-		   .timeout_ms		= 5000,
-		   .name		= "cidland");
+/*
+ * The ops, with the prefix the running kernel names the cgroup callbacks
+ * with: cpuctl_*, or cgroup_* on a kernel from before the cid form renamed
+ * them.
+ */
+#define CIDLAND_OPS(__cg)						\
+	.select_cid		= (void *)cidland_select_cid,		\
+	.enqueue		= (void *)cidland_enqueue,		\
+	.dequeue		= (void *)cidland_dequeue,		\
+	.tick			= (void *)cidland_tick,			\
+	.yield			= (void *)cidland_yield,		\
+	.dispatch		= (void *)cidland_dispatch,		\
+	.runnable		= (void *)cidland_runnable,		\
+	.quiescent		= (void *)cidland_quiescent,		\
+	.running		= (void *)cidland_running,		\
+	.stopping		= (void *)cidland_stopping,		\
+	.update_idle		= (void *)cidland_update_idle,		\
+	.enable			= (void *)cidland_enable,		\
+	.set_weight		= (void *)cidland_set_weight,		\
+	.init_task		= (void *)cidland_init_task,		\
+	.exit_task		= (void *)cidland_exit_task,		\
+	.__cg##_init		= (void *)cidland_cpuctl_init,		\
+	.__cg##_exit		= (void *)cidland_cpuctl_exit,		\
+	.__cg##_set_weight	= (void *)cidland_cpuctl_set_weight,	\
+	.__cg##_move		= (void *)cidland_cpuctl_move,		\
+	.init			= (void *)cidland_init,			\
+	.exit			= (void *)cidland_exit,			\
+	.timeout_ms		= 5000,					\
+	.name			= "cidland"
+
+SCX_OPS_CID_DEFINE(cidland_ops, CIDLAND_OPS(cpuctl));
+
+/*
+ * struct sched_ext_ops_cid as a kernel from before the rename declares it,
+ * the cgroup callbacks under their cgroup_* names and in the same slots.
+ * libbpf matches the members of a struct_ops map to the kernel's by name and
+ * drops the ___ suffix from the type name, so this map binds the same
+ * programs to the older names. User space creates whichever of the two maps
+ * the running kernel matches, see main.rs; members the kernel does not have
+ * are left zero and skipped.
+ */
+struct sched_ext_ops_cid___cgroup {
+	s32 (*select_cid)(struct task_struct *, s32, u64);
+	void (*enqueue)(struct task_struct *, u64);
+	void (*dequeue)(struct task_struct *, u64);
+	void (*dispatch)(s32, struct task_struct *);
+	void (*tick)(struct task_struct *);
+	void (*runnable)(struct task_struct *, u64);
+	void (*running)(struct task_struct *);
+	void (*stopping)(struct task_struct *, bool);
+	void (*quiescent)(struct task_struct *, u64);
+	bool (*yield)(struct task_struct *, struct task_struct *);
+	bool (*core_sched_before)(struct task_struct *, struct task_struct *);
+	void (*set_weight)(struct task_struct *, u32);
+	void (*set_cmask)(struct task_struct *, const struct scx_cmask *);
+	void (*update_idle)(s32, bool);
+	s32 (*init_task)(struct task_struct *, struct scx_init_task_args *);
+	void (*exit_task)(struct task_struct *, struct scx_exit_task_args *);
+	void (*enable)(struct task_struct *);
+	void (*disable)(struct task_struct *);
+	void (*dump)(struct scx_dump_ctx *);
+	void (*dump_cid)(struct scx_dump_ctx *, s32, bool);
+	void (*dump_task)(struct scx_dump_ctx *, struct task_struct *);
+	s32 (*cgroup_init)(struct cgroup *, struct scx_cgroup_init_args *);
+	void (*cgroup_exit)(struct cgroup *);
+	s32 (*cgroup_prep_move)(struct task_struct *, struct cgroup *, struct cgroup *);
+	void (*cgroup_move)(struct task_struct *, struct cgroup *, struct cgroup *);
+	void (*cgroup_cancel_move)(struct task_struct *, struct cgroup *, struct cgroup *);
+	void (*cgroup_set_weight)(struct cgroup *, u32);
+	void (*cgroup_set_bandwidth)(struct cgroup *, u64, u64, u64);
+	void (*cgroup_set_idle)(struct cgroup *, bool);
+	s32 (*sub_attach)(struct scx_sub_attach_args *);
+	void (*sub_detach)(struct scx_sub_detach_args *);
+	void (*sub_caps_updated)(const struct scx_cmask *, u64);
+	void (*sub_ecaps_updated)(s32, u64, u64);
+	void (*cid_online)(s32);
+	void (*cid_offline)(s32);
+	s32 (*init_cids)(void);
+	s32 (*init)(void);
+	void (*exit)(struct scx_exit_info *);
+	u32 dispatch_max_batch;
+	u64 flags;
+	u32 timeout_ms;
+	u32 exit_dump_len;
+	u64 hotplug_seq;
+	u32 cid_shard_size;
+	u32 rescue_bandwidth_ppt;
+	u32 rescue_quantum_us;
+	u64 sub_cgroup_id;
+	char name[128];
+	void *priv;
+};
+
+SEC(".struct_ops.link")
+struct sched_ext_ops_cid___cgroup cidland_ops_cgroup = {
+	CIDLAND_OPS(cgroup),
+};

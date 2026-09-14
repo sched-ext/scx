@@ -568,25 +568,53 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
-        let mut skel = scx_ops_cid_open!(skel_builder, open_object, cidland_ops, open_opts)
-            .context("opening BPF skeleton (does this kernel support cid-form sched_ext?)")?;
+
+        // The cid form's cgroup callbacks were renamed from cgroup_* to
+        // cpuctl_*. The BPF object defines the ops under both names, as two
+        // struct_ops maps sharing the same programs: use the one the running
+        // kernel matches and leave the other uncreated.
+        let cpuctl_names =
+            compat::struct_has_field("sched_ext_ops_cid", "cpuctl_set_weight").unwrap_or(false);
+        let cgroup_names = !cpuctl_names
+            && compat::struct_has_field("sched_ext_ops_cid", "cgroup_set_weight").unwrap_or(false);
+        let mut skel = if cgroup_names {
+            scx_ops_cid_open!(skel_builder, open_object, cidland_ops_cgroup, open_opts)
+        } else {
+            scx_ops_cid_open!(skel_builder, open_object, cidland_ops, open_opts)
+        }
+        .context("opening BPF skeleton (does this kernel support cid-form sched_ext?)")?;
+        if cgroup_names {
+            skel.maps.cidland_ops.set_autocreate(false)?;
+        } else {
+            skel.maps.cidland_ops_cgroup.set_autocreate(false)?;
+        }
 
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
+        skel.struct_ops.cidland_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
 
         // Honor cpu.weight, unless it was turned off or the kernel has no cpu
         // controller support for sched_ext to hook into. Detaching the
         // callbacks from the struct_ops keeps the kernel from delivering them
         // at all, and lets the scheduler load on a kernel whose
-        // sched_ext_ops_cid has no cpuctl_* members to bind them to.
-        let cgroup_enabled = !opts.disable_cgroups
-            && compat::struct_has_field("sched_ext_ops_cid", "cpuctl_set_weight").unwrap_or(false);
+        // sched_ext_ops_cid has no cgroup members to bind them to.
+        let cgroup_enabled = !opts.disable_cgroups && (cpuctl_names || cgroup_names);
         if !cgroup_enabled {
             let ops = skel.struct_ops.cidland_ops_mut();
             ops.cpuctl_init = std::ptr::null_mut();
             ops.cpuctl_exit = std::ptr::null_mut();
             ops.cpuctl_set_weight = std::ptr::null_mut();
             ops.cpuctl_move = std::ptr::null_mut();
-            info!("cgroup weights: off");
+            let ops = skel.struct_ops.cidland_ops_cgroup_mut();
+            ops.cgroup_init = std::ptr::null_mut();
+            ops.cgroup_exit = std::ptr::null_mut();
+            ops.cgroup_set_weight = std::ptr::null_mut();
+            ops.cgroup_move = std::ptr::null_mut();
+            info!("cgroup scheduling: off");
+        } else {
+            info!(
+                "cgroup scheduling: on ({}_* callbacks)",
+                if cgroup_names { "cgroup" } else { "cpuctl" }
+            );
         }
 
         // Override default BPF scheduling parameters.
@@ -721,16 +749,15 @@ impl<'a> Scheduler<'a> {
         //
         // SCX_OPS_BUILTIN_IDLE_PER_NODE is left out: a cid-form scheduler
         // cannot use the built-in idle tracking, this one does its own.
-        skel.struct_ops.cidland_ops_mut().flags = *compat::SCX_OPS_ENQ_LAST
+        let flags = *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
             | *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_TID_TO_TASK;
+        skel.struct_ops.cidland_ops_mut().flags = flags;
+        skel.struct_ops.cidland_ops_cgroup_mut().flags = flags;
 
-        info!(
-            "scheduler flags: {:#x}",
-            skel.struct_ops.cidland_ops_mut().flags
-        );
+        info!("scheduler flags: {:#x}", flags);
 
         // One hrtick per cid, over the same cid space the arena is sized
         // for below. A map is sized before the program is loaded.
@@ -741,7 +768,11 @@ impl<'a> Scheduler<'a> {
             .context("sizing the hrtick map")?;
 
         // Load the BPF program for validation.
-        let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei)?;
+        let mut skel = if cgroup_names {
+            scx_ops_cid_load!(skel, cidland_ops_cgroup, uei)
+        } else {
+            scx_ops_cid_load!(skel, cidland_ops, uei)
+        }?;
 
         // Capacity and asymmetric packing are separate kernel policies.
         // Query arch_asym_cpu_priority() and the live sd_asym_packing pointer
@@ -837,7 +868,11 @@ impl<'a> Scheduler<'a> {
             ArenaLib::start(skel.object_mut()).context("starting arena userspace services")?;
 
         // Attach the scheduler.
-        let struct_ops = Some(scx_ops_attach!(skel, cidland_ops)?);
+        let struct_ops = Some(if cgroup_names {
+            scx_ops_attach!(skel, cidland_ops_cgroup)
+        } else {
+            scx_ops_attach!(skel, cidland_ops)
+        }?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
