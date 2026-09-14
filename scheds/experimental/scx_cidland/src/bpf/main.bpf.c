@@ -2065,7 +2065,7 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 	return ACTIVE_BALANCE_NONE;
 }
 
-static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid,
+static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
 		     u64 now);
 
 /*
@@ -2087,10 +2087,17 @@ cid_edq_move_usable_head_to_local(s32 dst_cid, s32 src_cid, u64 now,
 		return ret == -EBUSY ? CID_EDQ_MOVE_BUSY : CID_EDQ_MOVE_MISS;
 	if (!at)
 		return CID_EDQ_MOVE_MISS;
+	/*
+	 * The node is the task context: reject a stale or cache-hot head
+	 * before resolving the task.
+	 */
+	if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
+	    (check_hot && task_hot((task_ctx_t *)at, src_cid, dst_cid, now))) {
+		scx_edq_task_drop(&at->common);
+		return CID_EDQ_MOVE_MISS;
+	}
 	p = scx_bpf_tid_to_task(at->tid);
-	if (!p || READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-	    !cid_allowed(p, dst_cid) ||
-	    (check_hot && task_hot(p, src_cid, dst_cid, now))) {
+	if (!p || !cid_allowed(p, dst_cid)) {
 		scx_edq_task_drop(&at->common);
 		return CID_EDQ_MOVE_MISS;
 	}
@@ -2129,7 +2136,7 @@ static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 	if (is_pcpu_task(p) ||
 	    !bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr))
 		pinned = true;
-	else if (!task_hot(p, src_cid, dst_cid, now))
+	else if (!task_hot((task_ctx_t *)at, src_cid, dst_cid, now))
 		movable = true;
 	move = movable ? cid_edq_remove_held_to_local(src_cid, dst_cid, at, p) :
 			 CID_EDQ_MOVE_MISS;
@@ -4860,25 +4867,22 @@ pick:
 }
 
 /*
- * Is @p, queued on @src_cid, still cache hot there as far as @dst_cid is
- * concerned?
+ * Is the task of @tctx, queued on @src_cid, still cache hot there as far as
+ * @dst_cid is concerned?
  *
  * Two threads of one core share every cache there is, so a task is never
  * hot between them: moving it costs nothing and leaving one of them idle
  * costs a thread. task_hot() says the same of a domain with
  * SD_SHARE_CPUCAPACITY.
  */
-static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid, u64 now)
+static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
+		     u64 now)
 {
-	const task_ctx_t *tctx;
-
 	if (smt_enabled &&
 	    cid_topo(src_cid)->core_base == cid_topo(dst_cid)->core_base)
 		return false;
 
-	tctx = try_lookup_task_ctx(p);
-
-	return tctx && time_before(now, tctx->last_stop_at + migration_cost_ns);
+	return time_before(now, tctx->last_stop_at + migration_cost_ns);
 }
 
 /*
