@@ -69,8 +69,9 @@ const volatile bool force_smt_asym_packing;
 const volatile bool smt_whole_core;
 
 /*
- * Honor the weight of the cpu controller's cgroups, cpu.weight, on top of
- * the weight a task gets from its nice level. See cgrp_weight().
+ * Schedule the cpu controller's cgroups as groups, each weighing its
+ * cpu.weight against its siblings, the way fair.c's group scheduling does.
+ * See struct grp_q.
  */
 const volatile bool cgroup_enabled = true;
 
@@ -324,8 +325,9 @@ struct task_ctx {
 	u64 delay_vref;		/* its reference when the task left it */
 	u64 delay_w;		/* its weight without the task */
 	u64 delay_gen;		/* its @empty_gen then */
-	u32 cgw;		/* weight of its cgroup, see cgrp_weight() */
-	u64 cgw_gen;		/* the @cgrp_gen @cgw was taken at */
+	struct grp_q __arena *grp;	/* its cgroup's queues, NULL at the root */
+	struct grp_q __arena *gq;	/* the one it is a member of, see grp_load_add() */
+	u64 gw;				/* the weight it is a member with */
 	u64 wakee_decay_at;
 	u32 wakee_flips;
 	s32 last_wakee_pid;
@@ -375,12 +377,47 @@ static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct 
 }
 
 /*
- * Per-cgroup context: what the cpu controller says about a cgroup.
+ * Group scheduling, fair.c's with a single runqueue: a cgroup's task on a cid
+ * is queued, placed and picked in the cid's own pack beside every other task,
+ * at an effective weight that is its share of the hierarchy, and the cgroup
+ * hierarchy itself only keeps the weights that share is computed from, see
+ * commit 85570f10a4c6 ("sched/eevdf: Move to a single runqueue").
+ *
+ * One struct grp_q per cgroup per cid, the load of fair.c's cfs_rq of the
+ * group: @load is the weight of the group's members on the cid, its tasks at
+ * their nice weights and its child groups at their shares, and @contrib is
+ * what the group adds to its parent's @load there, its shares while it has
+ * any member and nothing otherwise. A task's effective weight is its nice
+ * weight scaled by shares / load at every level up to the cid's own,
+ * __calc_prop_weight() in enqueue_hierarchy(), see grp_h_weight().
+ *
+ * A cgroup at the root has no queues, its tasks weigh their nice weights. A
+ * cgroup nested deeper than GRP_MAX_DEPTH shares its ancestor's at that depth.
+ */
+#define GRP_MAX_DEPTH	8
+
+struct grp_hdr {
+	u64 weight;		/* cpu.weight as a load weight: the group's shares */
+	u64 pages;		/* arena pages of this block */
+};
+
+struct grp_q {
+	u64 load;
+	u64 contrib;
+	struct grp_q __arena *parent;	/* NULL for a child of the root */
+	struct grp_hdr __arena *hdr;
+};
+
+typedef struct grp_q __arena grp_q_t;
+
+/*
+ * Per-cgroup context: where the cgroup's queues are. @hdr is NULL when
+ * @ents is not the cgroup's own.
  */
 struct cgrp_ctx {
-	u32 weight;	/* its own cpu.weight */
-	u32 cweight;	/* that composed with its ancestors', see cgrp_weight() */
-	u64 gen;	/* the @cgrp_gen @cweight was composed at */
+	grp_q_t *ents;
+	struct grp_hdr __arena *hdr;
+	u32 depth;
 };
 
 struct {
@@ -406,17 +443,64 @@ struct {
 } hrticks SEC(".maps");
 
 /*
- * Bumped by ops.cpuctl_set_weight(), which expires every composed weight
- * cached anywhere, cgroup and task alike: one cpu.weight write changes the
- * weight of everything under that cgroup, and there is no walking down to
- * them from here. A cache that carries a generation older than this one is
- * recomputed the next time its task runs.
+ * Add @delta to the load of @gq and bring what each group above adds to its
+ * parent in line, the sums of enqueue_hierarchy() and dequeue_hierarchy().
  *
- * Read on the wakeup path, written only when a cpu.weight file is, so it
- * belongs with the read-mostly globals and not on a __hot_written line.
- * Never 0: a task context starts zeroed and has to look stale.
+ * The loads are changed from whichever cid a task joins or leaves a pack
+ * from, without a lock, so a group's @contrib is moved by compare and swap to
+ * what its load says it should be, its delta is applied to the parent, and
+ * the group is looked at again before going up: whoever changes a load last
+ * also leaves the contributions above it matching.
  */
-static u64 cgrp_gen = 1;
+static void grp_load_add(grp_q_t *gq, s64 delta)
+{
+	bool moved = false;
+	int i;
+
+	__sync_fetch_and_add(&gq->load, delta);
+
+	for (i = 0; i < 4 * GRP_MAX_DEPTH && gq && gq->parent; i++) {
+		grp_q_t *parent = gq->parent;
+		u64 load = READ_ONCE(gq->load);
+		u64 target = load ? READ_ONCE(gq->hdr->weight) : 0;
+		u64 cur = READ_ONCE(gq->contrib);
+
+		if (cur != target) {
+			if (__sync_val_compare_and_swap(&gq->contrib, cur, target) == cur) {
+				__sync_fetch_and_add(&parent->load, target - cur);
+				moved = true;
+			}
+			continue;
+		}
+		if (!moved)
+			break;
+		gq = parent;
+		moved = false;
+	}
+}
+
+/*
+ * The effective weight of a member of @gq that weighs @w in it: @w scaled by
+ * shares / load at every level, __calc_prop_weight(). With @joining, the
+ * weight it will have once it has joined, its own weight and those of the
+ * groups that join with it counted in.
+ */
+static u64 grp_h_weight(grp_q_t *gq, u64 w, bool joining)
+{
+	u64 add = joining ? w : 0;
+	int i;
+
+	for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
+		u64 shares = READ_ONCE(gq->hdr->weight);
+		u64 load = READ_ONCE(gq->load) + add;
+
+		add = joining && !READ_ONCE(gq->contrib) ? shares : 0;
+		w = w * shares / MAX(load, 1ULL);
+		gq = gq->parent;
+	}
+
+	return MAX(w, 1ULL);
+}
 
 /*
  * Topology of a cid, filled in ops.init() from scx_bpf_cid_topo() and the
@@ -3204,78 +3288,22 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 
 /*
  * The scale cpu.weight is written on: what a cgroup nobody has touched
- * carries, and the most one can be given.
+ * carries.
  */
 #define CGROUP_WEIGHT_DFL	100
-#define CGROUP_WEIGHT_MAX	10000
 
 /*
- * Return the weight of @cgrp, composed with the weights of the cgroups it
- * sits under, on the cpu.weight scale.
+ * The load weight of a group written @weight in cpu.weight,
+ * sched_weight_from_cgroup():
  *
- * cpu.weight is written on a cgroup and means "against my siblings", so a
- * task's standing against the whole machine is the product of the ratios
- * along the path from the root down to it: a service of the default weight
- * under a slice given ten times its siblings' is worth ten of the same
- * service in a default slice. Composing is what makes the knob work at all
- * on a systemd machine, where the weights that get set sit on the slices
- * and the tasks live in the leaves under them.
- *
- * This is a per-task weight, not a share of the machine handed to a cgroup
- * and divided among its members: two tasks in a cgroup of twice the weight
- * get twice the CPU each, where fair.c would give them twice between them.
- * Doing it fair.c's way needs the weight of the runnable siblings at every
- * level, which is a count kept on a cacheline shared by every CPU that
- * wakes a task, and this scheduler is not willing to pay that on a wakeup.
- * What the composition does buy is the ordering: heavier cgroups get more,
- * in the right direction and by the right ratios among equal-sized groups.
- *
- * The product is capped at what a single cpu.weight can ask for. Left
- * unbounded a few nested boosts multiply into a weight so large that the
- * vruntime of anything under it stops advancing, which is a starvation
- * bug rather than a strong preference.
- *
- * The result is cached on the cgroup and expires with @cgrp_gen, so the
- * walk runs once per cgroup per cpu.weight write.
+ *	return DIV_ROUND_CLOSEST_ULL(cgrp_weight * 1024, CGROUP_WEIGHT_DFL);
  */
-static u32 cgrp_weight(struct cgroup *cgrp)
+static u64 cgrp_load_weight(u32 weight)
 {
-	struct cgrp_ctx *cgc;
-	u64 w = CGROUP_WEIGHT_DFL;
-	u32 level;
+	u64 w = ((u64)weight * NICE_0_WEIGHT + CGROUP_WEIGHT_DFL / 2) /
+		CGROUP_WEIGHT_DFL;
 
-	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
-	if (cgc && cgc->gen == cgrp_gen)
-		return cgc->cweight;
-
-	/*
-	 * Level 0 is the root, which has no cpu.weight of its own, and the
-	 * last level is @cgrp itself.
-	 */
-	bpf_arena_for(level, 1, cgrp->level + 1) {
-		struct cgroup *anc = bpf_cgroup_ancestor(cgrp, level);
-		struct cgrp_ctx *acgc;
-
-		if (!anc)
-			return CGROUP_WEIGHT_DFL;
-
-		acgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, anc, 0, 0);
-		if (acgc && acgc->weight)
-			w = w * acgc->weight / CGROUP_WEIGHT_DFL;
-		bpf_cgroup_release(anc);
-
-		if (!w)
-			w = 1;
-		else if (w > CGROUP_WEIGHT_MAX)
-			w = CGROUP_WEIGHT_MAX;
-	}
-
-	if (cgc) {
-		cgc->cweight = w;
-		cgc->gen = cgrp_gen;
-	}
-
-	return w;
+	return w ? w : 1;
 }
 
 /*
@@ -3301,35 +3329,28 @@ static u32 cgrp_weight(struct cgroup *cgrp)
  * the new load weight and drops it, leaving @p->se.load holding whatever
  * the fair class last left there. Go back to the table.
  *
- * That weight is then scaled by the weight of the cgroup @p sits in, see
- * cgrp_weight(), taken from the copy @tctx carries. A task with no context
- * yet, or one under --disable-cgroups, weighs what its nice level says and
- * nothing else.
+ * A task in a cgroup weighs its nice weight against the other members of its
+ * group on the cid, and what EEVDF charges and orders it by is its share of
+ * the whole hierarchy, cached in @tctx, see task_h_refresh().
  */
+static u64 task_nice_weight(const struct task_struct *p)
+{
+	u32 idx;
+
+	if (p->policy == SCHED_IDLE)
+		return WEIGHT_IDLEPRIO;
+
+	idx = p->static_prio - MAX_RT_PRIO;
+	return idx < ARRAY_SIZE(prio_to_weight) ? prio_to_weight[idx] :
+						   NICE_0_WEIGHT;
+}
+
 static u64 task_weight(const struct task_struct *p, const task_ctx_t *tctx)
 {
-	u64 w;
-	u32 idx, cgw;
+	if (tctx && tctx->grp && tctx->se.vw)
+		return tctx->se.vw;
 
-	if (p->policy == SCHED_IDLE) {
-		w = WEIGHT_IDLEPRIO;
-	} else {
-		idx = p->static_prio - MAX_RT_PRIO;
-		w = idx < ARRAY_SIZE(prio_to_weight) ?
-			prio_to_weight[idx] : NICE_0_WEIGHT;
-	}
-
-	cgw = tctx ? tctx->cgw : 0;
-	if (!cgw || cgw == CGROUP_WEIGHT_DFL)
-		return w;
-
-	/*
-	 * A light task in a light cgroup can scale down to nothing, and
-	 * calc_delta_fair() divides by this.
-	 */
-	w = w * cgw / CGROUP_WEIGHT_DFL;
-
-	return w ? w : 1;
+	return task_nice_weight(p);
 }
 
 /*
@@ -4103,69 +4124,118 @@ static void vref_join(pack_t *pk, sched_ent_t *se, u64 join_w)
 }
 
 /*
+ * Bring the lag and the deadline of @tctx over to the weight @w, the part of
+ * reweight_task() that is not about the pack, see there.
+ */
+static void task_rescale(task_ctx_t *tctx, u64 w)
+{
+	sched_ent_t *se = &tctx->se;
+	u64 old = se->vw;
+
+	if (w == old)
+		return;
+	se->vw = w;
+	if (!old)
+		return;
+
+	se->vlag = vdiv(se->vlag * (s64)old, w);
+	if (se->deadline && time_before(se->vruntime, se->deadline))
+		se->deadline = se->vruntime + (se->deadline - se->vruntime) * old / w;
+}
+
+/*
+ * The weight the task of @tctx will have in @cid's pack once it has joined
+ * it: its nice weight, or its share of its group hierarchy on @cid.
+ */
+static u64 task_join_weight(const struct task_struct *p, const task_ctx_t *tctx,
+			    s32 cid)
+{
+	u64 w = task_nice_weight(p);
+
+	if (!tctx->grp)
+		return w;
+	if (tctx->gq == &tctx->grp[cid])
+		return grp_h_weight(tctx->gq, tctx->gw, false);
+
+	return grp_h_weight(&tctx->grp[cid], w, true);
+}
+
+/*
+ * Take @tctx out of its pack's reference and out of its group's load, the
+ * two memberships a task has on a cid and gives up together.
+ */
+static void task_vref_leave(task_ctx_t *tctx)
+{
+	grp_q_t *gq = tctx->gq;
+
+	vref_leave(&tctx->se);
+	if (gq) {
+		tctx->gq = NULL;
+		grp_load_add(gq, -(s64)tctx->gw);
+	}
+}
+
+/*
  * Make @p a member of its pack on @cid, leaving the one it was in, see
- * vref_join().
+ * vref_join(), and of its group's load there. A task in a group joins at the
+ * share its group then gives it, and its lag and deadline follow.
  */
 static void task_vref_join(s32 cid, const struct task_struct *p,
 			   task_ctx_t *tctx)
 {
 	pack_t *pk = cid_valid(cid) ? task_pack(tctx, cid) : NULL;
+	u64 w;
 
 	if (tctx->se.vpack == pk)
 		return;
-	vref_leave(&tctx->se);
+	task_vref_leave(tctx);
 
 	if (!pk)
 		return;
-	vref_join(pk, &tctx->se, task_weight(p, tctx));
+	if (tctx->grp) {
+		tctx->gw = task_nice_weight(p);
+		tctx->gq = &tctx->grp[cid];
+		grp_load_add(tctx->gq, tctx->gw);
+		w = grp_h_weight(tctx->gq, tctx->gw, false);
+		task_rescale(tctx, w);
+	} else {
+		w = task_weight(p, tctx);
+	}
+	vref_join(pk, &tctx->se, w);
 }
 
 /*
- * Bring @tctx's copy of its cgroup weight up to date.
- *
- * The weight is read from the cgroup and kept on the task, so the paths
- * that ask a task what it weighs read a word they already have in hand.
- * The copy is taken again when the generation says a cpu.weight has been
- * written somewhere, or when ops.cpuctl_move() puts the task in another
- * cgroup, and the walk that composes it costs one wakeup of one task per
- * cgroup per write.
- *
- * Called from the two ops that precede every use of the weight, so what a
- * task carries is at worst one slice out of date: ops.runnable() before it
- * is placed and queued, and ops.running() before it is charged for what it
- * runs. Both take @p as their task argument, which is what
- * scx_bpf_task_cgroup() asks for.
- *
- * A pack holds the weight of each of its members as of the moment it
- * joined, see vref_join(), so a task whose weight has just changed has to
- * leave and rejoin for the sums to mean anything. Leaving is done here;
- * both callers rejoin, one through place_task() and one directly.
+ * Bring a member of a pack over to the share its group hierarchy gives it
+ * now, which moves with every task that joins or leaves the groups above
+ * it on the cid: the entity leaves the pack's reference and joins it again
+ * at the new weight with its lag carried over, reweight_eevdf(), which
+ * fair.c runs on enqueue, set_next_task() and the tick. @now is on the rq
+ * clock.
  */
-static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
-			  bool dequeued);
-
-static void cgw_refresh(const struct task_struct *p, task_ctx_t *tctx)
+static void task_h_refresh(task_ctx_t *tctx, u64 now)
 {
-	struct cgroup *cgrp;
-	u32 w;
+	sched_ent_t *se = &tctx->se;
+	pack_t *pk = se->vpack;
+	u64 w, old, tnow, vref;
+	s64 lag;
 
-	if (!cgroup_enabled || tctx->cgw_gen == cgrp_gen)
+	if (!tctx->gq || !pk)
+		return;
+	w = grp_h_weight(tctx->gq, tctx->gw, false);
+	old = se->vjoin_w;
+	if (w == old || !old)
 		return;
 
-	cgrp = scx_bpf_task_cgroup((struct task_struct *)p);
-	if (!cgrp)
-		return;
-	w = cgrp_weight(cgrp);
-	bpf_cgroup_release(cgrp);
-
-	tctx->cgw_gen = cgrp_gen;
-	if (w == tctx->cgw)
-		return;
-
-	tctx->cgw = w;
-	tctx->se.deadline = 0;
-	reweight_task(p, tctx, false);
-	vref_leave(&tctx->se);
+	tnow = cid_clock_task_at(pk->cid, now);
+	vref = pack_vref_place(pk, tnow);
+	lag = vdiv((s64)(vref - se->vruntime) * (s64)old, w);
+	vref_leave(se);
+	task_rescale(tctx, w);
+	vref = pack_vref_place(pk, tnow);
+	se->deadline = se->deadline && time_before(se->vruntime, se->deadline) ?
+		       vref - lag + (se->deadline - se->vruntime) : 0;
+	se->vruntime = vref - lag;
+	vref_join(pk, se, w);
 }
 
 /*
@@ -4453,8 +4523,12 @@ static void place_task(s32 cid, const struct task_struct *p,
 
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
 		pack_t *pk = task_pack(tctx, cid);
-		u64 w = task_weight(p, tctx);
-		u64 vruntime = pack_vref_before_join(pk, &tctx->se, w, tnow);
+		u64 w = task_join_weight(p, tctx, cid);
+		u64 vruntime;
+
+		/* The lag is carried at the weight the task is placed with. */
+		task_rescale(tctx, w);
+		vruntime = pack_vref_before_join(pk, &tctx->se, w, tnow);
 
 		/*
 		 * ops.quiescent() does not run when the kernel migrates a queued
@@ -4508,25 +4582,33 @@ static void place_task(s32 cid, const struct task_struct *p,
 static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 			  bool dequeued)
 {
-	u64 w = task_weight(p, tctx), old = tctx->se.vw;
-	s32 cid;
+	u64 w, old = tctx->se.vw;
+	s32 cid = scx_bpf_task_cid((struct task_struct *)p);
+
+	/*
+	 * A task in a group first changes what it weighs in its group, and
+	 * then takes the share that gives it.
+	 */
+	if (tctx->gq) {
+		u64 nice_w = task_nice_weight(p);
+
+		grp_load_add(tctx->gq, (s64)nice_w - (s64)tctx->gw);
+		tctx->gw = nice_w;
+		w = grp_h_weight(tctx->gq, nice_w, false);
+	} else if (tctx->grp && cid_valid(cid)) {
+		w = grp_h_weight(&tctx->grp[cid], task_nice_weight(p), true);
+	} else {
+		w = task_nice_weight(p);
+	}
 
 	if (w == old)
 		return;
 	if (dequeued && tctx->se.vpack)
 		tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, scx_bpf_now());
-	tctx->se.vw = w;
-	if (!old)
-		return;
+	task_rescale(tctx, w);
 
-	tctx->se.vlag = vdiv(tctx->se.vlag * (s64)old, w);
-	if (tctx->se.deadline && time_before(tctx->se.vruntime, tctx->se.deadline))
-		tctx->se.deadline = tctx->se.vruntime +
-				 (tctx->se.deadline - tctx->se.vruntime) * old / w;
-
-	if (!dequeued)
+	if (!dequeued || !old)
 		return;
-	cid = scx_bpf_task_cid((struct task_struct *)p);
 	if (cid_valid(cid)) {
 		pack_t *pk = task_pack(tctx, cid);
 		u64 now = scx_bpf_now();
@@ -4556,8 +4638,6 @@ static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 static void direct_dispatch_local(struct task_struct *p, task_ctx_t *tctx, s32 cid,
 				  u64 now)
 {
-	/* ops.runnable() follows select_cid(), so refresh before spending lag. */
-	cgw_refresh(p, tctx);
 	place_task(cid, p, tctx, now, true);
 	tctx->direct_placed = true;
 	cid_edq_mark_dispatched(tctx);
@@ -5226,6 +5306,26 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	if (!cid_valid(cid))
 		return;
 	topo = cid_topo(cid);
+
+	/*
+	 * The share a task's groups give it moves with the tasks that come and
+	 * go in them: take the running task over to it, as task_tick_fair()
+	 * does through update_cfs_group() and reweight_eevdf(), charging what it
+	 * ran at the old weight first.
+	 */
+	if (cgroup_enabled) {
+		task_ctx_t *tctx = try_lookup_task_ctx(p);
+
+		if (tctx && tctx->gq && tctx->se.vpack &&
+		    grp_h_weight(tctx->gq, tctx->gw, false) != tctx->se.vjoin_w) {
+			u64 tnow = cid_clock_task_owned(cid, now);
+
+			keep_charge(p, cid, tnow);
+			task_h_refresh(tctx, now);
+			keep_charge(p, cid, tnow);
+		}
+	}
+
 	if (!no_newidle_cost)
 		newidle_decay(cid_ctx(cid), now);
 	cid_load_accumulate(cid, now);
@@ -6095,7 +6195,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 		lag = task_lag_at(p, tctx, pk, now);
 		tctx->se.vlag = lag;
 	}
-	vref_leave(&tctx->se);
+	task_vref_leave(tctx);
 
 	/*
 	 * A task that blocks over-served is what fair.c keeps in the tree,
@@ -6135,7 +6235,6 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 	direct_placed = tctx->direct_placed;
 	tctx->direct_placed = false;
-	cgw_refresh(p, tctx);
 	if (wa_weight)
 		ravg_accumulate_arena(&tctx->runnable_avg, 1, scx_bpf_now());
 
@@ -6151,7 +6250,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 	 * with no credit, while one that was still owed service keeps it.
 	 */
 	if (!direct_placed)
-		vref_leave(&tctx->se);
+		task_vref_leave(tctx);
 }
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
@@ -6201,8 +6300,14 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * After the lag has been carried, which reads the pack the task is
 	 * leaving, and before the join that snapshots what it weighs.
 	 */
-	cgw_refresh(p, tctx);
 	task_vref_join(cid, p, tctx);
+
+	/*
+	 * A task in a group is picked at the share of the hierarchy it has now,
+	 * set_next_task_fair() running reweight_eevdf().
+	 */
+	if (tctx->gq)
+		task_h_refresh(tctx, now);
 
 	/*
 	 * Publish what this cid is running. A task queued here later is
@@ -6297,6 +6402,30 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 */
 }
 
+/*
+ * The queues of the cgroup @p is in, NULL for the root cgroup or a kernel
+ * without the cpu controller's hooks. From ops.enable(), the first op
+ * scx_bpf_task_cgroup() can be asked about @p in; the cgroup of
+ * ops.init_task() is not a pointer the verifier trusts.
+ */
+static grp_q_t *task_cgrp_ents(struct task_struct *p)
+{
+	struct cgrp_ctx *cgc;
+	struct cgroup *cgrp;
+	grp_q_t *ents;
+
+	if (!cgroup_enabled)
+		return NULL;
+	cgrp = scx_bpf_task_cgroup(p);
+	if (!cgrp)
+		return NULL;
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+	ents = cgc ? cgc->ents : NULL;
+	bpf_cgroup_release(cgrp);
+
+	return ents;
+}
+
 void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 {
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
@@ -6306,6 +6435,8 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 
 	if (tctx) {
 		scx_bpf_task_set_dsq_vtime(p, (u64)tctx);
+		tctx->grp = task_cgrp_ents(p);
+		tctx->gq = NULL;
 		/*
 		 * ops.enable() is also called when a task switches back from a
 		 * higher scheduling class at run time. Place it at the current
@@ -6383,7 +6514,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	WRITE_ONCE(tctx->se.vpack, NULL);
 	tctx->delay_cid = -1;
 	tctx->recent_used_cid = -1;
-	tctx->se.vw = task_weight(p, tctx);
+	WRITE_ONCE(tctx->grp, NULL);
+	WRITE_ONCE(tctx->gq, NULL);
+	tctx->se.vw = task_nice_weight(p);
 
 	/*
 	 * @fork tells a task that is being created apart from one that was
@@ -6457,53 +6590,134 @@ void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
 
 /*
  * A cgroup the cpu controller is putting under this scheduler, either one
- * that already existed when it was loaded or one just created.
+ * that already existed when it was loaded or one just created, parents
+ * before their children: give it a queue on every cid, each adding to its
+ * parent's queue on that cid, see struct grp_q.
  */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
 			     struct scx_cgroup_init_args *args)
 {
-	struct cgrp_ctx *cgc;
+	struct cgrp_ctx *cgc, *pcgc = NULL;
+	grp_q_t *ents, *pents = NULL;
+	struct grp_hdr __arena *hdr;
+	struct cgroup *parent;
+	u64 bytes, pages;
+	u32 depth = 1, cid;
+
+	TOUCH_ARENA();
 
 	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0,
 				   BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!cgc)
 		return -ENOMEM;
+	cgc->ents = NULL;
+	cgc->hdr = NULL;
+	cgc->depth = 0;
+	if (!cgrp->level)
+		return 0;
 
-	cgc->weight = args->weight;
-	cgc->gen = 0;
+	parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1);
+	if (parent) {
+		pcgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, parent, 0, 0);
+		bpf_cgroup_release(parent);
+	}
+	if (pcgc && pcgc->ents) {
+		pents = pcgc->ents;
+		depth = pcgc->depth + 1;
+	}
+	if (depth > GRP_MAX_DEPTH) {
+		cgc->ents = pents;
+		cgc->depth = pcgc->depth;
+		return 0;
+	}
+
+	bytes = sizeof(struct grp_hdr) + (u64)nr_cids * sizeof(struct grp_q);
+	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+	hdr = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
+	if (!hdr)
+		return -ENOMEM;
+	hdr->weight = cgrp_load_weight(args->weight);
+	hdr->pages = pages;
+	ents = (grp_q_t *)((char __arena *)hdr + sizeof(struct grp_hdr));
+
+	/* Fresh arena pages read as zero: only what is not zero is stored. */
+	bpf_for(cid, 0, nr_cids) {
+		grp_q_t *gq = &ents[cid];
+
+		gq->hdr = hdr;
+		if (pents)
+			gq->parent = &pents[cid];
+	}
+
+	cgc->ents = ents;
+	cgc->hdr = hdr;
+	cgc->depth = depth;
 
 	return 0;
 }
 
 /*
- * Somebody wrote cpu.weight. The weight of every cgroup under @cgrp
- * changed with it and there is no walking down to them from here, so
- * expire every composed weight at once, see cgrp_weight().
+ * The cgroup is going away, or the scheduler is.
+ *
+ * A cgroup that is removed has no tasks left and nothing adds to its
+ * queues, so the memory goes back. The scheduler going away exits every
+ * cgroup before any task leaves it, scx_root_disable(), and those tasks
+ * still take their weights out of their groups' loads on the way out. The
+ * cgroup is still online then, where cgroup_destroy_locked() takes it
+ * offline before its controllers are, and the memory goes with the arena.
+ */
+void BPF_STRUCT_OPS(cidland_cpuctl_exit, struct cgroup *cgrp)
+{
+	struct grp_hdr __arena *hdr;
+	struct cgrp_ctx *cgc;
+
+	TOUCH_ARENA();
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+	if (!cgc || !cgc->hdr)
+		return;
+	hdr = cgc->hdr;
+	cgc->ents = NULL;
+	cgc->hdr = NULL;
+
+	if (!(cgrp->self.flags & CSS_ONLINE))
+		bpf_arena_free_pages(&arena, hdr, hdr->pages);
+}
+
+/*
+ * Somebody wrote cpu.weight: the shares of the cgroup's groups change, and
+ * each one takes them to its parent's load the next time a member joins or
+ * leaves it, see grp_load_add().
  */
 void BPF_STRUCT_OPS(cidland_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
 {
 	struct cgrp_ctx *cgc;
 
+	TOUCH_ARENA();
+
 	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
-	if (!cgc)
+	if (!cgc || !cgc->hdr)
 		return;
 
-	cgc->weight = weight;
-	__sync_fetch_and_add(&cgrp_gen, 1);
+	cgc->hdr->weight = cgrp_load_weight(weight);
 }
 
 /*
- * @p is now in another cgroup, so what it carries is no longer its
- * weight. The task is dequeued here; the copy is taken again the next
- * time it is placed, see cgw_refresh().
+ * @p is now in another cgroup. The task is off its runqueue here: it left its
+ * pack and its group's load in ops.quiescent(), and joins the new group's the
+ * next time it is placed or runs. A debt it owes the old pack is forgiven.
  */
 void BPF_STRUCT_OPS(cidland_cpuctl_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
+	struct cgrp_ctx *cgc;
 
-	if (tctx)
-		tctx->cgw_gen = 0;
+	if (!tctx)
+		return;
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, to, 0, 0);
+	tctx->grp = cgc ? cgc->ents : NULL;
+	tctx->delay_cid = -1;
 }
 
 /*
@@ -6859,6 +7073,7 @@ SCX_OPS_CID_DEFINE(cidland_ops,
 		   .init_task		= (void *)cidland_init_task,
 		   .exit_task		= (void *)cidland_exit_task,
 		   .cpuctl_init		= (void *)cidland_cpuctl_init,
+		   .cpuctl_exit		= (void *)cidland_cpuctl_exit,
 		   .cpuctl_set_weight	= (void *)cidland_cpuctl_set_weight,
 		   .cpuctl_move		= (void *)cidland_cpuctl_move,
 		   .init		= (void *)cidland_init,

@@ -150,10 +150,11 @@ struct Opts {
 
     /// Ignore the cpu controller: schedule on the nice levels alone.
     ///
-    /// By default a task's weight is its nice weight scaled by the cpu.weight
-    /// of the cgroup it is in and of the cgroups that one sits under. This
-    /// unhooks the scheduler from the cpu controller entirely, which is also
-    /// what happens on a kernel built without CONFIG_EXT_GROUP_SCHED.
+    /// By default the cpu controller's cgroups are scheduled as groups: a
+    /// cgroup competes with its siblings at its cpu.weight, and its tasks
+    /// share what it gets. This unhooks the scheduler from the cpu
+    /// controller entirely, which is also what happens on a kernel built
+    /// without CONFIG_EXT_GROUP_SCHED.
     #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
     disable_cgroups: bool,
 
@@ -582,6 +583,7 @@ impl<'a> Scheduler<'a> {
         if !cgroup_enabled {
             let ops = skel.struct_ops.cidland_ops_mut();
             ops.cpuctl_init = std::ptr::null_mut();
+            ops.cpuctl_exit = std::ptr::null_mut();
             ops.cpuctl_set_weight = std::ptr::null_mut();
             ops.cpuctl_move = std::ptr::null_mut();
             info!("cgroup weights: off");
