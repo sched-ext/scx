@@ -111,19 +111,6 @@ struct Opts {
     #[clap(short = 'm', long, default_value = "500")]
     migration_cost_us: u64,
 
-    /// Number of remote queues a busy CPU samples on each dispatch.
-    ///
-    /// A CPU with a queue of its own looks at this many other queues, rotating
-    /// through them across dispatches, and takes the head of one that is more than
-    /// twice as deep as its own and at least two tasks deeper; this is what spreads
-    /// out a pile-up created on a single CPU, the way the load balancer moves tasks
-    /// off the busiest runqueue. A larger value finds an imbalance sooner and costs
-    /// more work on every dispatch; 0 disables the sampling, leaving a busy CPU with
-    /// its own queue only. Idle CPUs are not affected: they always scan the whole
-    /// node for work.
-    #[clap(short = 'b', long, default_value = "2", value_parser = clap::value_parser!(u32).range(0..=255))]
-    balance_sample: u32,
-
     /// Failed scans an idle CPU tolerates before it stops honouring cache hotness.
     ///
     /// An idle CPU that finds nothing it is allowed to take, while work is queued
@@ -600,7 +587,6 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = slice_ns;
         rodata.tick_ns = tick_ns();
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
-        rodata.balance_sample = opts.balance_sample;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;

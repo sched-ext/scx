@@ -212,13 +212,6 @@ const volatile bool no_delay_requeue;
 const volatile bool no_hrtick;
 
 /*
- * Number of other cids' queues a busy cid looks at on each dispatch for a
- * queue deeper than its own. 0 disables the sampling, leaving a busy cid
- * with its own queue only.
- */
-const volatile u32 balance_sample = 2;
-
-/*
  * The globals written on the hot path sit on cache lines of their own.
  *
  * The rest of .bss is read by every op on every CPU (the sizes, the arena
@@ -436,7 +429,6 @@ struct cid_topo {
 struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
-	u64 last_balance_at;
 	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
 	u64 vsum_w;
 	u64 vref;
@@ -4894,11 +4886,8 @@ static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid, u64 now)
  * k << 16 | s), and return the first one whose head @dst_cid can take,
  * or -1, in the low 32 bits, with the number of queues still allowed in
  * the high 32 bits. The EDQ head is held, revalidated and dispatched here.
- * @ctl packs,
- * from the top, the depth of @dst_cid's own queue, the number of queues to
- * look at and whether a head still hot on its CPU is skipped. A queue found
- * empty has its bit cleared. A busy @dst_cid only takes from a queue more
- * than twice as deep as its own and at least two tasks deeper.
+ * @ctl packs the number of queues to look at and whether a head still hot on
+ * its CPU is skipped. A queue found empty has its bit cleared.
  *
  * A global function: it is verified once, not once per call site and
  * loop iteration, which keeps ops.dispatch() within the verifier's
@@ -4906,7 +4895,7 @@ static bool task_hot(struct task_struct *p, s32 src_cid, s32 dst_cid, u64 now)
  */
 __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
 {
-	u32 k = ks >> 16, s = ks & 63, own_nr = ctl >> 16;
+	u32 k = ks >> 16, s = ks & 63;
 	u32 limit = (ctl >> 8) & 0xff;
 	bool check_hot = ctl & 1;
 	s32 ret = -1;
@@ -4924,12 +4913,6 @@ __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
 			continue;
 		limit--;
 
-		if (own_nr) {
-			u32 nr = cid_queue_nr(cid);
-
-			if (nr < own_nr + 2 || nr <= 2 * own_nr)
-				continue;
-		}
 		move = cid_edq_move_usable_head_to_local(dst_cid, cid, now,
 							     check_hot);
 		if (move == CID_EDQ_MOVE_MOVED) {
@@ -4950,7 +4933,7 @@ __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
  */
 static __always_inline s32
 steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
-		 bool check_hot, u32 own_nr, u32 limit)
+		 bool check_hot, u32 limit)
 {
 	u32 first = base / 64, last, kstart, i, span;
 
@@ -4973,7 +4956,7 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
 		if (!w)
 			continue;
 		ret = steal_from_word(dst_cid, w, (k << 16) | (i ? 0 : start & 63),
-				      now, (own_nr << 16) | (limit << 8) | check_hot);
+				      now, (limit << 8) | check_hot);
 		cid = (s32)(u32)ret;
 		limit = ret >> 32;
 		if (cid >= 0)
@@ -5026,21 +5009,10 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  * is cleared as soon as a scan finds something, or finds the node
  * genuinely empty.
  *
- * A cid with work of its own samples @balance_sample other queues, rotating
- * through them across dispatches, and takes the head of one that is more
- * than twice as deep as its own and at least two tasks deeper. Every queue
- * is fed by the wakeups of its own CPU, so this is the only way a pile-up
- * gets spread out, e.g. a hundred children forked on one CPU while every
- * other CPU was busy with a task of its own, the way the load balancer
- * moves tasks off the busiest runqueue. The margin is what keeps CPUs
- * under an even load from trading tasks back and forth (the balancer has
- * its imbalance_pct), and a cid samples at most once per slice, the way
- * the load balancer runs on the tick rather than on every pick: sampling
- * on every dispatch under a wakeup storm moved tasks around faster than
- * they could warm a cache. Otherwise the cid takes its own head: waiting
- * for the owning CPU's slice end is what EEVDF does under RUN_TO_PARITY,
- * and sampling the queues for an earlier deadline instead measured worse
- * on every load.
+ * A cid that has work of its own does not pull. Sampling instantaneous
+ * queue depths from busy cids moved tasks back and forth under wakeup-heavy
+ * load, where fair.c's busy balancer instead acts periodically on averaged
+ * load and a computed imbalance.
  *
  * Only the heads are considered, a queue whose head cannot run on @dst_cid
  * (or is still hot there) is skipped as a whole.
@@ -5058,9 +5030,9 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
-	bool budget = false;
-	u64 t0 = 0;
-	u32 start, own_nr = 0;
+	bool budget = false, node_skipped = false;
+	u64 curr_cost = 0, t0 = 0;
+	u32 start;
 	s32 src = -1;
 
 	/*
@@ -5080,14 +5052,8 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	if (keep)
 		goto own;
 
-	if (busy) {
-		if (time_before(now, cctx->last_balance_at + slice_ns))
-			goto own;
-		own_nr = cid_queue_nr(dst_cid);
-		if (!own_nr)
-			goto own;
-		cctx->last_balance_at = now;
-	}
+	if (busy)
+		goto own;
 
 	start = cctx->steal_cursor;
 	if (start >= nr_cids)
@@ -5097,35 +5063,32 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	 * sched_balance_newidle(): the idle period is measured from here,
 	 * and a cid that has not been staying idle long enough to pay for
 	 * a scan of its LLC does not start one, see newidle_cost().
+	 *
+	 * A cid woken by a balance kick, for a waiter or for an active
+	 * balance, is not ending an idle period: fair.c runs the idle
+	 * balancer in softirq on the idle task and rq->avg_idle never
+	 * hears of it. Stamping here would make the wakeup that does
+	 * end the period measure it from the kick, and under a busy
+	 * tick that kicks a preferred idle core a hundred times a
+	 * second the average collapsed, the budget closed, and the
+	 * idle pull stopped: half the steals, 17% off messaging.
 	 */
-	if (!busy) {
-		/*
-		 * A cid woken by a balance kick, for a waiter or for an active
-		 * balance, is not ending an idle period: fair.c runs the idle
-		 * balancer in softirq on the idle task and rq->avg_idle never
-		 * hears of it. Stamping here would make the wakeup that does
-		 * end the period measure it from the kick, and under a busy
-		 * tick that kicks a preferred idle core a hundred times a
-		 * second the average collapsed, the budget closed, and the
-		 * idle pull stopped: half the steals, 17% off messaging.
-		 */
-		if (!force_steal && !kicked)
-			cctx->idle_stamp = now;
-		budget = !no_newidle_cost && !force_steal && !kicked;
-		/*
-		 * The cost is measured on a fresh clock, sched_clock_cpu() in
-		 * sched_balance_newidle(): the rq clock stands still under the
-		 * lock and would read every pull as free.
-		 */
-		if (budget)
-			t0 = bpf_ktime_get_ns();
-		if (budget && cctx->avg_idle < cctx->newidle_cost[NEWIDLE_LLC]) {
-			__sync_fetch_and_add(&nr_newidle_skips, 1);
-			return false;
-		}
+	if (!force_steal && !kicked)
+		cctx->idle_stamp = now;
+	budget = !no_newidle_cost && !force_steal && !kicked;
+	/*
+	 * The cost is measured on a fresh clock, sched_clock_cpu() in
+	 * sched_balance_newidle(): the rq clock stands still under the
+	 * lock and would read every pull as free.
+	 */
+	if (budget)
+		t0 = bpf_ktime_get_ns();
+	if (budget && cctx->avg_idle < cctx->newidle_cost[NEWIDLE_LLC]) {
+		__sync_fetch_and_add(&nr_newidle_skips, 1);
+		return false;
 	}
 
-	if (!busy && nr_place_tiers > 1 &&
+	if (nr_place_tiers > 1 &&
 	    (!smt_enabled || core_is_idle(dst_cid))) {
 		u32 t;
 
@@ -5135,7 +5098,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 					       node_nr, node_base, now,
 					       !force_steal &&
 					       failed <= cache_nice_tries,
-					       0, 0xff);
+					       0xff);
 			if (src >= 0) {
 				cctx->nr_balance_failed = 0;
 				goto pick;
@@ -5143,62 +5106,48 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 		}
 	}
 
-	if (busy) {
-		/*
-		 * A busy cid samples a few queues of its node, rotating
-		 * through them across dispatches.
-		 */
-		src = steal_from_range(dst_cid, -1, node_base, node_nr, start + 1,
-				       now, true, own_nr, balance_sample);
-	} else {
-		/*
-		 * An idle cid walks its own LLC before the rest of the node,
-		 * or the rest of the machine when there is nothing to gain by
-		 * keeping to a node, honouring hotness until it has failed often
-		 * enough to stop. A domain that is the whole of the next one is
-		 * not walked twice.
-		 */
-		bool node_skipped = false;
-		u64 curr_cost = 0;
+	/*
+	 * An idle cid walks its own LLC before the rest of the node,
+	 * or the rest of the machine when there is nothing to gain by
+	 * keeping to a node, honouring hotness until it has failed often
+	 * enough to stop. A domain that is the whole of the next one is
+	 * not walked twice.
+	 */
+	src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
+			       start + 1, now,
+			       !force_steal && failed <= cache_nice_tries,
+			       0xff);
+	if (budget) {
+		u64 t1 = bpf_ktime_get_ns();
 
-		src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
-				       start + 1, now,
-				       !force_steal && failed <= cache_nice_tries,
-				       0, 0xff);
-		if (budget) {
-			u64 t1 = bpf_ktime_get_ns();
-
-			curr_cost = t1 - t0;
-			update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
-			t0 = t1;
-			node_skipped = cctx->avg_idle <
-				       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
-		}
-		if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
-			src = steal_from_range(dst_cid, -1, node_base, node_nr,
-					       start + 1, now,
-					       !force_steal &&
-					       failed <= cache_nice_tries + 1,
-					       0, 0xff);
-			if (budget) {
-				u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
-
-				curr_cost += cost;
-				update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
-			}
-		}
-		if (curr_cost > cctx->max_idle_balance_cost)
-			cctx->max_idle_balance_cost = curr_cost;
-
-		/*
-		 * Nothing queued anywhere is a balanced node, not a failure.
-		 */
-		if (src >= 0 || cmask_empty(queued_cids))
-			cctx->nr_balance_failed = 0;
-		else
-			cctx->nr_balance_failed = failed + 1;
+		curr_cost = t1 - t0;
+		update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
+		t0 = t1;
+		node_skipped = cctx->avg_idle <
+			       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
 	}
-	cctx->steal_cursor = src >= 0 ? src : start + balance_sample;
+	if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
+		src = steal_from_range(dst_cid, -1, node_base, node_nr,
+				       start + 1, now,
+				       !force_steal &&
+				       failed <= cache_nice_tries + 1,
+				       0xff);
+		if (budget) {
+			u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
+
+			curr_cost += cost;
+			update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
+		}
+	}
+	if (curr_cost > cctx->max_idle_balance_cost)
+		cctx->max_idle_balance_cost = curr_cost;
+
+	/* Nothing queued anywhere is a balanced node, not a failure. */
+	if (src >= 0 || cmask_empty(queued_cids))
+		cctx->nr_balance_failed = 0;
+	else
+		cctx->nr_balance_failed = failed + 1;
+	cctx->steal_cursor = src >= 0 ? src : start + 1;
 
 own:
 	if (src < 0 && own)
