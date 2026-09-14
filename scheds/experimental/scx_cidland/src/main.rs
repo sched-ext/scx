@@ -258,6 +258,11 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     wa_weight: bool,
 
+    /// Periodic busy load balancing runs every domain-weight milliseconds
+    /// times this factor, sd->busy_factor (16 in fair.c).
+    #[clap(long, default_value = "16", value_parser = clap::value_parser!(u32).range(1..=64))]
+    busy_balance_factor: u32,
+
     /// Service is charged in rq_clock_task(), the clock update_curr() uses:
     /// wall time less the interrupt time and the hypervisor steal time the
     /// CPU spent on something else. This charges plain wall time, the rq
@@ -603,6 +608,7 @@ impl<'a> Scheduler<'a> {
         }
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;
+        rodata.busy_balance_factor = opts.busy_balance_factor;
         rodata.no_task_clock = opts.no_task_clock;
         info!(
             "service clock: {}",
@@ -844,6 +850,7 @@ impl<'a> Scheduler<'a> {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
             nr_steals: bss_data.nr_steals,
+            nr_busy_balances: bss_data.nr_busy_balances,
             nr_active_balances: bss_data.nr_active_balances,
             nr_preempts: bss_data.nr_preempts,
             nr_delay_requeues: bss_data.nr_delay_requeues,

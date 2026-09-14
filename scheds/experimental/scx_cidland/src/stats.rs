@@ -18,6 +18,9 @@ pub struct Metrics {
     #[stat(desc = "Tasks stolen from another CPU's queue")]
     pub nr_steals: u64,
 
+    #[stat(desc = "Queued tasks moved by periodic busy load balance")]
+    pub nr_busy_balances: u64,
+
     #[stat(desc = "Running tasks moved to an idle core by asymmetric balance")]
     pub nr_active_balances: u64,
 
@@ -38,9 +41,10 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] steals={} active_balances={} preempts={} delay_requeues={} hrticks={} newidle_skips={}",
+            "[{}] steals={} busy_balances={} active_balances={} preempts={} delay_requeues={} hrticks={} newidle_skips={}",
             crate::SCHEDULER_NAME,
             self.nr_steals,
+            self.nr_busy_balances,
             self.nr_active_balances,
             self.nr_preempts,
             self.nr_delay_requeues,
@@ -53,6 +57,7 @@ impl Metrics {
     fn delta(&self, rhs: &Self) -> Self {
         Self {
             nr_steals: self.nr_steals - rhs.nr_steals,
+            nr_busy_balances: self.nr_busy_balances - rhs.nr_busy_balances,
             nr_active_balances: self.nr_active_balances - rhs.nr_active_balances,
             nr_preempts: self.nr_preempts - rhs.nr_preempts,
             nr_delay_requeues: self.nr_delay_requeues - rhs.nr_delay_requeues,
