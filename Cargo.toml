@@ -60,3 +60,7 @@ debug = 0
 incremental = false
 strip = true
 lto = false
+
+# HACK: Use the local libarena-rs checkout while the 0.3.0 release is pending.
+[patch.crates-io]
+libarena-rs = { path = "/home/etsal/libarena-rs" }
