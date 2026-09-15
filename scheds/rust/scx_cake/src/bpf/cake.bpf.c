@@ -2363,8 +2363,9 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	{
 		u32 own_n = (u32)cake_nrq((u64)ucpu);
 		u32 wake_n;
+		bool seat;
 
-		own = own_n ? cake_dsq_peek((u64)ucpu) : NULL;
+
 		/* Marks and the empty test come from scalars: a pointer-to-bool
 		 * or a pointer pair test lowers to an OR the verifier refuses. */
 		cake_qmark_publish(ucpu, own_n != 0);
@@ -2377,13 +2378,21 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		 * on every dispatch with a non-empty pool (audit 2026-09-06). */
 		if (wake_n)
 			cake_wake_mark_set(llc);
+		seat = !own_n && cake_one_word && ucpu < 64 &&
+		       ((cake_seat_word >> ucpu) & 1);
+		/* Each peek is a DSQ hash lookup. The own head is read only to
+		 * order it against a pool head; the pool head only to order it
+		 * against an own head, to test the seat's free CPUs, or for the
+		 * probe census. A queue that competes with nothing is moved
+		 * unread (audit 2026-09-15). */
+		own = own_n && wake_n ? cake_dsq_peek((u64)ucpu) : NULL;
 		/* §G85 leak 3: a held seat with an empty own queue would take
 		 * pool work or steal, and its stage thread would return to a
 		 * busy CPU (the hold). While another idle CPU is nobody's seat,
 		 * the seat stays idle; that CPU was kicked for the pool wake. */
-		wake = wake_n ? cake_dsq_peek(pool) : NULL;
-		if (!own_n && cake_one_word && ucpu < 64 &&
-		    ((cake_seat_word >> ucpu) & 1)) {
+		wake = wake_n && (own_n || seat) ?
+		       cake_dsq_peek(pool) : NULL;
+		if (seat) {
 			/* §G88: a free CPU on this die only; pool work never
 			 * gets kicked across the L3 boundary from here. */
 			u64 free = cake_idle_word() & ~cake_seat_word &
@@ -2429,28 +2438,37 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 			 * matters when the own queue competes with it */
 			cake_wake_idle_stamp(llc);
 		}
-	}
-	if (wake) {
-		u64 wv = wake->scx.dsq_vtime;
 		/*
-		 * Either the vtime margin favours the wake head, or nobody
-		 * served that queue in a wall-clock window (§R.16, §G11.2).
+		 * Either the own queue is empty, the vtime margin favours the
+		 * wake head, or nobody served that queue in a wall-clock window
+		 * (§R.16, §G11.2). Both counts non-zero read both heads above; a
+		 * head that drained between count and peek falls through to the
+		 * moves.
 		 */
-		if (!own ||
-		    time_before(wv + SLICE_NS,
-				own->scx.dsq_vtime) ||
-		    cake_wake_starved(llc)) {
+		if (!own_n) {
 			first  = pool;
 			second = (u64)ucpu;
+		} else if (wake) {
+			if (!own ||
+			    time_before(wake->scx.dsq_vtime + SLICE_NS,
+					own->scx.dsq_vtime) ||
+			    cake_wake_starved(llc)) {
+				first  = pool;
+				second = (u64)ucpu;
+			}
 		}
-	}
-	if (cake_tog_probe && wake) {
-		/* PROBE: the pool head's previous die vs this CPU's, before the
-		 * move that may take it (the take is confirmed by wake_served). */
-		if (cake_cross_llc((s32)wake->thread_info.cpu, cpu))
-			cake_probe_pool_x[ucpu & (MAX_CPUS - 1)] = 1;
-		else
-			cake_probe_pool_x[ucpu & (MAX_CPUS - 1)] = 0;
+		if (cake_tog_probe && wake_n) {
+			/* PROBE: the pool head's previous die vs this CPU's,
+			 * before the move that may take it (the take is confirmed
+			 * by wake_served). Its own peek keeps the census off the
+			 * ordinary peek condition. */
+			struct task_struct *h = wake ? wake : cake_dsq_peek(pool);
+
+			if (h && cake_cross_llc((s32)h->thread_info.cpu, cpu))
+				cake_probe_pool_x[ucpu & (MAX_CPUS - 1)] = 1;
+			else
+				cake_probe_pool_x[ucpu & (MAX_CPUS - 1)] = 0;
+		}
 	}
 	if (cake_move_to_local(first)) {
 		if (first == pool) {
