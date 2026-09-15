@@ -1,18 +1,15 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * EDF unit tests
  *
- * EDF unit tests for the flow scheduler.
- * The tests mirror the BPF header so behavior
- * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no knob.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * Covers the EDF, slice helpers with estimate clamp, weight scaling, and queue
+ * order checks. Run with cargo test -p scx_flow flow_tests_edf.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow_edf::*;
 use crate::flow_select::*;
 use crate::flow_slice::*;
-use std::collections::VecDeque;
 
 #[test]
 fn est_clamp_caps_at_one_second() {
@@ -147,7 +144,7 @@ fn s3_frontier_monotonic_with_wrap_holds() {
 }
 
 #[test]
-fn edf_insert_counts_clamp_and_order() {
+fn edf_insert_counts_clamp() {
     let slice = SLICE_NS;
     let frontier = 100_000_000;
     let (c1, dl1, f1) = edf_insert(0, frontier, slice, 800_000, 1024);
@@ -157,25 +154,7 @@ fn edf_insert_counts_clamp_and_order() {
     let (c2, dl2, f2) = edf_insert(frontier, frontier, slice, 500_000, 1024);
     assert!(!f2);
     assert_eq!(c2, frontier);
-    let mut q = Vec::new();
-    ordered_insert(
-        &mut q,
-        OrderedEntry {
-            deadline: dl1,
-            seq: 0,
-            id: 1,
-        },
-    );
-    ordered_insert(
-        &mut q,
-        OrderedEntry {
-            deadline: dl2,
-            seq: 1,
-            id: 2,
-        },
-    );
-    assert_eq!(q.len(), 2);
-    assert!(!q[1].before(&q[0]));
+    assert_eq!(dl2, frontier.wrapping_add(500_000));
 }
 
 #[test]
@@ -216,74 +195,19 @@ fn edf_insert_and_step_matches_composition() {
 }
 
 #[test]
-fn dsq_ids_match_spec() {
-    assert_eq!(DSQ_BASE, 0x4000);
-    assert_eq!(DSQ_PARK, 0x5000);
-    assert_ne!(DSQ_BASE, DSQ_PARK);
-    assert_eq!(dsq_for_cpu(0, 8), Some(0x4000));
-    assert_eq!(dsq_for_cpu(7, 8), Some(0x4007));
-    assert_eq!(dsq_for_cpu(8, 8), None);
-    assert_eq!(dsq_for_cpu(1023, 1024), Some(0x43ff));
-    assert_eq!(dsq_for_cpu(1024, 2048), None);
-}
-
-#[test]
-fn ordered_insert_sorts_by_deadline() {
-    let mut q = Vec::new();
-    for (dl, seq, id) in [(8_000_000, 0, 1), (1_000_000, 1, 2)] {
-        ordered_insert(
-            &mut q,
-            OrderedEntry {
-                deadline: dl,
-                seq,
-                id,
-            },
-        );
-    }
-    ordered_insert(
-        &mut q,
-        OrderedEntry {
-            deadline: 4_000_000,
-            seq: 2,
-            id: 3,
-        },
-    );
-    assert_eq!(q[0].id, 2);
-    assert_eq!(q[1].id, 3);
-    assert_eq!(q[2].id, 1);
-}
-
-#[test]
-fn ordered_insert_keeps_arrival_order_on_ties() {
-    let mut q = Vec::new();
-    for i in 0..4 {
-        let e = OrderedEntry {
-            deadline: 2_000_000,
-            seq: i,
-            id: i,
-        };
-        ordered_insert(&mut q, e);
-    }
-    assert_eq!(q[0].id, 0);
-    assert_eq!(q[1].id, 1);
-    assert_eq!(q[2].id, 2);
-    assert_eq!(q[3].id, 3);
-}
-
-#[test]
 fn kick_idle_rescues_stale_queue() {
     assert!(kick_idle_ok(0, 0, true));
     assert!(kick_idle_ok(1, 0, true));
     assert!(kick_idle_ok(2, 0, true));
-    assert!(!kick_idle_ok(3, 0, true));
-    assert!(!kick_idle_ok(8, 0, true));
-    assert!(!kick_idle_ok(u64::MAX, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(8, 0, true));
+    assert!(kick_idle_ok(u64::MAX, 0, true));
     assert!(!kick_idle_ok(0, 7, true));
     assert!(!kick_idle_ok(1, 1, true));
     assert!(!kick_idle_ok(2, 7, true));
     assert!(!kick_idle_ok(0, 0, false));
     assert!(!kick_idle_ok(2, 0, false));
-    assert!(!park_kick_ok());
+    assert!(!overflow_kick_ok());
 }
 
 /*
@@ -300,9 +224,9 @@ fn kick_coalesce_const_matches_header() {
 }
 
 /*
- * Recent needs 50us with zero open plus wrap. Zero
- * last never counts, 49999 counts, 50000 plus stays
- * open. Wrap diff holds across the wrap with no check.
+ * Recent needs 50us with zero open and wrap. Zero last never counts, 49999
+ * counts, 50000 and above stays open. Wrap diff holds across the wrap with no
+ * check.
  */
 #[test]
 fn kick_recent_needs_50us_with_zero_open() {
@@ -320,11 +244,9 @@ fn kick_recent_needs_50us_with_zero_open() {
 }
 
 /*
- * Coalesce needs q2 plus idle plus recent plus not
- * pinned. Q1 plus busy plus missing plus pinned stay
- * open with a kick. Park stays out with no kick use,
- * see park helper. Exiting uses its own idle kick with
- * no coalesce, see exiting helpers.
+ * Coalesce needs q2, idle, recent, and not pinned. Q1, busy, missing, and
+ * pinned stay open with a kick. Overflow stays out with no kick use, see the
+ * overflow helper. Exiting uses its own idle kick with no coalesce, see exiting helpers.
  */
 #[test]
 fn kick_coalesce_needs_q2_idle_recent_unpinned() {
@@ -341,22 +263,22 @@ fn kick_coalesce_needs_q2_idle_recent_unpinned() {
     assert!(!kick_coalesced(2, 0, false, false, now, recent));
     assert!(!kick_coalesced(2, 0, true, true, now, recent));
     assert!(!kick_coalesced(2, 0, true, true, now, stale));
-    assert!(!park_kick_ok());
+    assert!(!overflow_kick_ok());
 }
 
 /*
  * Q1 always kicks with no coalesce even when recent.
- * Deep stays quiet with no coalesce count. Q0 stays
+ * Deep always kicks with no coalesce count. Q0 stays
  * open with a kick. Busy stays quiet with no coalesce.
  */
 #[test]
-fn kick_q1_always_kicks_deep_stays_quiet() {
+fn kick_q1_always_kicks_deep_always_kicks() {
     let now = 5_000_000u64;
     let recent = now - 1_000;
     assert!(kick_idle_ok(1, 0, true));
     assert!(!kick_coalesced(1, 0, true, false, now, recent));
     assert!(!kick_coalesced(1, 0, true, true, now, recent));
-    assert!(!kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
     assert!(!kick_coalesced(3, 0, true, false, now, recent));
     assert!(!kick_coalesced(8, 0, true, false, now, recent));
     assert!(!kick_coalesced(u64::MAX, 0, true, false, now, recent));
@@ -364,6 +286,22 @@ fn kick_q1_always_kicks_deep_stays_quiet() {
     assert!(!kick_coalesced(0, 0, true, false, now, recent));
     assert!(!kick_idle_ok(2, 9, true));
     assert!(!kick_coalesced(2, 9, true, false, now, recent));
+}
+
+#[test]
+fn high2_foreign_crowd_idle_target_wakes() {
+    // Foreign crowd on the shared queue must not strand an
+    // idle target: the new task targets an idle CPU, so the
+    // idle kick runs regardless of shared depth.
+    assert!(kick_idle_ok(8, 0, true));
+    assert!(kick_idle_ok(32, 0, true));
+    assert!(!kick_idle_ok(8, 3, true));
+    assert!(!kick_idle_ok(8, 0, false));
+    let now = 5_000_000u64;
+    let recent = now - 1_000;
+    assert!(!kick_coalesced(8, 0, true, false, now, recent));
+    assert!(kick_idle_ok(1, 0, true));
+    assert!(kick_idle_ok(0, 0, true));
 }
 
 /*
@@ -416,7 +354,7 @@ fn exiting_runs_at_once_on_allowed_tgt() {
  * the task CPU mask only, so an allowed task CPU wins even
  * when the enqueuer is foreign, and a foreign task CPU
  * falls back even when the enqueuer is allowed. Mirrors the
- * BPF fix from here equals smp id to tgt equals task cpu.
+ * BPF fix from here equals smp id to tgt equals task CPU.
  */
 #[test]
 fn exiting_uses_task_cpu_not_enqueuer() {
@@ -437,9 +375,9 @@ fn exiting_uses_task_cpu_not_enqueuer() {
 }
 
 /*
- * Kick on idle with no depth plus no coalesce plus no rate.
- * Any queue state kicks when the task CPU is idle with a
- * live state, so q0 plus q1 plus q2 all wake at once.
+ * Kick on idle with no depth, no coalesce, and no rate. Any queue state kicks
+ * when the task CPU is idle with a live state, so q0, q1, and q2 all wake at
+ * once.
  */
 #[test]
 fn exiting_kick_on_idle() {
@@ -448,10 +386,9 @@ fn exiting_kick_on_idle() {
 }
 
 /*
- * No kick when busy or when the target state is missing.
- * Busy task CPUs stay quiet with no preempt, and a missing
- * state fails closed with no kick. Mirrors the BPF tst plus
- * running pid check with no kick at plus no coalesce.
+ * No kick when busy or when the target state is missing. Busy task CPUs stay
+ * quiet with no preempt, and a missing state fails closed with no kick. Mirrors
+ * the BPF tst, running pid check with no kick at, and no coalesce.
  */
 #[test]
 fn exiting_no_kick_when_busy_or_missing() {
@@ -459,16 +396,15 @@ fn exiting_no_kick_when_busy_or_missing() {
     assert!(!exiting_kick_ok(1, true));
     assert!(!exiting_kick_ok(0, false));
     assert!(!exiting_kick_ok(99, false));
-    assert!(!kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
     assert!(exiting_local_ok(true, true));
     assert!(!exiting_kick_ok(9, true));
 }
 
 /*
- * Fallback runs the normal path exactly once with no double
- * enqueue. An exiting task with a foreign task CPU skips the
- * fast insert plus the fast kick, then the normal path
- * inserts once. Counts model single insert plus no double.
+ * Fallback runs the normal path exactly once with no double enqueue. An exiting
+ * task with a foreign task CPU skips the fast insert and the fast kick, then
+ * the normal path inserts once. Counts model single insert and no double.
  */
 #[test]
 fn exiting_fallback_single_insert_no_double() {
@@ -495,10 +431,9 @@ fn exiting_fallback_single_insert_no_double() {
 }
 
 /*
- * Non-exiting tasks never take the fast path and keep the
- * normal kick rules. The fast gate stays closed for any tgt
- * mask, park stays kickless, and the normal idle plus
- * coalesce helpers stay unchanged.
+ * Non-exiting tasks never take the fast path and keep the normal kick rules.
+ * The fast gate stays closed for any tgt mask, park stays kickless, and the
+ * normal idle and coalesce helpers stay unchanged.
  */
 #[test]
 fn exiting_non_exiting_unchanged() {
@@ -506,8 +441,8 @@ fn exiting_non_exiting_unchanged() {
     assert!(!exiting_local_ok(false, false));
     assert!(kick_idle_ok(0, 0, true));
     assert!(kick_idle_ok(1, 0, true));
-    assert!(!kick_idle_ok(3, 0, true));
-    assert!(!park_kick_ok());
+    assert!(kick_idle_ok(3, 0, true));
+    assert!(!overflow_kick_ok());
     let now = 1_000_000u64;
     let recent = now - 10_000;
     assert!(kick_coalesced(2, 0, true, false, now, recent));
@@ -566,7 +501,7 @@ fn stay_local_keeps_task_cpu() {
 }
 
 #[test]
-fn empty_mask_parks() {
+fn empty_mask_overflows() {
     let empty = [false, false, false];
     assert_eq!(pick_target_cpu(0, &empty), None);
     assert_eq!(pick_target_cpu(2, &empty), None);
@@ -586,61 +521,13 @@ fn zero_freq_is_unknown_with_fallback() {
 }
 
 #[test]
-fn single_cpu_has_no_peers() {
-    assert_eq!(next_peer(0, 1), None);
-    assert_eq!(next_peer(0, 0), None);
-    assert_eq!(next_peer(0, 2), Some(1));
-    assert_eq!(next_peer(1, 2), Some(0));
-    assert_eq!(next_peer(2, 2), None);
-    assert_eq!(scan_bound(0), 0);
-    assert_eq!(scan_bound(1), 0);
-    assert_eq!(scan_bound(2), 1);
-    assert_eq!(scan_bound(8), 7);
-    assert_eq!(scan_bound(64), STEAL_BOUND);
+fn single_cpu_needs_no_scan() {
     assert_eq!(stay_target(0, 1, &[true]), Some(0));
     assert_eq!(stay_target(0, 1, &[false]), None);
     assert_eq!(stay_target(1, 1, &[true]), None);
     assert_eq!(pick_target_cpu(0, &[true]), Some(0));
     assert_eq!(pick_target_cpu(-1, &[true]), Some(0));
     assert_eq!(pick_target_cpu(0, &[false]), None);
-}
-
-#[test]
-fn steal_cursor_rotates_across_peers() {
-    assert_eq!(steal_next(0, 4), 1);
-    assert_eq!(steal_next(3, 4), 0);
-    assert_eq!(steal_next(0, 1), 0);
-    assert_eq!(steal_next(5, 0), 0);
-    let mut cur = 0;
-    for want in [1, 2, 3, 0, 1] {
-        cur = steal_next(cur, 4);
-        assert_eq!(cur, want);
-    }
-}
-
-/*
- * Tier 0 model only for donor plus rescue. BPF ships
- * thief idle only by construction due to verifier jump
- * at 1000001 on asleep check, with donor asleep handled
- * by idle kick.
- */
-#[test]
-fn donor_keeps_last_task() {
-    assert!(!donor_ok(0, false, false));
-    assert!(!donor_ok(1, false, false));
-    assert!(!donor_ok(0, true, true));
-    assert!(donor_ok(1, true, false));
-    assert!(donor_ok(1, false, true));
-    assert!(donor_ok(1, true, true));
-    for depth in [2, 3, 8, 32] {
-        assert!(donor_ok(depth, false, false));
-        assert!(donor_ok(depth, true, false));
-        assert!(donor_ok(depth, false, true));
-    }
-    assert_eq!(scan_bound(2), 1);
-    assert_eq!(scan_bound(9), 8);
-    assert_eq!(scan_bound(16), 8);
-    assert_eq!(scan_bound(1024), 8);
 }
 
 #[test]
@@ -695,8 +582,6 @@ fn konaka_single_cpu_never_leaves() {
     assert!(!may_run_on(1, &allowed));
     assert_eq!(stay_target(0, 1, &allowed), Some(0));
     assert_eq!(stay_target(1, 1, &allowed), None);
-    assert_eq!(next_peer(0, 1), None);
-    assert_eq!(scan_bound(1), 0);
 }
 
 #[test]
@@ -709,337 +594,6 @@ fn pinned_single_cpu_never_leaves() {
     assert!(!may_run_on(0, &pinned));
     assert!(!may_run_on(-1, &pinned));
     assert!(!may_run_on(99, &pinned));
-}
-
-#[test]
-fn dispatch_skips_dead_head() {
-    let dead = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: false,
-        fail: false,
-    };
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut q = VecDeque::from([dead.clone(), good.clone()]);
-    for _ in 0..2 {
-        q.push_back(good.clone());
-    }
-    let moved = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert_eq!(moved, 3);
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0], dead);
-}
-
-#[test]
-fn dispatch_skips_failed_move_with_progress() {
-    let failed = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: true,
-    };
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut q = VecDeque::from([failed.clone(), good.clone(), good.clone()]);
-    let moved = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert!(moved > 0);
-    assert_eq!(moved, 2);
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0], failed);
-}
-
-#[test]
-fn dispatch_batch_drains_within_passes() {
-    let good = PendingTask {
-        allowed: vec![true; 16],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut q = VecDeque::new();
-    for _ in 0..64 {
-        q.push_back(good.clone());
-    }
-    let first = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert_eq!(first, 32);
-    assert_eq!(q.len(), 32);
-    let second = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert_eq!(second, 32);
-    assert!(q.is_empty());
-}
-
-#[test]
-fn dispatch_park_moves_exiting_head() {
-    let exiting = PendingTask {
-        allowed: vec![true, true],
-        exiting: true,
-        live: true,
-        fail: false,
-    };
-    let foreign = PendingTask {
-        allowed: vec![false, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut q = VecDeque::from([exiting.clone(), foreign.clone(), good.clone(), good.clone()]);
-    let moved = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert!(moved > 0);
-    assert_eq!(moved, 3);
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0], foreign);
-}
-
-#[test]
-fn progress_guarantee_zero_means_no_movable_work() {
-    let dead = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: false,
-        fail: false,
-    };
-    let foreign = PendingTask {
-        allowed: vec![false, false],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut q = VecDeque::from([dead.clone(), foreign.clone()]);
-    let moved = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert_eq!(moved, 0);
-    assert_eq!(q.len(), 2);
-    q.push_back(PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    });
-    let moved2 = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert_eq!(moved2, 1);
-}
-
-#[test]
-fn dispatch_own_park_respects_budget() {
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut own = VecDeque::new();
-    let mut park = VecDeque::new();
-    for _ in 0..64 {
-        own.push_back(good.clone());
-    }
-    for _ in 0..4 {
-        park.push_back(good.clone());
-    }
-    let (a, b) = dispatch_own_park_model(&mut own, &mut park, 0, 32);
-    assert_eq!(a, 32);
-    assert_eq!(b, 0);
-    assert_eq!(a + b, 32);
-    let mut small_own = VecDeque::new();
-    let mut small_park = VecDeque::new();
-    for _ in 0..10 {
-        small_own.push_back(good.clone());
-    }
-    for _ in 0..4 {
-        small_park.push_back(good.clone());
-    }
-    let (c, d) = dispatch_own_park_model(&mut small_own, &mut small_park, 0, 32);
-    assert_eq!(c, 10);
-    assert_eq!(d, 4);
-}
-
-#[test]
-fn steal_only_when_idle_and_bounded() {
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut peers: Vec<VecDeque<PendingTask>> = vec![
-        VecDeque::new(),
-        VecDeque::from([good.clone(), good.clone()]),
-    ];
-    let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false, false, &[]);
-    assert_eq!(busy, 0);
-    let (idle, next) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false]);
-    assert_eq!(idle, 1);
-    assert_eq!(next, 1);
-    let mut wide: Vec<VecDeque<PendingTask>> = vec![VecDeque::new(); 16];
-    for q in wide.iter_mut().skip(1) {
-        q.push_back(good.clone());
-        q.push_back(good.clone());
-    }
-    let (capped, _) = steal_model(&mut wide, 0, 0, 32, true, false, &[]);
-    assert!(capped > 0);
-    assert!(capped <= 8);
-}
-
-#[test]
-fn steal_checks_mask_and_skips_bad_heads() {
-    let foreign = PendingTask {
-        allowed: vec![false, false],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let exiting = PendingTask {
-        allowed: vec![true, true],
-        exiting: true,
-        live: true,
-        fail: false,
-    };
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut peers: Vec<VecDeque<PendingTask>> = vec![
-        VecDeque::new(),
-        VecDeque::from([foreign.clone(), exiting.clone(), good.clone()]),
-        VecDeque::from([good.clone()]),
-    ];
-    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false, false]);
-    assert_eq!(moved, 1);
-    assert_eq!(peers[1].len(), 2);
-    assert_eq!(peers[2].len(), 1);
-}
-
-#[test]
-fn idle_rescues_singleton() {
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut peers: Vec<VecDeque<PendingTask>> =
-        vec![VecDeque::new(), VecDeque::from([good.clone()])];
-    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, true, &[false, false]);
-    assert_eq!(moved, 1);
-    assert!(peers[1].is_empty());
-}
-
-#[test]
-fn busy_refuses_singleton() {
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut peers: Vec<VecDeque<PendingTask>> =
-        vec![VecDeque::new(), VecDeque::from([good.clone()])];
-    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false]);
-    assert_eq!(moved, 0);
-    assert_eq!(peers[1].len(), 1);
-    let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false, false, &[false, false]);
-    assert_eq!(busy, 0);
-}
-
-#[test]
-fn rescue_ignores_unmovable_park_leftovers() {
-    assert!(rescue_single_ok(0, 0));
-    assert!(!rescue_single_ok(1, 0));
-    assert!(!rescue_single_ok(0, 1));
-    assert!(!rescue_single_ok(1, 1));
-    assert!(!rescue_single_ok(0, 2));
-}
-
-/*
- * Tier 0 model only for donor asleep rescue. BPF ships
- * thief idle only by construction due to verifier jump
- * at 1000001 on asleep check, with donor asleep handled
- * by idle kick.
- */
-#[test]
-fn donor_asleep_rescues_singleton() {
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut peers: Vec<VecDeque<PendingTask>> =
-        vec![VecDeque::new(), VecDeque::from([good.clone()])];
-    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, true]);
-    assert_eq!(moved, 1);
-    assert!(peers[1].is_empty());
-}
-
-#[test]
-fn exiting_task_eventually_runs() {
-    let exiting = PendingTask {
-        allowed: vec![true, true],
-        exiting: true,
-        live: true,
-        fail: false,
-    };
-    let good = PendingTask {
-        allowed: vec![true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut q = VecDeque::from([exiting.clone(), good.clone()]);
-    let moved = drain_model(&mut q, 0, DISPATCH_BATCH);
-    assert_eq!(moved, 2);
-    assert!(q.is_empty());
-    assert!(peer_head_ok(0, Some(&exiting)));
-    let mut peers: Vec<VecDeque<PendingTask>> = vec![
-        VecDeque::new(),
-        VecDeque::from([exiting.clone(), good.clone()]),
-        VecDeque::new(),
-    ];
-    let (stolen, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false, false]);
-    assert_eq!(stolen, 1);
-    let far = PendingTask {
-        allowed: vec![false, true],
-        exiting: true,
-        live: true,
-        fail: false,
-    };
-    assert!(!peer_head_ok(0, Some(&far)));
-    assert!(peer_head_ok(1, Some(&far)));
-}
-
-#[test]
-fn idle_steals_past_unmovable_leftovers() {
-    assert!(may_steal(2, 0, 0));
-    assert!(may_steal(0, 1, 0));
-    assert!(may_steal(0, 0, 0));
-    assert!(!may_steal(1, 0, 1));
-    assert!(!may_steal(0, 1, 1));
-    assert!(may_steal(0, 0, 1));
-    let foreign = PendingTask {
-        allowed: vec![false, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut own = VecDeque::from([foreign.clone(), foreign.clone()]);
-    let moved = drain_model(&mut own, 0, DISPATCH_BATCH);
-    assert_eq!(moved, 0);
-    assert!(may_steal(own.len() as u64, 0, moved));
 }
 
 #[test]
@@ -1101,61 +655,6 @@ fn completion_counts_once_per_grant() {
 }
 
 #[test]
-fn dispatch_own_park_then_steal_gate() {
-    let good = PendingTask {
-        allowed: vec![true, true, true],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let foreign = PendingTask {
-        allowed: vec![false, false, false],
-        exiting: false,
-        live: true,
-        fail: false,
-    };
-    let mut own = VecDeque::from([foreign.clone(), foreign.clone()]);
-    let mut park = VecDeque::new();
-    let mut peers: Vec<VecDeque<PendingTask>> = vec![
-        VecDeque::new(),
-        VecDeque::from([good.clone(), good.clone()]),
-        VecDeque::new(),
-    ];
-    let (a, b) = dispatch_own_park_model(&mut own, &mut park, 0, 32);
-    assert_eq!(a + b, 0);
-    assert_eq!(own.len(), 2);
-    let moved = a + b;
-    assert!(may_steal(own.len() as u64, park.len() as u64, moved));
-    let (stolen, _) = steal_model(&mut peers, 0, 0, 32 - moved, true, false, &[]);
-    assert_eq!(stolen, 1);
-    assert_eq!(a + b + stolen, 1);
-    let mut own2 = VecDeque::from([good.clone(), good.clone()]);
-    let mut park2 = VecDeque::new();
-    let mut peers2: Vec<VecDeque<PendingTask>> = vec![
-        VecDeque::new(),
-        VecDeque::from([good.clone(), good.clone()]),
-        VecDeque::new(),
-    ];
-    let (c, d) = dispatch_own_park_model(&mut own2, &mut park2, 0, 32);
-    assert_eq!(c, 2);
-    assert_eq!(d, 0);
-    assert!(own2.is_empty());
-    let moved2 = c + d;
-    assert!(may_steal(own2.len() as u64, park2.len() as u64, moved2));
-    let (stolen2, _) = steal_model(&mut peers2, 0, 0, 32 - moved2, true, false, &[]);
-    assert_eq!(stolen2, 1);
-    assert!(c + d + stolen2 <= 32);
-    let mut own3 = VecDeque::from([good.clone(), foreign.clone()]);
-    let mut park3 = VecDeque::new();
-    let (e, f) = dispatch_own_park_model(&mut own3, &mut park3, 0, 32);
-    assert_eq!(e, 1);
-    assert_eq!(own3.len(), 1);
-    let moved3 = e + f;
-    assert!(!may_steal(own3.len() as u64, park3.len() as u64, moved3));
-    assert!(e + f <= 32);
-}
-
-#[test]
 fn mask_range_and_live_fail_closed() {
     assert!(!may_run_on(-1, &[true, true]));
     assert!(!cpu_live(-1, 2));
@@ -1177,8 +676,6 @@ fn mask_range_and_live_fail_closed() {
 #[test]
 fn facade_matches_helpers() {
     assert_eq!(crate::flow::DISPATCH_BATCH, crate::flow_edf::DISPATCH_BATCH);
-    assert_eq!(crate::flow::DSQ_BASE, crate::flow_edf::DSQ_BASE);
-    assert_eq!(crate::flow::DSQ_PARK, crate::flow_edf::DSQ_PARK);
     assert_eq!(crate::flow::EST_MIN_NS, crate::flow_slice::EST_MIN_NS);
     assert_eq!(crate::flow::EST_MAX_NS, crate::flow_slice::EST_MAX_NS);
     assert_eq!(crate::flow::SLICE_NS, crate::flow_slice::SLICE_NS);
@@ -1222,11 +719,10 @@ fn free_core_needs_no_sibling_running() {
 }
 
 /*
- * Tier A scans for a free core in the group with no
- * claim. Tier B prefers any idle in the group. The
- * scan stays in id order with group plus mask plus
- * running pid. Strict iff ready is zero, best effort
- * iff ready is one with live table in placement.
+ * Tier A scans for a free core in the group with no claim. Tier B prefers any
+ * idle in the group. The scan stays in id order with group, mask, and running
+ * pid. Strict iff ready is zero, best effort iff ready is one with live table
+ * in placement.
  */
 #[test]
 fn tier_prefers_free_core_in_group() {
@@ -1357,9 +853,8 @@ fn singleton_tier_is_noop_with_prior_order() {
 }
 
 /*
- * Tiered keeps mask plus group. Cross group running
- * stays out. Empty masks park with none. Pinned single
- * keeps the single CPU with no scan. Strict iff ready
+ * Tiered keeps mask and group. Cross group running stays out. Empty masks park
+ * with none. Pinned single keeps the single CPU with no scan. Strict iff ready
  * is zero, best effort iff ready is one.
  */
 #[test]
@@ -1418,10 +913,9 @@ fn tiered_keeps_mask_plus_group() {
 }
 
 /*
- * Waker CPU idle in group keeps the waker. Needs idle
- * with no running task plus allowed plus in group.
- * An idle core cannot stack, so locality is free.
- * Beats Tier A even when CPU 0 is free with no idle.
+ * Waker CPU idle in group keeps the waker. Needs idle with no running task,
+ * allowed, and in group. An idle core cannot stack, so locality is free. Beats
+ * Tier A even when CPU 0 is free with no idle.
  */
 #[test]
 fn waker_idle_keeps_waker() {
@@ -1673,9 +1167,8 @@ fn smt_off_placement_matches_prior() {
 }
 
 /*
- * Empty plus zero plus missing stay safe. Zero CPUs
- * give none with no table use. Missing partner reads
- * as free with no trap. No division runs here.
+ * Empty, zero, and missing stay safe. Zero CPUs give none with no table use.
+ * Missing partner reads as free with no trap. No division runs here.
  */
 #[test]
 fn empty_plus_zero_stay_safe_with_no_trap() {
@@ -1714,10 +1207,9 @@ fn empty_plus_zero_stay_safe_with_no_trap() {
 }
 
 /*
- * Weight table holds 40 levels with strict fall plus
- * center 1024 at nice 0. Ends are 2048 at minus 20
- * and 256 at 19, so total spread K is 8 with boost
- * 2x and penalty 4x. All values fit in u16 with no zero.
+ * Weight table holds 40 levels with strict fall and center 1024 at nice 0. Ends
+ * are 2048 at minus 20 and 256 at 19, so total spread K is 8 with boost 2x and
+ * penalty 4x. All values fit in u16 with no zero.
  */
 #[test]
 fn weight_table_is_monotonic_with_center_1024() {
@@ -1763,9 +1255,8 @@ fn nice_maps_prio_minus_120_with_fallback() {
 }
 
 /*
- * Cap holds base in slice over 8 to slice times 8.
- * Center stays at one slice. Heavy keeps a short cap,
- * light keeps a long cap. Zero weight plus zero slice
+ * Cap holds base in slice over 8 to slice times 8. Center stays at one slice.
+ * Heavy keeps a short cap, light keeps a long cap. Zero weight and zero slice
  * stay safe with no divide fault.
  */
 #[test]
@@ -1810,9 +1301,8 @@ fn clamp_w_matches_fixed_at_center() {
 }
 
 /*
- * Heavy tasks keep earlier deadlines with the same
- * start. Scale plus clamp plus deadline all move with
- * weight, so low nice gains service with no starve as
+ * Heavy tasks keep earlier deadlines with the same start. Scale, clamp, and
+ * deadline all move with weight, so low nice gains service with no starve as
  * the cap holds extremes in 8x.
  */
 #[test]
@@ -1831,10 +1321,9 @@ fn heavy_keeps_earlier_deadline() {
 }
 
 /*
- * Insert matches weighted clamp plus scale plus
- * deadline. BPF clamps with the weight cap in both
- * enqueue paths, so the model composes the weighted
- * clamp with the scaled estimate at every weight.
+ * Insert matches weighted clamp, scale, and deadline. BPF clamps with the
+ * weight cap in both enqueue paths, so the model composes the weighted clamp
+ * with the scaled estimate at every weight.
  */
 #[test]
 fn edf_insert_matches_weighted_clamp_and_scale() {
@@ -1869,20 +1358,17 @@ fn edf_insert_matches_weighted_clamp_and_scale() {
 }
 
 /*
- * Weight stays out of routing with no group plus steal
- * plus kick change. Placement plus drain plus kick read
- * the same with any weight, so only deadline plus
- * vruntime move with nice.
+ * Weight stays out of routing with no group, drain, and kick change. Placement,
+ * drain, and kick read the same with any weight, so only deadline and vruntime
+ * move with nice.
  */
 #[test]
 fn weight_keeps_routing_unchanged() {
     let allowed = [true, true, true, true];
     assert_eq!(pick_target_cpu(1, &allowed), Some(1));
     assert!(may_run_on(1, &allowed));
-    assert!(donor_ok(2, false, false));
-    assert!(!donor_ok(1, false, false));
     assert!(kick_idle_ok(2, 0, true));
-    assert!(!park_kick_ok());
+    assert!(!overflow_kick_ok());
     let idle = RunningView::idle();
     assert!(idle.is_idle());
     assert_eq!(idle.nice, 0);
@@ -1899,9 +1385,8 @@ fn weight_keeps_routing_unchanged() {
 }
 
 /*
- * Per CPU nice plus weight decode with defaults plus
- * alias. Old JSON with no new fields stays valid. Old
- * tq_ns still maps to slice with no loss.
+ * Per CPU nice, weight decode with defaults, and alias. Old JSON with no new
+ * fields stays valid. Old tq_ns still maps to slice with no loss.
  */
 #[test]
 fn per_cpu_nice_plus_weight_decode_with_alias() {
@@ -1932,9 +1417,8 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
 }
 
 /*
- * Facade reexports the weight helpers with no drift.
- * Table plus nice plus weight plus cap plus clamp all
- * match the helper modules at once.
+ * Facade reexports the weight helpers with no drift. Table, nice, weight, cap,
+ * and clamp all match the helper modules at once.
  */
 #[test]
 fn facade_matches_weight_helpers() {
@@ -1954,12 +1438,14 @@ fn facade_matches_weight_helpers() {
 }
 
 /*
- * Tiered least fallback picks the smallest queued
- * depth with lowest id on ties. Earlier tiers still
- * win when they hit, so the least step only covers
- * the old first fallback. Placement keeps live with
- * strict iff ready is zero. Mirrors BPF select at
- * 4.2.19 with halves untouched in dispatch.
+ * Tiered least fallback picks the first allowed in
+ * the group with lowest id on ties. Earlier tiers still
+ * win. The per CPU FIFO store keeps backlog per CPU,
+ * so per CPU depth spreads the pick with lowest id
+ * on ties. Earlier tiers still win when they hit, so
+ * the least step only covers the old first fallback.
+ * Placement keeps live with strict iff ready is zero.
+ * Mirrors BPF select with halves untouched in dispatch.
  */
 #[test]
 fn tiered_least_fallback_picks_least() {
@@ -1972,7 +1458,8 @@ fn tiered_least_fallback_picks_least() {
     let running = vec![true; 4];
     let allowed = vec![true; 4];
     let idle = vec![false; 4];
-    let queued = vec![5, 1, 3, 9];
+    let overflow = vec![5, 9];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     let got = select_cpu_tiered_least(
         9,
         9,
@@ -1984,24 +1471,10 @@ fn tiered_least_fallback_picks_least() {
         0,
         &partner,
         &running,
-        &queued,
+        &overflow,
+        &per,
     );
-    assert_eq!(got, Some(1));
-    let tie = vec![2, 2, 2, 2];
-    let got2 = select_cpu_tiered_least(
-        9,
-        9,
-        &allowed,
-        &idle,
-        GROUP_LIGHT,
-        nr,
-        &table,
-        0,
-        &partner,
-        &running,
-        &tie,
-    );
-    assert_eq!(got2, Some(0));
+    assert_eq!(got, Some(0));
     let empty: Vec<u64> = vec![];
     let got3 = select_cpu_tiered_least(
         9,
@@ -2014,6 +1487,7 @@ fn tiered_least_fallback_picks_least() {
         0,
         &partner,
         &running,
+        &empty,
         &empty,
     );
     assert_eq!(got3, Some(0));
@@ -2029,17 +1503,34 @@ fn tiered_least_fallback_picks_least() {
         0,
         &partner,
         &running,
-        &queued,
+        &overflow,
+        &per,
     );
     assert_eq!(got4, Some(1));
+    let spread = vec![4, 0, 0, 0];
+    let got5 = select_cpu_tiered_least(
+        9,
+        9,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &overflow,
+        &spread,
+    );
+    assert_eq!(got5, Some(1));
 }
 
 /*
- * Pick in group least prefers the selected CPU when
- * allowed plus in group, else the least queued in the
- * group with lowest id on ties. No allowed CPU in the
- * group yields none for park use. Mirrors BPF enqueue
- * pick at 4.2.19 with live view plus frozen bounds.
+ * Pick in group least prefers the selected CPU when allowed and in group, else
+ * the least queued in the group. The per CPU FIFO store keeps backlog
+ * per CPU, so per CPU depth spreads the pick. No allowed CPU in
+ * the group yields none for overflow use. Mirrors BPF enqueue pick with live
+ * view and frozen bounds.
  */
 #[test]
 fn pick_in_group_least_prefers_selected_else_least() {
@@ -2048,41 +1539,45 @@ fn pick_in_group_least_prefers_selected_else_least() {
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let allowed = vec![true; 4];
-    let queued = vec![5, 1, 3, 9];
+    let overflow = vec![5, 9];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     assert_eq!(
-        pick_in_group_least(0, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
+        pick_in_group_least(0, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         Some(0)
     );
     assert_eq!(
-        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
-        Some(1)
+        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
+        Some(0)
     );
     assert_eq!(
-        pick_in_group_least(-1, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
-        Some(1)
+        pick_in_group_least(-1, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
+        Some(0)
     );
     assert_eq!(
-        pick_in_group_least(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
-        Some(1)
+        pick_in_group_least(2, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
+        Some(0)
     );
     let narrow = vec![false, false, true, true];
     assert_eq!(
-        pick_in_group_least(0, &narrow, GROUP_LIGHT, nr, &table, 0, &queued),
+        pick_in_group_least(0, &narrow, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         None
     );
     let empty = vec![false; 4];
     assert_eq!(
-        pick_in_group_least(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued),
+        pick_in_group_least(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         None
+    );
+    let spread = vec![3, 0, 0, 0];
+    assert_eq!(
+        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &spread),
+        Some(1)
     );
 }
 
 /*
- * Corrected frontier takes the max with wrap. Ref
- * past target wins, target past ref wins, equal
- * stays, zero follows max, wrap follows before.
- * Mirrors the BPF normal path max of ref plus
- * target with no park plus no tctx use.
+ * Corrected frontier takes the max with wrap. Ref past target wins, target past
+ * ref wins, equal stays, zero follows max, wrap follows before. Mirrors the BPF
+ * normal path max of ref, target with no park, and no tctx use.
  */
 #[test]
 fn corrected_frontier_takes_max_with_wrap() {
@@ -2108,11 +1603,9 @@ fn corrected_frontier_takes_max_with_wrap() {
 }
 
 /*
- * Corrected frontier feeds clamp plus deserved with
- * one floor. A ref past target lifts the clamp and
- * widens deserved at once, so both see the same
- * max with no split view. Park plus no tctx keep
- * ref only with no use here.
+ * Corrected frontier feeds clamp and deserved with one floor. A ref past target
+ * lifts the clamp and widens deserved at once, so both see the same max with no
+ * split view. Park and no tctx keep ref only with no use here.
  */
 #[test]
 fn corrected_frontier_feeds_clamp_and_deserved() {
@@ -2143,10 +1636,9 @@ fn corrected_frontier_feeds_clamp_and_deserved() {
 }
 
 /*
- * S0 strict keeps group isolation with mask win.
- * Perf widens to any allowed on in group miss with
- * same tier order. Least keeps lowest depth plus
- * lowest id over the widened set. Mask always wins.
+ * S0 strict keeps group isolation with mask win. Perf widens to any allowed on
+ * in group miss with same tier order. Least reads per CPU plus group
+ * overflow with lowest id over the widened set. Mask always wins.
  */
 #[test]
 fn s0_strict_keeps_isolation_perf_widens_on_miss() {
@@ -2154,58 +1646,128 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
     use crate::flow_group::GROUP_TABLE_LEN;
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
-    // Halves at 4: 0,1 light plus 2,3 hog.
+    // Halves at 4. 0,1 light and 2,3 hog. Overflow holds light 5, hog 0.
     let allowed = vec![true; 4];
-    let queued = vec![5, 1, 3, 0];
-    // Strict least in light is 1, perf same when hit.
+    let overflow = vec![5, 0];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
+    // Strict least in light is 0, perf same when hit.
     assert_eq!(
-        pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, false),
-        Some(1)
+        pick_in_group_widened(
+            9,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
+        Some(0)
     );
     assert_eq!(
-        pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, true),
-        Some(1)
+        pick_in_group_widened(
+            9,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            true
+        ),
+        Some(0)
     );
-    // Narrow to hog only: strict light misses, perf widens.
+    // Narrow to hog only. Strict light misses, perf widens.
     let narrow = vec![false, false, true, true];
     assert_eq!(
-        pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &queued, false),
+        pick_in_group_widened(
+            -1,
+            &narrow,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
         None
     );
     assert_eq!(
-        pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &queued, true),
-        Some(3)
+        pick_in_group_widened(
+            -1,
+            &narrow,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            true
+        ),
+        Some(2)
     );
-    // Selected cross group: strict skips to least, perf keeps it.
+    // Selected cross group. Strict skips to least, perf keeps it.
     assert_eq!(
-        pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, false),
-        Some(1)
+        pick_in_group_widened(
+            2,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
+        Some(0)
     );
     assert_eq!(
-        pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, true),
+        pick_in_group_widened(
+            2,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            true
+        ),
         Some(2)
     );
     // Mask wins in both modes with no allowed.
     let empty = vec![false; 4];
     assert_eq!(
-        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued, false),
+        pick_in_group_widened(
+            0,
+            &empty,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
         None
     );
     assert_eq!(
-        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued, true),
+        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow, &per, true),
         None
     );
-    // Least any keeps lowest depth plus lowest id.
-    let tie = vec![2, 2, 1, 1];
-    assert_eq!(least_any(&allowed, nr, &tie), Some(2));
-    assert_eq!(least_any(&narrow, nr, &tie), Some(2));
-    assert_eq!(least_any(&empty, nr, &tie), None);
+    // Least any keeps lowest depth and lowest id.
+    let tie = vec![2, 1];
+    assert_eq!(least_any(&allowed, nr, &table, 0, &tie, &per), Some(2));
+    assert_eq!(least_any(&narrow, nr, &table, 0, &tie, &per), Some(2));
+    assert_eq!(least_any(&empty, nr, &table, 0, &tie, &per), None);
 }
 
 /*
- * S0 tiered perf keeps order with wider any allowed.
- * Strict free plus idle plus prev plus least stay in
- * group, perf falls to any on each miss. Mask wins.
+ * S0 tiered perf keeps order with wider any allowed. Strict free, idle, prev,
+ * and least stay in group, perf falls to any on each miss. Mask wins.
  */
 #[test]
 fn s0_tiered_perf_keeps_order_with_wider_set() {
@@ -2215,11 +1777,12 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let partner = vec![SIBLING_EMPTY; 4];
-    // All idle plus free: strict and perf both take 0.
+    // All idle and free. Strict and perf both take 0.
     let allowed = vec![true; 4];
     let idle = vec![true; 4];
     let running = vec![false; 4];
-    let queued = vec![0; 4];
+    let overflow = vec![0, 0];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     assert_eq!(
         select_cpu_tiered_perf(
             -1,
@@ -2232,7 +1795,8 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             0,
             &partner,
             &running,
-            &queued,
+            &overflow,
+            &per,
             false
         ),
         Some(0)
@@ -2249,12 +1813,13 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             0,
             &partner,
             &running,
-            &queued,
+            &overflow,
+            &per,
             true
         ),
         Some(0)
     );
-    // Light masked out: strict falls to first hog, perf widens least.
+    // Light masked out. Strict falls to first hog, perf widens least.
     let hog_only = vec![false, false, true, true];
     let idle_hog = vec![false, false, true, true];
     let strict = select_cpu_tiered_perf(
@@ -2268,7 +1833,8 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         0,
         &partner,
         &running,
-        &queued,
+        &overflow,
+        &per,
         false,
     );
     let perf = select_cpu_tiered_perf(
@@ -2282,15 +1848,16 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         0,
         &partner,
         &running,
-        &queued,
+        &overflow,
+        &per,
         true,
     );
     assert_eq!(strict, Some(2));
     assert_eq!(perf, Some(2));
-    // Waker cross group: strict skips, perf keeps waker.
+    // Waker cross group. Strict skips, perf keeps waker.
     let running_busy = vec![true, true, true, false];
     let idle_none = vec![false; 4];
-    let queued_busy = vec![5, 5, 5, 0];
+    let overflow_busy = vec![5, 0];
     // Waker 3 is hog with idle core, group light.
     let s = select_cpu_tiered_perf(
         0,
@@ -2303,7 +1870,8 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         0,
         &partner,
         &running_busy,
-        &queued_busy,
+        &overflow_busy,
+        &per,
         false,
     );
     let p = select_cpu_tiered_perf(
@@ -2317,12 +1885,13 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         0,
         &partner,
         &running_busy,
-        &queued_busy,
+        &overflow_busy,
+        &per,
         true,
     );
     assert_ne!(s, p);
     assert_eq!(p, Some(3));
-    // Mask wins: no allowed yields none in both modes.
+    // Mask wins. No allowed yields none in both modes.
     let empty = vec![false; 4];
     assert_eq!(
         select_cpu_tiered_perf(
@@ -2336,7 +1905,8 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             0,
             &partner,
             &running,
-            &queued,
+            &overflow,
+            &per,
             false
         ),
         None
@@ -2353,7 +1923,8 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             0,
             &partner,
             &running,
-            &queued,
+            &overflow,
+            &per,
             true
         ),
         None
