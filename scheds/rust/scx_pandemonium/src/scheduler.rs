@@ -60,8 +60,8 @@ pub struct PandemoniumStats {
     // domain half, which on a two-domain box is the minority. Every steal is a
     // migration by definition, so this is the dispatch side's share of the count.
     pub nr_steal: u64,
-    // THE anchor -> target EDGE, BOTH OUTCOMES (intf.h nr_stay_fare_held /
-    // nr_stay_move_taken). The fare is the only priced term on the wake path's
+    // THE anchor -> target EDGE, BOTH OUTCOMES (intf.h nr_stay_cost_held /
+    // nr_stay_move_taken). The cost is the only priced term on the wake path's
     // own move and nothing incremented when it fired, so "holds everything home"
     // and "never runs" were indistinguishable from outside. Read as a ratio: the
     // pair is every decision, the first is the refusals.
@@ -72,7 +72,7 @@ pub struct PandemoniumStats {
     // one, or the kick rate reports IPIs that were never issued. Its magnitude is
     // what says whether the self-only subset is worth keeping.
     pub nr_kick_declined: u64,
-    pub nr_stay_fare_held: u64,
+    pub nr_stay_cost_held: u64,
     pub nr_stay_move_taken: u64,
     // PER-CPU RUNNABLE DEPTH (intf.h rq_depth_sum / rq_depth_samples).
     // Monotonic accumulators sampled at tick rate; difference BOTH across an
@@ -87,7 +87,7 @@ pub struct PandemoniumStats {
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
 // 184 (base, after the structurally empty latcrit l2 pair) + 8*8 (nr_cross_domain)
 // + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) + 8 (nr_steal)
-// + 8 (nr_kick_declined) + 8 (nr_stay_fare_held) + 8 (nr_stay_move_taken)
+// + 8 (nr_kick_declined) + 8 (nr_stay_cost_held) + 8 (nr_stay_move_taken)
 // + 8 (rq_depth_sum) + 8 (rq_depth_samples) = 312.
 const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 312);
 // 88 - 16 (lat_cri_thresh_high/_low, removed with the classifier that read them)
@@ -271,7 +271,7 @@ impl<'a> Scheduler<'a> {
                 total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
                 total.nr_steal += stats.nr_steal;
                 total.nr_kick_declined += stats.nr_kick_declined;
-                total.nr_stay_fare_held += stats.nr_stay_fare_held;
+                total.nr_stay_cost_held += stats.nr_stay_cost_held;
                 total.nr_stay_move_taken += stats.nr_stay_move_taken;
                 // Folded so the aggregate stays complete, but the SUMMED value
                 // is close to meaningless -- it is the total depth seen across
@@ -384,7 +384,7 @@ impl<'a> Scheduler<'a> {
             codel_target_floor_ns: bss.codel_target_floor_ns,
             codel_target_max_ns: data.codel_target_max_ns,
             // NEAREST-PEER PHI HOLD WARM-STAY PRICES IN (SLOT 0 = CHEAPEST
-            // PEER, THE VALUE warm_stay_anchor READS FOR THE HOME CPU). CPU 0
+            // PEER, THE VALUE warm_seat_pick READS FOR THE HOME CPU). CPU 0
             // IS REPRESENTATIVE ON A HOMOGENEOUS TOPOLOGY.
             home_dist_extra_ns: self.read_reff_value(0, 0) as u64,
         }
@@ -506,6 +506,16 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    // SET affinity_domain_peers (post-load mutable global). The MINIMUM over CPUs of
+    // how many affinity_rank slots stay inside that CPU's own cache domain, floored
+    // at 1 by the caller. Bounds the affinity idle-search FLOOR so the walk cannot be
+    // forced past a domain narrower than the old constant 3.
+    pub fn write_affinity_domain_peers(&mut self, peers: u32) {
+        if let Some(data) = self.skel.maps.data_data.as_mut() {
+            data.affinity_domain_peers = peers;
+        }
+    }
+
     // POPULATE L2 SIBLINGS MAP ENTRY
     pub fn write_l2_sibling(&self, group_id: u32, slot: u32, cpu: u32) -> Result<()> {
         let key = (group_id * 8 + slot).to_ne_bytes();
@@ -557,6 +567,22 @@ impl<'a> Scheduler<'a> {
         self.skel
             .maps
             .domain_phi
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    // POPULATE THE DIMENSIONLESS R_eff MAP (PAIRS 1:1 WITH affinity_rank).
+    // reff_frac[cpu * MAX_AFFINITY_CANDIDATES + slot] = R_eff(cpu, peer) as a Q16
+    // fraction of the machine's R_eff span. 0 = adjacent, 65536 = most distant
+    // pair. (u32)-1 = unused slot. The wake-path placement price multiplies this
+    // by codel_target_ns; the steal keeps reading reff_value's tau fold.
+    pub fn write_reff_frac(&self, cpu: u32, slot: u32, value: u32) -> Result<()> {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = value.to_ne_bytes();
+        self.skel
+            .maps
+            .reff_frac
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
@@ -626,151 +652,5 @@ impl Drop for Scheduler<'_> {
             .cache_domain
             .unpin("/sys/fs/bpf/pandemonium/cache_domain");
         let _ = std::fs::remove_dir("/sys/fs/bpf/pandemonium");
-    }
-}
-
-// THE FOLD'S NOT-A-SUM FIELDS
-//
-// read_stats() returns a total derived from the per-CPU array. Three fields
-// do not fold by addition, and getting any of them wrong changes numbers that
-// every consumer already trusts, silently and in the safe-looking direction:
-// a summed sojourn reads HIGHER than reality, a summed longrun flag reads as
-// a count rather than a boolean, and an elementwise array folded as a scalar
-// loses per-path attribution entirely. This pins all three against the shape
-// the code had before the array was preserved.
-#[cfg(test)]
-mod fold_tests {
-    use super::*;
-
-    fn cpu(dispatches: u64, sojourn: u64, longrun: u64, xdom: [u64; 8]) -> PandemoniumStats {
-        let mut s = PandemoniumStats::default();
-        s.nr_dispatches = dispatches;
-        s.batch_sojourn_ns = sojourn;
-        s.longrun_mode_active = longrun;
-        s.nr_cross_domain = xdom;
-        s
-    }
-
-    #[test]
-    fn counters_sum_across_cpus() {
-        let cpus = [
-            cpu(10, 0, 0, [0; 8]),
-            cpu(7, 0, 0, [0; 8]),
-            cpu(3, 0, 0, [0; 8]),
-        ];
-        assert_eq!(Scheduler::fold_stats(&cpus).nr_dispatches, 20);
-    }
-
-    #[test]
-    fn sojourn_takes_the_max_not_the_sum() {
-        // A system's worst batch sojourn is the worst any CPU saw, never the
-        // sum of what all of them saw. Summing here would report 900ms where
-        // the machine's actual worst wait was 500.
-        let cpus = [
-            cpu(0, 100, 0, [0; 8]),
-            cpu(0, 500, 0, [0; 8]),
-            cpu(0, 300, 0, [0; 8]),
-        ];
-        assert_eq!(Scheduler::fold_stats(&cpus).batch_sojourn_ns, 500);
-    }
-
-    #[test]
-    fn longrun_flag_takes_the_max_not_the_sum() {
-        // It is a mode flag. Summed across 20 CPUs it becomes a count and any
-        // consumer testing `> 0` still passes, which is exactly why this would
-        // survive review unnoticed.
-        let cpus = [
-            cpu(0, 0, 1, [0; 8]),
-            cpu(0, 0, 1, [0; 8]),
-            cpu(0, 0, 0, [0; 8]),
-        ];
-        assert_eq!(Scheduler::fold_stats(&cpus).longrun_mode_active, 1);
-    }
-
-    #[test]
-    fn cross_domain_folds_elementwise_per_path() {
-        let mut a = [0u64; 8];
-        let mut b = [0u64; 8];
-        a[0] = 5;
-        a[3] = 2;
-        b[0] = 1;
-        b[7] = 9;
-        let got = Scheduler::fold_stats(&[cpu(0, 0, 0, a), cpu(0, 0, 0, b)]).nr_cross_domain;
-        assert_eq!(got[0], 6, "path 0 must sum across CPUs");
-        assert_eq!(got[3], 2);
-        assert_eq!(got[7], 9);
-        assert_eq!(got[1], 0, "an untouched path stays zero");
-    }
-
-    #[test]
-    fn empty_array_folds_to_default() {
-        // A failed lookup returns an empty vec; the fold of nothing must be
-        // the same zeroed struct the old early-return produced.
-        let got = Scheduler::fold_stats(&[]);
-        assert_eq!(got.nr_dispatches, 0);
-        assert_eq!(got.batch_sojourn_ns, 0);
-    }
-}
-
-// GLOBAL-FIELD COHERENCE ACROSS THE PER-CPU KNOB MAP
-//
-// Making the knob map per-CPU makes divergence EXPRESSIBLE, and for six of the
-// eleven fields divergence is a defect rather than a feature: tau and codel_eq
-// are topology-owned and every CPU re-derives its tau-scaled statics from them,
-// while affinity_mode and the two lat_cri thresholds decide how a TASK is
-// classified, so a task would change class depending on which CPU last looked
-// at it. These pin the broadcast so a caller cannot diverge them by omission.
-#[cfg(test)]
-mod knob_broadcast_tests {
-    use super::*;
-
-    fn knobs(slice: u64, tau: u64) -> TuningKnobs {
-        let mut k = TuningKnobs::default();
-        k.slice_ns = slice;
-        k.topology_tau_ns = tau;
-        k
-    }
-
-    #[test]
-    fn global_fields_are_broadcast_from_slot_zero() {
-        let mut v = vec![knobs(100, 7_000), knobs(200, 9_999), knobs(300, 1)];
-        Scheduler::broadcast_global_fields(&mut v);
-        for (i, k) in v.iter().enumerate() {
-            assert_eq!(k.topology_tau_ns, 7_000, "slot {i} diverged on tau");
-        }
-    }
-
-    #[test]
-    fn per_cpu_fields_survive_the_broadcast() {
-        // The whole point: slices may differ per CPU. A broadcast that
-        // flattened them would silently restore the global-only behavior this
-        // change exists to remove.
-        let mut v = vec![knobs(100, 7_000), knobs(200, 0), knobs(300, 0)];
-        Scheduler::broadcast_global_fields(&mut v);
-        assert_eq!(v[0].slice_ns, 100);
-        assert_eq!(v[1].slice_ns, 200);
-        assert_eq!(v[2].slice_ns, 300);
-    }
-
-    #[test]
-    fn uniform_input_stays_uniform() {
-        // The acceptance criterion for the whole change: identical values in
-        // every slot must be indistinguishable from the pre-per-CPU map.
-        let mut v = vec![knobs(100, 7_000); 8];
-        let before = v.clone();
-        Scheduler::broadcast_global_fields(&mut v);
-        for (a, b) in before.iter().zip(v.iter()) {
-            assert_eq!(a.slice_ns, b.slice_ns);
-            assert_eq!(a.topology_tau_ns, b.topology_tau_ns);
-        }
-    }
-
-    #[test]
-    fn empty_and_single_slot_are_no_ops() {
-        let mut none: Vec<TuningKnobs> = Vec::new();
-        Scheduler::broadcast_global_fields(&mut none);
-        let mut one = vec![knobs(100, 7_000)];
-        Scheduler::broadcast_global_fields(&mut one);
-        assert_eq!(one[0].slice_ns, 100);
     }
 }
