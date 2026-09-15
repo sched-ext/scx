@@ -5528,12 +5528,14 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * deadline it was picked with, see place_task(), and that deadline
 	 * can be the earlier one: the kick that displaced it was issued
 	 * because it is no longer owed service, not because it lost on the
-	 * deadline. pick_eevdf() would leave it in the tree and skip it as
-	 * ineligible. Head-only selection would pick it straight
-	 * back and the task that displaced it would wait for the tick.
+	 * deadline. pick_eevdf() leaves it in the tree with the deadline of the
+	 * request it has not finished and skips it while it is ineligible, and
+	 * so does selection with the eligibility scan. Head-only selection,
+	 * --no-eligible-scan, would pick it straight back and the task that
+	 * displaced it would wait for the tick.
 	 *
-	 * Reissue its deadline from where its vruntime has reached, which is
-	 * what update_deadline() does once a request is consumed. The
+	 * There only, reissue its deadline from where its vruntime has reached,
+	 * which is what update_deadline() does once a request is consumed. The
 	 * vruntime is current: a running task reaches ops.enqueue() from
 	 * put_prev_task_scx(), after ops.stopping() has charged the service
 	 * it took, and charging it again here counted its last run twice.
@@ -5541,7 +5543,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * ops.stopping() has cleared it, so the task is tested on its own
 	 * vruntime against the reference, which is entity_eligible().
 	 */
-	if (displaced && !no_eligibility &&
+	if (displaced && !no_eligibility && no_eligible_scan &&
 	    time_after(tctx->se.vruntime,
 		       pack_vref_place(task_pack(tctx, prev_cid), tnow)))
 		tctx->se.deadline = 0;
