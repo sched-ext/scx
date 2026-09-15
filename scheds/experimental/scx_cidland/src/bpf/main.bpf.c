@@ -1547,17 +1547,20 @@ static __noinline bool cid_queue_move_head_to_local(s32 cid)
 /*
  * Atomically remove the earliest-deadline task whose vruntime is eligible.
  * If a lockless V snapshot finds none, retain the existing head fallback so
- * a transiently all-ineligible queue cannot be stranded. Pops again after a
- * failed dispatch, see cid_queue_move_head_to_local().
+ * a transiently all-ineligible queue cannot be stranded, unless @strict: the
+ * caller has a runnable task to keep instead. Pops again after a failed
+ * dispatch, see cid_queue_move_head_to_local().
  */
-static __noinline bool cid_edq_move_first_eligible_to_local(s32 cid, u64 vref)
+static __noinline bool cid_edq_move_first_eligible_to_local(s32 cid, u64 vref,
+							    bool strict)
 {
 	struct scx_edq __arena *edq = &cid_pack(cid)->edq;
 	cid_edq_task_t *at;
 
 	while (can_loop) {
-		at = (cid_edq_task_t *)scx_edq_pop_first_eligible_or_first(
-								edq, vref, true);
+		at = (cid_edq_task_t *)(strict ?
+			scx_edq_pop_first_eligible(edq, vref, true) :
+			scx_edq_pop_first_eligible_or_first(edq, vref, true));
 		if (!at)
 			return false;
 		if (cid_edq_dispatch_popped(at, NULL, cid))
@@ -4355,11 +4358,12 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
  * race. Callers enter here only when eligible scanning and eligibility
  * enforcement are both enabled.
  */
-static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow)
+static __noinline bool move_first_eligible_to_local(s32 cid, u64 tnow,
+						   bool strict)
 {
 	TOUCH_ARENA();
 	return cid_edq_move_first_eligible_to_local(
-		cid, pack_vref_place(cid_pack(cid), tnow));
+		cid, pack_vref_place(cid_pack(cid), tnow), strict);
 }
 
 /*
@@ -4432,6 +4436,41 @@ static bool curr_pick_dl(pack_t *pk, u64 now, u64 *dlp)
 }
 
 /*
+ * The deadline of the task @pk would pick from its queue at @now, the
+ * earliest one among those eligible, which is what pick_eevdf() searches
+ * the tree for:
+ *
+ *	if (left && vruntime_eligible(cfs_rq,
+ *				__node_2_se(left)->min_vruntime)) {
+ *		node = left;
+ *		continue;
+ *	}
+ *	se = __node_2_se(node);
+ *	if (entity_eligible(cfs_rq, se)) {
+ *		best = se;
+ *		break;
+ *	}
+ *
+ * or false when nothing queued is eligible. A queue contended by a remote
+ * scan is read off its head instead, which is what selection without an
+ * eligibility scan picks too.
+ */
+static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp)
+{
+	int ret;
+
+	if (no_eligible_scan || no_eligibility)
+		return !scx_edq_first_deadline(&pk->edq, dlp);
+
+	ret = scx_edq_try_first_eligible_deadline(&pk->edq,
+						  pack_vref_place(pk, now), dlp);
+	if (ret == -EBUSY)
+		return !scx_edq_first_deadline(&pk->edq, dlp);
+
+	return !ret;
+}
+
+/*
  * Does the task running on @cid keep it, rather than hand it to the head
  * of @cid's queue?
  *
@@ -4477,8 +4516,9 @@ static bool keep_running(s32 cid, u64 now)
 	 */
 	if (!cid_queued_test(cid))
 		return false;
-	if (scx_edq_first_deadline(&pk->edq, &head_dl))
-		return false;
+	/* Nothing queued is eligible: pick_eevdf() returns curr. */
+	if (!pack_pick_head_dl(pk, now, &head_dl))
+		return true;
 
 	/* A tie is kept: giving the CPU up costs a switch. */
 	return !time_after(dl, head_dl);
@@ -5355,20 +5395,18 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 *
 	 * and a curr that has lost the pick to some other queued task is
 	 * left running until its slice ends, or until a wakeup that does win
-	 * it. The preemption approximation treats the EDQ head as the next pick,
-	 * so the woken task must have a strictly earlier deadline. Selection at
-	 * actual dispatch can scan for eligibility, but doing so here changes the
-	 * policy using a non-atomic snapshot of current, queue, and virtual-time
-	 * state. A task already queued is not displaced by one that ties it. The
-	 * insertion is applied once this op returns, so the head seen here is the
-	 * one the task is queued against.
+	 * it. The next pick is the earliest deadline among the queued tasks that
+	 * are eligible, see pack_pick_head_dl(), so the woken task must have a
+	 * strictly earlier deadline than that one. An ineligible task with an
+	 * earlier deadline is skipped, as pick_eevdf() skips it. A task already
+	 * queued is not displaced by one that ties it.
 	 * A preemption for a task that queues behind others only trades the
 	 * running task for the head a slice early, once for
 	 * every wakeup that lands in the queue: with sixteen tasks queued per
 	 * CPU that was one context switch in three, and perf bench sched
 	 * messaging ran at half its speed.
 	 */
-	has_head = !scx_edq_first_deadline(&pk->edq, &head_dl);
+	has_head = pack_pick_head_dl(pk, now, &head_dl);
 	if (has_head) {
 		bool loses = !time_before(dl, head_dl);
 
@@ -6275,7 +6313,7 @@ pick:
 	/* Remote scans already validated, removed and dispatched one node. */
 	if (src == dst_cid) {
 		if (!((src == dst_cid && !no_eligible_scan && !no_eligibility) ?
-		      move_first_eligible_to_local(src, cid_clock_task_at(src, now)) :
+		      move_first_eligible_to_local(src, cid_clock_task_at(src, now), has_prev) :
 		      cid_queue_move_head_to_local(src))) {
 			cid_queued_check(src);
 			return false;
@@ -6339,7 +6377,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 	if (has_prev && curr_pick_dl(cid_pack(dst_cid), tnow, &rival_dl))
 		rival = true;
 	if (cid_queued_test(dst_cid) &&
-	    !scx_edq_first_deadline(&dst->pack.edq, &head_dl) &&
+	    pack_pick_head_dl(&dst->pack, tnow, &head_dl) &&
 	    (!rival || time_before(head_dl, rival_dl))) {
 		rival_dl = head_dl;
 		rival = true;
@@ -6507,7 +6545,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		return;
 	}
 	if (!keep && ((!no_eligible_scan && !no_eligibility) ?
-		     move_first_eligible_to_local(cid, tnow) :
+		     move_first_eligible_to_local(cid, tnow, has_prev) :
 		     cid_queue_move_head_to_local(cid))) {
 		cid_queued_check(cid);
 		if (active_balance)
