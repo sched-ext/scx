@@ -2618,7 +2618,12 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	run->retake = 0;
 	cake_stat_inc(CAKE_SITE_RUNNING);
 	CAKE_TIMED_VOID(CAKE_SITE_T_CAL, (void)0);
-	if (cake_tog_g85 && cake_one_word) {
+	/* The storage read serves only a seat held elsewhere. With no seat
+	 * bit up anywhere there is nothing to release now; a retained owner
+	 * record is retired seq-checked at the task's next hold, and every
+	 * seat test requires the bit. One word read replaces a task-storage
+	 * lookup per switch in a seatless regime (audit 2026-09-15). */
+	if (cake_tog_g85 && cake_one_word && cake_seat_word) {
 		struct cake_groove *gr = bpf_task_storage_get(&cake_grooves, p, 0, 0);
 
 		cake_seat_retire(gr, (u32)p->pid, cpu + 1);
