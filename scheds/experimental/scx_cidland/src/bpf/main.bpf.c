@@ -865,6 +865,24 @@ static int cid_edq_try_peek(s32 cid, cid_edq_task_t **atp)
 	return 0;
 }
 
+static int cid_edq_try_peek_nth(s32 cid, u32 nth, cid_edq_task_t **atp)
+{
+	u64 task;
+	int ret;
+
+	if (!nth)
+		return cid_edq_try_peek(cid, atp);
+	*atp = NULL;
+	ret = scx_edq_try_peek_nth_hold(&cid_ctx(cid)->edq, nth, &task);
+	if (ret) {
+		if (ret != -EBUSY)
+			scx_bpf_error("EDQ nth peek failed for cid %d: %d", cid, ret);
+		return ret;
+	}
+	*atp = (cid_edq_task_t *)task;
+	return 0;
+}
+
 static void cid_edq_mark_dispatched(task_ctx_t *tctx)
 {
 	cid_edq_task_t *at;
@@ -2121,87 +2139,107 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
 		     u64 now);
 
+#define BALANCE_TASK_SCAN	8U
+
 /*
- * Validate and remove the same EDQ head. Holding the node across the affinity
- * and hotness checks and removing that exact node prevents a concurrent
- * enqueue from substituting a different task before the steal, giving EDQ
- * the same validate-the-entity semantics as fair's locked detach.
+ * Validate and remove the first usable task in a bounded deadline-ordered EDQ
+ * prefix. Holding each node across the affinity and hotness checks and
+ * removing that exact node prevents a concurrent enqueue from substituting a
+ * different task before the steal, giving EDQ the same validate-the-entity
+ * semantics as fair's locked detach.
  */
 static __noinline enum cid_edq_move_result
-cid_edq_move_usable_head_to_local(s32 dst_cid, s32 src_cid, u64 now,
+cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 				  bool check_hot)
 {
-	cid_edq_task_t *at;
-	struct task_struct *p;
-	int ret;
+	u32 nth;
 
-	ret = cid_edq_try_peek(src_cid, &at);
-	if (ret)
-		return ret == -EBUSY ? CID_EDQ_MOVE_BUSY : CID_EDQ_MOVE_MISS;
-	if (!at)
-		return CID_EDQ_MOVE_MISS;
-	/*
-	 * The node is the task context: reject a stale or cache-hot head
-	 * before resolving the task.
-	 */
-	if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-	    (check_hot && task_hot((task_ctx_t *)at, src_cid, dst_cid, now))) {
-		scx_edq_task_drop(&at->common);
-		return CID_EDQ_MOVE_MISS;
-	}
-	p = scx_bpf_tid_to_task(at->tid);
-	if (!p || !cid_allowed(p, dst_cid)) {
-		scx_edq_task_drop(&at->common);
-		return CID_EDQ_MOVE_MISS;
+	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
+		cid_edq_task_t *at;
+		struct task_struct *p;
+		enum cid_edq_move_result move;
+		int ret;
+
+		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		if (ret)
+			return ret == -EBUSY ? CID_EDQ_MOVE_BUSY :
+					      CID_EDQ_MOVE_MISS;
+		if (!at) {
+			if (!nth)
+				cid_queued_check(src_cid);
+			break;
+		}
+		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
+		    (check_hot &&
+		     task_hot((task_ctx_t *)at, src_cid, dst_cid, now))) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		p = scx_bpf_tid_to_task(at->tid);
+		if (!p || !cid_allowed(p, dst_cid)) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		move = cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
+		if (move != CID_EDQ_MOVE_MISS)
+			return move;
 	}
 
-	return cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
+	return CID_EDQ_MOVE_MISS;
 }
 
 /*
- * Detach one eligible queued task from the selected source. Unlike the normal
- * steal path, inspect an affinity-restricted or cache-hot EDQ head, as
- * fair.c's detach_tasks() walks the CFS task list looking for a candidate.
+ * Detach one eligible queued task from the selected source. Scan past an
+ * affinity-restricted or cache-hot EDQ head, as fair.c's detach_tasks() walks
+ * the CFS task list looking for a candidate.
  */
 static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 					     u64 now)
 {
-	cid_edq_task_t *at;
-	enum cid_edq_move_result move;
-	struct task_struct *p;
-	bool movable = false, pinned = false;
-	int ret;
+	bool pinned = false;
+	u32 nth;
 
 	TOUCH_ARENA();
-	ret = cid_edq_try_peek(src_cid, &at);
-	if (ret == -EBUSY)
-		return ACTIVE_BALANCE_MISS;
-	if (!at) {
-		cid_queued_check(src_cid);
-		return ACTIVE_BALANCE_MISS;
+	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
+		cid_edq_task_t *at;
+		enum cid_edq_move_result move;
+		struct task_struct *p;
+		bool movable;
+		int ret;
+
+		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		if (ret == -EBUSY)
+			break;
+		if (ret || !at) {
+			if (!nth)
+				cid_queued_check(src_cid);
+			break;
+		}
+		p = scx_bpf_tid_to_task(at->tid);
+		if (!p || READ_ONCE(at->state) != CID_EDQ_ENQUEUED) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		movable = !is_pcpu_task(p) &&
+			  bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu,
+					       p->cpus_ptr);
+		if (!movable)
+			pinned = true;
+		else if (task_hot((task_ctx_t *)at, src_cid, dst_cid, now))
+			movable = false;
+		if (!movable) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		move = cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
+		if (move == CID_EDQ_MOVE_MOVED) {
+			__sync_fetch_and_add(&nr_steals, 1);
+			cid_queued_check(src_cid);
+			return ACTIVE_BALANCE_MOVED;
+		}
+		if (move == CID_EDQ_MOVE_BUSY)
+			break;
 	}
-	p = scx_bpf_tid_to_task(at->tid);
-	if (!p || READ_ONCE(at->state) != CID_EDQ_ENQUEUED) {
-		scx_edq_task_drop(&at->common);
-		cid_queued_check(src_cid);
-		return ACTIVE_BALANCE_MISS;
-	}
-	if (is_pcpu_task(p) ||
-	    !bpf_cpumask_test_cpu(cid_topo(dst_cid)->cpu, p->cpus_ptr))
-		pinned = true;
-	else if (!task_hot((task_ctx_t *)at, src_cid, dst_cid, now))
-		movable = true;
-	move = movable ? cid_edq_remove_held_to_local(src_cid, dst_cid, at, p) :
-			 CID_EDQ_MOVE_MISS;
-	if (move == CID_EDQ_MOVE_MOVED) {
-		__sync_fetch_and_add(&nr_steals, 1);
-		cid_queued_check(src_cid);
-		return ACTIVE_BALANCE_MOVED;
-	}
-	if (!movable)
-		scx_edq_task_drop(&at->common);
-	if (move != CID_EDQ_MOVE_BUSY)
-		cid_queued_check(src_cid);
 	return pinned ? ACTIVE_BALANCE_PINNED : ACTIVE_BALANCE_MISS;
 }
 
@@ -2756,15 +2794,15 @@ static const u32 prio_to_weight[40] = {
  * groups. Like sched_balance_find_src_group() and
  * sched_balance_find_src_rq(), the busiest eligible child group is selected
  * first, then its busiest queued cid. The individual source and destination
- * cids get the same guard when the destination has something queued. A head is
- * taken only if its weight fits the group imbalance, as detach_tasks() does
- * for migrate_load.
+ * cids get the same guard when the destination has something queued. A bounded
+ * deadline-ordered prefix is searched for a movable task whose weight fits the
+ * group imbalance, as detach_tasks() does for migrate_load.
  *
  * Like should_we_balance(), one cid owns a pass for each local group. It
  * retains the calculated imbalance as a budget and dispatch drains it one
- * cold, affinity-compatible EDQ head at a time. If the task cannot run on the
- * owner, can_migrate_task()'s new_dst_cpu rule redirects the reservation to
- * another allowed cid in the same local group.
+ * cold, affinity-compatible EDQ candidate at a time. If the task cannot run
+ * on the owner, can_migrate_task()'s new_dst_cpu rule redirects the reservation
+ * to another allowed cid in the same local group.
  */
 #define BUSY_BALANCE_IMBALANCE_PCT	117U
 /*
@@ -2957,14 +2995,59 @@ busy_balance_dst_cid(const struct task_struct *p, s32 owner_cid)
 	return -1;
 }
 
+/*
+ * Like detach_tasks(), walk a bounded prefix of the selected source queue
+ * instead of letting one pinned, hot, or oversized head hide movable work.
+ * EDQ order is deadline order, so the first task accepted here is the one
+ * cidland would prefer among the inspected candidates.
+ */
+static __noinline bool
+busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
+{
+	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
+	u64 budget = MIN(env->local_room, env->source_excess);
+	u32 nth;
+
+	TOUCH_ARENA();
+	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
+		cid_edq_task_t *at;
+		struct task_struct *p;
+		s32 move_dst;
+		int ret;
+
+		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		if (ret)
+			return false;
+		if (!at) {
+			if (!nth)
+				cid_queued_check(src_cid);
+			break;
+		}
+		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
+		    ((task_ctx_t *)at)->vjoin_w > budget ||
+		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		p = scx_bpf_tid_to_task(at->tid);
+		move_dst = p ? busy_balance_dst_cid(p, dst_cid) : -1;
+		scx_edq_task_drop(&at->common);
+		if (move_dst < 0)
+			continue;
+		env->move_budget = budget;
+		env->move_dst_cid = move_dst;
+		return true;
+	}
+
+	return false;
+}
+
 static __always_inline s32
 busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 			u32 level)
 {
 	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
-	cid_edq_task_t *at;
-	struct task_struct *p;
-	s32 cid, move_dst;
+	s32 cid;
 
 	if (!nr)
 		return -1;
@@ -2998,31 +3081,8 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	cid = busy_balance_find_src_cid(dst_cid, start);
 	if (cid < 0)
 		return -1;
-	if (cid_edq_try_peek(cid, &at))
+	if (!busy_balance_has_movable_task(dst_cid, cid, now))
 		return -1;
-	if (!at) {
-		cid_queued_check(cid);
-		return -1;
-	}
-	/*
-	 * @cid is outside the owner's local child group, so none of the
-	 * alternate destinations can be its SMT sibling. task_hot() has the
-	 * same result for all of them; reject it before resolving p.
-	 */
-	if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-	    ((task_ctx_t *)at)->vjoin_w >
-		MIN(env->local_room, env->source_excess) ||
-	    task_hot((task_ctx_t *)at, cid, dst_cid, now)) {
-		scx_edq_task_drop(&at->common);
-		return -1;
-	}
-	p = scx_bpf_tid_to_task(at->tid);
-	move_dst = p ? busy_balance_dst_cid(p, dst_cid) : -1;
-	scx_edq_task_drop(&at->common);
-	if (move_dst < 0)
-		return -1;
-	env->move_budget = MIN(env->local_room, env->source_excess);
-	env->move_dst_cid = move_dst;
 	return cid;
 }
 
@@ -5340,11 +5400,12 @@ static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
 
 /*
  * Look at the queued cids of @w, word @k rotated by @s (packed in @ks as
- * k << 16 | s), and return the first one whose head @dst_cid can take,
- * or -1, in the low 32 bits, with the number of queues still allowed in
- * the high 32 bits. The EDQ head is held, revalidated and dispatched here.
- * @ctl packs the number of queues to look at and whether a head still hot on
- * its CPU is skipped. A queue found empty has its bit cleared.
+ * k << 16 | s), and return the first one with a task @dst_cid can take, or
+ * -1, in the low 32 bits, with the number of queues still allowed in the high
+ * 32 bits. A bounded deadline-ordered EDQ prefix is held, revalidated and
+ * dispatched here. @ctl packs the number of queues to look at and whether a
+ * task still hot on its CPU is skipped. A queue found empty has its bit
+ * cleared.
  *
  * A global function: it is verified once, not once per call site and
  * loop iteration, which keeps ops.dispatch() within the verifier's
@@ -5370,8 +5431,8 @@ __noinline u64 steal_from_word(s32 dst_cid, u64 w, u32 ks, u64 now, u32 ctl)
 			continue;
 		limit--;
 
-		move = cid_edq_move_usable_head_to_local(dst_cid, cid, now,
-							     check_hot);
+		move = cid_edq_move_usable_task_to_local(dst_cid, cid, now,
+						     check_hot);
 		if (move == CID_EDQ_MOVE_MOVED) {
 			ret = cid;
 			break;
@@ -5670,8 +5731,9 @@ __noinline int cid_idle_rearm(s32 cid)
 }
 
 /*
- * Move the head of @src_cid that periodic busy balance selected for @dst_cid
- * to this CPU, but only once it is the task @dst_cid would pick.
+ * Move a task from the bounded deadline-ordered prefix of @src_cid selected by
+ * periodic busy balance for @dst_cid, but only once it is the task @dst_cid
+ * would pick.
  *
  * attach_task() does not run what it pulls: it enqueues it and lets
  * wakeup_preempt() decide, and pick_eevdf() then runs it only once it is
@@ -5691,37 +5753,10 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			   u64 now, u64 tnow)
 {
 	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
-	u64 dl, rival_dl, head_dl, v;
+	u64 rival_dl = 0, head_dl = 0;
 	bool rival = false;
-	cid_edq_task_t *at;
-	struct task_struct *p;
-	s64 lag;
-	int ret;
-
-	ret = cid_edq_try_peek(src_cid, &at);
-	if (ret)
-		return ret == -EBUSY ? -EAGAIN : 0;
-	if (!at)
-		return 0;
-	if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-	    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
-		scx_edq_task_drop(&at->common);
-		return 0;
-	}
-	if (((task_ctx_t *)at)->vjoin_w >
-	    READ_ONCE(dst->busy_balance_budget)) {
-		scx_edq_task_drop(&at->common);
-		return 0;
-	}
-	p = scx_bpf_tid_to_task(at->tid);
-	if (!p || !cid_allowed(p, dst_cid)) {
-		scx_edq_task_drop(&at->common);
-		return 0;
-	}
-
-	lag = task_lag_at(p, (task_ctx_t *)at, src_cid, now);
-	v = cid_vref_place(dst_cid, tnow) - lag;
-	dl = v + (at->common.node.deadline - at->common.node.eligibility);
+	bool retry = false;
+	u32 nth;
 
 	if (has_prev && curr_pick_dl(dst_cid, tnow, &rival_dl))
 		rival = true;
@@ -5731,19 +5766,53 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		rival_dl = head_dl;
 		rival = true;
 	}
-	if (rival &&
-	    ((!no_eligibility && lag < 0) || !time_before(dl, rival_dl))) {
-		scx_edq_task_drop(&at->common);
-		return -EAGAIN;
+	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
+		cid_edq_task_t *at;
+		struct task_struct *p;
+		s64 lag;
+		u64 dl, v, weight;
+		int ret;
+
+		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		if (ret)
+			return ret == -EBUSY ? -EAGAIN : 0;
+		if (!at) {
+			if (!nth)
+				cid_queued_check(src_cid);
+			break;
+		}
+		weight = ((task_ctx_t *)at)->vjoin_w;
+		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
+		    weight > READ_ONCE(dst->busy_balance_budget) ||
+		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		p = scx_bpf_tid_to_task(at->tid);
+		if (!p || !cid_allowed(p, dst_cid)) {
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		lag = task_lag_at(p, (task_ctx_t *)at, src_cid, now);
+		v = cid_vref_place(dst_cid, tnow) - lag;
+		dl = v + (at->common.node.deadline -
+			  at->common.node.eligibility);
+		if (rival && ((!no_eligibility && lag < 0) ||
+			      !time_before(dl, rival_dl))) {
+			retry = true;
+			scx_edq_task_drop(&at->common);
+			continue;
+		}
+		ret = cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
+		if (ret == CID_EDQ_MOVE_BUSY)
+			return -EAGAIN;
+		if (ret != CID_EDQ_MOVE_MOVED)
+			continue;
+		dst->busy_balance_budget -= weight;
+		return 1;
 	}
 
-	dst->busy_balance_env.move_budget = ((task_ctx_t *)at)->vjoin_w;
-	ret = cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
-	if (ret != CID_EDQ_MOVE_MOVED)
-		return 0;
-	dst->busy_balance_budget -= dst->busy_balance_env.move_budget;
-
-	return 1;
+	return retry ? -EAGAIN : 0;
 }
 
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)

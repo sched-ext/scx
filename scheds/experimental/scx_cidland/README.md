@@ -452,9 +452,11 @@ that has not been done.
    than twice as deep as its own and at least two tasks deeper, which is a
    cruder `imbalance_pct` and nothing else.
 
- - **Only queue heads move.** `detach_tasks()` walks the busiest runqueue
-   looking for something it may take. Here only the head of each queue is
-   considered, and a queue whose head cannot move is skipped whole.
+ - **Only a bounded queue prefix can move.** `detach_tasks()` walks the busiest
+   runqueue looking for something it may take. Here balancing scans the first
+   eight deadline-ordered tasks, so a blocked head no longer hides immediately
+   movable work, but a long prefix of pinned or cache-hot tasks can still stop
+   the search.
 
  - **No active balancing.** A *running* task is never migrated.
    `active_load_balance_cpu_stop()` exists in `fair.c` for exactly the case

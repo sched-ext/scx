@@ -71,6 +71,8 @@ int scx_edq_try_first_eligible_deadline(scx_edq_t __arg_arena *edq, u64 cutoff,
 					 u64 *deadline __arg_nonnull);
 u64 scx_edq_peek_hold(scx_edq_t __arg_arena *edq);
 int scx_edq_try_peek_hold(scx_edq_t __arg_arena *edq, u64 *task __arg_nonnull);
+int scx_edq_try_peek_nth_hold(scx_edq_t __arg_arena *edq, u32 nth,
+			       u64 *task __arg_nonnull);
 u64 scx_edq_nr_queued(scx_edq_t __arg_arena *edq);
 int scx_edq_task_init(scx_edq_task_t __arg_arena *task);
 int scx_edq_task_fini(scx_edq_task_t __arg_arena *task);
