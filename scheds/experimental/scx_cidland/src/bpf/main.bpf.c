@@ -474,6 +474,43 @@ struct {
 	__uint(max_entries, 1);
 } hrticks SEC(".maps");
 
+enum fork_child_level {
+	FORK_CHILD_NODE,
+	FORK_CHILD_LLC,
+	FORK_CHILD_CORE,
+};
+
+/*
+ * Scratch for fair.c-style SD_BALANCE_FORK group descent. Keep the loop
+ * accumulators in per-CPU map memory rather than on the caller's stack so the
+ * verifier can merge loop iterations whose idle branches differ.
+ * select_cid() cannot race another invocation on the same CPU.
+ */
+struct fork_pick_env {
+	u64 now;
+	u64 group_recent;
+	u64 best_recent;
+	u32 base;
+	u32 nr;
+	u32 anchor;
+	u32 level;
+	u32 group_base;
+	u32 group_nr;
+	u32 group_end;
+	u32 idle;
+	u32 best_idle;
+	u32 best_base;
+	u32 best_nr;
+	u32 best_local;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct fork_pick_env);
+	__uint(max_entries, 1);
+} fork_pick_scratch SEC(".maps");
+
 /*
  * Bring what @gq and each group above it add to their parents in line with
  * their loads and shares, the sums of enqueue_hierarchy() and
@@ -642,6 +679,7 @@ struct pack {
 struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
+	u64 fork_place_at;	/* last fork selection, meaningful at core_base */
 	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
 	struct pack pack;	/* the tasks of this cid */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
@@ -3292,29 +3330,112 @@ static s32 select_idle_sibling_cid(const struct task_struct *p, task_ctx_t *tctx
 	return cid;
 }
 
+static __always_inline void fork_pick_commit(struct fork_pick_env *env)
+{
+	bool local;
+
+	if (!env->group_nr)
+		return;
+	local = cid_in_range(env->anchor, env->group_base, env->group_nr);
+	if (env->best_nr) {
+		if (env->idle < env->best_idle)
+			return;
+		if (env->idle == env->best_idle) {
+			/* Keep fair.c's local-group preference on an idle tie. */
+			if (env->best_local)
+				return;
+			if (!local &&
+			    (env->level != FORK_CHILD_CORE ||
+			     env->group_recent >= env->best_recent))
+				return;
+		}
+	}
+
+	env->best_base = env->group_base;
+	env->best_nr = env->group_nr;
+	env->best_idle = env->idle;
+	env->best_recent = env->group_recent;
+	env->best_local = local;
+}
+
+/* Pick the idlest immediate child group of @range, as fair.c does. */
+static __noinline u64
+fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
+{
+	struct fork_pick_env *env;
+	u32 zero = 0;
+	u32 nr = range >> 32;
+	u32 i;
+
+	env = bpf_map_lookup_elem(&fork_pick_scratch, &zero);
+	if (!env || !nr)
+		return range;
+	env->base = (u32)range;
+	env->nr = nr;
+	env->anchor = anchor;
+	env->level = level;
+	env->now = now;
+	env->group_base = 0;
+	env->group_nr = 0;
+	env->group_end = 0;
+	env->idle = 0;
+	env->group_recent = 0;
+	env->best_idle = 0;
+	env->best_recent = 0;
+	env->best_base = 0;
+	env->best_nr = 0;
+	env->best_local = 0;
+
+	TOUCH_ARENA();
+	bpf_arena_for(i, env->base, env->base + nr) {
+		if (!cid_valid(i))
+			break;
+		if (!env->group_nr || i == env->group_end) {
+			fork_pick_commit(env);
+			if (env->level == FORK_CHILD_NODE) {
+				env->group_base = cid_topo(i)->node_base;
+				env->group_nr = cid_topo(i)->node_nr;
+			} else if (env->level == FORK_CHILD_LLC) {
+				env->group_base = cid_topo(i)->llc_base;
+				env->group_nr = cid_topo(i)->llc_nr;
+			} else {
+				env->group_base = cid_topo(i)->core_base;
+				env->group_nr = cid_topo(i)->core_nr;
+			}
+			env->group_end = env->group_base + env->group_nr;
+			env->idle = 0;
+			env->group_recent = env->level == FORK_CHILD_CORE ?
+				READ_ONCE(cid_ctx(env->group_base)->fork_place_at) : 0;
+			if (env->group_recent &&
+			    (s64)(env->now - env->group_recent) >= UTIL_HALF_LIFE_NS)
+				env->group_recent = 0;
+		}
+		if (cid_idle_test(i) && !cid_queued_test(i))
+			env->idle++;
+	}
+	fork_pick_commit(env);
+	return env->best_nr ? (u64)env->best_nr << 32 | env->best_base : range;
+}
+
 /* Choose fair.c's shallowest-idle or least-loaded CPU in @range. */
 static __noinline s32
-fork_pick_cid(const struct task_struct *p, u64 range, s32 anchor, u64 now)
+fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 {
 	bool restricted = is_restricted(p);
 	u32 base = range, nr = range >> 32;
-	u32 start_cpu = cid_topo(anchor)->cpu;
 	u64 best_idle_load = 0, best_idle_cap = 1, best_idle_stamp = 0;
 	u64 best_load = 0, best_cap = 1;
 	s32 best_idle = -EBUSY, best = -EBUSY;
 	u32 off;
 
 	TOUCH_ARENA();
-	bpf_arena_for(off, 0, nr_cpu_ids) {
-		u32 cpu = start_cpu + off + 1;
+	bpf_arena_for(off, 0, nr) {
 		u64 load, cap;
-		s32 cid;
+		s32 cid = base + off;
 
-		if (cpu >= nr_cpu_ids)
-			cpu -= nr_cpu_ids;
-		cid = scx_bpf_cpu_to_cid(cpu);
-		if (!cid_valid(cid) || !cid_in_range(cid, base, nr) ||
-		    (restricted && !cid_allowed(p, cid)))
+		if (!cid_valid(cid))
+			break;
+		if (restricted && !cid_allowed(p, cid))
 			continue;
 		/*
 		 * Keep the fractional running average here. A child that ran only
@@ -3349,14 +3470,47 @@ fork_pick_cid(const struct task_struct *p, u64 range, s32 anchor, u64 now)
 	return best_idle >= 0 ? best_idle : best;
 }
 
-/* Search fair.c's live SD_BALANCE_FORK domain for an idlest CPU. */
+/* Descend fair.c's live SD_BALANCE_FORK domain to an idlest CPU. */
 static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 				u64 now)
 {
 	struct cid_topo __arena *topo = cid_topo(anchor);
 	u64 range = (u64)topo->fork_nr << 32 | topo->fork_base;
+	u64 child;
+	s32 cid;
 
-	return fork_pick_cid(p, range, anchor, now);
+	/* Affinity needs per-group cpumask intersections; keep the safe path. */
+	if (is_restricted(p))
+		return fork_pick_cid(p, range, now);
+
+	if (topo->fork_nr > topo->node_nr) {
+		child = fork_pick_child(range, anchor, FORK_CHILD_NODE, now);
+		if (child >> 32)
+			range = child;
+	}
+	if (!cid_in_range(anchor, (u32)range, range >> 32))
+		anchor = (u32)range;
+	topo = cid_topo(anchor);
+	if ((range >> 32) > topo->llc_nr) {
+		child = fork_pick_child(range, anchor, FORK_CHILD_LLC, now);
+		if (child >> 32)
+			range = child;
+	}
+	if (!cid_in_range(anchor, (u32)range, range >> 32))
+		anchor = (u32)range;
+	topo = cid_topo(anchor);
+	if ((range >> 32) > topo->core_nr) {
+		child = fork_pick_child(range, anchor, FORK_CHILD_CORE, now);
+		if (child >> 32)
+			range = child;
+	}
+	if (!cid_in_range(anchor, (u32)range, range >> 32))
+		anchor = (u32)range;
+
+	cid = fork_pick_cid(p, range, now);
+	if (cid >= 0)
+		WRITE_ONCE(cid_ctx(cid_topo(cid)->core_base)->fork_place_at, now);
+	return cid;
 }
 
 /*

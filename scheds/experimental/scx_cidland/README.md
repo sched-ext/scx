@@ -245,8 +245,15 @@ be turned off on the command line to compare the two rules against each other.
    off by default. The
    `record_wakee()`/`wake_wide()` flip heuristic disables affinity for wide
    M:N wakeup patterns. Forks do not use this wakeup-only idle-sibling path:
-   they search the kernel's live `SD_BALANCE_FORK` span using averaged,
-   capacity-normalized per-CPU utilization, preferring an idle CPU.
+   they descend the kernel's live `SD_BALANCE_FORK` span through its NUMA,
+   LLC and core groups, selecting the child group with the most completely
+   idle CPUs at each level and keeping the local group on a tie. Equal-idle
+   remote cores prefer the one least recently selected for a fork; the stamp
+   expires after the utilization half-life, preserving fair.c's recent-use
+   bias without recomputing every CPU's average in the fork path. The final CPU
+   is selected using averaged, capacity-normalized per-CPU utilization,
+   preferring an idle CPU. Affinity-restricted tasks use the flat domain scan
+   until cidland can represent fair.c's per-group affinity intersections.
 
  - **Load balancing.** A CPU that runs out of work pulls from the other queues
    of its node, walking its own LLC first the way the idle balancer walks the
