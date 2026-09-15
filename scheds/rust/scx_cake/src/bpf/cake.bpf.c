@@ -252,11 +252,24 @@ static __always_inline bool cake_taci(s32 cpu, u32 site)
 	return won;
 }
 
+/* CLOCK_MONOTONIC: for deltas against kernel ktime fields (start_time,
+ * clockevent next_event). One clocksource read per call. */
 static __always_inline u64 cake_now(u32 site)
 {
 	cake_stat_inc(CAKE_SITE_KT);
 	cake_stat_inc(site);
 	return bpf_ktime_get_ns();
+}
+
+/* The rq clock: for stamps compared only with other stamps of this family
+ * (run start, pool served). Cached under the rq lock, sched_clock otherwise;
+ * never mixed with cake_now(). Cross-CPU deltas are clamped at the reader
+ * because the rq clock promises order per CPU only (§G34 H1). */
+static __always_inline u64 cake_now_rq(u32 site)
+{
+	cake_stat_inc(CAKE_SITE_KT);
+	cake_stat_inc(site);
+	return scx_bpf_now();
 }
 
 static __always_inline s32 cake_pick_idle(const struct cpumask *m, u64 flags)
@@ -881,7 +894,7 @@ static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
 	cidx = cake_recip_index(curr);
 
 	stamp = rs->stamp;
-	ran = cake_now(CAKE_SITE_KT_OCCUPANT) - stamp;
+	ran = time_delta(cake_now_rq(CAKE_SITE_KT_OCCUPANT), stamp);
 	*ran_out = ran;
 	return cake_scale_vtime_add(cv, ran, cidx);
 }
@@ -1117,7 +1130,7 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		return;
-	t->place_ns = cake_now(CAKE_SITE_KT_PROBE);
+	t->place_ns = cake_now_rq(CAKE_SITE_KT_PROBE);
 	t->target = (u32)dsq_id & (MAX_CPUS - 1);
 	t->caller = me;
 	{
@@ -1147,7 +1160,7 @@ static __noinline void cake_probe_run(struct task_struct *p, u64 now)
 	t = bpf_task_storage_get(&cake_probe_tags, p, 0, 0);
 	if (!t || !t->place_ns)
 		return;
-	wait = now - t->place_ns;
+	wait = time_delta(now, t->place_ns);
 	if (wait > 10 * NSEC_PER_MSEC) {
 		u32 i = __atomic_fetch_add(&cake_blackbox_n, 1, __ATOMIC_RELAXED) & 3;
 		struct cake_bb_rec *b = &cake_blackbox[i];
@@ -1442,8 +1455,8 @@ static __noinline bool cake_handoff_yields(s32 tcpu)
 	if (!curr || !(curr->scx.flags & CAKE_TASK_QUEUED) || !curr->scx.dsq_vtime)
 		return false;
 
-	ran = cake_now(CAKE_SITE_KT_HANDOFF) -
-	      cake.run[(u32)tcpu & (MAX_CPUS - 1)].stamp;
+	ran = time_delta(cake_now_rq(CAKE_SITE_KT_HANDOFF),
+			 cake.run[(u32)tcpu & (MAX_CPUS - 1)].stamp);
 	n = curr->nvcsw | 1;
 	lim = ran + cake_handoff_max_ns;
 
@@ -2229,14 +2242,14 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 static __noinline bool cake_wake_starved(u32 llc)
 {
 	return time_before(cake.wake_served[llc & (MAX_LLCS - 1)].word +
-			   WAKE_STARVE_WALL_NS, cake_now(CAKE_SITE_KT_WAKECLOCK));
+			   WAKE_STARVE_WALL_NS, cake_now_rq(CAKE_SITE_KT_WAKECLOCK));
 }
 
 /* Record that someone served the global wake queue. */
 static __noinline void cake_wake_serve_stamp(u32 llc)
 {
 	cake_stat_inc(CAKE_SITE_WAKE_SERVED_ST);
-	cake.wake_served[llc & (MAX_LLCS - 1)].word = cake_now(CAKE_SITE_KT_WAKECLOCK);
+	cake.wake_served[llc & (MAX_LLCS - 1)].word = cake_now_rq(CAKE_SITE_KT_WAKECLOCK);
 }
 
 /*
@@ -2248,7 +2261,7 @@ static __noinline void cake_wake_serve_stamp(u32 llc)
  */
 static __noinline void cake_wake_idle_stamp(u32 llc)
 {
-	u64 now = cake_now(CAKE_SITE_KT_WAKECLOCK);
+	u64 now = cake_now_rq(CAKE_SITE_KT_WAKECLOCK);
 	struct cake_slot *ws = &cake.wake_served[llc & (MAX_LLCS - 1)];
 
 	if (time_before(ws->word + WAKE_STARVE_REFRESH_NS, now)) {
@@ -2598,7 +2611,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * caller's CPU, whose smp id charged a foreign slot (§G42). */
 	u32 cpu = p->thread_info.cpu;
 	struct cake_run_slot *run = &cake.run[cpu & (MAX_CPUS - 1)];
-	u64 now = cake_now(CAKE_SITE_KT_RUNNING);
+	u64 now = cake_now_rq(CAKE_SITE_KT_RUNNING);
 
 	run->stamp = now;
 	run->sum = p->se.sum_exec_runtime;
