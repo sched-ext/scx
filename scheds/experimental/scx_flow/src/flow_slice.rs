@@ -1,13 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Slice and estimate helpers
  *
- * Slice and estimate helpers for the flow scheduler.
- * The functions mirror the BPF header so behavior
- * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no knob.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * Holds the slice and estimate helpers that mirror the BPF header so behavior
+ * stays the same on both sides of the boundary. The slice is fixed at 1ms with
+ * no knob. Frequency, LLC, and CPU cards stay display only and never shape
+ * placement.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 /* Lower bound of a per task estimate in nanos. */
@@ -34,14 +34,11 @@ pub const NICE_MAX: i32 = 19;
 pub const WEIGHT_K: u64 = 8;
 
 /*
- * Weight of each nice level from minus 20 to plus 19.
- * Index is nice plus 20 with center 1024 at nice 0.
- * Ends are 2048 at minus 20 and 256 at 19,
- * so total spread K is 8 with boost 2x and penalty 4x.
- * Made as 1024 times 2 to minus nice over 20 below 1,
- * else 1024 times 4 to minus nice over 19, rounded.
- * The maker is docs only, the table mirrors
- * the BPF rodata for tests.
+ * Weight of each nice level from minus 20 to plus 19. Index is nice + 20 with
+ * center 1024 at nice 0. Ends are 2048 at minus 20 and 256 at 19, so total
+ * spread K is 8 with boost 2x and penalty 4x. Made as 1024 times 2 to minus
+ * nice over 20 below 1, else 1024 times 4 to minus nice over 19, rounded. The
+ * maker is docs only, the table mirrors the BPF rodata for tests.
  */
 #[cfg(test)]
 pub const WEIGHT_TABLE: [u16; 40] = [
@@ -61,9 +58,9 @@ pub fn clamp_est(v: u64) -> u64 {
 }
 
 /*
- * Scale an estimate by weight for virtual time. The
- * fixed weight keeps the value unchanged while the
- * signature allows future weights with no call change.
+ * Scale an estimate by live weight for virtual time.
+ * Weight 1024 keeps the value unchanged and other
+ * weights scale it inversely.
  */
 #[cfg(test)]
 pub fn scale_by_weight(est: u64, weight: u32) -> u64 {
