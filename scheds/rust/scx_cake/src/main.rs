@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -828,10 +829,10 @@ impl<'a> Scheduler<'a> {
         };
         let words = sink_words::<{ bpf_intf::consts_QMASK_WORDS as usize }>(set);
         for (published, word) in bss.cpu_irq_hot_words.iter_mut().zip(words) {
-            // SAFETY: the skeleton maps writable, u64-aligned BSS. A volatile
-            // word store prevents the compiler from eliding a publication
-            // consumed asynchronously by BPF. No cross-word atomicity assumed.
-            unsafe { std::ptr::write_volatile(published, word) };
+            // SAFETY: the skeleton maps writable, u64-aligned BSS that BPF
+            // reads concurrently; the atomic view lives no longer than the
+            // &mut it is built from. No cross-word atomicity assumed.
+            unsafe { AtomicU64::from_ptr(published) }.store(word, Ordering::Relaxed);
         }
 
         if self.verbose {
@@ -1151,7 +1152,7 @@ fn probe_handoff_hop_ns() -> Option<HandoffProbe> {
             let (lock, cv) = &*peer;
             let mut turn = lock.lock().ok()?;
             for _ in 0..total {
-                while *turn % 2 == 0 {
+                while turn.is_multiple_of(2) {
                     turn = cv.wait(turn).ok()?;
                 }
                 *turn = turn.wrapping_add(1);
