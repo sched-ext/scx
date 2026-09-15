@@ -28,6 +28,7 @@ members = [
     "scheds/experimental/scx_flow",
     "scheds/experimental/scx_nitosis",
     "scheds/experimental/scx_rlfifo",
+    "scheds/experimental/scx_lunar",
     "scheds/experimental/scx_mlfq",
     "tools/scx_characterize",
     "tools/scxtop",
