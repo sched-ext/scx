@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Flow scheduler helpers facade
  *
- * Flow scheduler helpers facade. The helpers live in
- * slice plus EDF plus select plus group. This facade
- * reexports them so crate and flow paths stay stable.
+ * Reexports the slice, EDF, group, and preempt helpers and the select helpers
+ * in test, so crate and flow paths stay stable.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 pub use crate::flow_edf::*;
@@ -13,3 +14,4 @@ pub use crate::flow_preempt::*;
 #[cfg(test)]
 pub use crate::flow_select::*;
 pub use crate::flow_slice::*;
+pub use crate::flow_slot::*;
