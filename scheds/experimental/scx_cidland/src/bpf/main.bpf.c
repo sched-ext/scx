@@ -401,6 +401,7 @@ struct grp_hdr {
 	u64 pages;		/* arena pages of this block */
 	u64 load_avg;		/* sum of the queues' averaged loads, tg->load_avg */
 	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
+	u64 idle;		/* cpu.idle, see cidland_cpuctl_set_idle() */
 };
 
 struct grp_q {
@@ -613,6 +614,7 @@ struct cid_ctx {
 	struct busy_balance_env busy_balance_env; /* tick scan scratch space */
 	u64 busy_balance_load; /* latest domain-scan load sample */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
+	u32 curr_sched_idle;	/* that, or it is in an idle cgroup, see cid_sched_idle_target() */
 	u32 steal_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 	u64 idle_stamp;		/* when the last idle pull began, see newidle_cost() */
@@ -1504,6 +1506,11 @@ static bool cid_queued_test(s32 cid)
  * runqueue contains only SCHED_IDLE work instead of waiting on a normal
  * task elsewhere. Cidland does not count policy classes in a remote EDQ, so
  * recognize the exact cheap case: a SCHED_IDLE current with no waiter.
+ *
+ * Work in an idle cgroup counts as SCHED_IDLE work here, the way a task
+ * under a cfs_rq_is_idle() group counts in rq->cfs.h_nr_idle, see
+ * cidland_cpuctl_set_idle(). What @p itself is follows its policy alone, as
+ * in choose_sched_idle_rq().
  */
 static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
 {
@@ -1514,7 +1521,7 @@ static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
 		return false;
 	cctx = cid_ctx(cid);
 
-	return cctx->pack.curr_w && cctx->curr_idle;
+	return cctx->pack.curr_w && cctx->curr_sched_idle;
 }
 
 static void cid_queued_set(s32 cid)
@@ -4273,6 +4280,25 @@ static u64 task_join_weight(const struct task_struct *p, const task_ctx_t *tctx,
 }
 
 /*
+ * Return true if the task of @tctx is in an idle cgroup or under one,
+ * cfs_rq_is_idle() on the way up enqueue_hierarchy(). A group has the same
+ * ancestors on every cid, so the chain of the first one stands for all.
+ */
+static bool task_in_idle_cgroup(const task_ctx_t *tctx)
+{
+	grp_q_t *gq = tctx->grp;
+	int i;
+
+	for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
+		if (READ_ONCE(gq->hdr->idle))
+			return true;
+		gq = gq->parent;
+	}
+
+	return false;
+}
+
+/*
  * Take @tctx out of its pack's reference and out of its group's load, the
  * two memberships a task has on a cid and gives up together.
  */
@@ -6447,6 +6473,8 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		pk->curr_request = task_request(p);
 		pk->curr_w = task_weight(p, tctx);
 		cctx->curr_idle = p->policy == SCHED_IDLE;
+		cctx->curr_sched_idle = cctx->curr_idle ||
+					(tctx->grp && task_in_idle_cgroup(tctx));
 
 		/*
 		 * A pick with company is given an hrtick, set_next_task_fair():
@@ -6711,6 +6739,29 @@ void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
 }
 
 /*
+ * Return true if @cgrp is set cpu.idle. ops.cpuctl_set_idle() only reports
+ * changes, and struct scx_cgroup_init_args has no idle state, so a cgroup that
+ * was made idle before the scheduler was loaded is read off its task_group,
+ * whose css the cpu controller's is.
+ */
+static bool cgrp_is_idle(struct cgroup *cgrp)
+{
+	struct task_group *tg;
+	int idle = 0;
+
+	if (!bpf_core_field_exists(struct task_group, idle))
+		return false;
+	tg = (struct task_group *)cgrp->subsys[bpf_core_enum_value(enum cgroup_subsys_id,
+								     cpu_cgrp_id)];
+	if (!tg)
+		return false;
+	if (bpf_core_read(&idle, sizeof(idle), &tg->idle))
+		return false;
+
+	return idle > 0;
+}
+
+/*
  * A cgroup the cpu controller is putting under this scheduler, either one
  * that already existed when it was loaded or one just created, parents
  * before their children: give it a queue on every cid, each adding to its
@@ -6758,7 +6809,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
 	hdr = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
 	if (!hdr)
 		return -ENOMEM;
-	hdr->weight = cgrp_load_weight(args->weight);
+	hdr->idle = cgrp_is_idle(cgrp);
+	hdr->weight = hdr->idle ? WEIGHT_IDLEPRIO : cgrp_load_weight(args->weight);
 	hdr->pages = pages;
 	ents = (grp_q_t *)((char __arena *)hdr + sizeof(struct grp_hdr));
 
@@ -6822,6 +6874,32 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
 		return;
 
 	cgc->hdr->weight = cgrp_load_weight(weight);
+}
+
+/*
+ * Somebody wrote cpu.idle, sched_group_set_idle(): an idle cgroup has the
+ * weight of a SCHED_IDLE task, and one that stops being idle goes back to the
+ * default weight, not to the cpu.weight it had, which the kernel does not
+ * let be written while the cgroup is idle. The shares follow the next time
+ * the tick recomputes them, see grp_update_shares().
+ *
+ * A task under an idle cgroup also counts as SCHED_IDLE work on its cid for
+ * placement, see cid_sched_idle_target(). It does not change how the task
+ * preempts or is preempted: with a single runqueue, wakeup_preempt_fair()
+ * compares the tasks' own policies.
+ */
+void BPF_STRUCT_OPS(cidland_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
+{
+	struct cgrp_ctx *cgc;
+
+	TOUCH_ARENA();
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+	if (!cgc || !cgc->hdr)
+		return;
+
+	cgc->hdr->weight = idle ? WEIGHT_IDLEPRIO : cgrp_load_weight(CGROUP_WEIGHT_DFL);
+	WRITE_ONCE(cgc->hdr->idle, idle);
 }
 
 /*
@@ -7202,6 +7280,7 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	.__cg##_init		= (void *)cidland_cpuctl_init,		\
 	.__cg##_exit		= (void *)cidland_cpuctl_exit,		\
 	.__cg##_set_weight	= (void *)cidland_cpuctl_set_weight,	\
+	.__cg##_set_idle	= (void *)cidland_cpuctl_set_idle,	\
 	.__cg##_move		= (void *)cidland_cpuctl_move,		\
 	.init			= (void *)cidland_init,			\
 	.exit			= (void *)cidland_exit,			\

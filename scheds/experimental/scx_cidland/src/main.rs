@@ -688,11 +688,13 @@ impl<'a> Scheduler<'a> {
             ops.cpuctl_init = std::ptr::null_mut();
             ops.cpuctl_exit = std::ptr::null_mut();
             ops.cpuctl_set_weight = std::ptr::null_mut();
+            ops.cpuctl_set_idle = std::ptr::null_mut();
             ops.cpuctl_move = std::ptr::null_mut();
             let ops = skel.struct_ops.cidland_ops_cgroup_mut();
             ops.cgroup_init = std::ptr::null_mut();
             ops.cgroup_exit = std::ptr::null_mut();
             ops.cgroup_set_weight = std::ptr::null_mut();
+            ops.cgroup_set_idle = std::ptr::null_mut();
             ops.cgroup_move = std::ptr::null_mut();
             info!("cgroup scheduling: off");
         } else {
