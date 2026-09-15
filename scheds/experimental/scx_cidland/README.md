@@ -222,8 +222,11 @@ be turned off on the command line to compare the two rules against each other.
 
  - **Idle search.** `wake_affine()` first computes the target around which
    `select_idle_sibling()` searches. The target is tried if it is idle, then
-   the idle cache-affine CPU a task last ran on, then a fully idle core before
-   a thread with a busy sibling, scanning the LLC and then the node. A
+   the idle cache-affine CPU a task last ran on. On an asymmetric-capacity SMT
+   machine those candidates must have a fully idle core, and the asymmetric
+   capacity domain is scanned in wrapped CPU order before the ordinary LLC
+   scan, as `select_idle_capacity()` does. The fallback takes a fully idle core
+   before a thread with a busy sibling, scanning the LLC and then the node. A
    synchronous wakeup from a waker that is the only runnable task on its CPU
    makes that CPU the affine target, `wake_affine_idle()`: idle alternatives
    around it still win, and only when the scan fails is the wakee stacked on
@@ -241,8 +244,9 @@ be turned off on the command line to compare the two rules against each other.
    a few percent on wakeup-heavy runs, in `fair.c` as much as here, hence
    off by default. The
    `record_wakee()`/`wake_wide()` flip heuristic disables affinity for wide
-   M:N wakeup patterns. A new task with nowhere idle to go is placed on the
-   shortest queue, `find_idlest_cpu()`.
+   M:N wakeup patterns. Forks do not use this wakeup-only idle-sibling path:
+   they search the kernel's live `SD_BALANCE_FORK` span using averaged,
+   capacity-normalized per-CPU utilization, preferring an idle CPU.
 
  - **Load balancing.** A CPU that runs out of work pulls from the other queues
    of its node, walking its own LLC first the way the idle balancer walks the

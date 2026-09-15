@@ -52,6 +52,9 @@ struct cidland_cpu_args {
 	unsigned long long	place_tier;
 	unsigned long long	capacity_tier;
 	unsigned long long	smt_asym_packing;
+	unsigned long long	fork_span;
+	unsigned long long	wake_affine_span;
+	unsigned long long	asym_capacity_span;
 };
 
 /*
@@ -65,6 +68,9 @@ struct cidland_cpu_priority_args {
 	long long		priority;
 	unsigned long long	asym_packing;
 	unsigned long long	smt_asym_packing;
+	unsigned long long	fork_span;
+	unsigned long long	wake_affine_span;
+	unsigned long long	asym_capacity_span;
 };
 
 #endif /* __INTF_H */

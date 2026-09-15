@@ -816,10 +816,19 @@ impl<'a> Scheduler<'a> {
         // Keep capacity and SD_ASYM_PACKING tiers independent. fair.c uses
         // them in different paths; collapsing them into one ordering makes
         // packing priority affect every ordinary idle-CPU search.
-        let mut cpu_tiers: Vec<(u64, u64, u64, u64, bool)> = Vec::new();
+        let mut cpu_tiers: Vec<(u64, u64, u64, u64, bool, u64, u64, u64)> = Vec::new();
         for (i, (cpu, capacity)) in cpus.iter().enumerate() {
             let normalized = (*capacity * 1024 / max_cap).clamp(1, 1024);
-            cpu_tiers.push((cpu.id as u64, normalized as u64, tiers[i], tiers[i], false));
+            cpu_tiers.push((
+                cpu.id as u64,
+                normalized as u64,
+                tiers[i],
+                tiers[i],
+                false,
+                0,
+                0,
+                0,
+            ));
         }
         info!(
             "CPU capacity mode: {capacity_mode} ({nr_capacity_tiers} tier{}, tolerance {tolerance}%)",
@@ -869,22 +878,41 @@ impl<'a> Scheduler<'a> {
         // fit calculations.
         let mut priorities = Vec::new();
         let mut all_asym_packing = !opts.disable_asym_packing;
-        if !opts.disable_asym_packing {
-            priorities.reserve(cpu_tiers.len());
-            for (cpu, _, _, _, smt_asym_packing) in &mut cpu_tiers {
-                let mut args = types::cidland_cpu_priority_args {
-                    cpu: *cpu,
-                    priority: 0,
-                    asym_packing: 0,
-                    smt_asym_packing: 0,
-                };
-                run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
-                    .context("running cidland_get_cpu_priority")?;
+        priorities.reserve(cpu_tiers.len());
+        for (cpu, _, _, _, smt_asym_packing, fork_span, wake_affine_span, asym_capacity_span) in
+            &mut cpu_tiers
+        {
+            let mut args = types::cidland_cpu_priority_args {
+                cpu: *cpu,
+                priority: 0,
+                asym_packing: 0,
+                smt_asym_packing: 0,
+                fork_span: 0,
+                wake_affine_span: 0,
+                asym_capacity_span: 0,
+            };
+            run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
+                .context("querying CPU scheduler domains")?;
+            *fork_span = args.fork_span;
+            *wake_affine_span = args.wake_affine_span;
+            *asym_capacity_span = args.asym_capacity_span;
+            if !opts.disable_asym_packing {
                 all_asym_packing &= args.asym_packing != 0;
                 *smt_asym_packing = args.smt_asym_packing != 0;
                 priorities.push((*cpu, args.priority));
             }
         }
+
+        let mut domain_spans = cpu_tiers
+            .iter()
+            .map(|entry| (entry.5, entry.6, entry.7))
+            .collect::<Vec<_>>();
+        domain_spans.sort_unstable();
+        domain_spans.dedup();
+        info!(
+            "scheduler domain spans (fork, wake-affine, asym-capacity): {:?}",
+            domain_spans
+        );
 
         priorities.sort_by_key(|(_, priority)| std::cmp::Reverse(*priority));
         let distinct_priorities = priorities.windows(2).any(|pair| pair[0].1 != pair[1].1);
@@ -910,7 +938,7 @@ impl<'a> Scheduler<'a> {
                 priorities.iter().map(|(cpu, _)| cpu).collect::<Vec<_>>()
             );
         } else {
-            for (_, _, _, _, smt_asym_packing) in &mut cpu_tiers {
+            for (_, _, _, _, smt_asym_packing, _, _, _) in &mut cpu_tiers {
                 *smt_asym_packing = false;
             }
             info!(
@@ -937,13 +965,26 @@ impl<'a> Scheduler<'a> {
         };
         run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
             .context("running cidland_arena_init")?;
-        for (cpu, capacity, capacity_tier, place_tier, smt_asym_packing) in cpu_tiers {
+        for (
+            cpu,
+            capacity,
+            capacity_tier,
+            place_tier,
+            smt_asym_packing,
+            fork_span,
+            wake_affine_span,
+            asym_capacity_span,
+        ) in cpu_tiers
+        {
             let mut args = types::cidland_cpu_args {
                 cpu,
                 capacity,
                 place_tier,
                 capacity_tier,
                 smt_asym_packing: smt_asym_packing as u64,
+                fork_span,
+                wake_affine_span,
+                asym_capacity_span,
             };
             run_syscall_prog(&skel.progs.cidland_set_cpu, &mut args)
                 .context("running cidland_set_cpu")?;
