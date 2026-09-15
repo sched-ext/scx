@@ -436,6 +436,32 @@ u64 scx_edq_pop_first_eligible_or_first(scx_edq_t __arg_arena *edq,
 	return task;
 }
 
+/*
+ * Return in @deadline the deadline of the earliest-deadline task whose
+ * eligibility is at or before @cutoff, without removing it. -ENOENT when no
+ * queued task is eligible, -EBUSY when the queue is contended: the caller
+ * decides without it.
+ */
+__weak
+int scx_edq_try_first_eligible_deadline(scx_edq_t __arg_arena *edq, u64 cutoff,
+					 u64 *deadline __arg_nonnull)
+{
+	scx_edq_node_t *node;
+	int ret;
+
+	*deadline = 0;
+	ret = scx_edq_trylock(edq);
+	if (ret)
+		return ret;
+	node = first_eligible(edq, cutoff);
+	if (node)
+		*deadline = node->deadline;
+	else
+		ret = -ENOENT;
+	scx_edq_unlock(edq);
+	return ret;
+}
+
 __weak
 u64 scx_edq_peek_hold(scx_edq_t __arg_arena *edq)
 {

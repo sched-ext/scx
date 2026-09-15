@@ -67,6 +67,8 @@ u64 scx_edq_pop_first_eligible(scx_edq_t __arg_arena *edq, u64 cutoff,
 				 bool hold);
 u64 scx_edq_pop_first_eligible_or_first(scx_edq_t __arg_arena *edq,
 					 u64 cutoff, bool hold);
+int scx_edq_try_first_eligible_deadline(scx_edq_t __arg_arena *edq, u64 cutoff,
+					 u64 *deadline __arg_nonnull);
 u64 scx_edq_peek_hold(scx_edq_t __arg_arena *edq);
 int scx_edq_try_peek_hold(scx_edq_t __arg_arena *edq, u64 *task __arg_nonnull);
 u64 scx_edq_nr_queued(scx_edq_t __arg_arena *edq);
