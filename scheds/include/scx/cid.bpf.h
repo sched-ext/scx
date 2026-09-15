@@ -15,6 +15,7 @@
 #define __SCX_CID_BPF_H
 
 #include "bpf_arena_common.bpf.h"
+#include <lib/arena_loop.h>
 
 #ifndef BIT_U64
 #define BIT_U64(nr)		(1ULL << (nr))
@@ -76,7 +77,7 @@ static __always_inline void __cmask_init(struct scx_cmask __arena *m, u32 base,
 	m->nr_cids = nr_cids;
 	m->alloc_words = alloc_words;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= alloc_words)
 			break;
 		m->bits[i] = 0;
@@ -223,7 +224,7 @@ static __always_inline void cmask_set(u32 cid, struct scx_cmask __arena *m)
 		return;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
-	bpf_for(i, 0, CMASK_CAS_TRIES) {
+	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (old & bit)
 			return;
@@ -244,7 +245,7 @@ static __always_inline void cmask_clear(u32 cid, struct scx_cmask __arena *m)
 		return;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
-	bpf_for(i, 0, CMASK_CAS_TRIES) {
+	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (!(old & bit))
 			return;
@@ -265,7 +266,7 @@ static __always_inline bool cmask_test_and_set(u32 cid, struct scx_cmask __arena
 		return false;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
-	bpf_for(i, 0, CMASK_CAS_TRIES) {
+	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (old & bit)
 			return true;
@@ -287,7 +288,7 @@ static __always_inline bool cmask_test_and_clear(u32 cid, struct scx_cmask __are
 		return false;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
-	bpf_for(i, 0, CMASK_CAS_TRIES) {
+	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (!(old & bit))
 			return false;
@@ -347,7 +348,7 @@ static __always_inline void __cmask_word_or(u64 __arena *w, u64 mask)
 	u64 old, new;
 	u32 i;
 
-	bpf_for(i, 0, CMASK_CAS_TRIES) {
+	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if ((old & mask) == mask)
 			return;
@@ -364,7 +365,7 @@ static __always_inline void __cmask_word_andnot(u64 __arena *w, u64 mask)
 	u64 old, new;
 	u32 i;
 
-	bpf_for(i, 0, CMASK_CAS_TRIES) {
+	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (!(old & mask))
 			return;
@@ -404,7 +405,7 @@ static __always_inline bool cmask_full_range(const struct scx_cmask __arena *m, 
 	first_bit = start & 63;
 	last_bit = last & 63;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 wi = first_wi + i;
 		u64 mask = ~0ULL;
 
@@ -449,7 +450,7 @@ static __always_inline void cmask_set_range(struct scx_cmask __arena *m, u32 sta
 	first_bit = start & 63;
 	last_bit = last & 63;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 wi = first_wi + i;
 		u64 mask = ~0ULL;
 
@@ -492,7 +493,7 @@ static __always_inline void cmask_clear_range(struct scx_cmask __arena *m, u32 s
 	first_bit = start & 63;
 	last_bit = last & 63;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 wi = first_wi + i;
 		u64 mask = ~0ULL;
 
@@ -510,7 +511,7 @@ static __always_inline void cmask_zero(struct scx_cmask __arena *m)
 {
 	u32 nr_words = CMASK_NR_WORDS(m->nr_cids), i;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= nr_words)
 			break;
 		m->bits[i] = 0;
@@ -532,7 +533,7 @@ static __always_inline void cmask_fill(struct scx_cmask __arena *m)
 		return;
 	nr_words = (m->base + m->nr_cids - 1) / 64 - m->base / 64 + 1;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= nr_words)
 			break;
 		m->bits[i] = ~0LLU;
@@ -560,7 +561,7 @@ static __always_inline bool cmask_empty(const struct scx_cmask __arena *m)
 {
 	u32 nr_words = cmask_nr_words(m), i;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= nr_words)
 			break;
 		if (m->bits[i])
@@ -621,7 +622,7 @@ static __always_inline void cmask_op(struct scx_cmask __arena *dst,
 	head_mask = GENMASK_U64(63, lo & 63);
 	tail_mask = GENMASK_U64((hi - 1) & 63, 0);
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 w = lo_word + i;
 		u64 m;
 
@@ -685,7 +686,7 @@ static __always_inline bool cmask_equal(const struct scx_cmask __arena *a,
 		return true;
 	nr_words = (a->base + a->nr_cids - 1) / 64 - a->base / 64 + 1;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= nr_words)
 			break;
 		if (a->bits[i] != b->bits[i])
@@ -718,7 +719,7 @@ static __always_inline u32 cmask_next_set(const struct scx_cmask __arena *m, u32
 	start_wi = cid / 64 - base;
 	start_bit = cid & 63;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 wi = start_wi + i;
 		u64 word;
 		u32 found;
@@ -785,7 +786,7 @@ static __always_inline bool cmask_subset(const struct scx_cmask __arena *a,
 	lo_word = lo / 64;
 	hi_word = (hi - 1) / 64;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 w = lo_word + i;
 
 		if (w > hi_word)
@@ -810,7 +811,7 @@ static __always_inline u32 cmask_weight(const struct scx_cmask __arena *m)
 		return 0;
 	nr_words = (m->base + m->nr_cids - 1) / 64 - m->base / 64 + 1;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		if (i >= nr_words)
 			break;
 		count += __builtin_popcountll(m->bits[i]);
@@ -842,7 +843,7 @@ static __always_inline bool cmask_intersects(const struct scx_cmask __arena *a,
 	head_mask = GENMASK_U64(63, lo & 63);
 	tail_mask = GENMASK_U64((hi - 1) & 63, 0);
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 w = lo_word + i;
 		u64 mask, av, bv;
 
@@ -893,7 +894,7 @@ static __always_inline u32 cmask_next_and_set(const struct scx_cmask __arena *a,
 	start_wi = start / 64;
 	start_bit = start & 63;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 abs_wi = start_wi + i;
 		u64 word;
 		u32 found;
@@ -1070,7 +1071,7 @@ static __always_inline u32 cmask_next_and2_set(const struct scx_cmask __arena *a
 	start_wi = start / 64;
 	start_bit = start & 63;
 
-	bpf_for(i, 0, CMASK_MAX_WORDS) {
+	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
 		u32 abs_wi = start_wi + i;
 		u64 word;
 		u32 found;
@@ -1132,7 +1133,7 @@ static __always_inline void cmask_from_cpumask(struct scx_cmask __arena *m,
 	s32 cpu;
 
 	cmask_zero(m);
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_arena_for(cpu, 0, nr_cpu_ids) {
 		s32 cid;
 
 		if (!bpf_cpumask_test_cpu(cpu, cpumask))

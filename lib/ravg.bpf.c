@@ -48,6 +48,10 @@ int ravg_accumulate(struct ravg_data *rd, u64 new_val, u64 now,
 	if (now < rd->val_at)
 		now = rd->val_at;
 
+	/* No time has passed: record the new value and leave. */
+	if (now == rd->val_at)
+		goto out;
+
 	cur_seq = now / half_life;
 	val_seq = rd->val_at / half_life;
 	seq_delta = cur_seq - val_seq;

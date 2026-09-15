@@ -167,6 +167,12 @@ pub struct Cpu {
     pub base_freq: usize,
     /// The best-effort guessing of cpu_capacity scaled to 1024.
     pub cpu_capacity: usize,
+    /// The kernel scheduler's exact topology capacity, when exported by sysfs.
+    ///
+    /// Unlike [`Cpu::cpu_capacity`], this is never inferred from CPPC or CPU
+    /// frequency data. It is read only from cpuX/cpu_capacity and corresponds
+    /// to topology_get_cpu_scale().
+    pub kernel_cpu_capacity: Option<usize>,
     pub smt_level: usize,
     /// CPU idle resume latency
     pub pm_qos_resume_latency_us: usize,
@@ -666,7 +672,11 @@ fn create_insert_cpu(
     let trans_lat_ns =
         read_from_file(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0_usize);
 
-    // Cpu capacity
+    // CPU capacity. Keep the kernel scheduler's exported value separate from
+    // the best-effort estimate, whose source may instead be CPPC or cpufreq.
+    let kernel_cpu_capacity = read_from_file(&cpu_path.join("cpu_capacity"))
+        .ok()
+        .filter(|capacity| *capacity > 0);
     let cap_path = cpu_path.join(cs.suffix.clone());
     let rcap = read_from_file(&cap_path).unwrap_or(cs.max_rcap);
     let cpu_capacity = (rcap * 1024) / cs.max_rcap;
@@ -728,6 +738,7 @@ fn create_insert_cpu(
             max_freq,
             base_freq,
             cpu_capacity,
+            kernel_cpu_capacity,
             smt_level: 0, // Will be initialized at instantiate().
             pm_qos_resume_latency_us,
             trans_lat_ns,
@@ -1175,6 +1186,7 @@ pub mod testutils {
             max_freq: 0,
             base_freq: 0,
             cpu_capacity: 1024,
+            kernel_cpu_capacity: Some(1024),
             smt_level: 0, // filled by instantiate()
             pm_qos_resume_latency_us: 0,
             trans_lat_ns: 0,
