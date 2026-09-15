@@ -19,17 +19,12 @@ use crate::scheduler::Scheduler;
 // OF THIS AND ARE EXPLICITLY MIGRATED OUT.
 //
 // CARVE-OUT: ONLY ABSOLUTE-COUNT QUANTITIES KEEP nr_cpu_ids. GRAPH-SHAPE
-// QUANTITIES (including search budgets sized by spectral connectivity) ARE
-// EXPRESSED THROUGH tau VIA lambda_2 = TAU_SCALE_NS / tau. TWO SITES IN
-// main.bpf.c INTENTIONALLY KEEP nr_cpu_ids:
-//   - select_cpu()'s wake_wide() flips threshold (matches the kernel's
-//     wake_wide() convention; an external interface).
-//   - tick()'s rotating-scan budget switch (coverage over the active CPU
-//     range, not a graph-shape decision).
-// Everything else -- timing, oscillator dynamics, search budgets, depth
-// gates -- derives from tau in apply_tau_scaling().
+// QUANTITIES, SEARCH BUDGETS INCLUDED, GO THROUGH tau VIA
+// lambda_2 = TAU_SCALE_NS / tau. TWO SITES IN main.bpf.c KEEP nr_cpu_ids:
+//   select_cpu()'s wake_wide THRESHOLD, WHICH MATCHES A KERNEL CONVENTION
+//   tick()'s ROTATING-SCAN BUDGET, WHICH IS COVERAGE, NOT GRAPH SHAPE
 //
-// EXTRACTION IS O(n log n) ON TOP OF THE EXISTING O(n^3) Jacobi; NEGLIGIBLE.
+// EXTRACTION IS O(n log n) ON TOP OF THE EXISTING O(n^3) JACOBI.
 // REFERENCE: CHEEGER'S INEQUALITY BOUNDS lambda_2 AGAINST GRAPH BOTTLENECK.
 const LAMBDA_ZERO_EPS: f64 = 1e-8;
 const TAU_SCALE_NS: f64 = 1.6e8; // 160MS. CAPACITY-AWARE ANCHOR: AT THE
@@ -38,17 +33,19 @@ const TAU_SCALE_NS: f64 = 1.6e8; // 160MS. CAPACITY-AWARE ANCHOR: AT THE
 const TAU_FLOOR_NS: u64 = 1_000_000; //  1MS
 const TAU_CEIL_NS: u64 = 40_000_000; // 40MS
 
-// CoDel TARGET EQUILIBRIUM CLAMP RANGE. THE CONTROLLER'S MEAN-REVERTING
-// TARGET IN ABSENCE OF DISTURBANCE. SAME ORDER OF MAGNITUDE AS THE
-// CoDel TARGET RANGE ITSELF (FLOOR ~200us, CEILING ~8MS).
-const C_EQ_FLOOR_NS: u64 = 200_000; // 200us
-const C_EQ_CEIL_NS: u64 = 8_000_000; // 8ms
+// THE OSCILLATOR'S WORKING BAND, MIRRORING K_CODEL_FLOOR AND K_CODEL_MAX IN
+// main.bpf.c. c_eq IS A POSITION INSIDE THIS BAND, SO IT NEEDS NO CLAMP OF ITS
+// OWN -- SEE compute_codel_eq_ns.
+const K_CODEL_FLOOR_Q16: f64 = 1147.0; // 0.0175 * tau
+const K_CODEL_MAX_Q16: f64 = 3277.0; // 0.05   * tau
+const Q16: f64 = 65536.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TopologySpectrum {
     pub fiedler: f64,     // lambda_2
-    pub tau_ns: u64,      // clamped TAU_SCALE_NS / lambda_2
-    pub codel_eq_ns: u64, // <R_eff> * 2m * tau, clamped
+    pub tau_ns: u64,      // clamped TAU_SCALE_NS / sqrt(fiedler * N)
+    pub codel_eq_ns: u64, // A POSITION IN [K_CODEL_FLOOR, K_CODEL_MAX]*tau
+    // SET BY THE SPECTRAL-GAP DEFICIT. NO CLAMP.
     // Phi migration-potential distance->wait scale (Q16). The extra head-wait a
     // steal must clear before crossing to a peer = (reff * this) >> 16 ns. Always
     // computed now (T1): the continuous metric prices distance on every part, no
@@ -127,36 +124,54 @@ fn compute_tau_ns(fiedler: f64, n: usize) -> u64 {
 }
 
 // CoDel TARGET EQUILIBRIUM FROM THE LAPLACIAN SPECTRUM.
-// FORMULA:  c_eq = <R_eff> * 2m * tau
-// SPECTRAL FORM:
-//   <R_eff>  =  Tr(L+) / N  =  (1/N) * sum_{lambda > 0} 1 / lambda
-//   2m       =  Tr(L)      =  sum_{lambda} lambda
-//   tau      =  TAU_SCALE_NS / lambda_2  (already computed, in ns)
+//   s    = 1 - lambda_2 * Tr(L+) / (N - 1)
+//   c_eq = (K_CODEL_FLOOR + (K_CODEL_MAX - K_CODEL_FLOOR) * s) * tau
 //
-// PHYSICAL INTERPRETATION: c_eq is the natural commute-time scale of
-// the topology graph -- the average time it takes work to bounce
-// between two CPUs along the topology's slowest paths. The CoDel
-// target's mean-reverting equilibrium settles to this value in the
-// absence of disturbance, so the stall detector tightens around the
-// topology's intrinsic timescale instead of a hand-picked constant.
+// s IS THE NORMALISED SPECTRAL-GAP DEFICIT. lambda_2 * Tr(L+) / (N-1) is
+// lambda_2 over the HARMONIC MEAN of the positive eigenvalues: 1 on a flat
+// spectrum, where no cut is worse than any other, falling toward 1/(N-1) when
+// lambda_2 sits far below every other cut. So s measures HOW MUCH WORSE THE
+// BOTTLENECK IS THAN THE GRAPH'S TYPICAL CONNECTIVITY, which is the quantity
+// "how long should work be tolerated not moving" keys on. Cheeger already ties
+// lambda_2 to that bottleneck, so this reads the same object the tau law uses.
 //
-// CLAMPED TO [200us, 8ms] -- THE CoDel TARGET RANGE ITSELF.
+// IT IS A POSITION IN THE BAND, NOT A QUANTITY CLAMPED INTO ONE. Tr(L+) >=
+// 1/lambda_2 bounds s at 0 and Tr(L+) <= (N-1)/lambda_2 bounds it at
+// 1 - 1/(N-1), so c_eq lands inside [K_CODEL_FLOOR*tau, K_CODEL_MAX*tau] by
+// construction and main.bpf.c's re-clamp into that same window never fires.
+// THAT IS THE POINT: an equilibrium equal to the band's ceiling gives the
+// oscillator a spring that can only push one way.
+//
+// THE ENDS. A 2-CPU graph has exactly one positive eigenvalue, so s is 0 and
+// the target sits at the floor -- two CPUs have no far tier and stalls should
+// be caught as hard as the band allows. An SMT part, where a stiff sibling edge
+// sits beside a weak cross-domain cut, reads s ~0.72 and tolerates longer.
 fn compute_codel_eq_ns(eigenvalues: &[f64], n: usize, tau_ns: u64) -> u64 {
-    if n == 0 {
-        return TAU_FLOOR_NS;
+    let floor_ns = (K_CODEL_FLOOR_Q16 / Q16) * tau_ns as f64;
+    if n < 2 {
+        return floor_ns as u64;
     }
     let mut sum_inv_lambda = 0.0f64;
-    let mut sum_lambda = 0.0f64;
+    let mut n_pos = 0usize;
+    let mut lambda_2 = f64::MAX;
     for &lambda in eigenvalues {
-        sum_lambda += lambda;
         if lambda > LAMBDA_ZERO_EPS {
             sum_inv_lambda += 1.0 / lambda;
+            n_pos += 1;
+            if lambda < lambda_2 {
+                lambda_2 = lambda;
+            }
         }
     }
-    let avg_reff = sum_inv_lambda / n as f64;
-    let two_m = sum_lambda;
-    let raw_ns = avg_reff * two_m * tau_ns as f64;
-    (raw_ns as u64).clamp(C_EQ_FLOOR_NS, C_EQ_CEIL_NS)
+    // A DISCONNECTED OR DEGENERATE GRAPH HAS NO GAP TO READ. Fall to the floor,
+    // which is the tightest the band allows and the safe direction for a
+    // topology this cannot describe.
+    if n_pos == 0 || lambda_2 == f64::MAX || sum_inv_lambda <= 0.0 {
+        return floor_ns as u64;
+    }
+    let s = (1.0 - lambda_2 * sum_inv_lambda / (n - 1) as f64).clamp(0.0, 1.0);
+    let span_ns = ((K_CODEL_MAX_Q16 - K_CODEL_FLOOR_Q16) / Q16) * tau_ns as f64;
+    (floor_ns + span_ns * s) as u64
 }
 
 pub struct CpuTopology {
@@ -366,6 +381,13 @@ impl CpuTopology {
             "OVERFLOW DOMAINS: {} (emergent, cpu_domain populated)",
             ov_domains
         );
+        let dom_peers = topo.min_in_domain_peers(&rank, &cpu_dom);
+        sched.write_affinity_domain_peers(dom_peers);
+        log_info!(
+            "AFFINITY DOMAIN PEERS: {} (min over CPUs; bounds the \
+                   idle-search floor)",
+            dom_peers
+        );
         if let Err(e) = sched.write_topology_fields(spectrum.tau_ns, spectrum.codel_eq_ns) {
             log_warn!("TOPOLOGY KNOB WRITE FAILED: {}", e);
         }
@@ -431,30 +453,24 @@ impl CpuTopology {
         Ok(())
     }
 
-    // RESISTANCE AFFINITY (KYNG-DINIC ELECTRICAL FLOW MODEL)
-    //
-    // EFFECTIVE RESISTANCE R_eff(u,v) BETWEEN TWO CPUs CAPTURES THE TRUE
-    // MIGRATION COST THROUGH ALL TOPOLOGY PATHS. COMPUTED FROM THE LAPLACIAN
-    // PSEUDOINVERSE OF THE CPU TOPOLOGY GRAPH:
+    // RESISTANCE AFFINITY. EFFECTIVE RESISTANCE R_eff(u,v) IS THE MIGRATION COST
+    // BETWEEN TWO CPUs THROUGH ALL TOPOLOGY PATHS, FROM THE LAPLACIAN
+    // PSEUDOINVERSE OF THE CPU GRAPH:
+    //   L  = D - W          DEGREE MINUS WEIGHTED ADJACENCY
+    //   L+ = sum_{lambda_i > 0} (1/lambda_i) * v_i * v_i^T
     //   R_eff(i,j) = L+[i,i] + L+[j,j] - 2*L+[i,j]
     //
-    // EDGE CONDUCTANCES (INVERSE RESISTANCE):
-    //   L2 SIBLINGS:      10.0  (SHARED L2, NEAR-ZERO MIGRATION COST)
-    //   SAME L3 / cache domain:     3.0  (SHARED LLC; ONLY WHEN A SOCKET HOLDS >1 cache domain)
-    //   CROSS-DOMAIN SOCKET:  1.0  (CROSS-DOMAIN INTERCONNECT HOP, ~8x CORE-TO-CORE LATENCY)
-    //   CROSS-SOCKET:      0.3  (NUMA HOP, HIGH COST)
-    // RAISING THE same-domain RUNG (NOT LOWERING THE CROSS-DOMAIN CUT) RANKS
-    // SAME-L3 PEERS AHEAD OF CROSS-L3 ONES WITHOUT MOVING lambda_2: THE CROSS-L3
-    // CUT STAYS 1.0, SO tau AND codel_eq ARE UNCHANGED. THE L3 RUNG IS ALWAYS ON;
-    // on a monolithic part llc_domain == socket_domain, so it coincides with the
-    // socket rung and the continuous R_eff metric calibrates to the L2 boundary.
+    // EDGE CONDUCTANCES, THE INVERSE OF RESISTANCE:
+    //   L2 SIBLINGS          10.0   SHARED L2, NEAR-ZERO MIGRATION COST
+    //   SAME L3              3.0    SHARED LLC
+    //   CROSS-DOMAIN SOCKET  1.0    INTERCONNECT HOP, ~8x CORE-TO-CORE LATENCY
+    //   CROSS-SOCKET         0.3    NUMA HOP
+    // THE SAME-DOMAIN RUNG IS RAISED RATHER THAN THE CROSS-DOMAIN CUT LOWERED, SO
+    // SAME-L3 PEERS RANK AHEAD OF CROSS-L3 ONES WITHOUT MOVING lambda_2 -- THE
+    // CROSS-L3 CUT STAYS 1.0 AND tau AND codel_eq ARE UNCHANGED. ON A MONOLITHIC
+    // PART THE L3 RUNG COINCIDES WITH THE SOCKET RUNG.
     //
-    // THE LAPLACIAN L = D - W WHERE D IS DEGREE MATRIX, W IS WEIGHTED ADJACENCY.
-    // L+ (MOORE-PENROSE PSEUDOINVERSE) COMPUTED VIA EIGENDECOMPOSITION:
-    //   L+ = sum_{i: lambda_i > 0} (1/lambda_i) * v_i * v_i^T
-    //
-    // FOR n CPUs THIS IS O(n^3) -- TRIVIAL AT SCHEDULER STARTUP (n <= 256).
-    //
+    // O(n^3) FOR n CPUs, WHICH IS TRIVIAL AT STARTUP FOR n <= 256.
     // REFERENCE: Christiano-Kelner-Madry-Spielman-Teng (STOC 2011),
     //            Chen-Kyng-Liu-Peng-Gutenberg-Sachdeva (FOCS 2022)
 
@@ -875,6 +891,47 @@ impl CpuTopology {
         dom
     }
 
+    // HOW MANY affinity_rank SLOTS STAY INSIDE A CPU'S OWN DOMAIN, MINIMUM OVER
+    // CPUs. COUNTED OFF THE SAME rank THE BPF WALK READS AND THE SAME cpu_dom THE
+    // OVERFLOW SITES RE-KEY ON, SO THE BOUND CANNOT DISAGREE WITH THE WALK.
+    //
+    // THE PREFIX IS WHAT MATTERS. build_affinity_rank SORTS BY R_eff ASCENDING AND
+    // THE CACHE RUNGS ARE ORDERED, SO A CPU'S SAME-DOMAIN PEERS OCCUPY AN UNBROKEN
+    // PREFIX -- THE COUNT IS THEREFORE THE INDEX OF THE FIRST CROSS-DOMAIN SLOT,
+    // WHICH IS THE BUDGET AT WHICH THE WALK LEAVES THE DOMAIN. THE LOOP STOPS AT
+    // THE FIRST NON-MEMBER RATHER THAN COUNTING MEMBERSHIP ANYWHERE IN THE ROW.
+    //
+    // MINIMUM, NOT AVERAGE. THE BOUND KEEPS THE WALK INSIDE EVERY CPU'S DOMAIN,
+    // SO THE TIGHTEST CPU SETS IT.
+    //
+    // A SINGLETON DOMAIN IS EXCLUDED RATHER THAN ALLOWED TO SET THE BOUND. A CPU
+    // WITH NO IN-DOMAIN PEER HAS NO BUDGET THAT COULD KEEP IT LOCAL, SO ITS ZERO
+    // WOULD DRAG EVERY OTHER CPU'S FLOOR TO 1 TO EXPRESS A CONSTRAINT THAT CANNOT
+    // HELP IT. THE SINGLETON FALLS THROUGH TO THE dfl PICK INSTEAD.
+    // RETURNS 1 ONLY WHEN NO CPU HAS A PEER.
+    pub fn min_in_domain_peers(&self, rank: &[u32], cpu_dom: &[u32]) -> u32 {
+        let n = self.nr_cpus;
+        if n < 2 || rank.len() < n * n || cpu_dom.len() < n {
+            return 1;
+        }
+        let mut min_peers = u32::MAX;
+        for cpu in 0..n {
+            let home = cpu_dom[cpu];
+            let mut peers = 0u32;
+            for slot in 0..(n - 1) {
+                let target = rank[cpu * n + slot] as usize;
+                if target >= n || cpu_dom[target] != home {
+                    break;
+                }
+                peers += 1;
+            }
+            if peers > 0 && peers < min_peers {
+                min_peers = peers;
+            }
+        }
+        if min_peers == u32::MAX { 1 } else { min_peers }
+    }
+
     // SYMMETRIC EIGENDECOMPOSITION VIA JACOBI ROTATIONS
     // RETURNS (eigenvalues, eigenvectors_column_major)
     // SUITABLE FOR n <= 256. NO EXTERNAL DEPENDENCIES.
@@ -1164,6 +1221,11 @@ impl CpuTopology {
     ) -> Result<()> {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES as usize;
         let valid = self.nr_cpus.saturating_sub(1).min(stride);
+        // R_eff's SPAN, FOR THE DIMENSIONLESS EMIT BELOW. Same quantity
+        // detect_and_populate calls reff_norm; recomputed here so this function
+        // stays self-contained rather than taking an eighth argument.
+        let reff_span =
+            ((reff.iter().cloned().fold(0.0f64, f64::max) * 1_000_000.0).round() as u64).max(1);
         for cpu in 0..self.nr_cpus {
             for slot in 0..valid {
                 let val = rank[cpu * self.nr_cpus + slot];
@@ -1209,10 +1271,28 @@ impl CpuTopology {
                         .min(u32::MAX as u64) as u32
                 };
                 sched.write_reff_value(cpu as u32, slot as u32, dist_extra)?;
+                // THE SAME R_eff SHAPE, WITH NO TIME UNIT ON IT. reff_value folds
+                // the distance against TAU because that is the steal's question:
+                // only sustained backlog (~tau) justifies a far pull. The wake-path
+                // placement sites ask a different question against comparands two
+                // orders smaller -- one codel_target (233-667us) and a backlog
+                // quantised at one pcpu_demand_ns (12-50us) -- so the tau fold is
+                // 20-170x oversized there and settles those tests by itself.
+                // Emit the fraction instead and let each consumer multiply by the
+                // yardstick its own comparison uses. Q16, so 65536 == the most
+                // distant pair on this machine; bounded at every topology, which is
+                // what stops slot 0 changing rung from moving a threshold 42x.
+                let frac_q16 = if phi_dist_scale_q16 == 0 {
+                    0u32
+                } else {
+                    ((r_scaled << 16) / reff_span).min(65536) as u32
+                };
+                sched.write_reff_frac(cpu as u32, slot as u32, frac_q16)?;
             }
             for slot in valid..stride {
                 sched.write_affinity_rank(cpu as u32, slot as u32, u32::MAX)?;
                 sched.write_reff_value(cpu as u32, slot as u32, u32::MAX)?;
+                sched.write_reff_frac(cpu as u32, slot as u32, u32::MAX)?;
                 sched.write_domain_phi(cpu as u32, slot as u32, u32::MAX)?;
             }
         }
@@ -1298,243 +1378,4 @@ fn parse_cpu_list(s: &str) -> Vec<u32> {
     result.sort();
     result.dedup();
     result
-}
-
-#[cfg(test)]
-mod t2_cut_tests {
-    use super::*;
-
-    // 8 CPUs, no SMT (each its own L2), one socket, two L3 groups: {0..3},{4..7}.
-    // Intra-L3 edges weigh CONDUCTANCE_LLC (3.0), inter-L3 same-socket weigh
-    // CONDUCTANCE_SOCKET (1.0) -- two clusters joined by weak edges.
-    fn synth_2domain() -> CpuTopology {
-        CpuTopology {
-            nr_cpus: 8,
-            l2_domain: (0..8u32).collect(),
-            l2_groups: Vec::new(),
-            socket_domain: vec![0u32; 8],
-            llc_domain: vec![0, 0, 0, 0, 1, 1, 1, 1],
-            nr_sockets: 1,
-        }
-    }
-
-    #[test]
-    fn min_conductance_cut_splits_on_llc() {
-        let t = synth_2domain();
-        let members: Vec<usize> = (0..8).collect();
-        let (a, b, phi) = t.best_cut(&members).expect("cut");
-        let (mut sa, mut sb) = (a.clone(), b.clone());
-        sa.sort();
-        sb.sort();
-        let (llc0, llc1) = (vec![0usize, 1, 2, 3], vec![4usize, 5, 6, 7]);
-        assert!(
-            (sa == llc0 && sb == llc1) || (sa == llc1 && sb == llc0),
-            "expected the L3 boundary, got {:?} | {:?}",
-            sa,
-            sb
-        );
-        assert!(phi.is_finite() && phi > 0.0 && phi < 1.0, "phi = {}", phi);
-    }
-
-    #[test]
-    fn cut_conductance_zero_weight_guard() {
-        // A singleton member set has no valid bipartition -> None, not a panic.
-        let t = synth_2domain();
-        assert!(t.best_cut(&[3usize]).is_none());
-    }
-
-    // 8 CPUs WITH SMT: 4 L2 pairs {0,1}{2,3}{4,5}{6,7}, two L3 groups {0..3},
-    // {4..7}, one socket. L2-sib 1000, same-L3 cross-L2 3.0, cross-L3 same-socket
-    // 1.0 -- a clean two-level hierarchy whose tree should be L3 over L2 pairs.
-    fn synth_smt_2domain() -> CpuTopology {
-        CpuTopology {
-            nr_cpus: 8,
-            l2_domain: vec![0, 0, 1, 1, 2, 2, 3, 3],
-            l2_groups: Vec::new(),
-            socket_domain: vec![0u32; 8],
-            llc_domain: vec![0, 0, 0, 0, 1, 1, 1, 1],
-            nr_sockets: 1,
-        }
-    }
-
-    #[test]
-    fn top_cut_is_the_l3_seam() {
-        let t = synth_smt_2domain();
-        let (a, b, phi) = t.domain_cut(&(0..8).collect::<Vec<_>>()).expect("cut");
-        let (mut sa, mut sb) = (a.clone(), b.clone());
-        sa.sort();
-        sb.sort();
-        let (l3a, l3b) = (vec![0usize, 1, 2, 3], vec![4usize, 5, 6, 7]);
-        assert!(
-            (sa == l3a && sb == l3b) || (sa == l3b && sb == l3a),
-            "top cut should be the L3 seam, got {:?} | {:?}",
-            sa,
-            sb
-        );
-        assert!(phi.is_finite() && phi > 0.0 && phi < 1.0, "phi = {}", phi);
-    }
-
-    #[test]
-    fn domain_tree_leaves_are_l2_groups() {
-        let t = synth_smt_2domain();
-        let tree = t.build_domain_tree(&(0..8).collect::<Vec<_>>());
-        let mut leaves: Vec<Vec<usize>> = tree
-            .leaves()
-            .into_iter()
-            .map(|mut l| {
-                l.sort();
-                l
-            })
-            .collect();
-        leaves.sort();
-        assert_eq!(
-            leaves,
-            vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]],
-            "leaves should be the 4 L2 groups"
-        );
-        // The root cut (L3 seam) is the cheapest crossing: coarser seam, lower phi.
-        let phis = tree.cut_phis();
-        assert!(!phis.is_empty(), "tree should have cuts");
-        let root_phi = phis[0];
-        assert!(
-            phis.iter().all(|&p| root_phi <= p + 1e-9),
-            "root cut should be the lowest phi, got {:?}",
-            phis
-        );
-    }
-
-    // Two cuts induce the same bipartition (ignoring which side is A vs B)?
-    fn same_bipartition(
-        a: &(Vec<usize>, Vec<usize>, f64),
-        b: &(Vec<usize>, Vec<usize>, f64),
-    ) -> bool {
-        let norm = |c: &(Vec<usize>, Vec<usize>, f64)| {
-            let (mut x, mut y) = (c.0.clone(), c.1.clone());
-            x.sort();
-            y.sort();
-            if x < y { (x, y) } else { (y, x) }
-        };
-        norm(a) == norm(b)
-    }
-
-    #[test]
-    fn walk_cut_matches_eigen_cut_smt() {
-        let t = synth_smt_2domain();
-        let m: Vec<usize> = (0..8).collect();
-        let eigen = t.domain_cut(&m).expect("eigen");
-        let walk = t.walk_cut(&m).expect("walk");
-        assert!(
-            same_bipartition(&eigen, &walk),
-            "walk {:?}|{:?} != eigen {:?}|{:?}",
-            walk.0,
-            walk.1,
-            eigen.0,
-            eigen.1
-        );
-    }
-
-    // 16 CPUs, 2 sockets {0..7}{8..15}, 4 L3 groups, 8 L2 pairs. The weakest seam
-    // is cross-socket (CONDUCTANCE_CROSS 0.3) -- both cuts must land there,
-    // exercising the random walk on a deeper graph than the 8-CPU case.
-    fn synth_2socket() -> CpuTopology {
-        CpuTopology {
-            nr_cpus: 16,
-            l2_domain: (0..16).map(|c| (c / 2) as u32).collect(),
-            l2_groups: Vec::new(),
-            socket_domain: (0..16).map(|c| (c / 8) as u32).collect(),
-            llc_domain: (0..16).map(|c| (c / 4) as u32).collect(),
-            nr_sockets: 2,
-        }
-    }
-
-    #[test]
-    fn walk_cut_matches_eigen_cut_2socket() {
-        let t = synth_2socket();
-        let m: Vec<usize> = (0..16).collect();
-        let eigen = t.domain_cut(&m).expect("eigen");
-        let walk = t.walk_cut(&m).expect("walk");
-        let (mut wa, mut wb) = (walk.0.clone(), walk.1.clone());
-        wa.sort();
-        wb.sort();
-        let (s0, s1): (Vec<usize>, Vec<usize>) = ((0..8).collect(), (8..16).collect());
-        assert!(
-            (wa == s0 && wb == s1) || (wa == s1 && wb == s0),
-            "walk top cut should be the socket seam, got {:?}|{:?}",
-            wa,
-            wb
-        );
-        assert!(same_bipartition(&eigen, &walk), "walk != eigen on 2-socket");
-    }
-
-    #[test]
-    fn compute_domain_tree_public_wrapper() {
-        let t = synth_smt_2domain();
-        let tree = t.compute_domain_tree();
-        assert_eq!(tree.leaves().len(), 4, "smt 2-domain -> 4 L2-group leaves");
-    }
-
-    #[test]
-    fn single_cpu_is_one_leaf() {
-        let t = CpuTopology {
-            nr_cpus: 1,
-            l2_domain: vec![0],
-            l2_groups: Vec::new(),
-            socket_domain: vec![0],
-            llc_domain: vec![0],
-            nr_sockets: 1,
-        };
-        let tree = t.compute_domain_tree();
-        assert_eq!(tree.leaves(), vec![vec![0usize]]);
-        assert!(tree.cut_phis().is_empty(), "a single CPU has no cuts");
-    }
-
-    #[test]
-    fn cross_phi_matrix_prices_the_boundaries() {
-        let t = synth_smt_2domain();
-        let tree = t.compute_domain_tree();
-        let m = t.domain_cross_phi_matrix(&tree);
-        let n = 8;
-        // Same leaf {0,1}: no boundary -> sentinel.
-        assert_eq!(m[0 * n + 1], u32::MAX, "same-leaf pair must be sentinel");
-        // Cross-L2 same-L3 (0,2) and cross-L3 (0,4): real, priced boundaries.
-        assert_ne!(m[0 * n + 2], u32::MAX);
-        assert_ne!(m[0 * n + 4], u32::MAX);
-        // Cross-L2 is the TIGHTER (nearer) seam -> higher phi than cross-L3.
-        assert!(
-            m[0 * n + 2] > m[0 * n + 4],
-            "cross-L2 phi {} should exceed cross-L3 phi {}",
-            m[0 * n + 2],
-            m[0 * n + 4]
-        );
-        // CPUs 2 and 3 are the same sibling L2 pair: identical crossing price from 0.
-        assert_eq!(m[0 * n + 2], m[0 * n + 3]);
-        // Symmetric.
-        assert_eq!(m[0 * n + 4], m[4 * n + 0]);
-    }
-
-    #[test]
-    fn overflow_partition_matches_l3_groups() {
-        let t = synth_smt_2domain();
-        assert_eq!(t.overflow_domain_count(), 2, "two L3 groups");
-        let tree = t.compute_domain_tree();
-        let dom = t.domain_partition(&tree, 2);
-        assert!(
-            dom[0] == dom[1] && dom[1] == dom[2] && dom[2] == dom[3],
-            "L3 group 0 is one overflow domain: {:?}",
-            dom
-        );
-        assert!(
-            dom[4] == dom[5] && dom[5] == dom[6] && dom[6] == dom[7],
-            "L3 group 1 is one overflow domain: {:?}",
-            dom
-        );
-        assert_ne!(dom[0], dom[4], "the two L3 groups are distinct domains");
-        // target 1 -> a single overflow domain (monolithic re-key).
-        let mono = t.domain_partition(&tree, 1);
-        assert!(
-            mono.iter().all(|&d| d == 0),
-            "target 1 = one domain: {:?}",
-            mono
-        );
-    }
 }

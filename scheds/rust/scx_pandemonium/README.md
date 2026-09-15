@@ -1,8 +1,8 @@
 # PANDEMONIUM
 
-A Linux kernel scheduler for sched_ext, built in Rust and C23, PANDEMONIUM assigns every task a latency tier by scheduling role and adapts scheduling decisions in real time. A damped harmonic oscillator drives CoDel-inspired stall detection with the literal RFC 8289 sojourn metric and an R_eff-derived equilibrium reference. Resistance affinity (effective resistance from the Laplacian pseudoinverse of the CPU topology graph) provides topology-aware task placement for pipe/IPC storms. A migration potential Φ — R_eff priced against the queueing relief a move buys — prices both cross-domain work stealing and enqueue-time placement spill, so a task crosses a cache boundary only when the backlog it relieves outweighs the cache cost. The steal applies Φ as a delay on the backlog age; the spill as a per-peer depth threshold Rust folds from R_eff at topology detect and the kernel reads with one indexed lookup — the computation in the adaptive layer, the application in the kernel. Every knob the adaptive layer ships is a function of a measurement — per-CPU queue depth, traffic shape, critical slowing and persistence — computed on the tick it is applied rather than learned over a convergence window.
+A Linux kernel scheduler for sched_ext, built in Rust and C23, PANDEMONIUM prices every scheduling decision in nanoseconds against a live service bound and adapts that bound in real time. There is no task classifier. Slice, placement, admission and preemption each read a measured quantity — service rendered, queue backlog, accrued wait — so the question at every site is what a task is owed rather than what class it belongs to. A damped harmonic oscillator drives CoDel-inspired stall detection with the literal RFC 8289 sojourn metric, resting at an equilibrium the machine's own Laplacian spectrum chooses. Resistance affinity (effective resistance from the Laplacian pseudoinverse of the CPU topology graph) provides topology-aware task placement for pipe/IPC storms. A migration potential Φ — R_eff priced against the queueing relief a move buys — prices cross-domain work stealing, enqueue-time placement spill and the overflow drain, so a task crosses a cache boundary only when the backlog it relieves outweighs the cache cost. Rust folds the distance terms into per-peer tables at topology detect and the kernel reads them with one indexed lookup — the computation in the adaptive layer, the application in the kernel. Every knob the adaptive layer ships is a function of a measurement — per-CPU queue depth, traffic shape, critical slowing and persistence — computed on the tick it is applied rather than learned over a convergence window.
 
-Overflow sojourn rescue, longrun detection, sleep-informed batch tuning, tier-gated DSQ routing, a migration-potential-gated R_eff work steal, a Φ-priced placement spill, a Φ-priced warm-stay home anchor, a sojourn selector whose warp is bounded by the live CoDel target, a slice quantum priced in the same unit, an off-tick unified sojourn bound, an RT-policy latency floor and hard starvation rescue.
+Overflow sojourn rescue, longrun detection, depth-derived slice tuning, class-free DSQ routing, a migration-potential-gated R_eff work steal, a Φ-priced placement spill, a Φ-priced warm-stay home anchor, a sojourn selector keyed on the bare arrival stamp, a slice quantum priced in the same unit, an off-tick unified sojourn bound, an RT-policy latency floor and hard starvation rescue.
 
 See the [New User Guide](https://github.com/wllclngn/PANDEMONIUM/blob/main/NEW-USER-GUIDE.md) for an introduction — the ideas behind PANDEMONIUM in plain language.
 
@@ -152,16 +152,17 @@ figure needs a bench that can separate -0.4% from zero, and this one cannot.
 
 ### Dispatch Waterfall
 
-Layered dispatch with per-CPU DSQ dominance and one age-driven safety mechanism. CPU-tied placement is bounded at the enqueue site and overflow spills to a sibling per-CPU DSQ in R_eff order, each candidate admitted on measured backlog rather than a task count — the per-peer depth table was replaced by an admission bound in ns against the live CoDel target. Idle-CPU placement inserts directly into the per-domain overflow DSQ and is picked up within one dispatch cycle; an eager R_eff search at that site is a wire-speed regression on fork storms with no measurable placement benefit. The steal is **one Φ-priced walk** with no near/far tier boundary — the penalty alone prices the move, so nearer relief is always preferred without a structural same-domain/different-domain gate (THE FLAG). Bounding a CPU nobody is calling `dispatch()` on at all is `sweep_bound_preempt`'s off-tick job, not a step here. The sojourn gate at STEP 0/1 is load-bearing for workqueue-worker fairness: Without it the watchdog worker strands in the overflow DSQ long enough to trigger a 30s kill.
+Layered dispatch with per-CPU DSQ dominance and one age-driven safety mechanism. CPU-tied placement is bounded at the enqueue site and overflow spills to a sibling per-CPU DSQ in R_eff order, each candidate admitted on measured backlog rather than a task count — the per-peer depth table was replaced by an admission bound in ns against the live CoDel target. Idle-CPU placement seats the wakee on that CPU's own per-CPU DSQ and kicks it, so the CPU that was kicked is the one that dispatches it — routing to the shared overflow queue while kicking one CPU would decouple the two. The steal is **one Φ-priced walk** with no near/far tier boundary — the penalty alone prices the move, so nearer relief is always preferred without a structural same-domain/different-domain gate (THE FLAG). Bounding a CPU nobody is calling `dispatch()` on at all is `sweep_bound_preempt`'s off-tick job, not a step here. The sojourn gate at STEP 0/1 is load-bearing for workqueue-worker fairness: Without it the watchdog worker strands in the overflow DSQ long enough to trigger a 30s kill.
 
 | Step | Source | Rule |
 |---|---|---|
 | **0** | Own per-CPU DSQ | Cache-hot, zero contention. **Sojourn-gated**: If either overflow side has aged past the CoDel target, fall through to STEP 2 so this dispatch serves overflow too. |
 | **1** | R_eff steal | One loop over the per-CPU R_eff-ascending peer list, cross-domain peers included, on a tau-derived budget. A peer is relieved only when it has more than one task queued *and* its head has aged past the CoDel target plus that peer's distance penalty — so an SMT sibling is freely relievable while a cross-domain pull must show real backlog. A confirmed tight pair adds a hold so a near steal does not split it, and a per-CPU rate limit gates the walk to once per CoDel target. |
-| **2** | Older overflow side | The same pick-the-older comparison at the live CoDel target. Feeds the oscillator. |
-| **3** | Local overflow | Cache-coherent drain of this cache domain's overflow DSQ (`domain_inter_dsq`, sojourn-ordered). The interactive/batch split was merged; there is one overflow side per domain. |
-| **5** | Cross-domain work conservation | Scan other domains once; drain any non-empty overflow, interactive first per domain, then batch. Runs only when the local domain is empty, so cross-domain migration here is pure idle-time work conservation. |
-| **6** | KEEP_RUNNING | `prev` still wants CPU and nothing is queued. |
+| **net** | Hard starvation rescue | Blind drain past `codel_starve_ns`, ahead of STEP 2 and never gated. The floor under everything below it. |
+| **2** | Aged overflow | Blind drain once the domain's overflow queue has aged past the live CoDel target. Feeds the oscillator. |
+| **3** | Local overflow | Selective drain of this domain's overflow DSQ (`domain_inter_dsq`, sojourn-ordered): peek the head and price the wait it owes by how far it last ran from here, so a far task is left for a nearer seat. STEP 2 stays blind on purpose — a rescue exists to take whatever is stuck. |
+| **5** | Cross-domain work conservation | Scan the other domains once and drain any non-empty overflow. Runs only when the local domain is empty, so cross-domain migration here is pure idle-time work conservation. |
+| **keep-prev** | KEEP_RUNNING | `prev` still wants CPU and nothing is queued. |
 
 ### Four-Tier Enqueue
 
@@ -169,7 +170,7 @@ Layered dispatch with per-CPU DSQ dominance and one age-driven safety mechanism.
 - **enqueue Tier 0** (warm-stay): An uncongested anchor keeps the task on its warm core with no spill. A wakeup anchors on `home_cpu` — a fixed point, so the pull is self-limiting — while a requeue anchors on `last_cpu`, because a requeue already holds a seat and was passed over rather than displaced. An occupancy gate releases the next same-anchor wakee to idle-seek instead of stacking it
 - **enqueue Tier 1** (idle CPU): Direct per-CPU DSQ insert + kick. Drained by STEP 0 when that CPU next dispatches. The wire-speed path: Eager R_eff search at this site is a fork-storm regression with no placement benefit, so Tier 1 stays a direct insert
 - **enqueue Tier 2** (wakeup preemption): Uses `pick_pcpu_dsq_with_spill` for symmetric placement with `select_cpu`. CPU-tied; benefits from eager per-CPU placement
-- **enqueue Tier 3** (fallback): The task's home domain's overflow DSQ, `domain_inter_dsq`. There is one overflow side per domain — the batch/interactive split was merged, because dispatch STEP 2 already prices the crossover in `codel_target_ns`. The sojourn deadline (`now − warp`) is computed at the insert
+- **enqueue Tier 3** (fallback): The task's home domain's overflow DSQ, `domain_inter_dsq`. There is one overflow queue per domain; the batch/interactive split was merged, because dispatch STEP 2 already prices the crossover in `codel_target_ns`. The arrival stamp is taken at the insert
 - **tick**: Longrun detection, sojourn enforcement, per-CPU preempt of the resident for an aged waiter (`sojourn_stamp_pcpu[this_cpu]` age against `codel_target_ns`, which is BPF-derived and live in both modes)
 
 ### Damped Harmonic Oscillator Stall Detection
@@ -186,7 +187,7 @@ Damping is Butterworth-optimal (ζ ≈ 0.707): The flattest response available, 
 
 **Stall decision**: Per-CPU minimum sojourn against `codel_target_ns`. Below is flowing; above for `sojourn_interval_ns` is stalled and forces rescue. The decision is binary CoDel; the target is what oscillates.
 
-**Equilibrium**: `c_eq = ⟨R_eff⟩ × 2m × τ`, built from spectral properties already computed at topology detect — the natural latency tolerance of the machine's own topology rather than a hand-tuned constant. Clamped to `[200µs, 8ms]`.
+**Equilibrium**: The oscillator's rest point is a *position inside* its own working band, set by the normalised spectral-gap deficit — how much worse the topology's bottleneck is than its typical connectivity, read from eigenvalues already computed at topology detect. A machine whose cuts are all alike gets the tightest tolerance in the band; one with a genuine bottleneck gets a looser one. Because it is a position rather than an absolute quantity, it needs no clamp, and the spring can push the target in both directions rather than only up into a ceiling.
 
 **Feedback**: The overflow rescue count drives the impulse. Each tick on CPU 0 the oscillator applies impulse, spring and damping, caps velocity and integrates. `x` rests at `c_eq` when quiet, descends on rescue events, returns damped. Every timing constant scales from τ, so a topology change preserves the damping ratio automatically — the live values are derived at runtime, never tabulated.
 
@@ -194,35 +195,35 @@ Damping is Butterworth-optimal (ζ ≈ 0.707): The flattest response available, 
 
 ### Overflow Sojourn Rescue
 
-Per-CPU DSQ dominance under sustained load makes downstream anti-starvation unreachable — 90%+ of dispatches serve per-CPU DSQ while overflow tasks age indefinitely. Dispatch STEP 0 / STEP 1 fall through to STEP 2 when either overflow DSQ has aged past `codel_target_ns` — the live CoDel target the oscillator drives around its R_eff-derived equilibrium `codel_seed_ns` (`⟨R_eff⟩ × 2m × τ`, clamped into the oscillator's `[floor, max]` window, so ≤~667µs at 12C — not a hand-tuned ~10ms). The spectral scalar opens the gate; sojourn (enqueue-age) fills it and selects the older side. `try_service_older_overflow` then drains that side past the threshold. CAS-based timestamp management prevents races across CPUs.
+Per-CPU DSQ dominance under sustained load makes downstream anti-starvation unreachable — 90%+ of dispatches serve per-CPU DSQ while overflow tasks age indefinitely. Dispatch STEP 0 / STEP 1 fall through to STEP 2 once the domain's overflow DSQ has aged past `codel_target_ns`, the live target the oscillator drives around its spectral equilibrium. `try_service_aged_overflow` then drains it. CAS-based timestamp management prevents races across CPUs.
 
-**Drain both when both aged**: Under sustained mixed load both overflow DSQs can stay continuously non-empty for tens of seconds, freezing both timestamps at their first-non-empty values. A strict "older wins" would then pick the same side every rescue call until external pressure dropped, locking out batch-demoted long-runners (at 2C, a 19-29s starvation tail; 4C+ closes the window through higher dispatch density). So when BOTH sides are aged, both drain — older-first ordering preserved (latency-budget bias for interactive on ties), at the cost of one extra `scx_bpf_dsq_move_to_local`.
+There is **one overflow queue per domain**, not an interactive/batch pair. The split existed to stop one side starving the other and it could never do that, because both sides were vtime DSQs sorted by the same key — so it only ever separated what a discriminating key would have ordered anyway. Worse, the tick's preempt read the batch side alone, so a waiter in the interactive queue could never evict a resident. That was measured as a task holding 100% of a CPU across 82k dispatches with zero wakes while its partner waited 369µs median on a semaphore. One queue, one stamp, and any waiter qualifies. The protection the split claimed moved to admission, where a seat admits only under one live target and no flood can build a standing queue in the first place.
 
 ### Longrun Detection
 
-When batch DSQ stays non-empty past `longrun_thresh_ns` (tau-scaled, ~665ms at the 12C reference, where τ is 13.3ms), `longrun_mode` activates. Two consumers: `task_slice` substitutes `burst_slice_ns` for `slice_ns` as the base grant for every task (a tighter cap, so residents yield faster under pressure); `tick` scales the preempt threshold via `longrun_preempt_shift` — 4× at 2C (extends BATCH's protected window) so thin topologies don't thrash, no scaling at 4C+ where capacity already absorbs LAT_CRIT contention.
+When the domain's overflow DSQ stays non-empty past `longrun_thresh_ns` (tau-scaled, ~665ms at the 12C reference, where τ is 13.3ms), `longrun_mode` activates. Two consumers. `task_slice` substitutes `burst_slice_ns` for `slice_ns` as the base grant for every task, a tighter cap so residents yield faster under pressure. `tick` widens the preempt band via `longrun_preempt_shift` — 4× on thin topologies (τ < 4ms) so they don't thrash, no scaling above that, where capacity already absorbs the contention.
 
 ### Wake Sensitivity & Preemption
 
-There is no burst detector, and nothing needs one: A burst is already answered by the oscillator-adapted CoDel target, the placement-side depth gate with its L2/R_eff spill, the starvation rescue, and the tier information present at the enqueue site. Tick preemption is derived per-CPU, with no global signal:
+There is no burst detector, and nothing needs one: A burst is already answered by the oscillator-adapted CoDel target, the placement-side depth gate with its L2/R_eff spill, and the starvation rescue. Tick preemption is derived per-CPU, with no global signal:
 
 - **Per-CPU preempt**: `pandemonium_tick` reads its own `sojourn_stamp_pcpu[this_cpu]` — the age of the oldest task waiting on this CPU — against `codel_target_ns`: The resident yields once a waiter has aged past the live service bound, with no class exemption. A declared RT policy answers to the wider starvation bound (`lag_cap_ns`) instead — the service bound falls inside one PipeWire period, so a uniform band would preempt an RT thread mid-buffer every time a waiter exists, and under migration load a waiter always exists. Per-CPU by construction — no token to race over. A single global flag instead (armed at enqueue, cleared by the first tick to preempt on *any* CPU) gets token-stolen across cores under a fork storm, so the CPU actually burying a latency waker rarely wins the race — the audio-under-load pathology (intermittent, single-thread, bursty-only). The per-CPU read reuses the bounded-array scan already running for the coarse per-CPU sojourn check, so no new global state.
 - **RT never arrives, and that is a property of the kernel rather than of this scheduler**: sched_ext sits BELOW RT and deadline in the scheduling-class hierarchy and is handed only `SCHED_NORMAL`, `SCHED_BATCH` and `SCHED_IDLE`. A `SCHED_FIFO` or `SCHED_RR` thread is served by the RT class and never reaches these ops at all, so there is no RT tier to declare and no RT floor to hold. Measured rather than assumed: Two `SCHED_FIFO` threads at rtprio 5 held against a live scheduler for 48 seconds produced zero arrivals across all 49 samples.
 - **Core-scaled longrun protection**: During sustained `longrun_mode`, the preempt threshold scales up on thin topologies (τ < 4ms) only, extending the resident's window so they don't thrash; wider topologies keep the baseline, where capacity already absorbs the contention. This is the one modulation that was never class-based.
 
-### Sojourn Selector: The CoDel-bounded warp
+### Sojourn Selector: The sort key is the wait
 
-There is no weighted virtual-time engine. `task_deadline()` returns `now − warp` — the enqueue timestamp back-dated by a bounded warp, with no tier term — so every DSQ is ordered oldest-first (largest sojourn served first). Sojourn IS the selector; no second fairness clock runs parallel to the sojourn + R_eff/CoDel layer.
+There is no weighted virtual-time engine and no warp. `task_deadline()` returns the task's arrival stamp and nothing else, so every DSQ is ordered oldest-first and the longest-waiting task is served first. Sojourn IS the selector; no second fairness clock runs parallel to the sojourn + R_eff/CoDel layer.
 
-**The ordering bound and the starvation bound are separate numbers.** The warp is the share of one live CoDel target a task left unconsumed on its last run — `codel_target_ns − last_run_ns`, floored at zero. A task that blocked immediately earns a full target; one that held the CPU for a target or longer earns nothing; everything between is continuous, with no classifier, no maturity gate and no fixed steps (THE FLAG). It is bounded by the target by construction, so a task that has waited past one target out-sorts any fresh claim.
+`wait_since` is stamped on the first insert after a run, preserved across requeues, and cleared when the task runs. A task passed over N times keeps its original claim, so a starving task rises on its own as the clock moves under a stationary base.
 
-`lag_cap_ns = K_LAG_CAP × τ` clamped `[8ms, 80ms]` is the **starvation** bound and nothing else — the age at which `sweep_bound_preempt` forces a head off its CPU. It was previously also the warp ceiling, which let a single back-date consume the entire starvation budget; the two are no longer one number.
+**The latency bound is admission's, not the ordering's.** A seat admits a task only while its backlog is under one live CoDel target, so the wait inherited on arrival is bounded by one target plus the single demand that may overshoot it. Ten versions of ordering arithmetic — start tags, attained-service credits, back-dated warps — all measured null, because reordering a work-conserving queue does not change how much work completes. The bound moved to admission instead of being tuned an eleventh time, and the ordering no longer has to enforce what admission already guarantees.
 
-Starvation-freedom is therefore structural rather than clamped: A task older than one target out-sorts any freshly-warped waker, no new-task penalty is needed, and a new task enters at `now` like any other arrival. (A wakeup-frequency-weighted warp and a queue-depth backlog term each reorder by something other than wait — they cluster ping-pong wakers or rubberband interactivity — so the warp stays bounded by the target; deep-queue drainage is left to the overflow sojourn rescue, which forces aged work forward by wait, not depth.)
+`lag_cap_ns` is the **starvation** bound and nothing else — the age at which `sweep_bound_preempt` forces a head off its CPU. It was previously also an ordering ceiling; the two are no longer one number.
 
 ### Hard Starvation Rescue
 
-Two bounds sit under the dispatch waterfall, the tighter one first. `sweep_bound_preempt` runs off-tick and NO_HZ_FULL-immune: It rotates through CPUs and forces one back into `dispatch()` whenever an overflow head ages past `lag_cap_ns` — `clamp(K_LAG_CAP × τ, 8ms, 80ms)`, ~13.3ms at the 12C reference, and the starvation bound rather than the warp ceiling. Beneath it, `codel_starve_ns` — `clamp(K_STARVATION_RESCUE × τ, 20ms, 500ms)`, ~55.6ms at the 12C reference — is the last-resort threshold in dispatch: Past it, the older overflow side is serviced unconditionally. The off-tick bound catches the common case; the starve threshold is the floor under everything, including a CPU the sweep has not yet rotated to. A pinned single-CPU task (per-CPU kworker, IRQ thread, cpuset) is a separate hazard: It can only run on its one CPU, and if that CPU is idle it never ticks, so the in-tick rescue scan never fires and the task strands until the 30s scx watchdog disables the scheduler. A tick-independent guard on the enqueue path seats a pinned task on its own CPU and `SCX_KICK_PREEMPT`s it at enqueue (an event scx guarantees runs), closing the watchdog-disable the tick-driven rescue cannot reach.
+Two bounds sit under the dispatch waterfall, the tighter one first. `sweep_bound_preempt` runs off-tick and NO_HZ_FULL-immune: It rotates through CPUs and forces one back into `dispatch()` whenever an overflow head ages past `lag_cap_ns` — `clamp(K_LAG_CAP × τ, 8ms, 80ms)`, ~13.3ms at the 12C reference, which is the starvation bound and nothing else. Beneath it, `codel_starve_ns` — `clamp(K_STARVATION_RESCUE × τ, 20ms, 500ms)`, ~55.6ms at the 12C reference — is the last-resort threshold in dispatch: Past it, the overflow queue is serviced unconditionally. The off-tick bound catches the common case; the starve threshold is the floor under everything, including a CPU the sweep has not yet rotated to. A pinned single-CPU task (per-CPU kworker, IRQ thread, cpuset) is a separate hazard: It can only run on its one CPU, and if that CPU is idle it never ticks, so the in-tick rescue scan never fires and the task strands until the 30s scx watchdog disables the scheduler. A tick-independent guard on the enqueue path seats a pinned task on its own CPU and `SCX_KICK_PREEMPT`s it at enqueue (an event scx guarantees runs), closing the watchdog-disable the tick-driven rescue cannot reach.
 
 ### Topology-Aware Placement
 
@@ -232,7 +233,7 @@ Two bounds sit under the dispatch waterfall, the tighter one first. `sweep_bound
 
 **Tight-pair gate**: A task's pair signal is keyed on the waker's **identity**, not on which CPU it ran on. `same_waker_runs` is a saturating count of consecutive wakes from one pid; past `PAIR_OBS_MIN` the task is treated as a handoff partner, where warm co-location pays. The predecessor was a CPU-indexed bitmap whose popcount was read as partner cardinality, and it was monotone — every migration of a partner set another bit, so a genuine 1:1 pair looked *less* pair-like the longer it ran, and the detector degraded by the very thing it existed to suppress. A pid does not change when its owner moves. The signal also arms gradually rather than latching: Nobody qualifies at load time and each task earns it by demonstrating the relationship.
 
-**L2 cache affinity**: An in-enqueue search for an idle CPU in the same L2 domain, gated by a three-position knob holding its base value. Per-dispatch hit/miss counters are kept per tier.
+**L2 cache affinity**: An in-enqueue search for an idle CPU in the same L2 domain, gated by a three-position knob holding its base value. Per-dispatch hit/miss counters are kept in the two reporting buckets.
 
 R_eff is proportional to expected round-trip time for work between CPUs [2], so minimizing it between pipe partners minimizes cache-line transfer cost [1][3][4].
 
@@ -249,8 +250,12 @@ R_eff alone is a placement *ranking* — it orders candidate CPUs by distance bu
 ### No Behavioural Classifier
 
 **There is no task classifier, and the dispatch key takes no class input at all** — see
-Sojourn Selector. `tier` is deleted. What remains is one index, `PF_WQ_WORKER`, used
-solely to split the L2 hit/miss counters into two reporting buckets.
+Sojourn Selector. `tier` is deleted. What remains of the old split is `PF_WQ_WORKER`,
+read at two sites and neither of them an ordering or placement decision. It splits the
+L2 hit/miss counters into two reporting buckets, and it carries a 1.5× multiplier on the
+nice weight that widens the *standing* slice ceiling — the grant a task has already
+earned by holding a CPU for a full target, capped by the same four-target bound every
+resident pays. Nothing reads it to decide where a task goes or when it runs.
 
 The classifier was removed in stages and every stage was measured. A score over wakeup
 and context-switch rates was built and removed: `last_woke_at` did two jobs that
@@ -283,7 +288,7 @@ Every knob derives from one sensor, and the mapping is the design:
 | **persistence** | Veitch-Abry Hurst | the rescue threshold | A queue deep on a persistent CPU will still be deep, so rescue sooner |
 | **coupling** | Pecora-Carroll, pairwise | nothing, deliberately | See below — measured, and not actuated |
 
-- **One Thread, Zero Mutexes**: 1-second control loop on the main thread reads the per-CPU BPF stats array — depth, wake latency, dispatch counts, per-tier P99 — and writes knobs BPF picks up on the next scheduling decision. The array survives the read: Relating CPU *i* to CPU *j* is the half of the boundary BPF structurally cannot cross, so the spatial dimension is the reason the loop exists.
+- **One Thread, Zero Mutexes**: 1-second control loop on the main thread reads the per-CPU BPF stats array — depth, wake latency, dispatch counts, wake-latency percentiles — and writes knobs BPF picks up on the next scheduling decision. The array survives the read: Relating CPU *i* to CPU *j* is the half of the boundary BPF structurally cannot cross, so the spatial dimension is the reason the loop exists.
 - **Chaos primitives** (`chaos.rs`, pure Rust, recomputed each tick over a 16-sample raw window): HVG mean degree λ (Luque–Lacasa horizontal visibility graph — ~2 periodic, →4 IID-random), Bandt–Pompe D=3 permutation entropy (ordinal disorder, normalized to [0,1]) and RQA determinism (fraction of recurrence points on diagonals — →1 steady, →0 IID).
 - **One base profile, not three**: An audit of what actually varied across the old LIGHT / MIXED / HEAVY profiles found slice, preempt and batch (now all derived from measured depth, critical slowing and traffic shape) and `affinity_mode`. Everything else was identical in all three — defaults wearing a selector. What remains is a starting point the derivations move from: The value a knob holds on a machine that has not been measured yet.
 - **The live load graph**: Nodes are CPUs weighted by mean depth, traffic shape, critical slowing and persistence; edges are CPU pairs weighted by coupling. The chip's electrical graph is a constant and R_eff already prices against it — this is the graph the *workload* forms, which moves every second. Depth sets the per-CPU slice, a deep queue slicing shorter so it drains and a shallow one longer so it stops paying context-switch cost for contention that is not there. Critical slowing tightens the preempt window ahead of the burst, the only actuation here acting on a prediction rather than a completed loss. Traffic shape sets the batch and burst ceilings; persistence sets the rescue threshold, since a queue deep on a persistent CPU will still be deep.
@@ -295,7 +300,7 @@ Every knob derives from one sensor, and the mapping is the design:
 
 All timing constants scale from `tau_ns = TAU_SCALE_NS / √(λ₂ · N)` — capacity-aware (the geometric mean of connectivity `1/λ₂` and capacity `1/√N`, so a well-connected but core-starved topology loosens instead of tightening), with safety-rail clamps. 12C reference: τ≈13.3ms (λ₂=12, N=12). Cardinality decisions (per-CPU DSQ depth, wake_wide threshold, tick scan budget) use `nr_cpus` directly — counts are not tau-derived. **The per-column τ values and derived cells below are an approximate reference; the live values are derived at runtime from the capacity-aware τ law.**
 
-Every constant in that law is derived at runtime and none is tabulated here: The sojourn interval, the starvation rescue, the CoDel floor/ceiling/equilibrium, the warp bound, the spill and idle-search budgets, the per-CPU DSQ depth and the longrun preempt shift all fall out of τ with safety-rail clamps. One exception, stated because the claim is otherwise exact: The sojourn interval lands on its own clamp floor at 12C, so on this topology it is a constant rather than a τ-derived value. A machine with a different topology gets different numbers by construction, which is the point.
+Every constant in that law is derived at runtime and none is tabulated here: The sojourn interval, the starvation rescue, the CoDel floor, ceiling and equilibrium, the spill and idle-search budgets, the per-CPU DSQ depth and the longrun preempt shift all fall out of τ with safety-rail clamps. One exception, stated because the claim is otherwise exact: The sojourn interval lands on its own clamp floor at 12C, so on this topology it is a constant rather than a τ-derived value. A machine with a different topology gets different numbers by construction, which is the point.
 
 - **Low-core slice discipline**: τ is largest at low core count (λ₂ shrinks as cores drop), so the tau slice cap runs loosest exactly where a wide batch slice hurts most — a 4ms slice on 2–4 cores denies a latency-sensitive probe across many consecutive slices, the low-core tail. The slice is capped to 1ms at `nr_cpus ≤ 4`, where a wide slice buys no throughput; 8C/12C keep the tau-scaled width, where it earns it.
 - **CPU Hotplug**: `cpu_online`/`cpu_offline` callbacks clear per-CPU timestamps and oscillator state (velocity, rescue count) to prevent stale oscillation after suspend/resume
@@ -335,12 +340,21 @@ src/
     stress.rs          CPU-pinned stress worker (Python test harness hook)
 build.rs               vmlinux.h generation + C23 patching + BPF compilation
 tests/
-  pandemonium-tests.py Test orchestrator (prism-scale, prism-contention,
-                         prism-pcpu, prism-scx, prism-sys, low-cpu-deadline)
-  prism-fork-thread.py Fork/thread IPC benchmark (full scx field) + hw counters + non-compensatory regression gate
+  pandemonium-tests.py Dev-tier orchestrator (scale, contention, pcpu, scx, sys,
+                         low-cpu-deadline)
+  prism.py             One-command shareable report (montauk digest, redacted --
+                         specs + ranked offenders + metrics)
+  prism-fork-thread.py Fork/thread IPC benchmark (full scx field) + hw counters
+  prism-ipc.py         IPC round-trip by primitive (pipe, socket, eventfd, sem, fanout)
   prism-power.py       Energy-efficiency benchmark (RAPL J/op + idle floor)
-  prism.py     One-command shareable report (montauk digest: specs + ranked offenders + metrics, redacted)
-  gate.rs              Integration test gate (load/classify/latency/responsiveness/contention)
+  prism-strand.py      Pinned/stranded-task watchdog probe
+  prism-cachyos.py     Comparison against the CachyOS scheduler set
+  prism-plot.py        Plot rendering for captured runs
+  ipc_workload.py      Shared IPC primitive drivers
+  loadgen.c            Load generator (+ loadgen_common.[ch])
+  *_gate.py            Non-compensatory regression gates (report, baseline,
+                         quiescent tail, fold, install)
+  gate.rs              Integration test gate (load/latency/responsiveness/contention)
 include/
   scx/                 Vendored sched_ext headers
 ```
@@ -350,7 +364,7 @@ include/
 ```
 BPF per-CPU histograms              Monitor Thread (1s loop)
 (wake_lat_hist, sleep_hist)  --->   Read + drain histograms
-                                    Compute P99 per tier
+                                    Compute aggregate P99
                                       |
                                       v
                                     per-CPU stats array -> live load graph
@@ -363,10 +377,10 @@ BPF per-CPU histograms              Monitor Thread (1s loop)
                                       v
                                     BPF reads knobs on next dispatch
 
-Resistance affinity: R_eff ranked map -> BPF select_cpu (is_handoff_partner-gated)
+Resistance affinity: R_eff ranked map -> BPF select_cpu + enqueue placement
 L2 placement:        affinity_mode knob -> BPF enqueue (base value)
 Migration potential: R_eff cost oracle + phi_dist_scale_q16 -> BPF dispatch STEP 1 steal resist
-Sojourn threshold:   codel_thresh_ns knob -> BPF dispatch (core-count-scaled, codel_eq-floored)
+Sojourn scan:        codel_thresh_ns knob -> BPF tick() rotating per-CPU scan (tau-scaled)
 Stall detection:     codel_target_ns (BPF-internal, damped oscillation, no Rust input)
 Cross-cache domain scatter:   nr_cross_domain path counters -> telemetry (no actuation)
 ```
@@ -377,17 +391,22 @@ One thread, zero mutexes. BPF produces histograms, Rust reads them once per seco
 
 | Knob | Default | Owner | Purpose |
 |------|---------|-------|---------|
-| `slice_ns` | 1ms | Derived (depth) | Interactive slice ceiling |
+| `slice_ns` | 1ms | Derived (depth) | Base slice ceiling, every task |
 | `preempt_thresh_ns` | 1ms | Derived (critical slowing) | Tick preemption threshold |
-| `batch_slice_ns` | 20ms | Derived (traffic shape) | Batch slice ceiling, itself capped at `SLICE_STANDING_TARGETS × codel_target_ns` in BPF |
+| `batch_slice_ns` | 20ms | Derived (traffic shape) | Standing slice ceiling — the grant for a task that has already held a CPU for a full target, itself capped at four live targets in BPF |
 | `burst_slice_ns` | 1ms | Derived (traffic shape) | Slice during longrun mode |
 | `affinity_mode` | 0 | Base value | L2 placement (0=OFF, 1=WEAK, 2=STRONG) |
-| `codel_thresh_ns` | 5ms | Derived (persistence) | Batch DSQ rescue threshold (tau-scaled) |
-| `topology_tau_ns` | 0 | Topology | Fiedler-derived time constant (τ = TAU_SCALE / λ₂) |
-| `codel_eq_ns` | 0 | Topology | R_eff-derived CoDel equilibrium (`⟨R_eff⟩ × 2m × τ`) |
-| `phi_dist_scale_q16` | 0 | Topology | Φ distance→wait scale (Q16): cross-domain steal resist `R_eff × this >> 16`; 0 = flat CoDel target (monolithic / single domain) |
+| `codel_thresh_ns` | 5ms | Derived (persistence) | Age at which `tick()`'s rotating per-CPU scan kicks a CPU holding an aged waiter (tau-scaled) |
+| `topology_tau_ns` | 0 | Topology | Fiedler-derived time constant, capacity-aware in core count — every other bound scales from it |
+| `codel_eq_ns` | 0 | Topology | Spectral CoDel equilibrium, a position inside the target band |
 
-Topology-owned fields are written by Rust at topology detect and on hotplug; the adaptive loop preserves them on every write, since the 1Hz cycle would otherwise clobber the equilibrium. The knob map is per-CPU, so each CPU reads its own slot — but `topology_tau_ns`, `codel_eq_ns`, `spill_temp_q16` and `affinity_mode` must hold the same value everywhere or tau-scaling diverges by whichever CPU last observed it, and the Rust writer broadcasts those from slot 0 by construction.
+Eight fields, and that is the whole map. The Φ distance scale is deliberately not one
+of them — Rust folds it into the `reff_value` table at topology detect, so the steal
+reads a ns penalty by index instead of multiplying at dispatch. That table is all-zero
+on a monolithic part or under `--phi-scale 0`, which collapses the thresholds to a flat
+CoDel target with no special case in the kernel.
+
+Topology-owned fields are written by Rust at topology detect and on hotplug; the adaptive loop preserves them on every write, since the 1Hz cycle would otherwise clobber the equilibrium. The knob map is per-CPU, so each CPU reads its own slot — but `topology_tau_ns`, `codel_eq_ns` and `affinity_mode` must hold the same value everywhere or tau-scaling diverges by whichever CPU last observed it, and the Rust writer broadcasts those from slot 0 by construction.
 
 ## Requirements
 
@@ -454,20 +473,20 @@ Adaptive (default) adds the control loop's own readings:
 |---------|---------|
 | d/s | Total dispatches per second |
 | idle | select_cpu idle fast path (%) |
-| shared | Enqueue -> per-node DSQ |
+| shared | Enqueue -> the domain's overflow DSQ |
 | preempt | Tick preemptions |
 | keep | KEEP_RUNNING re-slices |
 | kick H/S | Hard (PREEMPT) / Soft kicks |
 | enq W/R | Wakeup / Re-enqueue counts |
 | wake / p99 | Average / aggregate P99 wakeup latency |
-| [B/I/L] | Per-tier P99. `L` is a retired third lane and reads 0 always — `tier` is two values |
+| [B/I/L] | Wakeup-latency P99 split by the `PF_WQ_WORKER` reporting bucket. `L` is a retired third lane and reads 0 always, since nothing writes it |
 | lat_idle / lat_kick | Wakeup latency split: idle-placement vs kick path |
 | sleep: io | I/O-wait sleep pattern (%) |
-| slice / batch | Current interactive / batch slice knob (us) |
+| slice / batch | Current base / standing slice knob (us) |
 | reenq | Re-enqueue count |
-| sjrn | Batch sojourn: current / threshold |
+| sjrn | Overflow wait age: current / threshold |
 | rescue | Overflow rescue dispatches this tick |
-| l2: B/I/L | L2 cache hit rate per tier |
+| l2: B/I | L2 cache hit rate, same two reporting buckets |
 | chaos: lam/H/det/x | HVG mean degree λ / Bandt-Pompe entropy / RQA determinism / chaos-crossing counter |
 | frozen (n) | Quiescence freeze active (1/0) and cumulative frozen ticks |
 | retune_iv | Adaptive-rarity retune interval (ticks between retunes) |
@@ -495,9 +514,7 @@ The dev tier — one or more names, or `all` for the full sweep:
 ./pandemonium.py prism --dev ipc                      # IPC round-trip by primitive (pipe, socket, eventfd, sem, fanout)
 ./pandemonium.py prism --dev fork-thread              # Fork/thread IPC + hardware counters + regression gate
 ./pandemonium.py prism --dev power                    # Energy efficiency (RAPL J/op + idle floor)
-./pandemonium.py prism --dev locality                 # Cache-locality of migrations (same-L2/L3/socket tiers)
 ./pandemonium.py prism --dev strand                   # Per-CPU kthread strand detection
-./pandemonium.py prism --dev cold-wake                # Cold wakeup latency
 ./pandemonium.py prism --dev storm                    # Kick/reenqueue storm
 ./pandemonium.py prism --dev pcpu                     # Per-CPU DSQ correctness
 ./pandemonium.py prism --dev contention               # Contention stress (6 phases)

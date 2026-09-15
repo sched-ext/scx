@@ -13,21 +13,12 @@ typedef unsigned char u8;
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
 #define MAX_NODES 32
-// EMERGENT OVERFLOW-DOMAIN CEILING. The min-conductance partition yields small
-// domain counts (Ryzen 3000: 2, EPYC: up to ~16); 32 is a comfortable cap. The
-// overflow DSQs are pre-allocated at init (DSQs are cheap); nr_overflow_domains,
-// walked from Rust at topology detect, gates which are live.
+// OVERFLOW-DOMAIN CEILING. DSQs ARE PRE-ALLOCATED AT INIT;
+// nr_overflow_domains GATES WHICH ARE LIVE.
 #define MAX_OVERFLOW_DOMAINS 32
-// AFFINITY_RANK STORAGE PER CPU. EACH CPU'S R_eff-RANKED PEERS ARE
-// STORED HERE; STEP 1 R_eff STEAL AND THE PLACEMENT-SIDE SPILL HELPER
-// WALK THIS LIST WITH A TAU-DERIVED RUNTIME BUDGET CAPPED BY nr_cpu_ids
-// - 1 (ACTUAL TOPOLOGY). MAX_AFFINITY_CANDIDATES IS THE COMPILE-TIME
-// VERIFIER-SAFE LOOP BOUND, DERIVED FROM MAX_CPUS RATHER THAN HARDCODED:
-// MAX_CPUS >> 3 (= 128 AT MAX_CPUS=1024) STAYS WELL UNDER THE VERIFIER
-// PATH-STATE LIMIT WHILE COVERING SYSTEMS UP TO THAT WIDTH WITH NO
-// TRUNCATION. UNUSED SLOTS PAST nr_cpu_ids - 1 ARE (u32)-1 SENTINEL;
-// LOOPS EARLY-EXIT ON SENTINEL. MAP SIZE = MAX_CPUS * (MAX_CPUS >> 3)
-// * 4 = 512KB AT MAX_CPUS=1024.
+// PER-CPU affinity_rank SLOT COUNT: MAX_CPUS >> 3 = 128 AT MAX_CPUS=1024.
+// SLOTS PAST nr_cpu_ids - 1 HOLD (u32)-1; LOOPS EARLY-EXIT ON THE SENTINEL.
+// MAP SIZE = MAX_CPUS * 128 * 4 = 512KB.
 #define MAX_AFFINITY_CANDIDATES (MAX_CPUS >> 3)
 
 // KERNEL PROCESS FLAGS (NOT IN vmlinux.h -- THESE ARE #define MACROS)
@@ -40,19 +31,14 @@ struct tuning_knobs {
 	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
 	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
-	u64 codel_thresh_ns;    // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
-	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (SET BY RUST, DEFAULT 1MS)
-	u64 topology_tau_ns;    // FIEDLER-DERIVED TIME CONSTANT (1/lambda_2).
-	                        // 0 MEANS RUST HAS NOT YET WRITTEN tau; BPF
-	                        // FALLBACK CONSTANTS REMAIN IN EFFECT UNTIL A
-	                        // NONZERO VALUE LANDS. WRITTEN AT TOPOLOGY
-	                        // DETECT AND ON HOTPLUG.
-	u64 codel_eq_ns;        // R_eff-DERIVED CODEL EQUILIBRIUM TARGET.
-	                        // <R_eff> * 2m * tau, CLAMPED [200us, 8ms].
-	                        // 0 MEANS NOT YET WRITTEN. WRITTEN AT TOPOLOGY
-	                        // DETECT AND ON HOTPLUG (CO-LOCATED WITH tau).
-	// PHI DISTANCE PENALTY IS PRE-FOLDED INTO THE reff_value MAP (IN NS) BY
-	// RUST AT TOPOLOGY DETECT -- NO KNOB FIELD: BPF READS THE MAP DIRECTLY.
+	u64 codel_thresh_ns;    // tick() PER-CPU SOJOURN SCAN THRESHOLD (SET BY RUST)
+	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (DEFAULT 1MS)
+	u64 topology_tau_ns;    // FIEDLER TIME CONSTANT, CAPACITY-AWARE IN N.
+	                        // 0 = UNWRITTEN, BPF FALLBACKS STAY IN EFFECT
+	u64 codel_eq_ns;        // CODEL EQUILIBRIUM, A POSITION IN THE TARGET BAND
+	                        // FROM THE SPECTRAL-GAP DEFICIT. 0 = UNWRITTEN
+	// THE PHI DISTANCE PENALTY IS NOT A KNOB: RUST PRE-FOLDS IT INTO THE
+	// reff_value MAP IN NS AT TOPOLOGY DETECT AND BPF READS THAT MAP.
 };
 
 // PER-CPU STATISTICS (BPF_MAP_TYPE_PERCPU_ARRAY VALUE)
@@ -73,101 +59,47 @@ struct pandemonium_stats {
 	u64 wake_lat_idle_cnt;  // LATENCY COUNT: IDLE FAST PATH
 	u64 wake_lat_kick_sum;  // LATENCY SUM: HARD-KICKED ENQUEUE (NS)
 	u64 wake_lat_kick_cnt;  // LATENCY COUNT: HARD-KICKED ENQUEUE
-	// L2 CACHE AFFINITY INSTRUMENTATION
-	// COUNTED IN select_cpu() IDLE PATH AND enqueue() TIER 1
+	// L2 CACHE AFFINITY, COUNTED IN select_cpu() IDLE PATH AND enqueue() TIER 1
 	u64 nr_l2_hit_batch;
 	u64 nr_l2_miss_batch;
 	u64 nr_l2_hit_interactive;
 	u64 nr_l2_miss_interactive;
-	// CPU RELEASE: TASKS RESCUED FROM LOCAL DSQ BY scx_bpf_reenqueue_local()
-	u64 nr_reenqueue;
-	// CODEL SOJOURN: CURRENT BATCH WAIT AGE (NS), WRITTEN BY tick()
-	u64 batch_sojourn_ns;
-	// LONGRUN: 1 IF SUSTAINED BATCH PRESSURE DETECTED, 0 OTHERWISE, WRITTEN BY tick()
-	u64 longrun_mode_active;
-	// OVERFLOW SOJOURN RESCUE: TASKS DISPATCHED BY try_service_older_overflow
-	// AT codel_target_ns (DISPATCH STEP 2)
-	u64 nr_overflow_rescue;
-	// CROSS-DOMAIN SCATTER ATTRIBUTION: PER-PLACEMENT-PATH COUNT OF LANDINGS
-	// WHERE THE CHOSEN CPU IS IN A DIFFERENT cache domain THAN THE TASK'S last_cpu.
-	// INDEXED BY XDOM_* BELOW. THE ADAPTIVE LAYER CONSUMES THE PLACEMENT-SIDE
-	// PATHS (XDOM_SEL_* + XDOM_ENQ_T1) AS THE MWU CROSS-DOMAIN SCATTER LOSS
-	// PATHWAY, AND THE BENCH SUITE SURFACES ALL PATHS PER RUN. THE PHI-CORRECT
-	// PATHS (XDOM_STEAL, XDOM_STEP5) ARE TRACKED BUT EXCLUDED FROM THE LOSS --
-	// THEY ARE DELIBERATE WORK-CONSERVATION MOVES, NOT SCATTER TO SUPPRESS.
+	u64 nr_reenqueue;       // TASKS RESCUED BY scx_bpf_reenqueue_local()
+	u64 batch_sojourn_ns;   // CURRENT OVERFLOW WAIT AGE (NS), WRITTEN BY tick()
+	u64 longrun_mode_active;// 1 IF SUSTAINED OVERFLOW PRESSURE, WRITTEN BY tick()
+	u64 nr_overflow_rescue; // DISPATCHES BY try_service_aged_overflow AT
+	                        // codel_target_ns (STEP 2)
+	// CROSS-DOMAIN LANDINGS BY PLACEMENT PATH, INDEXED BY XDOM_* BELOW.
+	// THE ADAPTIVE LAYER SUMS XDOM_SEL_* + XDOM_ENQ_T1 AS THE MWU SCATTER
+	// LOSS; XDOM_STEAL AND XDOM_STEP5 ARE EXCLUDED FROM IT.
 	u64 nr_cross_domain[8];
-	// OSCILLATOR ENVELOPE: PARK ENTRIES (CPU-0 TICK WRITER). ZERO AFTER AN
-	// IDLE-HEAVY RUN MEANS THE ENVELOPE NEVER PARKED -- THE MIET-COLLAPSE
-	// FAILURE MODE THE BENCH MUST BE ABLE TO DETECT.
-	u64 nr_osc_park;
-	// SPILL-KICK ATTRIBUTION: select_cpu wakeups whose seat was redirected off
-	// the verified-idle pick onto a busy spill CPU, kicked with SCX_KICK_PREEMPT
-	// instead of the no-op SCX_KICK_IDLE. The signal that confirms the tick-floor
-	// strand fix -- it should track the formerly tick-floored burst wakes while
-	// the >=900us wake2run bucket collapses.
-	u64 nr_spill_kick_preempt;
-	// TOTAL STEAL COUNT: every successful STEP 1 peer move_to_local, regardless
-	// of domain. nr_cross_domain[XDOM_STEAL] counts only CROSS-domain steals, and
-	// on a two-domain box most steals are same-domain and were counted nowhere --
-	// so "what fraction of the migration count is the dispatch-side steal" had no
-	// answer from anything in the tree. Every successful steal IS a migration by
-	// definition: the task comes off a peer's queue and runs here. One bump, no
-	// per-cause breakdown, operator-useful on any workload.
-	u64 nr_steal;
-	// THE FARE-HELD STAY: anchor_stay_beats_move refusing the anchor -> target
-	// move, so the wakee is seated on its warm anchor and waits there rather than
-	// taking a verified-idle peer one cache tier out. IT IS DELIBERATELY NOT A
-	// SPILL -- nothing was redirected onto a busy sibling -- so no existing
-	// counter moves when the fare fires, and its two possible states read
-	// identically from outside: "the fare holds everything home" and "the path
-	// never runs" both leave every other number unchanged. This is the increment
-	// that separates them. Counted beside nr_stay_move_taken so the pair gives the
-	// fare's HIT RATE rather than a bare count whose denominator is unknown.
-	// THE REFUSED REQUEUE KICK, SELF-TARGETED ONLY: requeue_kick_flag returning
-	// KICK_NONE, so no kfunc was called at all. It is deliberately NOT a soft kick
-	// -- booking it as one would report an IPI that never happened, and an absence
-	// read as a measured value is the error this project has now made twice.
-	// IT IS ALSO THE MEASUREMENT THAT SIZES THE SAFE SUBSET, which is why no peer
-	// counter sits beside it. The refusal was first built for every target and cost
-	// +42.7% wall at 8C; narrowed to self-targets, this count IS the answer to
-	// whether the surviving subset is large enough to carry the latency win. Tens
-	// of thousands at 8C means it is; a sliver means the rung was always the peer
-	// refusals and belongs out of the tree.
-	u64 nr_kick_declined;
-	u64 nr_stay_fare_held;
-	// THE SAME EDGE, PRICED AND TAKEN: the fare admitted the move and the wakee
-	// went to the idle peer. nr_stay_fare_held + this is every anchor -> target
-	// decision the wake path made.
-	u64 nr_stay_move_taken;
-	// PER-CPU RUNNABLE DEPTH, ACCUMULATED. THE ADAPTIVE LAYER HAD NO QUEUE
-	// SERIES AT ALL: IT INFERRED LOAD FROM idle_pct, ONE SYSTEM-WIDE INTEGER
-	// PERCENTAGE, WHICH IS WHY THE WHOLE CHAOS LAYER RAN OVER 16 SAMPLES OF
-	// ONE SCALAR. THIS IS THE SERIES PER-CPU REGIME AND PECORA-CARROLL
-	// COUPLING BOTH REQUIRE -- COUPLING MEASURES THE RELATIONSHIP BETWEEN TWO
-	// SERIES, AND UNTIL NOW EXACTLY ONE EXISTED ANYWHERE IN THE SYSTEM.
-	//
-	// SUM/SAMPLES RATHER THAN AN INSTANTANEOUS VALUE, MATCHING THE
-	// wake_lat_sum/wake_lat_samples PAIR ABOVE: A 1HZ READER SAMPLING A QUEUE
-	// THAT MOVES AT MICROSECOND SCALE ALIASES BADLY, SO BPF ACCUMULATES AT
-	// TICK RATE AND USERSPACE DIFFERENCES BOTH FIELDS FOR A TRUE INTERVAL
-	// MEAN. MONOTONIC; NEVER RESET IN BPF.
+	u64 nr_osc_park;        // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK)
+	u64 nr_spill_kick_preempt; // select_cpu SEATS REDIRECTED OFF AN IDLE PICK
+	                        // ONTO A BUSY SPILL CPU, KICKED SCX_KICK_PREEMPT
+	u64 nr_steal;           // EVERY SUCCESSFUL STEP 1 PEER move_to_local,
+	                        // CROSS- AND SAME-DOMAIN
+	u64 nr_kick_declined;   // requeue_kick_flag RETURNING KICK_NONE,
+	                        // SELF-TARGETED ONLY. NO KFUNC WAS CALLED
+	u64 nr_stay_cost_held;  // anchor_stay_beats_move REFUSING THE
+	                        // anchor -> target MOVE
+	u64 nr_stay_move_taken; // THE SAME EDGE ADMITTED. HELD + TAKEN IS EVERY
+	                        // anchor -> target DECISION THE WAKE PATH MADE
+	// PER-CPU RUNNABLE DEPTH, ACCUMULATED AT TICK RATE. USERSPACE DIFFERENCES
+	// BOTH FIELDS FOR AN INTERVAL MEAN, AS wake_lat_sum/wake_lat_samples DO.
+	// MONOTONIC; NEVER RESET IN BPF.
 	u64 rq_depth_sum;
 	u64 rq_depth_samples;
 };
 
-// XDOM path indices for pandemonium_stats.nr_cross_domain[] (diagnostic).
-#define XDOM_SEL_TIGHT   0   // RETIRED, READS 0. Was select_cpu's WAKE_SYNC
-                             // tight-partner colocation; the sync wake is now
-                             // exempt from the placement override. The SLOT is
-                             // kept because these are array indices and the
-                             // archive's prom labels are positional -- renaming
-                             // or renumbering orphans every stored run.
+// XDOM PATH INDICES FOR pandemonium_stats.nr_cross_domain[] (DIAGNOSTIC).
+// THE INDICES ARE POSITIONAL IN ARCHIVED PROM LABELS: NEVER RENUMBER.
+#define XDOM_SEL_TIGHT   0   // select_cpu sync pipe-partner co-location
 #define XDOM_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
 #define XDOM_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
 #define XDOM_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
 #define XDOM_ENQ_T1      4   // enqueue TIER 1 idle (pick_idle_cpu_node)
 #define XDOM_ENQ_T2      5   // enqueue TIER 2 warm-anchor spill
 #define XDOM_STEAL       6   // dispatch STEP 1 R_eff steal (this_cpu vs peer)
-#define XDOM_STEP5       7   // dispatch STEP 5 cross-domain work-conservation scan
+#define XDOM_STEP5       7   // dispatch STEP 5 cross-domain work-conservation
 
 #endif // __INTF_H

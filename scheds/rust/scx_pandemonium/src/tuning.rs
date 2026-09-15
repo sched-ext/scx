@@ -36,14 +36,8 @@ const HEAVY_P99_CEIL_NS: u64 = 10_000_000; // 10MS: HEAVY LOAD, REALISTIC
 // AFFINITY MODE: L2 PLACEMENT STRENGTH
 pub const AFFINITY_OFF: u64 = 0;
 pub const AFFINITY_WEAK: u64 = 1;
-// Unused since the coupling->affinity derivation was withdrawn 2026-08-05.
-// Kept: it is half of a two-value ABI the BPF side still reads, and a knob that
-// can only ever hold one of its values is a defect waiting to be re-found.
-
-// SPILL TEMPERATURE (SPILL-Phi). T = T_base*(1 + kappa*H), H THE Bandt-Pompe
-// PERMUTATION ENTROPY IN [0,1]; Q16 FIXED-POINT (65536 = T_base = 1.0).
-// COMPUTED EACH ADAPTIVE TICK FROM THE CHAOS LAYER, SHIPPED AS A NON-MWU KNOB
-// OVERLAID LIKE topology_tau_ns. INERT UNTIL THE SPILL PRICE CONSUMES IT.
+// AFFINITY_STRONG (2) IS IN THE BPF ABI BUT NOTHING SHIPS IT; THE BASE PROFILE
+// HOLDS WEAK.
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -54,13 +48,14 @@ pub struct TuningKnobs {
     pub affinity_mode: u64,
     pub codel_thresh_ns: u64,
     pub burst_slice_ns: u64,
-    // FIEDLER-DERIVED TOPOLOGY TIME CONSTANT (TAU_SCALE_NS / lambda_2).
+    // FIEDLER-DERIVED TOPOLOGY TIME CONSTANT, CAPACITY-AWARE IN N.
     // ZERO MEANS RUST HAS NOT YET WRITTEN tau; BPF USES THE PRE-FIRST-TICK
     // FALLBACK CONSTANTS UNTIL A NONZERO VALUE LANDS. WRITTEN BY RUST AT
     // TOPOLOGY DETECT AND ON HOTPLUG; READ BY BPF AT THE FIRST CPU-0 TICK.
     pub topology_tau_ns: u64,
-    // R_eff-DERIVED CODEL EQUILIBRIUM TARGET (<R_eff> * 2m * tau).
-    // CO-LOCATED WITH topology_tau_ns; SAME ZERO/WRITE/CLAMP SEMANTICS.
+    // CODEL EQUILIBRIUM, A POSITION INSIDE THE TARGET BAND SET BY THE
+    // SPECTRAL-GAP DEFICIT. CO-LOCATED WITH topology_tau_ns; SAME ZERO/WRITE/
+    // CLAMP SEMANTICS.
     pub codel_eq_ns: u64,
 }
 
@@ -109,6 +104,20 @@ impl Regime {
 
 // REGIME KNOBS
 
+// THE BASE KNOB PROFILE.
+//
+// This was three profiles selected by a Regime enum. An audit of what actually
+// varied across Light/Mixed/Heavy found only slice, preempt and batch, all now
+// derived from measured queue depth, critical slowing and traffic shape.
+// codel_thresh_ns and burst_slice_ns were IDENTICAL in all three, so they were
+// never regime-dependent -- they were defaults wearing a selector.
+// affinity_mode carries its base value THROUGH: a coupling derivation was tried
+// and withdrawn after it regressed IPC 16x, and derive_percpu_knobs must not
+// reintroduce one.
+//
+// What remains is a starting point the derivations move from. It is not a
+// policy choice; it is the value a knob holds on a machine we have not measured
+// yet.
 pub fn base_knobs() -> TuningKnobs {
     TuningKnobs {
         slice_ns: MIXED_SLICE_NS,
@@ -124,11 +133,11 @@ pub fn base_knobs() -> TuningKnobs {
 
 // TAU-SCALED REGIME KNOBS
 // CAPS DIMENSIONED AS Q16 FIXED-POINT MULTIPLIERS OF tau_ns. k_i CALIBRATED
-// AGAINST THE 12C REFERENCE TOPOLOGY (tau ~= 40MS):
-//   SLICE_CAP:   0.15 -> 6MS  AT tau=40MS
-//   PREEMPT_CAP: 0.075 -> 3MS AT tau=40MS
-//   BATCH_CAP:   1.5 -> 60MS  AT tau=40MS (Mixed ONLY)
-//   SOJOURN:     0.15 -> 6MS  AT tau=40MS
+// AGAINST THE 12C REFERENCE TOPOLOGY, WHERE tau IS 13.3MS:
+//   SLICE_CAP:   0.15  -> 2.0MS
+//   PREEMPT_CAP: 0.075 -> 1.0MS
+//   BATCH_CAP:   1.5   -> 20MS (Mixed ONLY)
+//   SOJOURN:     0.15  -> 2.0MS, WHICH IS ITS CLAMP FLOOR
 // PER-CAP CLAMPS ARE SAFETY RAILS.
 const K_SLICE_CAP_Q16: u64 = 9830; // 0.15
 const K_PREEMPT_CAP_Q16: u64 = 4915; // 0.075
