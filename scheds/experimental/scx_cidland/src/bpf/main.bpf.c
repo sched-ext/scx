@@ -498,14 +498,26 @@ static void grp_load_add(grp_q_t *gq, s64 delta)
 }
 
 /*
+ * Fractional bits the effective weight is carried with down the hierarchy,
+ * the precision scale_load() gives fair.c's weights on 64-bit.
+ */
+#define GRP_WEIGHT_SHIFT	10
+
+/*
  * The effective weight of a member of @gq that weighs @w in it: @w scaled by
  * shares / load at every level, __calc_prop_weight(). With @joining, the
  * weight it will have once it has joined, its own weight and those of the
  * groups that join with it counted in.
+ *
+ * The product is carried in fixed point and rounded once at the end: truncated
+ * at every level, a light task in a large or deep hierarchy loses a unit per
+ * level off a weight of a few units. Packs keep whole weights, which are
+ * multiplied by vruntime distances, so the result still has a floor of 1
+ * where fair.c's has MIN_SHARES of a scaled weight.
  */
 static u64 grp_h_weight(grp_q_t *gq, u64 w, bool joining)
 {
-	u64 add = joining ? w : 0;
+	u64 add = joining ? w : 0, wf = w << GRP_WEIGHT_SHIFT;
 	int i;
 
 	for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
@@ -513,10 +525,11 @@ static u64 grp_h_weight(grp_q_t *gq, u64 w, bool joining)
 		u64 load = READ_ONCE(gq->load) + add;
 
 		add = joining && !READ_ONCE(gq->contrib) ? shares : 0;
-		w = w * shares / MAX(load, 1ULL);
+		wf = wf * shares / MAX(load, 1ULL);
 		gq = gq->parent;
 	}
 
+	w = (wf + (1ULL << (GRP_WEIGHT_SHIFT - 1))) >> GRP_WEIGHT_SHIFT;
 	return MAX(w, 1ULL);
 }
 
