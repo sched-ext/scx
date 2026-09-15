@@ -61,9 +61,8 @@ struct scx_stk {
 /*
  * Poor man's userspace-driven RCU for sdt allocations. Freed nodes accumulate
  * on the active side while the draining side sits out a grace period which
- * userspace provides, membarrier(MEMBARRIER_CMD_GLOBAL) being
- * synchronize_rcu(), before its nodes return to the allocator. Stands in until
- * BPF grows bpf_call_rcu().
+ * userspace provides, see rust/scx_arena, before its nodes return to the
+ * allocator. Stands in until BPF grows bpf_call_rcu().
  */
 struct scx_urcu {
 	__u64		head[2];	/* struct sdt_data ptrs linked via urcu_link */

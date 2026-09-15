@@ -39,6 +39,10 @@ pub const CACHELINE_SIZE: usize = 64;
 const MEMBARRIER_CMD_GLOBAL: libc::c_long = 1;
 const URCU_DOORBELL: &str = "scx_urcu_doorbell";
 const URCU_MIN_INTERVAL: Duration = Duration::from_millis(1);
+/* the fallback grace period is expedited and IPIs every CPU in the kernel */
+const URCU_FALLBACK_INTERVAL: Duration = Duration::from_millis(100);
+/* membarrier retries under a hotplug storm before the fallback takes over */
+const URCU_MEMBARRIER_RETRIES: u32 = 4;
 
 /// One background thread and the eventfd that stops it. Dropping writes the
 /// eventfd and joins the thread.
@@ -105,7 +109,8 @@ fn prog_fd_clone(prog: &libbpf_rs::Program<'_>) -> Result<Option<OwnedFd>> {
 /// period, membarrier(MEMBARRIER_CMD_GLOBAL) is synchronize_rcu(), and runs
 /// the lib-provided scx_urcu_<storage>_pending/reclaim driver programs until
 /// nothing is awaiting reclaim, one grace period per cycle shared across the
-/// storages and at least URCU_MIN_INTERVAL between the side flips.
+/// storages and at least URCU_MIN_INTERVAL between the side flips. See
+/// UrcuGracePeriod for the cases membarrier cannot cover.
 fn urcu_run_prog(fd: &OwnedFd) -> Result<u32> {
     let mut opts: libbpf_sys::bpf_test_run_opts = unsafe { std::mem::zeroed() };
 
@@ -117,10 +122,171 @@ fn urcu_run_prog(fd: &OwnedFd) -> Result<u32> {
     Ok(opts.retval)
 }
 
+/// membarrier(MEMBARRIER_CMD_GLOBAL) is synchronize_rcu() except in two cases:
+/// it fails with EINVAL when nohz_full is active and it returns without
+/// waiting when only one CPU is online. Both fall back to updating a private
+/// map-in-map slot, which the kernel documents as waiting for the running
+/// non-sleepable programs. That wait is an expedited grace period and IPIs
+/// every CPU in the kernel, so the daemon spaces those rounds out.
+struct UrcuGracePeriod {
+    membarrier: bool,
+    outer: libbpf_rs::MapHandle,
+    inner: libbpf_rs::MapHandle,
+    warned: bool,
+}
+
+fn membarrier_global() -> std::io::Result<()> {
+    let ret = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/* bumped by the kernel for every CPU online and offline transition */
+fn hotplug_seq() -> Result<u64> {
+    let seq = std::fs::read_to_string("/sys/kernel/sched_ext/hotplug_seq")
+        .context("reading /sys/kernel/sched_ext/hotplug_seq")?;
+    seq.trim()
+        .parse()
+        .with_context(|| format!("parsing hotplug_seq {:?}", seq))
+}
+
+fn online_cpus() -> Result<libc::c_long> {
+    let ret = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    if ret < 0 {
+        bail!(
+            "reading the online CPU count failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(ret)
+}
+
+impl UrcuGracePeriod {
+    fn new() -> Result<Self> {
+        let membarrier = match membarrier_global() {
+            Ok(()) => true,
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => false,
+            Err(e) => bail!("membarrier(GLOBAL) failed: {}", e),
+        };
+
+        let opts = libbpf_sys::bpf_map_create_opts {
+            sz: std::mem::size_of::<libbpf_sys::bpf_map_create_opts>() as _,
+            ..Default::default()
+        };
+        let inner = libbpf_rs::MapHandle::create(
+            libbpf_rs::MapType::Array,
+            Some("scx_urcu_inner"),
+            4,
+            4,
+            1,
+            &opts,
+        )
+        .context("creating urcu inner map")?;
+        let opts = libbpf_sys::bpf_map_create_opts {
+            inner_map_fd: inner.as_fd().as_raw_fd() as u32,
+            ..opts
+        };
+        let outer = libbpf_rs::MapHandle::create(
+            libbpf_rs::MapType::ArrayOfMaps,
+            Some("scx_urcu_outer"),
+            4,
+            4,
+            1,
+            &opts,
+        )
+        .context("creating urcu outer map")?;
+        let gp = Self {
+            membarrier,
+            outer,
+            inner,
+            warned: false,
+        };
+        gp.map_update()
+            .context("probing urcu map-update grace period")?;
+        Ok(gp)
+    }
+
+    fn map_update(&self) -> Result<()> {
+        /*
+         * A successful map-in-map update waits for the running non-sleepable
+         * programs, see maybe_wait_bpf_programs(), even when the slot keeps the
+         * same inner map.
+         */
+        self.outer
+            .update(
+                &0u32.to_ne_bytes(),
+                &self.inner.as_fd().as_raw_fd().to_ne_bytes(),
+                libbpf_rs::MapFlags::ANY,
+            )
+            .context("waiting for urcu map-update grace period")
+    }
+
+    /// Wait for a grace period. Returns whether the expedited fallback was used.
+    fn synchronize(&mut self) -> Result<bool> {
+        if self.membarrier {
+            /*
+             * membarrier(GLOBAL) does not wait when only one CPU is online, so
+             * the count is checked before and after the call and the hotplug
+             * counter is compared across it. That still has a hole because the
+             * counter moves at the active transitions, not when the online mask
+             * changes: a CPU going offline bumps it before leaving the mask, a
+             * CPU coming online after entering. Example with A and B online
+             * while B goes offline and C comes online:
+             *
+             *  1. B bumps the counter, still in the mask.
+             *  2. Read count 2 and the counter.
+             *  3. B leaves the mask, one CPU online.
+             *  4. membarrier() sees one CPU and returns without waiting.
+             *  5. Descheduled. B finishes, C starts and enters the mask.
+             *  6. Read count 2 and the counter, unchanged. Trusted.
+             *  7. C bumps the counter.
+             *
+             * That needs this thread descheduled mid-call during two
+             * back-to-back hotplugs. A moved counter with CPUs left means a
+             * hotplug raced the call, so retry. This is best effort: the hole
+             * stays open for a scheduler that runs through hotplug, and for a
+             * restarting one until its asynchronous disable completes.
+             */
+            for _ in 0..URCU_MEMBARRIER_RETRIES {
+                if online_cpus()? <= 1 {
+                    break;
+                }
+                let seq = hotplug_seq()?;
+
+                membarrier_global().context("membarrier(GLOBAL) failed")?;
+                if online_cpus()? <= 1 {
+                    break;
+                }
+                if hotplug_seq()? == seq {
+                    return Ok(false);
+                }
+            }
+        }
+
+        if !self.warned {
+            self.warned = true;
+            eprintln!(
+                "scx-urcu: {}, waiting for grace periods through expedited map-in-map updates at least {:?} apart",
+                if self.membarrier {
+                    "a single CPU is online"
+                } else {
+                    "membarrier is unavailable with nohz_full"
+                },
+                URCU_FALLBACK_INTERVAL
+            );
+        }
+        self.map_update()?;
+        Ok(true)
+    }
+}
+
 fn urcu_daemon(
     stop: OwnedFd,
     doorbell: libbpf_rs::MapHandle,
     pairs: Vec<(OwnedFd, OwnedFd)>,
+    mut gp: UrcuGracePeriod,
 ) -> Result<()> {
     let mut builder = libbpf_rs::RingBufferBuilder::new();
     builder
@@ -131,6 +297,7 @@ fn urcu_daemon(
         .context("building urcu doorbell ring buffer")?;
 
     let mut last: Option<Instant> = None;
+    let mut interval = URCU_MIN_INTERVAL;
     loop {
         let mut fds = [
             libc::pollfd {
@@ -157,12 +324,13 @@ fn urcu_daemon(
         /* run one final drain below before honoring a stop request */
         let stopping = fds[1].revents != 0;
 
-        /* drain until nothing is awaiting reclaim */
+        /* drain until nothing is awaiting reclaim, unpaced once stopping */
         loop {
+            let pace = if stopping { Duration::ZERO } else { interval };
             if let Some(last) = last {
                 let elapsed = last.elapsed();
-                if elapsed < URCU_MIN_INTERVAL {
-                    std::thread::sleep(URCU_MIN_INTERVAL - elapsed);
+                if elapsed < pace {
+                    std::thread::sleep(pace - elapsed);
                 }
             }
 
@@ -185,13 +353,11 @@ fn urcu_daemon(
             }
             last = Some(Instant::now());
 
-            let ret = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) };
-            if ret != 0 {
-                bail!(
-                    "membarrier(GLOBAL) failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
+            interval = if gp.synchronize()? {
+                URCU_FALLBACK_INTERVAL
+            } else {
+                URCU_MIN_INTERVAL
+            };
 
             for reclaim in reclaims {
                 while urcu_run_prog(reclaim)? != 0 {}
@@ -244,13 +410,18 @@ pub(crate) fn urcu_spawn(obj: &libbpf_rs::Object) -> Result<Option<Daemon>> {
         return Ok(None);
     }
 
+    let gp = UrcuGracePeriod::new().context("setting up urcu grace periods")?;
     let stop = stop_eventfd()?;
     let daemon_stop = stop.try_clone().context("cloning urcu stop eventfd")?;
     let thread = std::thread::Builder::new()
         .name("scx-urcu".into())
         .spawn(move || {
-            if let Err(e) = urcu_daemon(daemon_stop, doorbell, pairs) {
-                eprintln!("scx-urcu daemon exiting on error: {:#}", e);
+            if let Err(e) = urcu_daemon(daemon_stop, doorbell, pairs, gp) {
+                let _ = std::io::Write::write_fmt(
+                    &mut std::io::stderr(),
+                    format_args!("FATAL: scx-urcu daemon failed: {:#}\n", e),
+                );
+                std::process::exit(1);
             }
         })
         .context("spawning urcu daemon thread")?;
