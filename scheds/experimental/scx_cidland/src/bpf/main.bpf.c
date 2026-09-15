@@ -71,9 +71,9 @@ const volatile bool smt_whole_core;
 /*
  * Schedule the cpu controller's cgroups as groups, each weighing its
  * cpu.weight against its siblings, the way fair.c's group scheduling does.
- * See struct grp_q.
+ * See struct grp_q. Off unless user space asks for it, --enable-cgroups.
  */
-const volatile bool cgroup_enabled = true;
+const volatile bool cgroup_enabled;
 
 /*
  * Ignore synchronous wakeup events.

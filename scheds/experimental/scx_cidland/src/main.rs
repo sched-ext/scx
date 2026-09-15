@@ -148,15 +148,22 @@ struct Opts {
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// Ignore the cpu controller: schedule on the nice levels alone.
+    /// Schedule the cpu controller's cgroups as groups.
     ///
-    /// By default the cpu controller's cgroups are scheduled as groups: a
-    /// cgroup competes with its siblings at its cpu.weight, and its tasks
-    /// share what it gets. This unhooks the scheduler from the cpu
-    /// controller entirely, which is also what happens on a kernel built
-    /// without CONFIG_EXT_GROUP_SCHED.
+    /// A cgroup then competes with its siblings at its cpu.weight and its
+    /// tasks share what it gets, the way fair.c's group scheduling does, with
+    /// cpu.weight meaning the weight per active CPU (fair.c's default
+    /// cgroup_mode, "concur").
+    ///
+    /// Off by default: tasks are scheduled on their nice levels alone and
+    /// cpu.weight is ignored. Keeping the group loads and effective weights
+    /// up to date costs every wakeup of a task in a nested cgroup a walk of
+    /// its hierarchy, which on a systemd machine is every task, and shows up
+    /// as wakeup latency and throughput.
+    ///
+    /// Needs a kernel built with CONFIG_EXT_GROUP_SCHED.
     #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
-    disable_cgroups: bool,
+    enable_cgroups: bool,
 
     /// Force every CPU to have the same capacity.
     ///
@@ -468,6 +475,83 @@ fn tick_ns() -> u64 {
 /// upstream rule with its default log scaling; a kernel whose distribution
 /// changed the normalized value or an administrator who tuned the sysctl
 /// runs fair.c at some other slice, and --slice-us is how to match it.
+/// Return the number of cgroups with a cpu.weight other than the default, and
+/// one of them, walking the cgroup v2 hierarchy. A cgroup has a cpu.weight
+/// file only where its parent enables the cpu controller.
+fn cgroups_with_cpu_weight(root: &std::path::Path) -> (usize, Option<String>) {
+    const CGROUP_WEIGHT_DFL: u64 = 100;
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    let (mut count, mut example, mut visited) = (0, None, 0);
+
+    while let Some((dir, depth)) = stack.pop() {
+        visited += 1;
+        if visited > 100_000 {
+            break;
+        }
+        if let Ok(val) = std::fs::read_to_string(dir.join("cpu.weight")) {
+            if val.trim().parse::<u64>().is_ok_and(|w| w != CGROUP_WEIGHT_DFL) {
+                count += 1;
+                if example.is_none() {
+                    let name = dir.strip_prefix(root).unwrap_or(&dir);
+                    example = Some(format!("/{} ({})", name.display(), val.trim()));
+                }
+            }
+        }
+        if depth >= 64 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push((entry.path(), depth + 1));
+            }
+        }
+    }
+
+    (count, example)
+}
+
+/// Tell whether cgroup scheduling can do what the options ask for: warn when
+/// it was asked for and the kernel or the cgroup setup leaves nothing to
+/// hook into, and when it is off while some cgroup has a cpu.weight that is
+/// then ignored.
+fn check_cgroup_support(requested: bool, kernel_support: bool) {
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    let cpu_controller = std::fs::read_to_string(root.join("cgroup.subtree_control"))
+        .is_ok_and(|ctrl| ctrl.split_whitespace().any(|c| c == "cpu"));
+
+    if requested {
+        if !kernel_support {
+            warn!(
+                "--enable-cgroups: the kernel has no sched_ext cgroup support \
+                 (CONFIG_EXT_GROUP_SCHED), cgroups are not scheduled as groups"
+            );
+        } else if !cpu_controller {
+            warn!(
+                "--enable-cgroups: the cpu controller is not enabled in {}, \
+                 every task is scheduled as part of the root cgroup",
+                root.join("cgroup.subtree_control").display()
+            );
+        }
+        return;
+    }
+
+    if !cpu_controller {
+        return;
+    }
+    let (count, example) = cgroups_with_cpu_weight(root);
+    if count > 0 {
+        warn!(
+            "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored without \
+             --enable-cgroups",
+            count,
+            example.unwrap_or_default()
+        );
+    }
+}
+
 fn base_slice_ns(nr_cpus: usize) -> u64 {
     const NORMALIZED_BASE_SLICE_NS: u64 = 700_000;
     let cpus = nr_cpus.clamp(1, 8) as u64;
@@ -592,12 +676,13 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
         skel.struct_ops.cidland_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
 
-        // Honor cpu.weight, unless it was turned off or the kernel has no cpu
-        // controller support for sched_ext to hook into. Detaching the
-        // callbacks from the struct_ops keeps the kernel from delivering them
-        // at all, and lets the scheduler load on a kernel whose
+        // Schedule cgroups as groups only when asked to and when the kernel
+        // has cpu controller support for sched_ext to hook into. Detaching
+        // the callbacks from the struct_ops keeps the kernel from delivering
+        // them at all, and lets the scheduler load on a kernel whose
         // sched_ext_ops_cid has no cgroup members to bind them to.
-        let cgroup_enabled = !opts.disable_cgroups && (cpuctl_names || cgroup_names);
+        let cgroup_enabled = opts.enable_cgroups && (cpuctl_names || cgroup_names);
+        check_cgroup_support(opts.enable_cgroups, cpuctl_names || cgroup_names);
         if !cgroup_enabled {
             let ops = skel.struct_ops.cidland_ops_mut();
             ops.cpuctl_init = std::ptr::null_mut();

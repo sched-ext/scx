@@ -281,16 +281,20 @@ be turned off on the command line to compare the two rules against each other.
    through `cpu_util_cfs_boost()`. `--disable-cpufreq` leaves the governor
    alone.
 
- - **cgroup weights.** A task's weight is its nice weight scaled by the
-   `cpu.weight` of the cgroup it is in and of the cgroups that one sits under,
-   so a service in a slice given ten times its siblings' weight is worth ten of
-   the same service in a default slice. This is a per-task weight rather than a
-   share of the machine handed to a cgroup and divided among its members, which
-   is what `fair.c` gives: two tasks in a cgroup of twice the weight get twice
-   the CPU each here, where `fair.c` would give them twice between them. Doing
-   it `fair.c`'s way needs the weight of the runnable siblings at every level of
-   the hierarchy, a count on a cacheline shared by every CPU that wakes a task.
-   `--disable-cgroups` ignores the cpu controller entirely.
+ - **cgroup scheduling.** Off by default: tasks are scheduled on their nice
+   levels alone and `cpu.weight` is ignored. `--enable-cgroups` schedules the
+   cpu controller's cgroups as groups the way `fair.c` does since it moved to a
+   single runqueue: every task stays in its cid's queue at an effective weight,
+   its nice weight scaled by `shares / load` at every level of its hierarchy,
+   and a group's shares on a cid are the load-proportional part of its
+   `cpu.weight` scaled by how many CPUs' worth of tasks it runs (`fair.c`'s
+   default `cgroup_mode`, "concur"). Keeping the group loads and effective
+   weights current costs every wakeup of a task in a nested cgroup a walk of
+   its hierarchy, which on a systemd machine is every task: about 2% of
+   throughput and a few microseconds of wakeup latency in schbench from a
+   depth-3 session scope. The scheduler warns at startup when some cgroup sets
+   `cpu.weight` while this is off, and when it is on but the kernel has no
+   sched_ext cgroup support or the cpu controller is not enabled.
 
  - **Asymmetric capacity and packing.** Capacity and CPU priority are separate
    kernel policies. The default capacity comes from the kernel's exported
