@@ -86,17 +86,20 @@ struct Opts {
 
     /// Maximum scheduling slice duration in microseconds.
     ///
-    /// A slice is only ever acted on from the tick: update_curr_scx() charges
-    /// the time a task has run against it, and task_tick_scx() is the one
-    /// place that reschedules once it is spent, so the granularity of the
-    /// whole thing is 1/HZ no matter what is asked for here. A slice of
-    /// exactly one tick therefore buys two: the task is handed the CPU a few
-    /// microseconds after the tick that freed it, so at the next tick it is
-    /// those few microseconds short of its slice and runs a whole further
-    /// tick. Keep the default under a tick of a HZ=1000 kernel, at the
-    /// normalized_sysctl_sched_base_slice of fair.c.
-    #[clap(short = 's', long, default_value = "700")]
-    slice_us: u64,
+    /// The default is fair.c's sysctl_sched_base_slice as update_sysctl()
+    /// sets it: the normalized 700 us scaled by 1 + ilog2(min(nr_cpus, 8)),
+    /// 2.8 ms on eight CPUs or more, so the two schedulers issue requests of
+    /// the same size on the same machine. A kernel that runs fair.c at some
+    /// other slice, /sys/kernel/debug/sched/base_slice_ns says which, is
+    /// matched by setting it here. A task that has company on its CPU is asked for the CPU when
+    /// its request runs out, by a timer armed for its deadline, see
+    /// --no-hrtick, so the slice is what it says whatever the kernel's HZ.
+    /// Without the timer a slice is only acted on from the tick, and one of
+    /// exactly a tick buys two: the task is handed the CPU a few microseconds
+    /// after the tick that freed it, so at the next tick it is those few
+    /// microseconds short of its slice and runs a whole further tick.
+    #[clap(short = 's', long)]
+    slice_us: Option<u64>,
 
     /// Time, in microseconds, that a task stays cache hot on the CPU it last ran on.
     ///
@@ -135,6 +138,17 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "1", value_parser = clap::value_parser!(u32).range(0..=255))]
     cache_nice_tries: u32,
 
+    /// Scan for work on an idle CPU whatever the scan costs.
+    ///
+    /// An idle CPU keeps an average of how long it stays idle after a scan and
+    /// the most a scan at each level has cost, and does not start a scan its
+    /// idle time would not pay for, since a CPU its own wakeups keep bringing
+    /// back is about to have work of its own: sched_balance_newidle()'s
+    /// avg_idle against sd->max_newidle_lb_cost. This drops the budget and
+    /// scans every time.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_newidle_cost: bool,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -156,15 +170,29 @@ struct Opts {
     #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
     disable_cgroups: bool,
 
-    /// Report every CPU at the same capacity, collapsing the capacity tiers.
+    /// Force every CPU to have the same capacity.
     ///
-    /// The capacity is guessed from ACPI CPPC or cpufreq, which separates the
-    /// P-cores, the favored P-cores and the E-cores of a hybrid x86 into three
-    /// tiers. The kernel's own cpu_capacity is uniform on those machines, so
-    /// fair.c has no fast-core preference on the wakeup path. This makes cidland
-    /// see what fair.c sees, for comparing the placement decisions of the two.
-    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
+    /// By default cidland uses the kernel-exported cpu_capacity values, matching
+    /// the capacity classes used to construct the kernel's scheduling domains.
+    #[clap(
+        short = 'u',
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "asym_capacity"
+    )]
     uniform_capacity: bool,
+
+    /// Force asymmetric capacities using the best available hardware estimate.
+    ///
+    /// This uses ACPI CPPC, cpufreq, or cpu_capacity through scx_utils rather
+    /// than following the kernel's selected capacity classes. It can therefore
+    /// expose hybrid x86 capacity differences that fair.c does not use.
+    #[clap(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "uniform_capacity"
+    )]
+    asym_capacity: bool,
 
     /// Maximum capacity difference, in percent, within one capacity tier.
     ///
@@ -172,9 +200,17 @@ struct Opts {
     /// small differences such as favored versus ordinary P-cores do not make
     /// wakeups chase a marginally faster CPU. A larger gap still starts a new
     /// tier and retains the preference for P-cores over E-cores. 0 restores
-    /// one tier per distinct reported capacity.
-    #[clap(short = 't', long, default_value = "5", value_parser = clap::value_parser!(u32).range(0..=50))]
-    capacity_tier_tolerance_pct: u32,
+    /// one tier per distinct reported capacity. The default is 0 when following
+    /// the kernel and 5 with --asym-capacity.
+    #[clap(short = 't', long, value_parser = clap::value_parser!(u32).range(0..=50))]
+    capacity_tier_tolerance_pct: Option<u32>,
+
+    /// Disable the kernel's SD_ASYM_PACKING CPU preference.
+    ///
+    /// Placement then follows the capacity tiers selected by the default
+    /// kernel capacity, --uniform-capacity, or --asym-capacity mode.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_asym_packing: bool,
 
     /// Disable direct dispatch during synchronous wakeups.
     ///
@@ -185,6 +221,26 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Weigh the waking CPU against the previous one when both are busy.
+    ///
+    /// By default a wakee whose previous CPU and waking CPU are both busy
+    /// stays where it last ran. With this, it goes to the one the two loads
+    /// say is lighter, the time-averaged weight of what is runnable on each,
+    /// so that a waker that runs a little and sleeps a lot takes its wakee
+    /// onto its own CPU: wake_affine_weight(). It matters on a saturated
+    /// machine with many short wakeups; elsewhere it costs a few percent of
+    /// wakeup throughput for no measured gain, as it does in fair.c.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    wa_weight: bool,
+
+    /// Service is charged in rq_clock_task(), the clock update_curr() uses:
+    /// wall time less the interrupt time and the hypervisor steal time the
+    /// CPU spent on something else. This charges plain wall time,
+    /// bpf_ktime_get_ns(), instead, so a task pays for the interrupts that
+    /// land on its CPU and for the time the host took from its vCPU.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_task_clock: bool,
+
     /// Interrupt on the deadlines alone, without asking who is owed service.
     ///
     /// The wakeup preemption normally fires only when the woken task is owed
@@ -194,6 +250,19 @@ struct Opts {
     /// rules against each other.
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     no_eligibility: bool,
+
+    /// Take the head of a deadline-ordered queue at dispatch, eligible or not.
+    ///
+    /// A sched_ext priority DSQ is ordered by deadline but, unlike fair.c's
+    /// augmented EEVDF tree, cannot directly find the earliest-deadline task
+    /// whose vruntime is eligible. Dispatch normally walks the queue for that
+    /// task when the head is not eligible, which matches the selection rule
+    /// there at a linear worst-case cost. This option takes the head instead;
+    /// --no-eligibility implies it. Wakeup preemption and keep-running
+    /// decisions are head-based either way because they cannot observe the
+    /// current task, queue, and virtual-time frontier atomically.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_eligible_scan: bool,
 
     /// Interrupt a running task that is still owed service.
     ///
@@ -209,6 +278,27 @@ struct Opts {
     #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
     no_run_to_parity: bool,
 
+    /// Keep a longer-request running task protected from shorter wakees.
+    ///
+    /// Normally an eligible waking task that asks for a shorter request than
+    /// the task currently running can preempt it despite RUN_TO_PARITY. The
+    /// wakee is put on an available local DSQ as a one-shot short buddy,
+    /// matching the wakeup side of PREEMPT_SHORT in fair.c. This option keeps
+    /// the ordinary protection for comparison.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_preempt_short: bool,
+
+    /// Do not compensate placement lag for joining a virtual-time pack.
+    ///
+    /// Normally cidland inflates a task's placement offset before adding its
+    /// weight to the destination pack, so the movement of the weighted-average
+    /// reference does not dilute the requested lag. This disables that
+    /// PLACE_LAG compensation and restores the older behavior where lag can
+    /// evaporate as a task repeatedly sleeps and wakes. For comparing the two
+    /// placement rules against each other.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_place_lag: bool,
+
     /// Give a task a new request every time it is placed.
     ///
     /// A task that is moved to another CPU, or queued again without having
@@ -223,6 +313,40 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     no_place_rel_deadline: bool,
 
+    /// Let a task that blocks over-served carry its whole debt across the sleep.
+    ///
+    /// A task that blocks while it is over-served normally has the debt paid
+    /// off by the pack it left, with the service delivered there while it
+    /// slept, and never more than paid off: it wakes owing at most what it
+    /// owed, and often nothing. This makes it carry the whole debt to its next
+    /// placement instead, however long it slept.
+    ///
+    /// This is DELAY_DEQUEUE and DELAY_ZERO off. For comparing the two rules
+    /// against each other.
+    #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
+    no_delay_dequeue: bool,
+    /// Wake a task that blocked over-served through the placement.
+    ///
+    /// A task that blocks while it is over-served is still on the runqueue it
+    /// blocked on as far as fair.c is concerned, and a wakeup that comes
+    /// before its debt is paid requeues it there, ttwu_runnable(), without
+    /// choosing a CPU for it: it runs there once it is picked, or wherever a
+    /// balance moves it. That is what happens here too. This option sends
+    /// such a task through wake_affine() and the idle scan like any other
+    /// wakeup instead, so it gets an idle CPU when there is one. Implied by
+    /// --no-delay-dequeue. For comparing the two rules against each other.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_delay_requeue: bool,
+
+    /// Notice the end of a request at the tick after it, not when it happens.
+    ///
+    /// A request is normally ended on the spot by a timer armed for the
+    /// running task's deadline whenever it has company, the way HRTICK does
+    /// in fair.c. Without it a task holds the CPU until the tick that follows
+    /// the end of its request, up to a whole tick late, and a task waiting
+    /// behind it waits that long. For comparing the two against each other.
+    #[clap(short = 'H', long, action = clap::ArgAction::SetTrue)]
+    no_hrtick: bool,
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -301,6 +425,29 @@ fn tick_ns() -> u64 {
     1_000_000
 }
 
+/// The request size fair.c hands out by default on this machine.
+///
+/// sysctl_sched_base_slice is not the 700 us the kernel is compiled with.
+/// update_sysctl() scales that at boot, and again on hotplug, by a factor
+/// taken from the number of online CPUs:
+///
+///	unsigned int cpus = min_t(unsigned int, num_online_cpus(), 8);
+///	case SCHED_TUNABLESCALING_LOG:
+///		factor = 1 + ilog2(cpus);
+///	sysctl_sched_base_slice = factor * normalized_sysctl_sched_base_slice;
+///
+/// so a machine with eight CPUs or more runs a 2.8 ms slice. This is the
+/// upstream rule with its default log scaling; a kernel whose distribution
+/// changed the normalized value or an administrator who tuned the sysctl
+/// runs fair.c at some other slice, and --slice-us is how to match it.
+fn base_slice_ns(nr_cpus: usize) -> u64 {
+    const NORMALIZED_BASE_SLICE_NS: u64 = 700_000;
+    let cpus = nr_cpus.clamp(1, 8) as u64;
+    let factor = 1 + cpus.ilog2() as u64;
+
+    factor * NORMALIZED_BASE_SLICE_NS
+}
+
 /// Assign sorted, descending CPU capacities to tiers.
 ///
 /// Each capacity is compared with the fastest CPU in the current tier rather
@@ -331,7 +478,7 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         try_set_rlimit_infinity();
 
-        if opts.slice_us == 0 {
+        if opts.slice_us == Some(0) {
             bail!("--slice-us must be greater than 0");
         }
 
@@ -367,6 +514,22 @@ impl<'a> Scheduler<'a> {
             1_000_000_000 / tick_ns()
         );
 
+        let slice_ns = match opts.slice_us {
+            Some(us) => {
+                let ns = us * 1000;
+                info!("slice: {} us (--slice-us)", us);
+                ns
+            }
+            None => {
+                let ns = base_slice_ns(topo.all_cpus.len());
+                info!(
+                    "slice: {} us (700 us scaled as update_sysctl() does)",
+                    ns / 1000
+                );
+                ns
+            }
+        };
+
         // Print command line.
         info!(
             "scheduler options: {}",
@@ -399,48 +562,121 @@ impl<'a> Scheduler<'a> {
 
         // Override default BPF scheduling parameters.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
-        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.slice_ns = slice_ns;
         rodata.tick_ns = tick_ns();
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.balance_sample = opts.balance_sample;
         rodata.cache_nice_tries = opts.cache_nice_tries;
+        rodata.no_newidle_cost = opts.no_newidle_cost;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.wa_weight = opts.wa_weight;
+        rodata.no_task_clock = opts.no_task_clock;
+        info!(
+            "service clock: {}",
+            if opts.no_task_clock {
+                "ktime"
+            } else {
+                "rq_clock_task"
+            }
+        );
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
+        rodata.no_eligible_scan = opts.no_eligible_scan;
         rodata.no_run_to_parity = opts.no_run_to_parity;
+        rodata.no_preempt_short = opts.no_preempt_short;
+        rodata.no_place_lag = opts.no_place_lag;
         rodata.no_place_rel_deadline = opts.no_place_rel_deadline;
+        rodata.no_delay_dequeue = opts.no_delay_dequeue;
+        rodata.no_delay_requeue = opts.no_delay_requeue;
+        rodata.no_hrtick = opts.no_hrtick;
         rodata.no_vref_update = opts.no_vref_update;
+
+        // Follow the capacity classes selected by the kernel unless explicitly
+        // overridden. cpu_capacity is topology_get_cpu_scale(), the same input
+        // used to construct SD_ASYM_CPUCAPACITY domains. scx_utils deliberately
+        // has a more aggressive hardware-derived estimate, retained here for
+        // the --asym-capacity override.
+        let (mut cpus, capacity_mode, default_tolerance): (Vec<_>, _, u32) = if opts
+            .uniform_capacity
+        {
+            (
+                topo.all_cpus
+                    .values()
+                    .map(|cpu| (cpu.clone(), 1024usize))
+                    .collect(),
+                "forced uniform",
+                0,
+            )
+        } else if opts.asym_capacity {
+            (
+                topo.all_cpus
+                    .values()
+                    .map(|cpu| (cpu.clone(), cpu.cpu_capacity))
+                    .collect(),
+                "forced hardware-derived",
+                5,
+            )
+        } else {
+            let kernel_cpus: Option<Vec<_>> = topo
+                .all_cpus
+                .values()
+                .map(|cpu| Some((cpu.clone(), cpu.kernel_cpu_capacity?)))
+                .collect();
+
+            match kernel_cpus {
+                Some(cpus) => (cpus, "kernel", 0),
+                None => {
+                    warn!(
+                        "kernel CPU capacity classes are not exported by sysfs; falling back to hardware-derived capacities"
+                    );
+                    (
+                        topo.all_cpus
+                            .values()
+                            .map(|cpu| (cpu.clone(), cpu.cpu_capacity))
+                            .collect(),
+                        "hardware-derived fallback",
+                        5,
+                    )
+                }
+            }
+        };
 
         // Capacity tiers: CPUs sorted by capacity in descending order, with
         // close capacities coalesced into a tier, 0 being the fastest.
         // Capacities are normalized to 1..1024 so the highest is always 1024.
-        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
-        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
-        let max_cap = cpus.first().map(|c| c.cpu_capacity).unwrap_or(1).max(1);
-        let capacities: Vec<_> = cpus.iter().map(|cpu| cpu.cpu_capacity).collect();
-        let tiers = capacity_tiers(&capacities, opts.capacity_tier_tolerance_pct);
-        let mut cpu_tiers: Vec<(u64, u64, u64)> = Vec::new();
-        for (i, cpu) in cpus.iter().enumerate() {
-            if opts.uniform_capacity {
-                cpu_tiers.push((cpu.id as u64, 1024, 0));
-                continue;
-            }
-            let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
-            cpu_tiers.push((cpu.id as u64, normalized as u64, tiers[i]));
+        cpus.sort_by_key(|(_, capacity)| std::cmp::Reverse(*capacity));
+        let max_cap = cpus
+            .first()
+            .map(|(_, capacity)| *capacity)
+            .unwrap_or(1)
+            .max(1);
+        let capacities: Vec<_> = cpus.iter().map(|(_, capacity)| *capacity).collect();
+        let tolerance = opts
+            .capacity_tier_tolerance_pct
+            .unwrap_or(default_tolerance);
+        let tiers = capacity_tiers(&capacities, tolerance);
+        let nr_capacity_tiers = tiers.last().copied().unwrap_or(0) + 1;
+        let asym_capacity = nr_capacity_tiers > 1;
+        // Keep capacity and SD_ASYM_PACKING tiers independent. fair.c uses
+        // them in different paths; collapsing them into one ordering makes
+        // packing priority affect every ordinary idle-CPU search.
+        let mut cpu_tiers: Vec<(u64, u64, u64, u64, bool)> = Vec::new();
+        for (i, (cpu, capacity)) in cpus.iter().enumerate() {
+            let normalized = (*capacity * 1024 / max_cap).clamp(1, 1024);
+            cpu_tiers.push((cpu.id as u64, normalized as u64, tiers[i], tiers[i], false));
         }
-        let nr_tiers = if opts.uniform_capacity {
-            1
-        } else {
-            tiers.last().copied().unwrap_or(0) + 1
-        };
-        if nr_tiers > 1 {
+        info!(
+            "CPU capacity mode: {capacity_mode} ({nr_capacity_tiers} tier{}, tolerance {tolerance}%)",
+            if nr_capacity_tiers == 1 { "" } else { "s" }
+        );
+        if nr_capacity_tiers > 1 {
             info!(
                 "CPUs by capacity: {:?}",
-                cpus.iter().map(|cpu| cpu.id).collect::<Vec<_>>()
+                cpus.iter().map(|(cpu, _)| cpu.id).collect::<Vec<_>>()
             );
         }
 
@@ -458,26 +694,100 @@ impl<'a> Scheduler<'a> {
             skel.struct_ops.cidland_ops_mut().flags
         );
 
+        // One hrtick per cid, over the same cid space the arena is sized
+        // for below. A map is sized before the program is loaded.
+        let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
+        skel.maps
+            .hrticks
+            .set_max_entries(nr_cpus as u32)
+            .context("sizing the hrtick map")?;
+
         // Load the BPF program for validation.
         let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei)?;
+
+        // Capacity and asymmetric packing are separate kernel policies.
+        // Query arch_asym_cpu_priority() and the live sd_asym_packing pointer
+        // through BPF: neither has a stable userspace ABI. If asymmetric
+        // packing is active across the scheduler's CPU domain, use its exact
+        // priorities for placement ordering while retaining cpu_capacity for
+        // fit calculations.
+        let mut priorities = Vec::new();
+        let mut all_asym_packing = !opts.disable_asym_packing;
+        if !opts.disable_asym_packing {
+            priorities.reserve(cpu_tiers.len());
+            for (cpu, _, _, _, smt_asym_packing) in &mut cpu_tiers {
+                let mut args = types::cidland_cpu_priority_args {
+                    cpu: *cpu,
+                    priority: 0,
+                    asym_packing: 0,
+                    smt_asym_packing: 0,
+                };
+                run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
+                    .context("running cidland_get_cpu_priority")?;
+                all_asym_packing &= args.asym_packing != 0;
+                *smt_asym_packing = args.smt_asym_packing != 0;
+                priorities.push((*cpu, args.priority));
+            }
+        }
+
+        priorities.sort_by_key(|(_, priority)| std::cmp::Reverse(*priority));
+        let distinct_priorities = priorities.windows(2).any(|pair| pair[0].1 != pair[1].1);
+        let asym_packing = all_asym_packing && distinct_priorities;
+        let mut nr_place_tiers = nr_capacity_tiers;
+        if asym_packing {
+            let mut tier = 0u64;
+            for i in 0..priorities.len() {
+                if i > 0 && priorities[i - 1].1 != priorities[i].1 {
+                    tier += 1;
+                }
+                let cpu = priorities[i].0;
+                let entry = cpu_tiers
+                    .iter_mut()
+                    .find(|entry| entry.0 == cpu)
+                    .expect("priority CPU must be present in topology");
+                entry.3 = tier;
+            }
+            nr_place_tiers = tier + 1;
+            info!(
+                "CPU asymmetric packing: kernel ({} priority tiers, CPUs {:?})",
+                nr_place_tiers,
+                priorities.iter().map(|(cpu, _)| cpu).collect::<Vec<_>>()
+            );
+        } else {
+            for (_, _, _, _, smt_asym_packing) in &mut cpu_tiers {
+                *smt_asym_packing = false;
+            }
+            info!(
+                "CPU asymmetric packing: {}; placement follows {capacity_mode} capacity tiers",
+                if opts.disable_asym_packing {
+                    "disabled"
+                } else {
+                    "off"
+                }
+            );
+        }
 
         // Size the arena for the cid space, which is num_possible_cpus()
         // wide, and hand over the capacity of each CPU. The cid layout is
         // only known once the kernel has built it, at attach, so this is in
         // cpu space and ops.init() translates. It has to happen between
         // load and attach: the tables must be in place before ops.init().
-        let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
         let mut args = types::cidland_arena_args {
             nr_cpus: nr_cpus as u64,
-            nr_tiers,
+            nr_place_tiers,
+            nr_capacity_tiers,
+            asym_capacity: asym_capacity as u64,
+            asym_packing: asym_packing as u64,
         };
         run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
             .context("running cidland_arena_init")?;
-        for (cpu, capacity, tier) in cpu_tiers {
+        for (cpu, capacity, capacity_tier, place_tier, smt_asym_packing) in cpu_tiers {
             let mut args = types::cidland_cpu_args {
                 cpu,
                 capacity,
-                tier,
+                place_tier,
+                capacity_tier,
+                smt_asym_packing: smt_asym_packing as u64,
             };
             run_syscall_prog(&skel.progs.cidland_set_cpu, &mut args)
                 .context("running cidland_set_cpu")?;
@@ -504,7 +814,11 @@ impl<'a> Scheduler<'a> {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
             nr_steals: bss_data.nr_steals,
+            nr_active_balances: bss_data.nr_active_balances,
             nr_preempts: bss_data.nr_preempts,
+            nr_delay_requeues: bss_data.nr_delay_requeues,
+            nr_hrticks: bss_data.nr_hrticks,
+            nr_newidle_skips: bss_data.nr_newidle_skips,
         }
     }
 
