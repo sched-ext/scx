@@ -403,6 +403,12 @@ static void collect_sys_stat(void)
 		cpuc->avg_util_invr = calc_asym_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
 
 		/*
+		 * Both utilization signals are now up to date, so recompute
+		 * the performance target. ops.running() only commits it.
+		 */
+		calc_cpuperf_target(cpuc);
+
+		/*
 		 * Calculate domain-pinned task utilization. Clamp both
 		 * snapshots to compute_wall. For wall time, this guards against
 		 * cross-interval contamination (last_measured_*_clk is sampled

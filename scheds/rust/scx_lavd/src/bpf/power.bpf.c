@@ -803,27 +803,93 @@ unlock_out:
 	return err;
 }
 
-__hidden
-int update_cpuperf_target(struct cpu_ctx *cpuc)
+/*
+ * The utilization counts all non-idle time, including what RT/DL and IRQ
+ * stole from SCX. schedutil adds those on its own, so the target must carry
+ * the SCX part only.
+ */
+static __always_inline u32 scx_only_util(u32 total, u32 steal)
 {
-	u32 util_wall, max_util_wall, cpuperf_target;
+	return (total > steal) ? (total - steal) : 0;
+}
+
+__hidden
+int calc_cpuperf_target(struct cpu_ctx *cpuc)
+{
+	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
+	u32 step, cur;
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
 	 * the running average and the recent utilization is used to respond
 	 * quickly upon load spikes. When the utilization is greater than
 	 * LAVD_CPU_UTIL_MAX_FOR_CPUPERF (85%), ceil to 100%.
+	 *
+	 * The performance target is on the system-wide capacity scale, where
+	 * SCX_CPUPERF_ONE is the most capable CPU, not a ratio of this CPU's
+	 * own busy time. Scale it by the CPU's capacity. The proportional part
+	 * uses the capacity- and frequency-invariant utilization, which does
+	 * not depend on the frequency we end up picking.
+	 *
+	 * Note that we should use scx_bpf_cpuperf_cap() because that is
+	 * what actually schedutil takes care of.
+	 *
+	 * Both utilizations are taken net of the stolen time, since schedutil
+	 * accounts for RT/DL and IRQ separately; passing the total would count
+	 * them twice.
 	 */
-	if (!no_freq_scaling) {
-		max_util_wall = max(cpuc->avg_util_wall, cpuc->cur_util_wall);
-		util_wall = (max_util_wall < LAVD_CPU_UTIL_MAX_FOR_CPUPERF) ?
-				max_util_wall : LAVD_SCALE;
-		cpuperf_target = (util_wall * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
-	} else
-		cpuperf_target = SCX_CPUPERF_ONE;
+	cap = scx_bpf_cpuperf_cap(cpuc->cpu_id);
+	if (no_freq_scaling) {
+		cpuperf_target = cap;
+	} else {
+		max_util_wall = max(scx_only_util(cpuc->avg_util_wall,
+						  cpuc->avg_steal_util_wall),
+				    scx_only_util(cpuc->cur_util_wall,
+						  cpuc->cur_steal_util_wall));
+		if (max_util_wall >= LAVD_CPU_UTIL_MAX_FOR_CPUPERF) {
+			cpuperf_target = cap;
+		} else {
+			max_util_invr = max(scx_only_util(cpuc->avg_util_invr,
+							  cpuc->avg_steal_util_invr),
+					    scx_only_util(cpuc->cur_util_invr,
+							  cpuc->cur_steal_util_invr));
+			cpuperf_target = min(max_util_invr, cap);
+		}
+	}
 
 	/*
-	 * Update the performance target once it changes.
+	 * Committing a target is not free, so utilization jitter around a
+	 * steady load should not reach cpufreq. Round the target up to a step
+	 * boundary, and apply a deadband on the way down: a lower target is
+	 * accepted only once it has fallen by cap/32.
+	 */
+	step = cap >> LAVD_CPUPERF_UP_SHIFT;
+	if (step < 1) {
+		step = 1;
+	}
+	cpuperf_target = min(round_up(cpuperf_target, step), cap);
+
+	cur = cpuc->cpuperf_target;
+	if (cpuperf_target < cur &&
+	    (cur - cpuperf_target) < (cap >> LAVD_CPUPERF_DOWN_SHIFT)) {
+		return 0;
+	}
+
+	cpuc->cpuperf_target = cpuperf_target;
+
+	return 0;
+}
+
+__hidden
+int update_cpuperf_target(struct cpu_ctx *cpuc)
+{
+	u32 cpuperf_target = cpuc->cpuperf_target;
+
+	/*
+	 * Commit the target computed at the last sys_stat interval. This must
+	 * run on the target CPU itself, since schedutil ignores an update made
+	 * from a CPU outside the policy unless the cpufreq driver allows DVFS
+	 * from any CPU.
 	 */
 	if (cpuc->cpuperf_cur != cpuperf_target) {
 		scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);

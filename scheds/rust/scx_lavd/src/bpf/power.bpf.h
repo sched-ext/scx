@@ -22,6 +22,7 @@ extern u32			default_big_core_scale;
 int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
 
+int calc_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);
 u16 get_cpuperf_cap(s32 cpu);
 
