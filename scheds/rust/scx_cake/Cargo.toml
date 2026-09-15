@@ -11,7 +11,7 @@ license = "GPL-2.0-only"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }
-libbpf-rs = "=0.27.0"
+libbpf-rs = "=0.27.1"
 libc = "0.2"
 log = "0.4"
 simplelog = "0.12"

@@ -3870,14 +3870,14 @@ dependencies = [
 
 [[package]]
 name = "libbpf-cargo"
-version = "0.27.0"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b60690d8d106293050fe02e0f6d090556b3ca2a2ec9c73271eb47efd69376b12"
+checksum = "00b21b4a7724f00e71b9fd1266bab4d3fafd6b11ab084e9ae8fd09803636097e"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.19.2",
  "clap",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "memmap2",
  "serde",
  "serde_json",
@@ -3900,9 +3900,9 @@ dependencies = [
 
 [[package]]
 name = "libbpf-rs"
-version = "0.27.0"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e69ad90c37d14f657291712f297a1460a1d1b647da45e0e372996b807c38f02"
+checksum = "e31aef1b2b743b2ebcc8eded144207c0f05c2d59e2d8c1d40dfa65f59437b60f"
 dependencies = [
  "bitflags 2.13.2",
  "libbpf-sys",
@@ -5816,7 +5816,7 @@ name = "scx_arena"
 version = "1.1.3"
 dependencies = [
  "anyhow",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libbpf-sys",
  "libc",
  "scx_cargo",
@@ -5830,7 +5830,7 @@ version = "1.1.3"
 dependencies = [
  "anyhow",
  "clap",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "scx_cargo",
  "scx_utils",
  "simplelog",
@@ -5844,7 +5844,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -5859,7 +5859,7 @@ name = "scx_bpf_compat"
 version = "1.1.3"
 dependencies = [
  "anyhow",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "once_cell",
  "scx_cargo",
@@ -5874,7 +5874,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -5891,7 +5891,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "scx_cargo",
@@ -5907,8 +5907,8 @@ dependencies = [
  "bindgen 0.73.2",
  "glob",
  "lazy_static",
- "libbpf-cargo 0.27.0",
- "libbpf-rs 0.27.0",
+ "libbpf-cargo 0.27.1",
+ "libbpf-rs 0.27.1",
  "regex",
  "ruzstd",
  "sscanf",
@@ -5928,7 +5928,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "nix 0.31.3",
@@ -5950,7 +5950,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "regex",
  "scx_cargo",
@@ -5967,7 +5967,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "scx_arena",
@@ -5987,7 +5987,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "nvml-wrapper",
  "nvml-wrapper-sys",
@@ -6007,7 +6007,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -6026,7 +6026,7 @@ dependencies = [
  "clap_complete",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -6046,7 +6046,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -6086,7 +6086,7 @@ dependencies = [
  "gpoint",
  "hex",
  "itertools 0.14.0",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "nix 0.31.3",
  "ordered-float 5.5.0",
@@ -6118,7 +6118,7 @@ dependencies = [
  "fb_procfs",
  "inotify",
  "lazy_static",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "nix 0.31.3",
  "nvml-wrapper",
@@ -6147,7 +6147,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -6172,7 +6172,7 @@ dependencies = [
  "itertools 0.14.0",
  "ktstr",
  "lazy_static",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "maplit",
  "nix 0.31.3",
@@ -6196,7 +6196,7 @@ dependencies = [
  "clap_complete",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -6223,7 +6223,7 @@ dependencies = [
  "itertools 0.14.0",
  "ktstr",
  "lazy_static",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "maplit",
  "nix 0.31.3",
@@ -6250,7 +6250,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "lazy_static",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "ordered-float 5.5.0",
  "scx_arena",
@@ -6273,7 +6273,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "flate2",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "regex",
  "scx_cargo",
@@ -6301,7 +6301,7 @@ version = "1.1.3"
 dependencies = [
  "anyhow",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "plain",
  "procfs",
@@ -6317,7 +6317,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "ordered-float 5.5.0",
@@ -6337,7 +6337,7 @@ name = "scx_rustland_core"
 version = "2.4.14"
 dependencies = [
  "anyhow",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "plain",
  "scx_cargo",
@@ -6354,7 +6354,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "ordered-float 5.5.0",
@@ -6405,7 +6405,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "log",
  "scx_cargo",
  "scx_stats",
@@ -6421,7 +6421,7 @@ version = "1.1.3"
 dependencies = [
  "anyhow",
  "buddy_system_allocator",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "scx_cargo",
  "scx_utils",
 ]
@@ -6437,8 +6437,8 @@ dependencies = [
  "glob",
  "hex",
  "lazy_static",
- "libbpf-cargo 0.27.0",
- "libbpf-rs 0.27.0",
+ "libbpf-cargo 0.27.1",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "nix 0.31.3",
@@ -6474,7 +6474,7 @@ dependencies = [
  "futures",
  "glob",
  "hashbrown 0.17.1",
- "libbpf-rs 0.27.0",
+ "libbpf-rs 0.27.1",
  "libc",
  "log",
  "log-panics",
