@@ -4666,7 +4666,6 @@ static void task_h_refresh(task_ctx_t *tctx, u64 now)
 	lag = vdiv((s64)(vref - se->vruntime) * (s64)old, w);
 	vref_leave(se);
 	task_rescale(tctx, w);
-	vref = pack_vref_place(pk, tnow);
 	se->deadline = se->deadline && time_before(se->vruntime, se->deadline) ?
 		       vref - lag + (se->deadline - se->vruntime) : 0;
 	se->vruntime = vref - lag;
