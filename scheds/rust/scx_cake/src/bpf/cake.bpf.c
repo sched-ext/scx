@@ -188,6 +188,7 @@ enum cake_stat {
 	CAKE_SITE_STEAL_MOVED,
 	CAKE_SITE_STEAL_MOVED_X,
 	CAKE_STAT_POOL_DIRECT,		/* pool-bound wake directly used an idle claim */
+	CAKE_SITE_KICK_ALONE,		/* continuation alone at its owner: no idle kick */
 	CAKE_STAT_NR,
 };
 
@@ -2004,7 +2005,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 tcpu = (s32)p->thread_info.cpu;
 	u64 lo, d, slice;
 	s32 idle;
-	bool pooled = false;
+	bool pooled = false, alone;
 
 	/*
 	 * Kernel-thread wakes go straight to the selected CPU's local DSQ, so
@@ -2131,11 +2132,22 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 
 		slice = cake_task_slice(p);
+		/* A continuation whose owner queue and local queue are both
+		 * empty is served by its owner on the very next pick; an idle
+		 * CPU kicked for it wakes to lose the steal race or to move a
+		 * warm task cold. The mark is read before this insert sets it;
+		 * a stale set bit keeps the kick, the safe direction (audit
+		 * 2026-09-15). */
+		alone = !(enq_flags & CAKE_ENQ_WAKEUP) && !cake_qmark_test((u32)tcpu);
 		cake_qmark_set((u32)tcpu);
 		cake_dsq_insert_vtime(p, (u64)(u32)tcpu, slice, vt, enq_flags);
 
 		if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed == 1)
 			cake_pinned_wake_preempt(p, tcpu, d, slice);
+		if (alone && !cake_local_nr(tcpu)) {
+			cake_stat_inc(CAKE_SITE_KICK_ALONE);
+			goto no_idle;
+		}
 	}
 
 kick_idle:

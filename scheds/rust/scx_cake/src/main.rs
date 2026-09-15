@@ -645,7 +645,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 119] = [
+            const NAMES: [&str; 121] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -765,6 +765,8 @@ impl<'a> Scheduler<'a> {
                 "x_pool_served",
                 "steal_moved",
                 "x_steal_moved",
+                "pool_direct",
+                "kick_alone",
             ];
             // The name table must match the BPF enum exactly; a drift prints
             // zeros silently because out-of-range lookups fail quietly.
