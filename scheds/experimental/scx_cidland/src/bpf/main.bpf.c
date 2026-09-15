@@ -402,6 +402,8 @@ struct grp_hdr {
 	u64 load_avg;		/* sum of the queues' averaged loads, tg->load_avg */
 	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
 	u64 idle;		/* cpu.idle, see cidland_cpuctl_set_idle() */
+	u64 slot;		/* its index in @grp_hdrs */
+	u64 next_free;		/* next block to free, see grp_free_defer() */
 };
 
 struct grp_q {
@@ -416,9 +418,26 @@ struct grp_q {
 	u64 load_avg_contrib;	/* what @hdr->load_avg holds of this queue */
 	u64 nr_avg_contrib;	/* what @hdr->nr_avg holds of this queue */
 	u64 shares_at;		/* when @shares was last computed */
+	u32 cid;
+	u32 avg_lock;		/* serializes the averages, see grp_avg_trylock() */
 };
 
 typedef struct grp_q __arena grp_q_t;
+
+/*
+ * A cgroup's block: the header, its queues, one per cid, and a bitmap of the
+ * cids whose queue still adds to the per-cgroup sums, see grp_sweep().
+ */
+static __always_inline grp_q_t *grp_ents(struct grp_hdr __arena *hdr)
+{
+	return (grp_q_t *)((char __arena *)hdr + sizeof(struct grp_hdr));
+}
+
+static __always_inline u64 __arena *grp_live(struct grp_hdr __arena *hdr, u32 nr)
+{
+	return (u64 __arena *)((char __arena *)grp_ents(hdr) +
+			       (u64)nr * sizeof(struct grp_q));
+}
 
 /*
  * Per-cgroup context: where the cgroup's queues are. @hdr is NULL when
@@ -805,6 +824,261 @@ static void grp_nr_add(grp_q_t *gq, s64 delta)
 #define GRP_SUM_NS		1000000ULL
 
 /*
+ * The averages of a group queue, what they add to the per-cgroup sums, and its
+ * bit in the live bitmap are updated by the cid that owns the queue, from its
+ * tick, and by grp_sweep() from whichever cid runs it once the queue has gone
+ * quiet. fair.c does both under the runqueue's lock; here the two take the
+ * queue's own lock and give way to each other rather than wait: the owner's
+ * next tick, or the next sweep, does what one skipped.
+ */
+static bool grp_avg_trylock(grp_q_t *gq)
+{
+	return !READ_ONCE(gq->avg_lock) &&
+	       __sync_val_compare_and_swap(&gq->avg_lock, 0, 1) == 0;
+}
+
+static void grp_avg_unlock(grp_q_t *gq)
+{
+	__sync_val_compare_and_swap(&gq->avg_lock, 1, 0);
+}
+
+/*
+ * Every cgroup block, indexed by struct grp_hdr's @slot, for grp_sweep() to
+ * walk. Allocated by ops.init(), written by the cgroup ops, which the kernel
+ * serializes.
+ */
+#define GRP_MAX_CGROUPS		16384
+
+static u64 __arena *grp_hdrs;
+static u32 grp_hdrs_nr;		/* slots ever used */
+
+static u64 grp_sweep_at __hot_written;
+static u32 grp_sweep_lock __hot_written;
+static u64 grp_sweep_pos;	/* where grp_sweep() goes on from */
+static u64 grp_free_head;	/* blocks waiting to be freed, see grp_free_defer() */
+
+/*
+ * How often, and over how many queues at most, grp_sweep() runs.
+ */
+#define GRP_SWEEP_NS		NSEC_PER_MSEC
+#define GRP_SWEEP_BUDGET	64
+
+/*
+ * Set or clear the bit of @gq's cid in its cgroup's live bitmap. By compare
+ * and swap: the verifier takes no atomic or/and on arena memory.
+ */
+static void grp_live_update(grp_q_t *gq, bool live)
+{
+	u64 __arena *word = &grp_live(gq->hdr, nr_cids)[gq->cid / 64];
+	u64 bit = 1ULL << (gq->cid & 63), old;
+
+	while (can_loop) {
+		old = READ_ONCE(*word);
+		if (!!(old & bit) == live)
+			return;
+		if (__sync_val_compare_and_swap(word, old,
+						live ? old | bit : old & ~bit) == old)
+			return;
+	}
+}
+
+/*
+ * Decay the averages of @gq, a queue with no members left on its cid, and
+ * take what they add to its cgroup's sums along: update_blocked_averages()
+ * for a group whose cfs_rq has gone quiet. The cid that owns the queue only
+ * keeps them from its tick while the group runs there, and without this a
+ * cid the group has left would hold its last contribution for good, inflating
+ * tg_load_avg and shrinking the group's shares everywhere else.
+ */
+__noinline int grp_decay(grp_q_t *gq __arg_arena, u64 now)
+{
+	struct grp_hdr __arena *hdr;
+	u64 la, na;
+
+	TOUCH_ARENA();
+
+	if (!gq || READ_ONCE(gq->load) || !grp_avg_trylock(gq))
+		return 0;
+	/* A task may have joined between the look and the lock. */
+	if (READ_ONCE(gq->load)) {
+		grp_avg_unlock(gq);
+		return 0;
+	}
+	hdr = gq->hdr;
+
+	ravg_accumulate_arena(&gq->load_avg, 0, now);
+	ravg_accumulate_arena(&gq->nr_avg, 0, now);
+	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
+	na = ravg_read_arena(&gq->nr_avg, now);
+	/* A 64th of a task decays to nothing more that matters. */
+	if (na < (1ULL << RAVG_FRAC_BITS) / 64)
+		na = 0;
+
+	if (la != gq->load_avg_contrib) {
+		__sync_fetch_and_add(&hdr->load_avg, (s64)(la - gq->load_avg_contrib));
+		gq->load_avg_contrib = la;
+	}
+	if (na != gq->nr_avg_contrib) {
+		__sync_fetch_and_add(&hdr->nr_avg, (s64)(na - gq->nr_avg_contrib));
+		gq->nr_avg_contrib = na;
+	}
+
+	if (!la && !na)
+		grp_live_update(gq, false);
+	grp_avg_unlock(gq);
+
+	return 0;
+}
+
+/*
+ * One step of grp_sweep() from @pos, cgroup slot in the high 32 bits and cid
+ * in the low: decay the next live queue at or after it in that cgroup, or
+ * move to the next cgroup. Return the position to go on from, or ~0 past the
+ * last slot. A global function, so that the walk is a loop over an opaque
+ * cursor and verifies once.
+ */
+__noinline u64 grp_sweep_step(u64 pos, u64 now)
+{
+	u32 slot = pos >> 32, cid = (u32)pos, words = (nr_cids + 63) / 64, k;
+	struct grp_hdr __arena *hdr;
+	u64 __arena *live;
+	u64 w;
+
+	TOUCH_ARENA();
+
+	if (!grp_hdrs || slot >= grp_hdrs_nr || slot >= GRP_MAX_CGROUPS)
+		return ~0ULL;
+	hdr = (struct grp_hdr __arena *)grp_hdrs[slot];
+	k = cid / 64;
+	if (!hdr || k >= words)
+		return (u64)(slot + 1) << 32;
+
+	live = grp_live(hdr, nr_cids);
+	w = READ_ONCE(live[k]) & (~0ULL << (cid & 63));
+	if (!w)
+		return (u64)slot << 32 | ((k + 1) * 64);
+	cid = k * 64 + __builtin_ctzll(w);
+	if (cid >= nr_cids)
+		return (u64)(slot + 1) << 32;
+
+	grp_decay(&grp_ents(hdr)[cid], now);
+	return (u64)slot << 32 | (cid + 1);
+}
+
+/*
+ * Hand the block of a removed cgroup over to be freed by the next sweep, when
+ * a sweep that may still be looking at it holds grp_sweep_lock and the block
+ * cannot be freed from under it. Producers push without a lock and the sweep
+ * pops with compare and swap, see grp_free_pop(). A push that cannot complete
+ * leaks the block, which is safe.
+ */
+static void grp_free_defer(struct grp_hdr __arena *hdr)
+{
+	u64 old;
+
+	while (can_loop) {
+		old = READ_ONCE(grp_free_head);
+		hdr->next_free = old;
+		if (__sync_val_compare_and_swap(&grp_free_head, old, (u64)hdr) == old)
+			return;
+	}
+}
+
+/* Keep reclamation from adding an unbounded amount of work to one tick. */
+#define GRP_FREE_BUDGET	8
+
+/*
+ * Pop one block from the deferred-free list. The sweep lock serializes
+ * consumers, while cgroup exits may still push new blocks concurrently.
+ */
+__noinline u64 grp_free_pop(void)
+{
+	u64 head, next;
+
+	TOUCH_ARENA();
+
+	while (can_loop) {
+		struct grp_hdr __arena *hdr;
+
+		head = READ_ONCE(grp_free_head);
+		if (!head)
+			return 0;
+		hdr = (struct grp_hdr __arena *)head;
+		next = hdr->next_free;
+		if (__sync_val_compare_and_swap(&grp_free_head, head, next) == head)
+			return head;
+	}
+
+	return 0;
+}
+
+/*
+ * Free a bounded number of blocks grp_free_defer() handed over. Called with
+ * grp_sweep_lock held, after the walk: a block pushed during the walk may be
+ * the one it looked at, and one pushed later is out of the registry and out
+ * of any later walk. Anything left stays linked for a later sweep.
+ */
+__noinline int grp_free_drain(void)
+{
+	u32 i;
+
+	TOUCH_ARENA();
+
+	bpf_for(i, 0, GRP_FREE_BUDGET) {
+		u64 next = grp_free_pop();
+		struct grp_hdr __arena *hdr;
+
+		if (!next)
+			break;
+		hdr = (struct grp_hdr __arena *)next;
+		bpf_arena_free_pages(&arena, hdr, hdr->pages);
+	}
+
+	return 0;
+}
+
+/*
+ * Walk the queues that still add to their cgroup's sums, a few per
+ * GRP_SWEEP_NS, and decay the ones that have gone quiet, see grp_decay().
+ * One cid at a time does it, from its tick, where fair.c's idle balancer
+ * updates the blocked averages of idle CPUs.
+ *
+ * A global function, verified once rather than in the tick's context.
+ */
+__noinline int grp_sweep(u64 now)
+{
+	u64 at = READ_ONCE(grp_sweep_at), pos;
+	bool wrapped = false;
+	u32 i;
+
+	TOUCH_ARENA();
+
+	if (!grp_hdrs || (!grp_hdrs_nr && !READ_ONCE(grp_free_head)) ||
+	    now - at < GRP_SWEEP_NS ||
+	    __sync_val_compare_and_swap(&grp_sweep_at, at, now) != at)
+		return 0;
+	if (__sync_val_compare_and_swap(&grp_sweep_lock, 0, 1))
+		return 0;
+
+	pos = READ_ONCE(grp_sweep_pos);
+	bpf_for(i, 0, GRP_SWEEP_BUDGET) {
+		pos = grp_sweep_step(pos, now);
+		if (pos == ~0ULL) {
+			if (wrapped)
+				break;
+			wrapped = true;
+			pos = 0;
+		}
+	}
+	WRITE_ONCE(grp_sweep_pos, pos == ~0ULL ? 0 : pos);
+	if (READ_ONCE(grp_free_head))
+		grp_free_drain();
+	WRITE_ONCE(grp_sweep_lock, 0);
+
+	return 0;
+}
+
+/*
  * Bring what @gq adds to its cgroup's sums up to date, and recompute the
  * group's shares on the cid, update_cfs_group() with fair.c's default
  * cgroup_mode, "concur", calc_concur_shares():
@@ -836,13 +1110,18 @@ static void grp_update_shares(grp_q_t *gq, u64 now)
 	u64 load = READ_ONCE(gq->load), la, na, nr, total, tg_load, shares;
 	s64 d;
 
+	if (!grp_avg_trylock(gq))
+		return;
+
 	ravg_accumulate_arena(&gq->load_avg, load, now);
 	ravg_accumulate_arena(&gq->nr_avg, READ_ONCE(gq->nr), now);
 	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
 	na = ravg_read_arena(&gq->nr_avg, now);
 
-	if (now - gq->shares_at < GRP_SUM_NS)
+	if (now - gq->shares_at < GRP_SUM_NS) {
+		grp_avg_unlock(gq);
 		return;
+	}
 	gq->shares_at = now;
 
 	d = (s64)(la - gq->load_avg_contrib);
@@ -855,6 +1134,9 @@ static void grp_update_shares(grp_q_t *gq, u64 now)
 		__sync_fetch_and_add(&hdr->nr_avg, d);
 		gq->nr_avg_contrib = na;
 	}
+	if (gq->load_avg_contrib || gq->nr_avg_contrib)
+		grp_live_update(gq, true);
+	grp_avg_unlock(gq);
 
 	nr = READ_ONCE(hdr->nr_avg) >> RAVG_FRAC_BITS;
 	nr = MIN(MAX(nr, 1ULL), (u64)nr_cids);
@@ -5471,6 +5753,8 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 		grp_q_t *gq = tctx ? tctx->gq : NULL;
 		int i;
 
+		grp_sweep(now);
+
 		/* update_cfs_group() for every level the task runs in. */
 		for (i = 0; gq && i < GRP_MAX_DEPTH; i++) {
 			grp_update_shares(gq, now);
@@ -6817,7 +7101,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
 		return 0;
 	}
 
-	bytes = sizeof(struct grp_hdr) + (u64)nr_cids * sizeof(struct grp_q);
+	bytes = sizeof(struct grp_hdr) + (u64)nr_cids * sizeof(struct grp_q) +
+		(u64)((nr_cids + 63) / 64) * sizeof(u64);
 	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 	hdr = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
 	if (!hdr)
@@ -6832,6 +7117,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
 		grp_q_t *gq = &ents[cid];
 
 		gq->hdr = hdr;
+		gq->cid = cid;
 		gq->shares = hdr->weight;
 		if (pents)
 			gq->parent = &pents[cid];
@@ -6839,6 +7125,22 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
 
 	cgc->ents = ents;
 	cgc->hdr = hdr;
+
+	/* A slot for grp_sweep(); a cgroup without one is simply not swept. */
+	hdr->slot = GRP_MAX_CGROUPS;
+	if (grp_hdrs) {
+		u32 slot;
+
+		bpf_for(slot, 0, GRP_MAX_CGROUPS) {
+			if (!grp_hdrs[slot]) {
+				hdr->slot = slot;
+				grp_hdrs[slot] = (u64)hdr;
+				if (slot >= grp_hdrs_nr)
+					grp_hdrs_nr = slot + 1;
+				break;
+			}
+		}
+	}
 	cgc->depth = depth;
 
 	return 0;
@@ -6868,8 +7170,24 @@ void BPF_STRUCT_OPS(cidland_cpuctl_exit, struct cgroup *cgrp)
 	cgc->ents = NULL;
 	cgc->hdr = NULL;
 
-	if (!(cgrp->self.flags & CSS_ONLINE))
+	/* Out of the registry: no sweep that starts from now on can find it. */
+	if (grp_hdrs && hdr->slot < GRP_MAX_CGROUPS)
+		WRITE_ONCE(grp_hdrs[hdr->slot], 0);
+
+	if (cgrp->self.flags & CSS_ONLINE)
+		return;
+
+	/*
+	 * A sweep already walking may still hold a pointer to the block. Free
+	 * it only with the sweep lock held, or leave it to the sweep, which
+	 * frees it once its walk is over, see grp_free_drain().
+	 */
+	if (__sync_val_compare_and_swap(&grp_sweep_lock, 0, 1) == 0) {
 		bpf_arena_free_pages(&arena, hdr, hdr->pages);
+		WRITE_ONCE(grp_sweep_lock, 0);
+	} else {
+		grp_free_defer(hdr);
+	}
 }
 
 /*
@@ -7021,6 +7339,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	if (!nr_cids_max) {
 		scx_bpf_error("cidland_arena_init() didn't run");
 		return -EINVAL;
+	}
+
+	if (cgroup_enabled) {
+		grp_hdrs = bpf_arena_alloc_pages(&arena, NULL,
+						 (GRP_MAX_CGROUPS * sizeof(u64) +
+						  PAGE_SIZE - 1) / PAGE_SIZE,
+						 NUMA_NO_NODE, 0);
+		if (!grp_hdrs)
+			return -ENOMEM;
 	}
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
