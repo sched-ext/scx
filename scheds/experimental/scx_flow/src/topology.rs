@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Trimmed topology
  *
- * Trimmed topology for the flow scheduler. Static cards
- * plus sibling plus LLC plus capacity plus max frequency
- * seed the group table. Live frequency plus CPU cards
- * stay display only and never shape placement.
- * Zero means unknown and keeps a plain fallback.
+ * Seeds the group table from static cards, sibling, LLC, capacity, and max
+ * frequency. Live frequency and CPU cards stay display only and never shape
+ * placement. Zero means unknown and keeps a plain fallback.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use log::warn;
 use scx_utils::Topology;
@@ -22,15 +22,12 @@ fn has_older(topo: &Topology, id: usize, core: usize) -> bool {
 }
 
 /*
- * Static per CPU cards seeded once at attach. Max
- * frequency, cache domain and thread role come from
- * the host topology. Zero frequency means unknown and
- * stays display only. Failures yield an empty list so
- * the scheduler keeps running without cards. Single
- * CPU and no sibling hosts keep plain per CPU cards.
- * Live frequency plus CPU cards stay display only
- * and never shape placement. Max frequency plus
- * capacity plus LLC plus siblings seed groups.
+ * Static per CPU cards seeded once at attach. Max frequency, cache domain and
+ * thread role come from the host topology. Zero frequency means unknown and
+ * stays display only. Failures yield an empty list so the scheduler keeps
+ * running without cards. Single CPU and no sibling hosts keep plain per CPU
+ * cards. Live frequency and CPU cards stay display only and never shape
+ * placement. Max frequency, capacity, LLC, and siblings seed groups.
  */
 pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
     let topo = match Topology::new() {
@@ -60,6 +57,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             delay_win: 0,
             delay_armed: false,
             slice_ns: crate::flow::SLICE_NS,
+            active_ns: 0,
         });
     }
     out.sort_by_key(|e| e.id);
@@ -67,14 +65,11 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
 }
 
 /*
- * One line topology summary for the start log. Counts
- * CPUs and notes sibling and frequency state in plain
- * words. Unknown frequency stays unknown and never
- * prints as zero. Missing cards stay unknown. Single
- * CPU prints as one CPU with no peers. No sibling
- * prints as no SMT with plain per CPU behavior.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * One line topology summary for the start log. Counts CPUs and notes sibling
+ * and frequency state in plain words. Unknown frequency stays unknown and never
+ * prints as zero. Missing cards stay unknown. Single CPU prints as one CPU with
+ * no peers. No sibling prints as no SMT with plain per CPU behavior. Frequency,
+ * LLC, and CPU cards stay display only and never shape placement.
  */
 pub fn describe_topology(cards: &[crate::stats::PerCpuMetrics]) -> String {
     if cards.is_empty() {
@@ -134,11 +129,9 @@ pub fn read_cpuinfo_max_freq(cpu: u32) -> u64 {
 }
 
 /*
- * Base governor without the diagnostic suffix. Trims
- * space plus cuts at the paren plus space, so
- * performance with suffix still reads as performance.
- * Empty stays empty with no trap. The suffix never
- * feeds the unanimity check.
+ * Base governor without the diagnostic suffix. Trims space, cuts at the paren,
+ * and space, so performance with suffix still reads as performance. Empty stays
+ * empty with no trap. The suffix never feeds the unanimity check.
  */
 pub fn governor_base(g: &str) -> &str {
     let t = g.trim();
@@ -152,14 +145,26 @@ pub fn governor_base(g: &str) -> &str {
 }
 
 /*
- * Governor of one CPU with diagnostic suffix only.
- * Reads the scaling governor file. Missing files yield
- * unknown with no trap. Appends the EPP plus platform
- * suffix when present, so powersave with performance
- * EPP stays visible. The suffix is display only and
- * never feeds the unanimity check, see base.
+ * Platform profile once per tick. The file is machine
+ * global with one value for all CPUs. Missing files
+ * yield nothing with no trap, same as the per CPU
+ * path today. Callers read once per tick, then thread
+ * the value into the per CPU path.
  */
-pub fn read_governor(cpu: u32) -> String {
+pub fn read_platform_profile() -> Option<String> {
+    std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/*
+ * Governor of one CPU with a given platform value. Reads the scaling governor
+ * and EPP files per CPU. The platform value is machine global and passed in, so
+ * the tick reads the file once. Missing files yield unknown and no suffix with
+ * no trap, same as today. The suffix is display only and never feeds base.
+ */
+pub fn read_governor_with_profile(cpu: u32, platform: Option<&str>) -> String {
     let base = std::fs::read_to_string(format!(
         "{}{}{}{}",
         "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/", "scaling_governor"
@@ -178,8 +183,7 @@ pub fn read_governor(cpu: u32) -> String {
     .ok()
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty());
-    let pp = std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
-        .ok()
+    let pp = platform
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     match (epp, pp) {
@@ -191,12 +195,48 @@ pub fn read_governor(cpu: u32) -> String {
 }
 
 /*
- * True when every governor reads performance. Needs a
- * non empty list with each base at performance, so a
- * single powersave plus mixed plus unknown plus empty
- * stays strict with no trap. The EPP plus platform
- * suffix never feeds this check, see base. Online
- * CPUs only with no per CPU array in BPF.
+ * Governor of one CPU with diagnostic suffix only. Reads the scaling governor
+ * file. Missing files yield unknown with no trap. Appends the EPP and platform
+ * suffix when present, so powersave with performance EPP stays visible. The
+ * suffix is display only and never feeds the unanimity check, see base.
+ */
+#[allow(dead_code)]
+pub fn read_governor(cpu: u32) -> String {
+    read_governor_with_profile(cpu, read_platform_profile().as_deref())
+}
+
+/*
+ * Governors for one tick with one platform read.
+ * Calls the provider exactly once per collection, then
+ * threads the value into each per CPU read. Empty stays
+ * empty with one call and no trap. Output matches per
+ * CPU reads with the same value, see the tests.
+ */
+pub fn collect_governors_with<F>(cpus: &[u32], mut provider: F) -> Vec<String>
+where
+    F: FnMut() -> Option<String>,
+{
+    let platform = provider();
+    cpus.iter()
+        .map(|&id| read_governor_with_profile(id, platform.as_deref()))
+        .collect()
+}
+
+/*
+ * Governors for one tick over online CPUs. Reads the
+ * platform profile once per call, so a 16 CPU tick pays
+ * one slow read, not sixteen. Missing files yield the
+ * same strings as per CPU reads with no trap.
+ */
+pub fn collect_governors(cpus: &[u32]) -> Vec<String> {
+    collect_governors_with(cpus, read_platform_profile)
+}
+
+/*
+ * True when every governor reads performance. Needs a non empty list with each
+ * base at performance, so a single powersave, mixed, unknown, and empty stays
+ * strict with no trap. The EPP and platform suffix never feeds this check, see
+ * base. Online CPUs only with no per CPU array in BPF.
  */
 pub fn perf_unanimous(governors: &[String]) -> bool {
     if governors.is_empty() {
@@ -211,12 +251,10 @@ pub fn perf_unanimous(governors: &[String]) -> bool {
 }
 
 /*
- * Display governor for the dashboard plus snapshot.
- * Empty reads as unknown. Unanimous with same suffix
- * reads as the first full string, so EPP stays visible.
- * Unanimous with differing suffix reads as the base.
- * Mixed bases read as mixed with no list. Unknown alone
- * stays unknown with no trap.
+ * Display governor for the dashboard and snapshot. Empty reads as unknown.
+ * Unanimous with same suffix reads as the first full string, so EPP stays
+ * visible. Unanimous with differing suffix reads as the base. Mixed bases read
+ * as mixed with no list. Unknown alone stays unknown with no trap.
  */
 pub fn display_governor(governors: &[String]) -> String {
     if governors.is_empty() {
@@ -253,17 +291,13 @@ pub fn display_governor(governors: &[String]) -> String {
 }
 
 /*
- * Seed the per CPU group table plus ready flag. Reads
- * capacity plus max frequency plus siblings plus LLC
- * for live CPUs, then assigns with core split plus LLC
- * rules plus hetero interleave. All singleton cores use
- * halves plus interleave exactly. Ready stays cleared
- * when the core view matches halves, else ready set.
- * Strict iff ready is zero, best effort iff ready is
- * one. Single CPU keeps ready cleared with all light.
- * Short slices clamp with no pad. One core in one LLC
- * keeps LIGHT with no split. Each odd LLC gives the
- * extra core to hog.
+ * Seed the per CPU group table and ready flag. Reads capacity, max frequency,
+ * siblings, and LLC for live CPUs, then assigns with core split, LLC rules, and
+ * hetero interleave. All singleton cores use halves and interleave exactly.
+ * Ready stays cleared when the core view matches halves, else ready set. Strict
+ * iff ready is zero, best effort iff ready is one. Single CPU keeps ready
+ * cleared with all light. Short slices clamp with no pad. One core in one LLC
+ * keeps LIGHT with no split. Each odd LLC gives the extra core to hog.
  */
 pub fn group_seed(nr: usize) -> ([u8; crate::flow_group::GROUP_TABLE_LEN], u8) {
     let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
@@ -314,12 +348,10 @@ pub fn sibling_lists(nr: usize) -> Vec<Vec<u32>> {
 }
 
 /*
- * Sibling partner table plus fallback count. Builds
- * cores from sibling lists, then maps each CPU to the
- * next CPU in the same core in id order. Singletons
- * hold 0xffff, so the BPF free check is a no-op.
- * Empty lists count as sysfs fallbacks with singleton
- * behavior and no trap. Capped at 1024 with no new
+ * Sibling partner table and fallback count. Builds cores from sibling lists,
+ * then maps each CPU to the next CPU in the same core in id order. Singletons
+ * hold 0xffff, so the BPF free check is a no-op. Empty lists count as sysfs
+ * fallbacks with singleton behavior and no trap. Capped at 1024 with no new
  * maps. The caller logs the count once at start.
  */
 pub fn sibling_seed(nr: usize) -> ([u16; crate::flow_group::GROUP_TABLE_LEN], usize) {
@@ -361,12 +393,10 @@ pub fn llc_ids(nr: usize) -> Vec<u32> {
 }
 
 /*
- * Parse one CPU list from sysfs. Accepts comma plus
- * range form such as 0-7 plus 0,2,4 plus 0-3,8-11.
- * Trims space plus newline. Bad tokens stay out with
- * no trap. Ids at or past the table bound stay out,
- * so the cap holds with no extra use. Sorted with no
- * dup, so rank order stays stable.
+ * Parse one CPU list from sysfs. Accepts comma, range form such as 0-7, 0,2,4,
+ * and 0-3,8-11. Trims space and newline. Bad tokens stay out with no trap. Ids
+ * at or past the table bound stay out, so the cap holds with no extra use.
+ * Sorted with no dup, so rank order stays stable.
  */
 pub fn parse_cpu_list(s: &str) -> Vec<u32> {
     let mut out = crate::flow_group::parse_siblings_list(s);
@@ -387,11 +417,10 @@ pub fn read_cpu_list_file(path: &str) -> Vec<u32> {
 }
 
 /*
- * Online CPUs once at init. Reads the online file a
- * single time, so the group table plus snapshot share
- * one rank order. Missing files fall back to topology
- * cards with no trap. Sorted with no dup and capped
- * at the table bound. Empty stays empty with no pad.
+ * Online CPUs once at init. Reads the online file a single time, so the group
+ * table and snapshot share one rank order. Missing files fall back to topology
+ * cards with no trap. Sorted with no dup and capped at the table bound. Empty
+ * stays empty with no pad.
  */
 pub fn online_cpus() -> Vec<u32> {
     let mut out = read_cpu_list_file("/sys/devices/system/cpu/online");
@@ -427,10 +456,9 @@ pub fn possible_cpus() -> Vec<u32> {
 }
 
 /*
- * Possible CPU count for skew checks. Holds max id
- * plus one capped at the table bound. Missing files
- * fall back to online max plus one with no trap.
- * Empty stays zero with no division.
+ * Possible CPU count for skew checks. Holds max id and one capped at the table
+ * bound. Missing files fall back to online max and one with no trap. Empty
+ * stays zero with no division.
  */
 pub fn possible_nr() -> usize {
     let poss = possible_cpus();
@@ -502,15 +530,12 @@ pub fn llc_ids_online(online: &[u32]) -> Vec<u32> {
 }
 
 /*
- * Seed the per CPU group table by online rank plus
- * write by id. Reads capacity plus max frequency plus
- * siblings plus LLC for online CPUs only, then assigns
- * with core split plus LLC rules plus hetero interleave
- * in rank order. Offline ids stay light inert with no
- * trap. Dense full keeps prior table plus ready exactly.
- * Skewed forces ready one even when uniform, so SMT off
- * holds 4 plus 4 over online only. Strict iff ready is
- * zero, best effort iff ready is one. Single online
+ * Seed the per CPU group table by online rank and write by id. Reads capacity,
+ * max frequency, siblings, and LLC for online CPUs only, then assigns with core
+ * split, LLC rules, and hetero interleave in rank order. Offline ids stay light
+ * inert with no trap. Dense full keeps prior table and ready exactly. Skewed
+ * forces ready one even when uniform, so SMT off holds 4 and 4 over online
+ * only. Strict iff ready is zero, best effort iff ready is one. Single online
  * keeps ready cleared with all light.
  */
 pub fn group_seed_online(
@@ -530,8 +555,8 @@ pub fn group_seed_online(
             0,
         );
     }
-    // Dense full reuses the prior path exactly, so prior
-    // state holds with no drift plus no extra branch.
+    // Dense full reuses the prior path exactly, so prior state holds with no
+    // drift and no extra branch.
     if !crate::flow_group::online_skewed(&ids, possible) {
         return group_seed(ids.len());
     }
@@ -547,13 +572,11 @@ pub fn group_seed_online(
 }
 
 /*
- * Sibling partner table by online rank plus fallback
- * count. Builds online cores from sibling lists, then
- * maps each online CPU to the next online CPU in the
- * same core in id order. Singletons plus offline hold
- * 0xffff, so the BPF free check is a no-op. Empty lists
- * count as sysfs fallbacks with singleton behavior and
- * no trap. Dense full matches the prior table exactly.
+ * Sibling partner table by online rank and fallback count. Builds online cores
+ * from sibling lists, then maps each online CPU to the next online CPU in the
+ * same core in id order. Singletons and offline hold 0xffff, so the BPF free
+ * check is a no-op. Empty lists count as sysfs fallbacks with singleton
+ * behavior and no trap. Dense full matches the prior table exactly.
  */
 pub fn sibling_seed_online(online: &[u32]) -> ([u16; crate::flow_group::GROUP_TABLE_LEN], usize) {
     let mut ids: Vec<u32> = online
@@ -598,10 +621,9 @@ pub fn current_freq_khz(cpu: u32) -> u64 {
 }
 
 /*
- * Filter cards to an allowed subset for tests. Keeps
- * cards whose id is marked in the mask. Models pinned
- * cgroup subsets with no placement use. Frequency plus
- * LLC plus CPU cards stay display only here.
+ * Filter cards to an allowed subset for tests. Keeps cards whose id is marked
+ * in the mask. Models pinned cgroup subsets with no placement use. Frequency,
+ * LLC, and CPU cards stay display only here.
  */
 #[cfg(test)]
 pub fn filter_allowed(
@@ -616,10 +638,9 @@ pub fn filter_allowed(
 }
 
 /*
- * Synthetic card for tests. Builds one display only
- * card with the given id plus frequency plus LLC plus
- * thread role. Slice stays fixed at 1ms. Group stays
- * light with zero.
+ * Synthetic card for tests. Builds one display only card with the given id,
+ * frequency, LLC, and thread role. Slice stays fixed at 1ms. Group stays light
+ * with zero.
  */
 #[cfg(test)]
 pub fn synthetic_card(
@@ -642,6 +663,7 @@ pub fn synthetic_card(
         delay_win: 0,
         delay_armed: false,
         slice_ns: crate::flow::SLICE_NS,
+        active_ns: 0,
     }
 }
 
@@ -770,7 +792,7 @@ mod tests {
         assert!(perf_unanimous(&single));
     }
 
-    /* Mixed plus unknown plus empty stay strict. */
+    /* Mixed, unknown, and empty stay strict. */
     #[test]
     fn perf_mixed_and_unknown_stay_strict() {
         let mixed: Vec<String> = vec!["performance".into(), "powersave".into()];
@@ -811,5 +833,44 @@ mod tests {
             "powersave (epp:performance)".into(),
         ];
         assert_eq!(display_governor(&suffixed_mixed), "mixed");
+    }
+
+    /* Provider runs once per collection over N CPUs. */
+    #[test]
+    fn collect_governors_reads_platform_once() {
+        let cpus: Vec<u32> = (0..16).collect();
+        let mut calls = 0;
+        let got = collect_governors_with(&cpus, || {
+            calls += 1;
+            Some("balanced".to_string())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(got.len(), 16);
+    }
+
+    /* Batched output matches per CPU reads exactly. */
+    #[test]
+    fn collect_governors_matches_per_cpu_reads() {
+        let cpus: Vec<u32> = (0..8).collect();
+        for platform in [
+            None,
+            Some("balanced".to_string()),
+            Some("performance".to_string()),
+        ] {
+            let want: Vec<String> = cpus
+                .iter()
+                .map(|&id| read_governor_with_profile(id, platform.as_deref()))
+                .collect();
+            let got = collect_governors_with(&cpus, || platform.clone());
+            assert_eq!(got, want);
+        }
+        let empty: Vec<u32> = Vec::new();
+        let mut calls = 0;
+        let got = collect_governors_with(&empty, || {
+            calls += 1;
+            None
+        });
+        assert!(got.is_empty());
+        assert_eq!(calls, 1);
     }
 }

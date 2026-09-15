@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Build helper
  *
- * Build helper for the flow scheduler. It adds a warning
- * suppression for the generated kernel header and then
- * builds the BPF object and the userspace bindings.
+ * Adds a warning suppression for the generated kernel header and then builds the BPF object
+ * and the userspace bindings.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 fn add_bpf_warning_suppression(flag: &str) {

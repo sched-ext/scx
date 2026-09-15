@@ -1,24 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Group helpers
  *
- * Group helpers for the flow scheduler.
- * Two groups split cores by half with extra
- * to hog. Odd counts give the extra core to hog in
- * both views. One LLC splits globally. Two plus N
- * LLCs split in each LLC. All singleton cores use
- * halves plus interleave exactly. Light holds short
- * waits. Hog holds burn.
- * The classifier uses burn with a 32ms window plus
- * wake hits. Demote needs 16ms burn or one burst at
- * 4ms quiet down to 1ms floor during flood. Promote
- * needs 4ms low for 64 wins near 2s or 8 short blocks
- * below 1ms with burn below 4ms. Cold tasks join
- * light. The 4x gap keeps flips rare. A per CPU table
- * holds live groups when ready, else halves applies.
- * Short slices clamp with no pad. Strict iff ready is
- * zero, best effort iff ready is one with dispatch on
- * halves and placement on live.
+ * Holds the group helpers with two groups that split cores by half with extra
+ * to hog. The classifier uses burn and wake hits to demote and promote between
+ * light and hog. A per CPU table holds live groups when ready, else halves
+ * applies.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 /* Count of groups. Fixed at two with no knob. */
@@ -28,12 +17,12 @@ pub const NGROUPS: u64 = 2;
 pub const GROUP_LIGHT: u8 = 0;
 /* Hog group id for burn. */
 pub const GROUP_HOG: u8 = 1;
-/* Park id of the light group. */
+/* Overflow id of the light group. */
 #[cfg(test)]
-pub const PARK_LIGHT: u64 = 0x5000;
-/* Park id of the hog group. */
+pub const OVERFLOW_LIGHT: u64 = 0x6800;
+/* Overflow id of the hog group. */
 #[cfg(test)]
-pub const PARK_HOG: u64 = 0x5001;
+pub const OVERFLOW_HOG: u64 = 0x6801;
 /* Window length in nanos at 32ms. */
 #[cfg(test)]
 pub const WIN_NS: u64 = 32_000_000;
@@ -75,25 +64,25 @@ pub const PERF_LIGHT: u32 = 1024;
 /* Perf hint of hog at max. */
 #[cfg(test)]
 pub const PERF_HOG: u32 = 1024;
-/* Cpu perf level at max for running. */
+/* CPU perf level at max for running. */
 #[cfg(test)]
 pub const CPUPERF_LEVEL: u32 = 1024;
-/* Cpu perf idle at zero for blocked empty. */
+/* CPU perf idle at zero for blocked empty. */
 #[cfg(test)]
 pub const CPUPERF_IDLE: u32 = 0;
-/* Cpu perf EMA budget in nanos at 1ms. */
+/* CPU perf EMA budget in nanos at 1ms. */
 #[cfg(test)]
 pub const CPUPERF_BUDGET_NS: u64 = 1_000_000;
-/* Cpu perf EMA half-life in nanos at 24ms. */
+/* CPU perf EMA half-life in nanos at 24ms. */
 #[cfg(test)]
 pub const CPUPERF_HALF_LIFE_NS: u64 = 24_000_000;
-/* Cpu perf EMA climb alpha at 12x in FP8. */
+/* CPU perf EMA climb alpha at 12x in FP8. */
 #[cfg(test)]
 pub const CPUPERF_ALPHA: u64 = 3072;
-/* Cpu perf fixed point shift at 8. */
+/* CPU perf fixed point shift at 8. */
 #[cfg(test)]
 pub const CPUPERF_FP_SHIFT: u64 = 8;
-/* Cpu perf fixed point one at 256. */
+/* CPU perf fixed point one at 256. */
 #[cfg(test)]
 pub const CPUPERF_FP_ONE: u64 = 256;
 
@@ -117,12 +106,10 @@ pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
 }
 
 /*
- * Live group of one CPU from table plus halves fallback.
- * Reads the table when ready holds groups, else halves.
- * Bad values fall back to halves with no trap. Mirrors
- * the BPF live helper for snapshot use. Placement uses
- * live, dispatch keeps halves, so strict iff ready is
- * zero, best effort iff ready is one.
+ * Live group of one CPU from table and halves fallback. Reads the table when
+ * ready holds groups, else halves. Bad values fall back to halves with no trap.
+ * Mirrors the BPF live helper for snapshot use. Placement uses live, dispatch
+ * keeps halves, so strict iff ready is zero, best effort iff ready is one.
  */
 pub fn group_live(cpu: u32, nr: usize, table: &[u8], ready: u8) -> u8 {
     if ready != 0 && (cpu as usize) < nr && (cpu as usize) < table.len() {
@@ -138,9 +125,8 @@ pub fn group_live(cpu: u32, nr: usize, table: &[u8], ready: u8) -> u8 {
 }
 
 /*
- * True when values spread past 10pct. Needs max past
- * min by more than 10pct of max, so uniform hosts stay
- * plain. Empty plus single plus zero max stays false.
+ * True when values spread past 10pct. Needs max past min by more than 10pct of
+ * max, so uniform hosts stay plain. Empty, single, and zero max stays false.
  */
 pub fn spread_exceeds(vals: &[u64]) -> bool {
     if vals.len() < 2 {
@@ -172,13 +158,11 @@ pub fn hetero_needed(caps: &[u64], freqs: &[u64]) -> bool {
 }
 
 /*
- * Assign groups by sorted interleave. Sorts live CPUs
- * by capacity plus frequency plus id, then assigns even
- * slots to light and odd slots to hog. Odd counts give
- * the extra CPU to hog, so counts match halves with no
- * knob. The order spreads fast CPUs across both groups.
- * Halves is the fallback when the table is not ready.
- * Single CPU keeps all light.
+ * Assign groups by sorted interleave. Sorts live CPUs by capacity, frequency,
+ * and id, then assigns even slots to light and odd slots to hog. Odd counts
+ * give the extra CPU to hog, so counts match halves with no knob. The order
+ * spreads fast CPUs across both groups. Halves is the fallback when the table
+ * is not ready. Single CPU keeps all light.
  */
 pub fn assign_sorted_interleave(caps: &[u64], freqs: &[u64], nr: usize) -> Vec<u8> {
     let mut idx: Vec<usize> = (0..nr).collect();
@@ -205,12 +189,10 @@ pub fn assign_sorted_interleave(caps: &[u64], freqs: &[u64], nr: usize) -> Vec<u
 }
 
 /*
- * Seed the per CPU group table plus ready flag. Returns
- * interleaved groups with ready set when hetero holds.
- * Returns halves with ready cleared when hosts look
- * uniform, so the BPF side plus snapshot stay on halves.
- * Short slices clamp to available entries with no pad,
- * so missing entries never fake hetero.
+ * Seed the per CPU group table and ready flag. Returns interleaved groups with
+ * ready set when hetero holds. Returns halves with ready cleared when hosts
+ * look uniform, so the BPF side and snapshot stay on halves. Short slices clamp
+ * to available entries with no pad, so missing entries never fake hetero.
  */
 pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_LEN], u8) {
     let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
@@ -238,11 +220,10 @@ pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_
 pub const SIBLING_EMPTY: u16 = 0xffff;
 
 /*
- * Parse one sibling list from sysfs. Accepts comma
- * separated ids plus ranges with dash, such as 0-1
- * plus 0,1 plus 0-1,4. Trims space plus newline.
- * Bad tokens stay out with no trap. Ids at or past
- * 1024 stay out, so the cap holds with no extra use.
+ * Parse one sibling list from sysfs. Accepts comma separated ids and ranges
+ * with dash, such as 0-1, 0,1, and 0-1,4. Trims space and newline. Bad tokens
+ * stay out with no trap. Ids at or past 1024 stay out, so the cap holds with no
+ * extra use.
  */
 pub fn parse_siblings_list(s: &str) -> Vec<u32> {
     let mut out = Vec::new();
@@ -289,12 +270,10 @@ pub fn parse_siblings_list(s: &str) -> Vec<u32> {
 }
 
 /*
- * Build cores from sibling lists with union find.
- * Each list holds the sibling ids of one CPU. Only
- * ids below nr join, so offline ids stay out. Missing
- * lists mean singleton cores with no trap. Cores sort
- * by member plus by least id, so order stays stable.
- * No division, so no zero risk.
+ * Build cores from sibling lists with union find. Each list holds the sibling
+ * ids of one CPU. Only ids below nr join, so offline ids stay out. Missing
+ * lists mean singleton cores with no trap. Cores sort by member and by least
+ * id, so order stays stable. No division, so no zero risk.
  */
 pub fn build_cores(nr: usize, lists: &[Vec<u32>]) -> Vec<Vec<u32>> {
     let n = nr.min(GROUP_TABLE_LEN);
@@ -352,9 +331,8 @@ pub fn build_cores(nr: usize, lists: &[Vec<u32>]) -> Vec<Vec<u32>> {
 }
 
 /*
- * True when all cores hold one CPU. Hosts with SMT
- * off land here. Callers bypass LLC rules then, so
- * the split reduces to halves plus interleave with
+ * True when all cores hold one CPU. Hosts with SMT off land here. Callers
+ * bypass LLC rules then, so the split reduces to halves and interleave with
  * state equivalence to the prior release.
  */
 pub fn cores_are_singletons(cores: &[Vec<u32>]) -> bool {
@@ -414,14 +392,12 @@ pub fn assign_cores_split(cores: &[Vec<u32>], nr: usize) -> Vec<u8> {
 }
 
 /*
- * Assign groups by hetero core interleave. Sorts cores
- * by max capacity plus max frequency plus least id,
- * then assigns even slots to light and odd slots to
- * hog. Odd core counts give the extra core to hog, so
- * counts match the split bias with no knob. Spreads
- * fast cores across both groups. Single CPU keeps all
- * light. Single core falls back to CPU interleave, so
- * no group stays empty with no trap.
+ * Assign groups by hetero core interleave. Sorts cores by max capacity, max
+ * frequency, and least id, then assigns even slots to light and odd slots to
+ * hog. Odd core counts give the extra core to hog, so counts match the split
+ * bias with no knob. Spreads fast cores across both groups. Single CPU keeps
+ * all light. Single core falls back to CPU interleave, so no group stays empty
+ * with no trap.
  */
 pub fn assign_cores_interleave(
     cores: &[Vec<u32>],
@@ -480,20 +456,16 @@ pub fn assign_cores_interleave(
 }
 
 /*
- * Assign groups with LLC rules. One LLC splits cores
- * globally. Two plus N LLCs split cores in each LLC,
- * so each cache domain stays balanced. Cores take the
- * LLC of the least id. Missing LLC folds to one domain
- * with no pad. One core in one LLC keeps LIGHT as the
- * default with no split, so a single core LLC never
- * forces hog. Each LLC with an odd core count gives
- * the extra core to hog, so per LLC bias matches the
- * global bias with no knob. All singleton cores bypass
- * LLC and use the prior halves plus interleave exactly,
- * so SMT off keeps state equivalence. Empty group falls
- * back to global, so no group stays empty with no trap.
- * Strict iff ready is zero, best effort iff ready is
- * one with the same core view in both cases.
+ * Assign groups with LLC rules. One LLC splits cores globally. Two and N LLCs
+ * split cores in each LLC, so each cache domain stays balanced. Cores take the
+ * LLC of the least id. Missing LLC folds to one domain with no pad. One core in
+ * one LLC keeps LIGHT as the default with no split, so a single core LLC never
+ * forces hog. Each LLC with an odd core count gives the extra core to hog, so
+ * per LLC bias matches the global bias with no knob. All singleton cores bypass
+ * LLC and use the prior halves and interleave exactly, so SMT off keeps state
+ * equivalence. Empty group falls back to global, so no group stays empty with
+ * no trap. Strict iff ready is zero, best effort iff ready is one with the same
+ * core view in both cases.
  */
 pub fn assign_by_llc(
     cores: &[Vec<u32>],
@@ -626,15 +598,12 @@ pub fn assign_by_llc(
 }
 
 /*
- * Seed the per CPU group table with topology. Builds
- * cores from sibling lists with union find, then
- * assigns with LLC rules plus hetero interleave. All
- * singleton cores use the prior halves plus interleave
- * exactly. Ready stays cleared when the core view
- * matches halves, else ready set. Strict iff ready is
- * zero, best effort iff ready is one. Short slices
- * clamp with no pad. Single CPU keeps ready cleared
- * with all light. One core in one LLC keeps LIGHT with
+ * Seed the per CPU group table with topology. Builds cores from sibling lists
+ * with union find, then assigns with LLC rules and hetero interleave. All
+ * singleton cores use the prior halves and interleave exactly. Ready stays
+ * cleared when the core view matches halves, else ready set. Strict iff ready
+ * is zero, best effort iff ready is one. Short slices clamp with no pad. Single
+ * CPU keeps ready cleared with all light. One core in one LLC keeps LIGHT with
  * no split. Each odd LLC gives the extra core to hog.
  */
 pub fn seed_groups_topology(
@@ -683,9 +652,8 @@ pub fn seed_groups_topology(
 }
 
 /*
- * True when online ids form dense 0 plus 1 plus 2
- * with no gaps. Empty counts as dense with no trap.
- * The caller passes sorted ids with no sort here.
+ * True when online ids form dense 0, 1, and 2 with no gaps. Empty counts as
+ * dense with no trap. The caller passes sorted ids with no sort here.
  */
 pub fn online_is_dense(online: &[u32]) -> bool {
     for (rank, &id) in online.iter().enumerate() {
@@ -697,12 +665,10 @@ pub fn online_is_dense(online: &[u32]) -> bool {
 }
 
 /*
- * True when the online set skews from possible.
- * Needs len past possible or gaps or dense short,
- * so SMT off plus isolated plus hotplug all force
- * the live table with no halves fallback. Empty
- * stays false with no trap. Dense full stays false,
- * so prior state holds with no change.
+ * True when the online set skews from possible. Needs len past possible or gaps
+ * or dense short, so SMT off, isolated, and hotplug all force the live table
+ * with no halves fallback. Empty stays false with no trap. Dense full stays
+ * false, so prior state holds with no change.
  */
 pub fn online_skewed(online: &[u32], possible_nr: usize) -> bool {
     if online.is_empty() {
@@ -716,14 +682,11 @@ pub fn online_skewed(online: &[u32], possible_nr: usize) -> bool {
 }
 
 /*
- * Build cores from online ids with union find.
- * Each rank holds the sibling ids of one online CPU.
- * Only ids in the online set join, so offline ids
- * stay out with no trap. Missing lists mean singleton
- * cores with no trap. Cores hold ids sorted plus cores
- * sorted by least id, so order stays stable. No
- * division, so no zero risk. Mirrors build cores for
- * dense with rank mapping for sparse.
+ * Build cores from online ids with union find. Each rank holds the sibling ids
+ * of one online CPU. Only ids in the online set join, so offline ids stay out
+ * with no trap. Missing lists mean singleton cores with no trap. Cores hold ids
+ * sorted and cores sorted by least id, so order stays stable. No division, so
+ * no zero risk. Mirrors build cores for dense with rank mapping for sparse.
  */
 pub fn build_cores_online(online: &[u32], lists: &[Vec<u32>]) -> Vec<Vec<u32>> {
     use std::collections::HashMap;
@@ -783,17 +746,13 @@ pub fn build_cores_online(online: &[u32], lists: &[Vec<u32>]) -> Vec<Vec<u32>> {
 }
 
 /*
- * Seed the per CPU group table by online rank plus
- * write by id. Sorts live ranks by capacity plus
- * frequency plus rank, then assigns even slots to
- * light and odd slots to hog. Odd counts give the
- * extra rank to hog, so counts match halves with no
- * knob. Offline ids stay light inert with no trap.
- * Dense full keeps prior ready plus table exactly.
- * Skewed plus hetero both force ready one, so SMT off
- * holds 4 plus 4 over online only with no stall.
- * Strict iff ready is zero, best effort iff ready is
- * one with dispatch on halves and placement on live.
+ * Seed the per CPU group table by online rank and write by id. Sorts live ranks
+ * by capacity, frequency, and rank, then assigns even slots to light and odd
+ * slots to hog. Odd counts give the extra rank to hog, so counts match halves
+ * with no knob. Offline ids stay light inert with no trap. Dense full keeps
+ * prior ready and table exactly. Skewed and hetero both force ready one, so SMT
+ * off holds 4 and 4 over online only with no stall. Strict iff ready is zero,
+ * best effort iff ready is one with dispatch on halves and placement on live.
  */
 pub fn seed_groups_online(
     caps_rank: &[u64],
@@ -824,9 +783,8 @@ pub fn seed_groups_online(
     if !hetero && !skewed {
         return (table, 0);
     }
-    // Uniform skewed keeps rank halves, hetero keeps
-    // interleave, so the table holds 4 plus 4 over online
-    // only with offline inert.
+    // Uniform skewed keeps rank halves, hetero keeps interleave, so the table
+    // holds 4 and 4 over online only with offline inert.
     let assign: Vec<u8> = if hetero {
         assign_sorted_interleave(&live_caps, &live_freqs, n)
     } else {
@@ -841,18 +799,14 @@ pub fn seed_groups_online(
 }
 
 /*
- * Seed the per CPU group table by online rank with
- * topology. Builds online cores from sibling lists,
- * then assigns with LLC rules plus hetero interleave
- * in rank order. All singleton online cores use the
- * rank halves plus interleave exactly. Offline ids
- * stay light inert with no trap. Dense full keeps
- * prior table plus ready exactly. Skewed forces ready
- * one even when uniform, so SMT off holds groups over
- * online only with no halves drift. Strict iff ready
- * is zero, best effort iff ready is one. Short slices
- * clamp with no pad. Single online keeps ready cleared
- * with all light.
+ * Seed the per CPU group table by online rank with topology. Builds online
+ * cores from sibling lists, then assigns with LLC rules and hetero interleave
+ * in rank order. All singleton online cores use the rank halves and interleave
+ * exactly. Offline ids stay light inert with no trap. Dense full keeps prior
+ * table and ready exactly. Skewed forces ready one even when uniform, so SMT
+ * off holds groups over online only with no halves drift. Strict iff ready is
+ * zero, best effort iff ready is one. Short slices clamp with no pad. Single
+ * online keeps ready cleared with all light.
  */
 pub fn seed_groups_topology_online(
     caps_rank: &[u64],
@@ -973,13 +927,11 @@ pub fn sibling_table(cores: &[Vec<u32>], nr: usize) -> [u16; GROUP_TABLE_LEN] {
 }
 
 /*
- * Sibling partner table by online id for BPF placement.
- * Each online CPU holds the next online CPU in the same
- * core in id order. Singletons plus offline hold 0xffff,
- * so the free check is a no-op with no trap. Offline
- * stays inert with no write. Capped at 1024 with no
- * trap. Mirrors the BPF walk with the same bounds.
- * Dense full matches the prior table exactly.
+ * Sibling partner table by online id for BPF placement. Each online CPU holds
+ * the next online CPU in the same core in id order. Singletons and offline hold
+ * 0xffff, so the free check is a no-op with no trap. Offline stays inert with
+ * no write. Capped at 1024 with no trap. Mirrors the BPF walk with the same
+ * bounds. Dense full matches the prior table exactly.
  */
 pub fn sibling_table_online(cores_id: &[Vec<u32>], online: &[u32]) -> [u16; GROUP_TABLE_LEN] {
     let mut out = [SIBLING_EMPTY; GROUP_TABLE_LEN];
@@ -1017,21 +969,21 @@ pub fn sibling_table_online(cores_id: &[Vec<u32>], online: &[u32]) -> [u16; GROU
 }
 
 /*
- * Park id of one group with light as default. Hog
- * uses 0x5001. Any other value uses 0x5000.
+ * Overflow id of one group with light as default. Hog
+ * uses 0x6801. Any other value uses 0x6800.
  */
 #[cfg(test)]
-pub fn park_for_group(group: u8) -> u64 {
+pub fn overflow_for_group(group: u8) -> u64 {
     if group == GROUP_HOG {
-        PARK_HOG
+        OVERFLOW_HOG
     } else {
-        PARK_LIGHT
+        OVERFLOW_LIGHT
     }
 }
 
 /*
- * Perf hint of one group with single policy at max.
- * Light plus hog use max. Any other value uses max.
+ * Perf hint of one group with single policy at max. Light and hog use max. Any
+ * other value uses max.
  */
 #[cfg(test)]
 pub fn perf_for_group(group: u8) -> u32 {
@@ -1043,13 +995,11 @@ pub fn perf_for_group(group: u8) -> u32 {
 }
 
 /*
- * True when a stopping task should restore the idle hint.
- * Bang-bang edge at M1 with no EMA plus no state growth.
- * M2 keeps the predicate but maps the value through the
- * EMA with from_ema, so long idle still decays to zero.
- * Needs blocked plus per CPU queue empty plus local empty,
- * so runnable never restores with any queued work held high.
- * Mirrors the BPF helper for stopping use.
+ * True when a stopping task should restore the idle hint. Bang-bang edge at M1
+ * with no EMA and no state growth. M2 keeps the predicate but maps the value
+ * through the EMA with from_ema, so long idle still decays to zero. Needs
+ * blocked, per CPU queue empty, and local empty, so runnable never restores
+ * with any queued work held high. Mirrors the BPF helper for stopping use.
  */
 #[cfg(test)]
 pub fn should_restore_hint(runnable: bool, dsq_nr: u64, local_nr: u64) -> bool {
@@ -1086,16 +1036,14 @@ pub fn ema_climb(ema: u64, delta: u64) -> u64 {
 }
 
 /*
- * Decay the EMA by sleep with half-life halves plus Taylor.
- * Shifts whole half-lives then scales the residual below one
- * half with a 2nd-order Taylor of 0.5 to the r power at r is
- * rem over half. Fixed point at FP_ONE 256 holds ln2 times
- * 256 at 177 plus quad times 256 at 61, so t is rem times
- * 256 over half in 0 to 255 with dec1 plus inc2 in u64 order
- * with no float plus no loop. Zero sleep keeps identity.
- * Zero half keeps identity with no divide. At or past 64
- * periods returns zero, so long idle still maps to zero.
- * Mirrors the BPF helper with the same op order.
+ * Decay the EMA by sleep with half-life halves and Taylor. Shifts whole
+ * half-lives then scales the residual below one half with a 2nd-order Taylor of
+ * 0.5 to the r power at r is rem over half. Fixed point at FP_ONE 256 holds ln2
+ * times 256 at 177 + quad times 256 at 61, so t is rem times 256 over half in 0
+ * to 255 with dec1 + inc2 in u64 order with no float and no loop. Zero sleep
+ * keeps identity. Zero half keeps identity with no divide. At or past 64
+ * periods returns zero, so long idle still maps to zero. Mirrors the BPF helper
+ * with the same op order.
  */
 #[cfg(test)]
 pub fn ema_decay(ema: u64, sleep: u64, half: u64) -> u64 {
@@ -1204,18 +1152,14 @@ pub fn burst_hot(delta: u64) -> bool {
 }
 
 /*
- * Allowance from light depth with flood backpressure.
- * Depth sums queued tasks in light per CPU queues
- * capped at 4. Table is depth 0 to 1 to 4ms, depth 2
- * to 3 to 2ms, depth 4 plus to 1ms. Quiet keeps 4ms
- * so solo bursts still move fast alone. Mild pressure
- * steps down to 2ms so rising flood reacts sooner yet
- * stays clear of one slice chatter. Deep flood pins at
- * 1ms, so per task worst case is one slice during
- * flood. Recomputed per stop with no new task field,
- * so task stays at 48B. Halves matches dispatch view
- * with no table cost in the stop path. Strict iff
- * ready is zero, best effort iff ready is one with
+ * Allowance from light depth with flood backpressure. Depth sums queued tasks
+ * in light per CPU queues capped at 4. Table is depth 0 to 1 to 4ms, depth 2 to
+ * 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so solo bursts still move
+ * fast alone. Mild pressure steps down to 2ms so rising flood reacts sooner yet
+ * stays clear of one slice chatter. Deep flood pins at 1ms, so per task worst
+ * case is one slice during flood. Recomputed per stop with no new task field,
+ * so task stays at 48B. Halves matches dispatch view with no table cost in the
+ * stop path. Strict iff ready is zero, best effort iff ready is one with
  * placement on the live table.
  */
 #[cfg(test)]
@@ -1241,85 +1185,28 @@ pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
 }
 
 /*
- * Light depth from per CPU queued counts capped at 4.
- * Sums queued tasks over light CPUs in halves order
- * with early stop at 4. Halves matches the BPF depth
- * with no table use. Strict iff ready is zero, best
- * effort iff ready is one with placement on live.
- * Missing entries count as zero, so short slices stay
- * quiet with no trap.
+ * Both depths from the per CPU window counts capped
+ * at 4. Window holds own per CPU plus other per CPU
+ * plus both overflows with four reads and no full
+ * scan, so stopping pays window cost with no flood
+ * miss. Quiet keeps 4ms and flood fills the window
+ * plus overflows to the floor. Mirrors the BPF
+ * windowed refresh with four reads.
  */
 #[cfg(test)]
-pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
-    let mut depth = 0u64;
-    for cpu in 0..nr {
-        if group_of_cpu(cpu as u32, nr) != GROUP_LIGHT {
-            continue;
-        }
-        depth = depth.saturating_add(queued.get(cpu).copied().unwrap_or(0));
-        if depth >= 4 {
-            depth = 4;
-            break;
-        }
-    }
-    depth
-}
-
-/*
- * Hog depth from per CPU queued counts capped at 4.
- * Sums queued tasks over hog CPUs in halves order
- * with early stop at 4. Halves matches the BPF view
- * with no table use. Strict iff ready is zero, best
- * effort iff ready is one with placement on live.
- * Missing entries count as zero, so short slices stay
- * quiet with no trap. Display only with no burst use.
- */
-#[cfg(test)]
-pub fn hog_depth(queued: &[u64], nr: usize) -> u64 {
-    let mut depth = 0u64;
-    for cpu in 0..nr {
-        if group_of_cpu(cpu as u32, nr) != GROUP_HOG {
-            continue;
-        }
-        depth = depth.saturating_add(queued.get(cpu).copied().unwrap_or(0));
-        if depth >= 4 {
-            depth = 4;
-            break;
-        }
-    }
-    depth
-}
-
-/*
- * Both depths from per CPU queued counts capped at 4.
- * Single pass over halves order with early stop when
- * both hit 4. Mirrors the BPF refresh with one pass
- * and bounded cost. Strict iff ready is zero, best
- * effort iff ready is one with placement on live.
- * Missing entries count as zero.
- */
-#[cfg(test)]
-pub fn group_depths(queued: &[u64], nr: usize) -> (u64, u64) {
-    let mut light = 0u64;
-    let mut hog = 0u64;
-    for cpu in 0..nr {
-        let n = queued.get(cpu).copied().unwrap_or(0);
-        if group_of_cpu(cpu as u32, nr) == GROUP_LIGHT {
-            light = light.saturating_add(n);
-            if light >= 4 {
-                light = 4;
-            }
-        } else {
-            hog = hog.saturating_add(n);
-            if hog >= 4 {
-                hog = 4;
-            }
-        }
-        if light >= 4 && hog >= 4 {
-            break;
-        }
-    }
-    (light, hog)
+pub fn slot_window_depths(
+    own: u64,
+    other: u64,
+    light_over: u64,
+    hog_over: u64,
+    group: u8,
+) -> (u64, u64) {
+    let (light, hog) = if group == GROUP_HOG {
+        (other + light_over, own + hog_over)
+    } else {
+        (own + light_over, other + hog_over)
+    };
+    (light.min(4), hog.min(4))
 }
 
 /*
@@ -1387,8 +1274,8 @@ pub struct GroupState {
 #[cfg(test)]
 impl GroupState {
     /*
-     * Cold state with light plus no window. Fresh
-     * tasks join light so short waits stay quick.
+     * Cold state with light and no window. Fresh tasks join light so short
+     * waits stay quick.
      */
     pub fn cold() -> Self {
         Self {
@@ -1425,11 +1312,10 @@ pub fn burn_add(burn: u32, delta: u64) -> u32 {
 }
 
 /*
- * One classifier step for tests. Mirrors the BPF
- * stopping path with burn plus wake at quiet depth.
- * Quiet wrapper around the depth step with depth 0,
- * so lone bursts keep the 4ms line with no pressure.
- * See the depth step for the full move table.
+ * One classifier step for tests. Mirrors the BPF stopping path with burn and
+ * wake at quiet depth. Quiet wrapper around the depth step with depth 0, so
+ * lone bursts keep the 4ms line with no pressure. See the depth step for the
+ * full move table.
  */
 #[cfg(test)]
 pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) {
@@ -1437,24 +1323,18 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
 }
 
 /*
- * One classifier step with light depth for tests.
- * Mirrors the BPF stopping path with burn plus wake.
- * Adds the burst to burn, then checks the allowance
- * for the depth, then wake fast promote, then window
- * end. Allowance is 4ms at depth 0 to 1, 2ms at depth
- * 2 to 3, 1ms at depth 4 plus. Eight short blocks
- * below 1ms with burn below 4ms move hog to light at
- * once. A burst at the allowance clears wake hits. A
- * short with burn at or past 4ms clears wake hits. A
- * 16ms window moves light to hog at the window end. A
- * hot window at or past 16ms clears wake hits. A low
- * window below 4ms moves the streak forward and keeps
- * wake hits. A middle window at the end clears wake
- * hits with low runs and no move. A window in progress
- * keeps wake hits. A hog needs 64 low wins near 2s or
- * 8 short hits to return to light. Allowance is
- * recomputed per stop with no new task field, so task
- * stays at 48B. Returns true for demote plus true for
+ * One classifier step with light depth for tests. Mirrors the BPF stopping path
+ * with burn and wake. Adds the burst to burn, then checks the allowance for the
+ * depth, then wake fast promote, then window end. Allowance is 4ms at depth 0
+ * to 1, 2ms at depth 2 to 3, 1ms at depth 4 and above. Eight short blocks below
+ * 1ms with burn below 4ms move hog to light at once. A burst at the allowance
+ * clears wake hits. A short with burn at or past 4ms clears wake hits. A 16ms
+ * window moves light to hog at the window end. A hot window at or past 16ms
+ * clears wake hits. A low window below 4ms moves the streak forward and keeps
+ * wake hits. A middle window at the end clears wake hits with low runs and no
+ * move. A window in progress keeps wake hits. A hog needs 64 low wins near 2s
+ * or 8 short hits to return to light. Allowance is recomputed per stop with no
+ * new task field, so task stays at 48B. Returns true for demote and true for
  * promote when each move runs.
  */
 #[cfg(test)]
@@ -1544,110 +1424,6 @@ pub fn classify_step_depth(st: &mut GroupState, now: u64, delta: u64, depth: u64
 }
 
 /*
- * Group task for dispatch models. The mask names
- * allowed CPUs. The live flag marks a trusted pid
- * lookup. The fail flag models a failed move. Group
- * holds 0 for light and 1 for hog.
- */
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupTask {
-    /* Allowed CPUs. Index is the CPU. */
-    pub allowed: Vec<bool>,
-    /* False models a NULL pid lookup. */
-    pub live: bool,
-    /* True models a failed queue move. */
-    pub fail: bool,
-    /* Group id. 0 is light. 1 is hog. */
-    pub group: u8,
-}
-
-/*
- * True when one group task may move to the thief.
- * Needs a live task with no move failure plus the
- * CPU in the mask plus the same group. Tier 0 model
- * only. BPF ships Tier 3 park only by construction
- * with no task recheck due to verifier jump at 1000001
- * on donor check, so a stale cross entry may move iff
- * ready is one with strict park iff ready is zero and
- * best effort peer across groups. Pinned single tasks
- * with one allowed CPU may cross with an inflated
- * deadline, so the caller checks that path before this
- * strict check. Exiting tasks use the same rule with no
- * extra path.
- */
-#[cfg(test)]
-pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
-    if !task.live || task.fail {
-        return false;
-    }
-    let g = if task.group == GROUP_HOG {
-        GROUP_HOG
-    } else {
-        GROUP_LIGHT
-    };
-    if g != thief_group {
-        return false;
-    }
-    crate::flow_select::may_run_on(thief, &task.allowed)
-}
-
-/*
- * Drain up to budget group tasks for one CPU. Tier 0
- * model only. BPF ships Tier 3 park only by
- * construction with no task recheck due to verifier jump
- * at 1000001 on donor check, so a stale cross entry may
- * move iff ready is one with strict park iff ready is
- * zero and best effort peer across groups. The scan
- * keeps order and moves each task that passes the
- * strict group check. Dead, foreign, failed, and cross
- * group heads stay, so one head never blocks later
- * work. Returns moved plus skipped where skipped counts
- * cross group heads on mask pass. The model keeps both
- * drains plus merged skip. BPF Tier 3 uses park only by
- * construction with halves due to verifier jump at
- * 1000001 with peer mask only.
- */
-#[cfg(test)]
-pub fn group_drain_model(
-    queue: &mut std::collections::VecDeque<GroupTask>,
-    cpu: i32,
-    thief_group: u8,
-    budget: u32,
-) -> (u32, u32) {
-    let mut moved = 0;
-    let mut skipped = 0;
-    let mut kept = std::collections::VecDeque::new();
-    for task in queue.drain(..) {
-        let g = if task.group == GROUP_HOG {
-            GROUP_HOG
-        } else {
-            GROUP_LIGHT
-        };
-        let same = g == thief_group;
-        let ok = moved < budget
-            && task.live
-            && !task.fail
-            && same
-            && crate::flow_select::may_run_on(cpu, &task.allowed);
-        if ok {
-            moved += 1;
-        } else {
-            if task.live
-                && !task.fail
-                && !same
-                && crate::flow_select::may_run_on(cpu, &task.allowed)
-            {
-                skipped += 1;
-            }
-            kept.push_back(task);
-        }
-    }
-    *queue = kept;
-    (moved, skipped)
-}
-
-/*
  * First allowed CPU in one group for tests. Scans
  * in id order and returns the first live CPU that
  * allows the task. Halves is the fallback. Returns
@@ -1692,20 +1468,22 @@ pub fn first_in_group_live(
 }
 
 /*
- * Least queued allowed CPU in one group for tests.
- * Scans 0 to nr in id order with halves, so the
- * bound matches the BPF first helper. Needs group
- * plus mask plus queued depth. Picks the smallest
- * queued depth with lowest id on ties by strict
- * less only, so equal depths keep the first id.
- * Missing queued entries read as zero, so short
- * slices stay quiet with no trap. Returns none
- * when no allowed CPU lives in the group. Mirrors
- * the BPF least scan with halves view and frozen
- * constants.
+ * Least queued allowed CPU in one group for tests. Depth reads each
+ * candidate per CPU queue plus the group overflow tail, so per CPU
+ * backlog spreads the pick with lowest id on ties by strict less
+ * only. Missing entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Mirrors the BPF first
+ * helper with frozen constants.
  */
 #[cfg(test)]
-pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) -> Option<u32> {
+pub fn least_in_group(
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    overflow: &[u64],
+    per_cpu: &[u64],
+) -> Option<u32> {
+    let oq = overflow.get(group as usize).copied().unwrap_or(0);
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
     for cpu in 0..nr {
@@ -1715,7 +1493,7 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) ->
         if allowed.get(cpu).copied().unwrap_or(false) != true {
             continue;
         }
-        let q = queued.get(cpu).copied().unwrap_or(0);
+        let q = per_cpu.get(cpu).copied().unwrap_or(0).wrapping_add(oq);
         match best {
             None => {
                 best = Some(cpu as u32);
@@ -1732,17 +1510,12 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) ->
 }
 
 /*
- * Least queued allowed CPU in one live group for
- * tests. Scans 0 to nr in id order with the table
- * when ready, else halves, so the bound matches the
- * BPF first helper used by select plus enqueue.
- * Needs live group plus mask plus queued depth.
- * Picks the smallest queued depth with lowest id
- * on ties by strict less only. Missing queued
- * entries read as zero with no trap. Returns none
- * when no allowed CPU lives in the group. Placement
- * keeps live, dispatch keeps halves, constants
- * frozen. Mirrors the BPF least scan.
+ * Least queued allowed CPU in one live group for tests. Depth reads each
+ * candidate per CPU queue plus the group overflow tail, so per CPU
+ * backlog spreads the pick with lowest id on ties by strict less
+ * only. Missing entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Placement keeps live
+ * with frozen constants. Mirrors the BPF first helper.
  */
 #[cfg(test)]
 pub fn least_in_group_live(
@@ -1751,8 +1524,10 @@ pub fn least_in_group_live(
     nr: usize,
     table: &[u8],
     ready: u8,
-    queued: &[u64],
+    overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
+    let oq = overflow.get(group as usize).copied().unwrap_or(0);
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
     for cpu in 0..nr {
@@ -1762,7 +1537,7 @@ pub fn least_in_group_live(
         if allowed.get(cpu).copied().unwrap_or(false) != true {
             continue;
         }
-        let q = queued.get(cpu).copied().unwrap_or(0);
+        let q = per_cpu.get(cpu).copied().unwrap_or(0).wrapping_add(oq);
         match best {
             None => {
                 best = Some(cpu as u32);

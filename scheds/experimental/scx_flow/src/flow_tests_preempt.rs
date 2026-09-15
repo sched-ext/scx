@@ -1,11 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Preempt unit tests
  *
- * Preempt unit tests for the flow scheduler. The tests
- * mirror the BPF header so behavior stays the same on
- * both sides of the boundary. Delay stays in 32us units
- * with integer math only and no float use.
+ * Covers the delay, granule, slack, and rate helpers with header match and math
+ * checks. Run with cargo test -p scx_flow flow_tests_preempt.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow_preempt::*;
 use crate::flow_select::*;
@@ -224,10 +224,9 @@ fn frontier_deserved_beats_floor_by_granule() {
 }
 
 /*
- * Slack eases the deserved bound by 32us with a
- * strict miss by one pass plus exact boundary fail.
- * Zero slack collapses to the old granule only
- * compare with no behavior change.
+ * Slack eases the deserved bound by 32us with a strict miss by one pass and
+ * exact boundary fail. Zero slack collapses to the old granule only compare
+ * with no behavior change.
  */
 #[test]
 fn deserved_slack_eases_by_32us() {
@@ -354,33 +353,43 @@ fn cursor_store_keeps_rate_plus_stand() {
 }
 
 #[test]
-fn preempt_needs_five_gates_fail_closed() {
-    assert!(preempt_ok(true, true, true, true, true));
-    assert!(!preempt_ok(false, true, true, true, true));
-    assert!(!preempt_ok(true, false, true, true, true));
-    assert!(!preempt_ok(true, true, false, true, true));
-    assert!(!preempt_ok(true, true, true, false, true));
-    assert!(!preempt_ok(true, true, true, true, false));
-    assert!(!preempt_ok(false, false, false, false, false));
-    assert!(!preempt_ok(true, true, true, true, false));
-    let armed = delay_armed(15);
-    assert!(!preempt_ok(armed, true, true, true, true));
-    let armed2 = delay_armed(16);
-    assert!(preempt_ok(armed2, true, true, true, true));
-    assert!(!preempt_ok(armed2, false, true, true, true));
+fn preempt_bound_gate_needs_all_checks() {
+    assert!(preempt_ok(false, true, true, true, true, true));
+    assert!(!preempt_ok(true, true, true, true, true, true));
+    assert!(!preempt_ok(false, false, true, true, true, true));
+    assert!(!preempt_ok(false, true, false, true, true, true));
+    assert!(!preempt_ok(false, true, true, false, true, true));
+    assert!(!preempt_ok(false, true, true, true, false, true));
+    assert!(!preempt_ok(false, true, true, true, true, false));
+    assert!(!preempt_ok(true, false, false, false, false, false));
+    assert!(!preempt_ok(false, empty_ok(2), true, true, true, true));
+    assert!(preempt_ok(false, empty_ok(1), true, true, true, true));
+    let hog_pass = deserved_or_hog(false, true);
+    assert!(hog_pass);
+    assert!(preempt_ok(false, true, hog_pass, true, true, true));
+    let hog_fail = deserved_or_hog(false, false);
+    assert!(!hog_fail);
+    assert!(!preempt_ok(false, true, hog_fail, true, true, true));
+    assert!(delay_armed(16));
+    assert!(!delay_armed(15));
+    assert!(preempt_ok(false, true, true, true, true, true));
 }
 
 #[test]
-fn disarmed_matches_prior_no_kick() {
+fn armed_display_only_no_gate() {
     for win in [0u8, 8, 15] {
         assert!(!delay_armed(win));
-        assert!(!preempt_ok(delay_armed(win), true, true, true, true));
+        assert!(preempt_ok(false, true, true, true, true, true));
     }
     for win in [16u8, 100, 250] {
         assert!(delay_armed(win));
-        assert!(!preempt_ok(delay_armed(win), false, true, true, true));
-        assert!(!preempt_ok(delay_armed(win), true, false, true, true));
+        assert!(preempt_ok(false, true, true, true, true, true));
+        assert!(!preempt_ok(false, true, false, true, true, true));
+        assert!(!preempt_ok(false, false, true, true, true, true));
     }
+    assert!(delay_armed_latched(14, true));
+    assert!(!delay_armed(14));
+    assert!(preempt_ok(false, true, true, true, true, true));
 }
 
 #[test]
@@ -419,9 +428,8 @@ fn facade_matches_preempt_helpers() {
 }
 
 /*
- * Dual max is idempotent with bounded loss. Commutes
- * plus assoc plus idem, racy keeps old to true max.
- * Count stays running only, decay stays intact.
+ * Dual max is idempotent with bounded loss. Commutes, assoc, and idem, racy
+ * keeps old to true max. Count stays running only, decay stays intact.
  */
 #[test]
 fn delay_max_concurrent_keeps_bound() {
@@ -475,61 +483,83 @@ fn cursor_cas_keeps_fresh_flags() {
 }
 
 /*
- * Split reasons follow branch order armed plus deserved
- * plus group plus mask plus rate. First fail wins, rate
- * last as the atomic claim. Total plus reason both count
- * at 200B, so the sum of reasons equals the total.
+ * Split reasons follow bound order pinned, empty,
+ * deserved or hog, same, mask, and rate. First fail
+ * wins, rate last as the atomic claim. Pinned plus
+ * empty count total only at 296B with no reason, so
+ * total covers reasons plus total only. Deserved is
+ * 2, group is 3, mask is 4, rate is 5 with armed 1
+ * retired frozen.
  */
 #[test]
 fn skip_reason_follows_branch_order() {
-    assert_eq!(skip_reason(true, true, true, true, true), None);
-    assert_eq!(skip_reason(false, true, true, true, true), Some(1));
-    assert_eq!(skip_reason(true, false, true, true, true), Some(2));
-    assert_eq!(skip_reason(true, true, false, true, true), Some(3));
-    assert_eq!(skip_reason(true, true, true, false, true), Some(4));
-    assert_eq!(skip_reason(true, true, true, true, false), Some(5));
-    assert_eq!(skip_reason(false, false, false, false, false), Some(1));
-    assert_eq!(skip_reason(true, false, false, false, false), Some(2));
-    assert_eq!(skip_reason(true, true, false, false, false), Some(3));
-    assert_eq!(skip_reason(true, true, true, false, false), Some(4));
+    assert_eq!(skip_reason(false, true, true, true, true, true), None);
+    assert_eq!(skip_reason(true, true, true, true, true, true), Some(6));
+    assert_eq!(skip_reason(false, false, true, true, true, true), Some(6));
+    assert_eq!(skip_reason(false, true, false, true, true, true), Some(2));
+    assert_eq!(skip_reason(false, true, true, false, true, true), Some(3));
+    assert_eq!(skip_reason(false, true, true, true, false, true), Some(4));
+    assert_eq!(skip_reason(false, true, true, true, true, false), Some(5));
+    assert_eq!(
+        skip_reason(true, false, false, false, false, false),
+        Some(6)
+    );
+    assert_eq!(
+        skip_reason(false, false, false, false, false, false),
+        Some(6)
+    );
+    assert_eq!(
+        skip_reason(false, true, false, false, false, false),
+        Some(2)
+    );
+    assert_eq!(skip_reason(false, true, true, false, false, false), Some(3));
+    assert_eq!(skip_reason(false, true, true, true, false, false), Some(4));
     assert_eq!(skip_reason_name(0), "kick");
     assert_eq!(skip_reason_name(1), "armed");
     assert_eq!(skip_reason_name(2), "deserved");
     assert_eq!(skip_reason_name(3), "group");
     assert_eq!(skip_reason_name(4), "mask");
     assert_eq!(skip_reason_name(5), "rate");
+    assert_eq!(skip_reason_name(6), "total-only");
 }
 
 /*
- * Skip reason matches the five gate check. None means
- * all gates pass, some means at least one gate fails.
+ * Skip reason matches the bound gate check. None means
+ * all pass with kick, some means first fail wins in
+ * pinned, empty, deserved or hog, same, mask, and
+ * rate order at 296B.
  */
 #[test]
 fn skip_reason_matches_preempt_ok() {
-    for armed in [false, true] {
-        for deserved in [false, true] {
-            for same in [false, true] {
-                for mask in [false, true] {
-                    for rate in [false, true] {
-                        let ok = preempt_ok(armed, deserved, rate, same, mask);
-                        let reason = skip_reason(armed, deserved, same, mask, rate);
-                        assert_eq!(reason.is_none(), ok);
-                        if !ok {
-                            assert!(reason.is_some());
-                        }
-                    }
-                }
-            }
+    for bits in 0..64u8 {
+        let pinned = bits & 1 != 0;
+        let empty = bits & 2 != 0;
+        let hog = bits & 4 != 0;
+        let same = bits & 8 != 0;
+        let mask = bits & 16 != 0;
+        let rate = bits & 32 != 0;
+        let ok = preempt_ok(pinned, empty, hog, same, mask, rate);
+        let reason = skip_reason(pinned, empty, hog, same, mask, rate);
+        assert_eq!(reason.is_none(), ok);
+        if !ok {
+            assert!(reason.is_some());
         }
     }
-    assert!(preempt_ok(true, true, true, true, true));
-    assert_eq!(skip_reason(true, true, true, true, true), None);
+    assert!(preempt_ok(false, true, true, true, true, true));
+    assert_eq!(skip_reason(false, true, true, true, true, true), None);
+    assert_eq!(skip_reason(false, true, false, true, true, true), Some(2));
+    assert_eq!(skip_reason(false, true, true, false, true, true), Some(3));
+    assert_eq!(skip_reason(false, true, true, true, false, true), Some(4));
+    assert_eq!(skip_reason(false, true, true, true, true, false), Some(5));
+    assert_eq!(skip_reason(true, true, true, true, true, true), Some(6));
+    assert_eq!(skip_reason(false, false, true, true, true, true), Some(6));
 }
 
 /*
- * Delay 62 is the storm line at two queued. Armed needs
- * 16, so storm needs both armed plus queued depth. Rate
- * holds one kick per slice, storm would add a second.
+ * Deep queues stay quiet past one queued with no
+ * storm. Delay dots stay display only since 4.2.41,
+ * so armed never gates. Rate holds one kick per
+ * slice in the bound gate order.
  */
 #[test]
 fn storm_line_needs_two_queued() {
@@ -538,20 +568,20 @@ fn storm_line_needs_two_queued() {
     assert!(delay_armed(62));
     assert!(delay_armed(16));
     assert!(!delay_armed(15));
-    assert_eq!(skip_reason(false, true, true, true, true), Some(1));
-    assert_eq!(skip_reason(true, true, true, true, false), Some(5));
+    assert!(empty_ok(1));
+    assert!(!empty_ok(2));
+    assert_eq!(skip_reason(false, false, true, true, true, true), Some(6));
+    assert_eq!(skip_reason(false, true, true, true, true, false), Some(5));
+    assert!(preempt_ok(false, true, true, true, true, true));
 }
 
 /*
- * S1 perf bypasses the group gate with no recount.
- * Strict keeps the live check, so cross group fails
- * with reason 3. Perf forces same true before the
- * branch checks, so the same cross group wake kicks
- * with no group count. Other gates stay frozen, so
- * armed plus deserved plus mask plus rate still fail
- * in perf with the same branch order. Mirrors the BPF
- * if flow_perf_enabled same true in enqueue with no
- * preempt_ok signature change.
+ * S1 perf bypasses the group gate with no recount. Strict keeps the live check,
+ * so cross group fails with reason 3. Perf forces same true before the branch
+ * checks, so the same cross group wake kicks with no group count. Other gates
+ * stay live, so pinned plus empty total only and deserved or hog, mask, and
+ * rate still fail in perf with the same bound order. Armed stays display only
+ * with no gate use. Mirrors the BPF if flow_perf_enabled same true in enqueue.
  */
 #[test]
 fn same_override_bypasses_group_without_recount() {
@@ -559,22 +589,150 @@ fn same_override_bypasses_group_without_recount() {
     assert!(same_override(true, false));
     assert!(same_override(false, true));
     assert!(same_override(true, true));
-    assert_eq!(skip_reason(true, true, false, true, true), Some(3));
-    assert!(!preempt_ok(true, true, true, false, true));
+    assert_eq!(skip_reason(false, true, true, false, true, true), Some(3));
+    assert!(!preempt_ok(false, true, true, false, true, true));
     let eff = same_override(false, true);
     assert!(eff);
-    assert_eq!(skip_reason(true, true, eff, true, true), None);
-    assert!(preempt_ok(true, true, true, eff, true));
-    assert_ne!(skip_reason(true, true, eff, true, true), Some(3));
-    assert_eq!(skip_reason(false, true, eff, true, true), Some(1));
-    assert_eq!(skip_reason(true, false, eff, true, true), Some(2));
-    assert_eq!(skip_reason(true, true, eff, false, true), Some(4));
-    assert_eq!(skip_reason(true, true, eff, true, false), Some(5));
-    assert!(!preempt_ok(false, true, true, eff, true));
-    assert!(!preempt_ok(true, false, true, eff, true));
-    assert!(!preempt_ok(true, true, true, eff, false));
-    assert!(!preempt_ok(true, true, false, eff, true));
+    assert_eq!(skip_reason(false, true, true, eff, true, true), None);
+    assert!(preempt_ok(false, true, true, eff, true, true));
+    assert_ne!(skip_reason(false, true, true, eff, true, true), Some(3));
+    assert_eq!(skip_reason(true, true, true, eff, true, true), Some(6));
+    assert_eq!(skip_reason(false, false, true, eff, true, true), Some(6));
+    assert_eq!(skip_reason(false, true, false, eff, true, true), Some(2));
+    assert_eq!(skip_reason(false, true, true, eff, false, true), Some(4));
+    assert_eq!(skip_reason(false, true, true, eff, true, false), Some(5));
+    assert!(!preempt_ok(true, true, true, eff, true, true));
+    assert!(!preempt_ok(false, false, true, eff, true, true));
+    assert!(!preempt_ok(false, true, false, eff, true, true));
+    assert!(!preempt_ok(false, true, true, eff, false, true));
+    assert!(!preempt_ok(false, true, true, eff, true, false));
     let strict = same_override(false, false);
     assert!(!strict);
-    assert_eq!(skip_reason(true, true, strict, true, true), Some(3));
+    assert_eq!(skip_reason(false, true, true, strict, true, true), Some(3));
+}
+
+/*
+ * Empty first holds at most one queued task. Zero and
+ * one pass, two and more fail, so deep queues stay
+ * quiet with no storm. Mirrors the BPF empty check
+ * with no wrap and no new constant.
+ */
+#[test]
+fn empty_first_bounds_shallow_only() {
+    assert!(empty_ok(0));
+    assert!(empty_ok(1));
+    assert!(!empty_ok(2));
+    assert!(!empty_ok(3));
+    assert!(!empty_ok(8));
+    assert!(!empty_ok(100));
+    assert!(!empty_ok(u64::MAX));
+    assert_eq!(empty_ok(0), true);
+    assert_eq!(empty_ok(1), true);
+    assert_eq!(empty_ok(2), false);
+}
+
+/*
+ * Deserved edge holds minus one only with exact bound
+ * fail. Bound is frontier plus granule plus slack, so
+ * minus one passes and bound plus one fails with wrap
+ * safety intact. Uses the floor granule for cover.
+ */
+#[test]
+fn deserved_edge_holds_minus_one_only() {
+    let frontier = 50_000_000u64;
+    let gran = GRANULE_FLOOR_NS;
+    assert_eq!(gran, 64_000);
+    let bound = frontier.wrapping_add(gran).wrapping_add(DESERVED_SLACK_NS);
+    assert_eq!(bound, frontier + 96_000);
+    assert!(deserved(bound.wrapping_sub(1), frontier, gran));
+    assert!(!deserved(bound, frontier, gran));
+    assert!(!deserved(bound.wrapping_add(1), frontier, gran));
+    assert!(deserved(frontier, frontier, gran));
+    assert!(!deserved(frontier + 1_000_000, frontier, gran));
+}
+
+/*
+ * Hog OR needs no time cap past empty first. False
+ * plus false fails, all other pairs pass, so hog
+ * occupants preempt even when far past the deserved
+ * bound with no extra check. Minimal OR only.
+ */
+#[test]
+fn hog_or_truth_needs_no_time_cap() {
+    assert!(!deserved_or_hog(false, false));
+    assert!(deserved_or_hog(false, true));
+    assert!(deserved_or_hog(true, false));
+    assert!(deserved_or_hog(true, true));
+    let frontier = 50_000_000u64;
+    let gran = GRANULE_FLOOR_NS;
+    let far = frontier + gran + DESERVED_SLACK_NS + 1_000_000;
+    assert!(!deserved(far, frontier, gran));
+    assert!(deserved_or_hog(false, true));
+    assert!(!deserved_or_hog(false, false));
+    let near = frontier;
+    assert!(deserved(near, frontier, gran));
+    assert!(deserved_or_hog(true, false));
+}
+
+/*
+ * Rate claim keeps a single winner per slice. First
+ * claim wins, second fails, fresh wins once more with
+ * stand kept. Mirrors the BPF fetch OR claim with no
+ * check then set.
+ */
+#[test]
+fn rate_claim_holds_single_winner_stable() {
+    let mut a = 0u32;
+    assert!(rate_claim(&mut a));
+    assert!(!rate_claim(&mut a));
+    assert!(!rate_clear(a));
+    let mut b = CURSOR_RATE_BIT | 7;
+    assert!(!rate_claim(&mut b));
+    assert_eq!(cursor_val(b), 7);
+    let mut c = 0u32;
+    assert!(rate_claim(&mut c));
+    assert!(!rate_claim(&mut c));
+    let mut d = crate::flow_preempt::CURSOR_STAND_BIT | 3;
+    assert!(rate_claim(&mut d));
+    assert!(stand_held(d));
+    assert_eq!(cursor_val(d), 3);
+    assert!(!rate_claim(&mut d));
+}
+
+/*
+ * Skip reason holds bound gate order stable with total
+ * only intact. None means all pass with kick, some means
+ * first fail wins in pinned, empty, deserved or hog,
+ * same, mask, and rate order at 296B. Deserved stays
+ * 2, group stays 3, mask stays 4, rate stays 5 with
+ * armed 1 retired frozen and total only 6 for pinned
+ * plus deep. Empty boundary plus hog OR stay live with
+ * no armed gate.
+ */
+#[test]
+fn skip_reason_holds_bound_gate_stable() {
+    assert_eq!(skip_reason(false, true, true, true, true, true), None);
+    assert!(preempt_ok(false, true, true, true, true, true));
+    assert_eq!(skip_reason(true, true, true, true, true, true), Some(6));
+    assert_eq!(skip_reason(false, false, true, true, true, true), Some(6));
+    assert_eq!(skip_reason(false, true, false, true, true, true), Some(2));
+    assert_eq!(skip_reason(false, true, true, false, true, true), Some(3));
+    assert_eq!(skip_reason(false, true, true, true, false, true), Some(4));
+    assert_eq!(skip_reason(false, true, true, true, true, false), Some(5));
+    assert!(!preempt_ok(true, true, true, true, true, true));
+    assert!(!preempt_ok(false, false, true, true, true, true));
+    assert!(!preempt_ok(false, true, false, true, true, true));
+    assert!(!preempt_ok(false, true, true, false, true, true));
+    assert!(!preempt_ok(false, true, true, true, false, true));
+    assert!(!preempt_ok(false, true, true, true, true, false));
+    assert!(empty_ok(1));
+    assert!(!empty_ok(2));
+    assert!(deserved_or_hog(true, false));
+    assert!(deserved_or_hog(false, true));
+    assert!(!deserved_or_hog(false, false));
+    assert_eq!(skip_reason_name(0), "kick");
+    assert_eq!(skip_reason_name(1), "armed");
+    assert_eq!(skip_reason_name(2), "deserved");
+    assert_eq!(skip_reason_name(5), "rate");
+    assert_eq!(skip_reason_name(6), "total-only");
 }

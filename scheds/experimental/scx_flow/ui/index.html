@@ -1,11 +1,10 @@
 <!--
   SPDX-License-Identifier: GPL-2.0
+  scx_flow dashboard page
+  Live view of per CPU queues, per CPU running tasks, and system counters. Offline single
+  file with no external assets. Data source is the loopback snapshot route with /api/snapshot
+  and /api/stats.
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
-
-  Flow web UI. A live view of per-CPU queues,
-  per-CPU running tasks and system counters, served by
-  the dashboard server over loopback with a unix socket
-  fallback. Offline first with no external assets.
 -->
 <!doctype html>
 <html lang="en">
@@ -64,7 +63,7 @@
       font-feature-settings: "tnum";
     }
     /* Per-CPU card grid. Dense small chips that
-     * wrap across the page. No inner scroll: the
+     * wrap across the page. No inner scroll. The
      * page scrolls as one page so 20+ cores fit
      * without a nested scroll container. */
     .core-grid {
@@ -166,14 +165,19 @@
       line-height: 1.55;
     }
     .section-label {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-bottom: 8px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 6px;
+      margin-bottom: 10px;
     }
     .subsection-label {
-      font-size: 0.6875rem;
-      color: var(--text-muted);
-      margin-bottom: 2px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      letter-spacing: 0.02em;
+      margin-bottom: 4px;
     }
     /* System stats grid */
     .sys-grid {
@@ -181,6 +185,8 @@
       grid-template-columns: repeat(2, 1fr);
       gap: 8px;
       font-size: 0.8125rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
     }
     @media (min-width: 640px) {
       .sys-grid { grid-template-columns: repeat(4, 1fr); }
@@ -197,6 +203,242 @@
         grid-template-columns:
           repeat(auto-fill, minmax(92px, 1fr));
         gap: 4px;
+      }
+    }
+    /* Energy notes and ref pills. Serif notes stay quiet
+     * beside the formula, pills stay muted till hover. */
+    .energy-ref {
+      display: inline-block;
+      margin-left: 4px;
+      padding: 0 5px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--elevated);
+      color: var(--text-secondary);
+      font-family: var(--font-sans);
+      font-size: 0.75rem;
+      font-weight: 500;
+      line-height: 1.5;
+      text-decoration: none;
+      vertical-align: super;
+      position: relative;
+    }
+    .energy-ref:hover {
+      color: var(--text-primary);
+      border-color: var(--border-hover);
+    }
+    .energy-ref:focus {
+      color: var(--text-primary);
+      border-color: var(--border-hover);
+      outline: 1px solid var(--border-hover);
+      outline-offset: 1px;
+    }
+    /* Tooltips open below and grow with content. Height stays auto with no cap and visible overflow, width stays capped. */
+    .energy-tip {
+      display: none;
+      position: absolute;
+      top: 1.6em;
+      bottom: auto;
+      left: 50%;
+      transform: translateX(-50%);
+      width: max-content;
+      max-width: min(240px, 100vw - 32px);
+      height: auto;
+      max-height: none;
+      overflow: visible;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--elevated);
+      color: var(--text-secondary);
+      font-family: Georgia, 'Times New Roman', Times, serif;
+      font-size: 0.75rem;
+      font-weight: 400;
+      line-height: 1.45;
+      white-space: normal;
+      z-index: 1;
+    }
+    .energy-ref:hover .energy-tip,
+    .energy-ref:focus .energy-tip,
+    .energy-ref:focus-within .energy-tip {
+      display: block;
+    }
+    .energy-notes-list {
+      margin: 0;
+      padding-left: 1.25em;
+      border: none;
+      font-family: Georgia, 'Times New Roman', Times, serif;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+    .energy-notes-list li {
+      margin-top: 4px;
+    }
+    .energy-notes-list li::marker {
+      font-weight: 500;
+    }
+    .energy-backlink {
+      margin-left: 6px;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .energy-backlink:hover {
+      color: var(--text-primary);
+    }
+    /* Energy hero pair. Answer first with mono numerals, primary ink, tabular figures. */
+    .energy-hero .stat-value,
+    #energy-daily,
+    #energy-daily-kwh {
+      font-family: var(--font-mono);
+      font-size: 0.875rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      font-feature-settings: "tnum";
+      line-height: 1.3;
+    }
+    /* Hero labels stay muted, small, sans, so numerals carry the answer. */
+    .energy-hero span:first-child {
+      font-size: 0.8125rem;
+    }
+    /* Legend definition rows. Symbol chips sit on elevated ground, definitions stay secondary. */
+    #energy-legend {
+      display: grid;
+      gap: 4px;
+    }
+    #energy-legend .legend-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 0;
+      line-height: 1.55;
+    }
+    #energy-legend .legend-sym {
+      flex: none;
+      padding: 0 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--elevated);
+      color: var(--text-primary);
+      font-family: Georgia, 'Times New Roman', Times, serif;
+      font-style: italic;
+      font-size: 0.75rem;
+      line-height: 1.5;
+    }
+    #energy-legend .legend-def {
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+    }
+    /* Trace well and parsed rows. Keys stay muted, values stay secondary, outcomes add weight and markers. */
+    #energy-trace {
+      border: 1px solid var(--border-hover);
+      border-radius: 8px;
+      background: var(--elevated);
+      padding: 8px 10px;
+    }
+    /* Trace rows for parsed lines. Unknown lines fall through to plain rows, kept secondary. */
+    .trace-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0;
+      line-height: 1.5;
+    }
+    .trace-key {
+      color: var(--text-muted);
+      flex: none;
+    }
+    .trace-val {
+      color: var(--text-secondary);
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+    .trace-row--plain {
+      color: var(--text-secondary);
+      font-weight: 400;
+    }
+    .trace-accepted,
+    .trace-rejected,
+    .trace-low,
+    .trace-headline {
+      font-weight: 700;
+    }
+    .trace-accepted {
+      color: var(--success);
+    }
+    .trace-accepted .trace-val::before {
+      content: "✓ ";
+    }
+    .trace-rejected {
+      color: var(--warning);
+    }
+    .trace-rejected .trace-val::before {
+      content: "✕ ";
+    }
+    .trace-low {
+      color: var(--warning);
+      font-weight: 600;
+    }
+    .trace-low .trace-val::before {
+      content: "! ";
+    }
+    .trace-headline {
+      color: var(--text-primary);
+    }
+    .trace-headline .trace-val::before {
+      content: "» ";
+    }
+    /* Footnotes. Muted sans lines carry state notes, estimates, projections. */
+    #energy-note,
+    #energy-footnote {
+      font-family: var(--font-sans);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+    /* State note marker. Weight marks the note, never color alone. */
+    #energy-note:not(:empty) {
+      font-weight: 500;
+    }
+    /* Live derivation line. Serif secondary line follows the formula, quiet till headlines. */
+    #energy-live {
+      font-weight: 400;
+    }
+    /* Header badges. Weight and tracking mark mode, running, disconnected, never color alone. */
+    #mode-badge,
+    #status-badge {
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    /* Run badges. Live adds weight and solid border, idle stays dashed, muted. */
+    .run-idle {
+      border-style: dashed;
+      font-weight: 400;
+    }
+    .run-live {
+      border-style: solid;
+      font-weight: 700;
+    }
+    /* Connection status. Mono with weight marks live, disconnected, retrying. */
+    #conn-status {
+      font-family: var(--font-mono);
+      font-weight: 500;
+    }
+    /* Empty grid notice. Dashed border with centered weight marks the idle grid, quiet till work arrives. */
+    #core-cards > .card:not(.core-card) {
+      border-style: dashed;
+      font-weight: 600;
+    }
+    /* Narrow widths. Hero stacks full width, tips stay off where anchors carry the notes. */
+    @media (max-width: 640px) {
+      .energy-hero {
+        grid-column: 1 / -1;
+      }
+      .energy-tip,
+      .energy-ref:hover .energy-tip,
+      .energy-ref:focus .energy-tip,
+      .energy-ref:focus-within .energy-tip {
+        display: none !important;
       }
     }
   </style>
@@ -263,7 +505,73 @@
         id="summary-explanation"></p>
     </div>
 
-    <!-- Groups with depths plus pressure plus rates -->
+    <!-- Energy with daily, yearly savings, and trace -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Energy</p>
+      <div class="sys-grid">
+        <div class="energy-hero" style="grid-column:1/-1"><span style="color:var(--text-muted)">
+          Saved:</span>
+          <span class="stat-value" id="energy-daily">unavailable</span>
+          <span class="stat-value" id="energy-yearly" style="display:none">unavailable</span>
+          <a class="energy-ref" href="#energy-note-1"
+            style="display:none">[1]<span
+            class="energy-tip">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf.</span></a>
+          <a class="energy-ref" href="#energy-note-2"
+            style="display:none">[2]<span
+            class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Daily energy:</span>
+          <span class="stat-value" id="energy-daily-kwh">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Yearly energy:</span>
+          <span class="stat-value" id="energy-yearly-kwh">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Since running:</span>
+          <span class="stat-value" id="energy-since">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Pairs:</span>
+          <span class="stat-value" id="energy-pairs">unavailable</span>
+        </div>
+      </div>
+      <p id="energy-formula" style="margin-top:8px;
+        font-family: Georgia, 'Times New Roman', Times, serif;
+        font-size:0.875rem;color:var(--text-primary)">
+        <i>E_saved</i> = (<i>P_perf</i> − <i>P_strict</i>) × <i>t</i> ÷ 1000
+      </p>
+      <p id="energy-live" style="margin-top:4px;
+        font-family: Georgia, 'Times New Roman', Times, serif;
+        font-size:0.75rem;color:var(--text-secondary)">waiting for 3 accepted pairs</p>
+      <div id="energy-legend" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-secondary)">
+        <p class="legend-row"><span class="legend-sym"><i>E_saved</i></span> <span class="legend-def">is saved energy in kWh over the span.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>P_perf</i></span> <span class="legend-def">is mean perf power in W over kept seconds in all accepted pairs.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>P_strict</i></span> <span class="legend-def">is mean strict power in W over kept seconds in all accepted pairs.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>t</i></span> <span class="legend-def">is hours in the span.</span></p>
+      </div>
+      <pre id="energy-trace" style="margin-top:8px;
+        font-family:var(--font-mono);font-size:0.6875rem;
+        line-height:1.5;color:var(--text-secondary);
+        white-space:pre-wrap;word-break:break-word;">unavailable</pre>
+      <p id="energy-note" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-muted)"></p>
+      <p id="energy-footnote" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-muted)">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</p>
+      <div id="energy-notes" style="display:none">
+        <hr style="border:none;border-top:1px solid var(--border);
+          margin:1.5em 0">
+        <p class="subsection-label">Notes</p>
+        <ol class="energy-notes-list">
+          <li id="energy-note-1">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
+          <li id="energy-note-2">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
+        </ol>
+      </div>
+    </div>
+
+    <!-- Groups with depths, pressure, and rates -->
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Groups</p>
       <div class="sys-grid">
@@ -331,6 +639,10 @@
           Coalesce rate:</span>
           <span class="stat-value" id="coalesce-rate">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Slot rate:</span>
+          <span class="stat-value" id="slot-rate">0</span>
+        </div>
       </div>
     </div>
 
@@ -369,6 +681,10 @@
         <div><span style="color:var(--text-muted)">
           Steal moves:</span>
           <span class="stat-value" id="steal">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Steal cross:</span>
+          <span class="stat-value" id="steal-xmoves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Kicks:</span>
@@ -442,6 +758,22 @@
           Kick coalesced:</span>
           <span class="stat-value" id="kcoal">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Slot moves:</span>
+          <span class="stat-value" id="slot-moves">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Slot defer:</span>
+          <span class="stat-value" id="slot-defer">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Slot kicks:</span>
+          <span class="stat-value" id="slot-kicks">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Wheel skips (frozen):</span>
+          <span class="stat-value" id="wheel-skips">0</span>
+        </div>
       </div>
     </div>
 
@@ -493,12 +825,11 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per-CPU cards with fixed slice plus group
-     * plus the running estimate plus the pid plus
-     * nice plus weight plus delay. Freq unknown stays
+    /* Per-CPU cards with fixed slice, group, and the running estimate. They
+     * also show the pid, nice, weight, and delay. Freq unknown stays
      * plain with no zero print. No sibling stays plain
      * with no badge. Group shows live table when
-     * ready, else halves. Nice plus weight stay
+     * ready, else halves. Nice and weight stay
      * display only with dash when idle. Delay shows
      * latched dot with hollow when clear. Delay
      * shows stale word when idle, explicit. */
@@ -577,7 +908,7 @@
 
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
-     * walks the insert plus move plus group split with
+     * walks the insert, move, and group split with
      * wake detail. */
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
@@ -586,6 +917,8 @@
       var done = s.completions || 0;
       var park = s.park_moves || 0;
       var steal = s.steal_moves || 0;
+      var smoves = s.slot_moves || 0;
+      var sdefer = s.slot_defer || 0;
       var demote = s.group_demote || 0;
       var promote = s.group_promote || 0;
       var wake = s.group_wake_promote || 0;
@@ -603,6 +936,8 @@
           ' with completions ' + fmt(done) +
           '. Park moves cover ' + fmt(park) +
           ' and steal moves cover ' + fmt(steal) +
+          '. Slot moves cover ' + fmt(smoves) +
+          ' with defer ' + fmt(sdefer) +
           '. Demote covers ' + fmt(demote) +
           ' and promote covers ' + fmt(promote) +
           ' with wake ' + fmt(wake) + '.';
@@ -614,6 +949,8 @@
           ' with completions ' + fmt(done) +
           '. Park moves cover ' + fmt(park) +
           ' and steal moves cover ' + fmt(steal) +
+          '. Slot moves cover ' + fmt(smoves) +
+          ' with defer ' + fmt(sdefer) +
           '. Demote covers ' + fmt(demote) +
           ' and promote covers ' + fmt(promote) +
           ' with wake ' + fmt(wake) + '.';
@@ -621,7 +958,7 @@
       return { tldr: tldr, explanation: explanation };
     }
 
-    /* Prior counters plus wall time for rate math. */
+    /* Prior counters with wall time for rate math. */
     var prevStats = null;
     var prevAt = 0;
 
@@ -640,13 +977,214 @@
       return d / dt;
     }
 
+    /* Signed percent with two decimals for savings. */
+    function fmtSignedPct(x) {
+      x = +x || 0;
+      return (x >= 0 ? '+' : '') +
+        x.toFixed(2) + ' %';
+    }
+
+    /* Signed kWh with two decimals. */
+    function fmtSignedKwh(x) {
+      x = +x || 0;
+      return (x >= 0 ? '+' : '') +
+        x.toFixed(2) + ' kWh';
+    }
+
+    /* Live numbers in the same shape as the formula. */
+    /* Aggregate saved W over one day in all accepted pairs. */
+    function fmtLiveNum(x) {
+      var s = (+x || 0).toFixed(3);
+      if (s.charAt(0) === '-') {
+        s = '−' + s.slice(1);
+      }
+      return s;
+    }
+
+    /* Trace outcome class by word match, class only with no text change. */
+    function traceClass(line) {
+      if (line.indexOf('low confidence') >= 0) {
+        return 'trace-low';
+      }
+      if (line.indexOf('rejected') >= 0) {
+        return 'trace-rejected';
+      }
+      if (line.indexOf('accepted') >= 0) {
+        return 'trace-accepted';
+      }
+      if (line.indexOf('headline') >= 0) {
+        return 'trace-headline';
+      }
+      return '';
+    }
+
+    /* Parsed trace rows keep every byte, unknown lines stay plain with no marker. */
+    function renderTrace(text) {
+      var host = el('energy-trace');
+      host.textContent = '';
+      var src = String(text);
+      var lines = src.split('\n');
+      var trailing = src.length > 0 &&
+        src.charAt(src.length - 1) === '\n';
+      if (trailing) {
+        lines.pop();
+      }
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var row = document.createElement('span');
+        row.className = 'trace-row';
+        var mark = traceClass(line);
+        var at = line.indexOf(': ');
+        if (at >= 0) {
+          var keyEl = document.createElement('span');
+          keyEl.className = 'trace-key';
+          keyEl.textContent = line.slice(0, at);
+          var valEl = document.createElement('span');
+          valEl.className = 'trace-val';
+          valEl.textContent = line.slice(at + 2);
+          row.appendChild(keyEl);
+          row.appendChild(document.createTextNode(': '));
+          row.appendChild(valEl);
+        } else {
+          row.className += ' trace-row--plain';
+          row.textContent = line;
+        }
+        if (mark) {
+          row.className += ' ' + mark;
+        }
+        host.appendChild(row);
+        if (i < lines.length - 1 || trailing) {
+          host.appendChild(document.createTextNode('\n'));
+        }
+      }
+    }
+
+    /* Energy cells, trace, and note from one snapshot. */
+    /* Runs on the single one second poll with no extra timer */
+    /* and no stored history, so a restart resets the view. */
+    function updateEnergy(data) {
+      var energy = data.energy || {};
+      var state = energy.state || 'unavailable';
+      renderTrace(energy.trace || state);
+      var note = '';
+      if (state === 'unavailable') {
+        el('energy-daily').textContent = 'unavailable';
+        el('energy-daily-kwh').textContent = 'unavailable';
+        el('energy-yearly').textContent = 'unavailable';
+        el('energy-yearly-kwh').textContent = 'unavailable';
+        el('energy-since').textContent = 'unavailable';
+        el('energy-pairs').textContent = 'unavailable';
+        note = 'No package counter found. ' +
+          'The probe needs energy reads.';
+      } else if (state === 'baseline') {
+        el('energy-daily').textContent = 'baseline';
+        el('energy-daily-kwh').textContent = 'baseline';
+        el('energy-yearly').textContent = 'baseline';
+        el('energy-yearly-kwh').textContent = 'baseline';
+        el('energy-since').textContent = 'baseline';
+        el('energy-pairs').textContent = 'baseline';
+        note = 'Paused while the governor reads ' +
+          'performance. Showing baseline.';
+      } else if (state === 'waiting') {
+        el('energy-daily').textContent = 'waiting';
+        el('energy-daily-kwh').textContent = 'waiting';
+        el('energy-yearly').textContent = 'waiting';
+        el('energy-yearly-kwh').textContent = 'waiting';
+        el('energy-since').textContent = 'waiting';
+        el('energy-pairs').textContent =
+          (energy.accepted_pairs || 0) + ' accepted, ' +
+          (energy.rejected_pairs || 0) + ' rejected';
+        note = 'Waiting for load above 20 W. ' +
+          'Headlines need 3 accepted pairs.';
+      } else if (!energy.has_headline) {
+        var have = energy.accepted_pairs || 0;
+        var waiting = 'collecting ' + have + '/3 pairs';
+        el('energy-daily').textContent = waiting;
+        el('energy-daily-kwh').textContent = waiting;
+        el('energy-yearly').textContent = waiting;
+        el('energy-yearly-kwh').textContent = waiting;
+        el('energy-since').textContent = waiting;
+        el('energy-pairs').textContent =
+          have + ' accepted, ' +
+          (energy.rejected_pairs || 0) + ' rejected';
+        note = 'Collecting pairs. ' +
+          'Headlines need 3 accepted pairs.';
+      } else {
+        var conf = energy.low_confidence ?
+          ' (low confidence)' : '';
+        var shared = fmtSignedPct(energy.headline_pct) + conf +
+          ' across ' + (energy.accepted_pairs || 0) + ' pairs';
+        el('energy-daily').textContent = shared;
+        el('energy-yearly').textContent = shared;
+        el('energy-daily-kwh').textContent =
+          fmtSignedKwh(energy.daily_kwh) + ' / day estimate';
+        el('energy-yearly-kwh').textContent =
+          fmtSignedKwh(energy.yearly_kwh) + ' / yr projection';
+        el('energy-since').textContent =
+          fmtSignedKwh(energy.since_running_kwh) + ' estimate';
+        el('energy-pairs').textContent =
+          (energy.accepted_pairs || 0) + ' accepted, ' +
+          (energy.rejected_pairs || 0) + ' rejected';
+        if (energy.low_confidence) {
+          note = 'Low confidence with 3 to 4 pairs. ' +
+            'Yearly is a projection.';
+        }
+      }
+      if (state === 'backoff') {
+        note = 'Cooling down after bad reads. ' + note;
+      }
+      var live = '';
+      if (state === 'unavailable') {
+        live = 'waiting for package counter';
+      } else if (state === 'baseline') {
+        live = 'paused for baseline';
+      } else if (state === 'waiting') {
+        live = 'waiting for load above 20 W';
+      } else if (!energy.has_headline) {
+        live = 'waiting for 3 accepted pairs';
+      } else {
+        var saveW = (energy.daily_kwh || 0) * 1000 / 24;
+        live = '(' + fmtLiveNum(saveW) +
+          ' W) × 24 h ÷ 1000 = ' +
+          fmtLiveNum(energy.daily_kwh) + ' kWh';
+      }
+      el('energy-live').textContent = live;
+      el('energy-note').textContent = note;
+      /* Notes hold for every state except unavailable. */
+      /* Method and estimates stay true in baseline, waiting, */
+      /* and collecting too, so the block shows */
+      /* there. Pills show only with headlines, so no */
+      /* dangling refs in early states. */
+      var notes = el('energy-notes');
+      if (notes) {
+        notes.style.display =
+          (state === 'unavailable') ? 'none' : '';
+      }
+      /* Footnote backs unavailable alone. */
+      /* Other states hide the fallback line so */
+      /* note two carries estimates with no double. */
+      var footnote = el('energy-footnote');
+      if (footnote) {
+        footnote.style.display =
+          (state === 'unavailable') ? '' : 'none';
+      }
+      var showRefs = !!energy.has_headline &&
+        state !== 'unavailable' &&
+        state !== 'baseline' &&
+        state !== 'waiting';
+      var refs = document.querySelectorAll('.energy-ref');
+      for (var i = 0; i < refs.length; i++) {
+        refs[i].style.display = showRefs ? '' : 'none';
+      }
+    }
+
     function updateUI(data) {
       el('status-badge').textContent = '● running';
       el('status-badge').style.borderColor =
         'var(--success)';
       el('status-badge').style.color = 'var(--success)';
 
-      /* Mode cell with strict plus perf plus governor tip. */
+      /* Mode cell with strict, perf, and governor tip. */
       /* Perf widens placement to any allowed on miss. */
       /* Strict keeps group isolation with mask win. */
       var perf = data.perf_mode === 1 ? 'perf' : 'strict';
@@ -654,13 +1192,20 @@
       el('mode-badge').textContent = perf;
       el('mode-badge').title = gov;
 
+      /* Energy savings with daily, yearly, and trace. */
+      /* Unavailable stays literal, baseline stays paused, */
+      /* collecting waits for three pairs, headlines show */
+      /* one ratio in percent and kWh. Yearly */
+      /* is a projection, since running is an estimate. */
+      updateEnergy(data);
+
       var s = data.stats || {};
       var summary = buildSummary(s);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
 
-      /* Meta line with version plus topology. */
+      /* Meta line with version and topology. */
       var ver = data.version || '';
       var topo = data.topology || '';
       var meta = '';
@@ -670,7 +1215,7 @@
       el('meta-line').textContent = meta ||
         'per-CPU queues, fixed slices and placement';
 
-      /* Group depths plus pressure from snapshot. */
+      /* Group depths and pressure from snapshot. */
       el('light-depth').textContent =
         fmt(data.light_depth || 0);
       el('hog-depth').textContent =
@@ -721,6 +1266,9 @@
       var coalesceR = prevStats ?
         rateOf(s.kick_coalesced || 0,
           prevStats.kick_coalesced || 0, dt) : 0;
+      var slotR = prevStats ?
+        rateOf(s.slot_moves || 0,
+          prevStats.slot_moves || 0, dt) : 0;
       el('demote-rate').textContent = fmtRate(demoteR);
       el('promote-rate').textContent = fmtRate(promoteR);
       el('wake-rate').textContent = fmtRate(wakeR);
@@ -734,6 +1282,7 @@
       el('pskip-m-rate').textContent = fmtRate(pskipMR);
       el('pskip-r-rate').textContent = fmtRate(pskipRR);
       el('coalesce-rate').textContent = fmtRate(coalesceR);
+      el('slot-rate').textContent = fmtRate(slotR);
       prevStats = {
         group_demote: s.group_demote || 0,
         group_promote: s.group_promote || 0,
@@ -747,7 +1296,8 @@
         preempt_skipped_group: s.preempt_skipped_group || 0,
         preempt_skipped_mask: s.preempt_skipped_mask || 0,
         preempt_skipped_rate: s.preempt_skipped_rate || 0,
-        kick_coalesced: s.kick_coalesced || 0
+        kick_coalesced: s.kick_coalesced || 0,
+        slot_moves: s.slot_moves || 0
       };
       prevAt = nowMs;
 
@@ -766,6 +1316,8 @@
         fmt(s.park_moves || 0);
       el('steal').textContent =
         fmt(s.steal_moves || 0);
+      el('steal-xmoves').textContent =
+        fmt(s.steal_xmoves || 0);
       el('kicks').textContent =
         fmt(s.kicks || 0);
       el('no-tctx').textContent =
@@ -802,12 +1354,20 @@
         fmt(s.preempt_skipped_rate || 0);
       el('kcoal').textContent =
         fmt(s.kick_coalesced || 0);
+      el('slot-moves').textContent =
+        fmt(s.slot_moves || 0);
+      el('slot-defer').textContent =
+        fmt(s.slot_defer || 0);
+      el('slot-kicks').textContent =
+        fmt(s.slot_kicks || 0);
+      el('wheel-skips').textContent =
+        fmt(s.wheel_skips || 0);
 
       renderCoreCards(data);
     }
 
     /* Full snapshot download as a timestamped file. */
-    /* Pure blob save with no new network surface plus */
+    /* Pure blob save with no new network surface and */
     /* the same loopback snapshot route. */
     function downloadSnapshot() {
       fetch('/api/snapshot', { cache: 'no-store' })

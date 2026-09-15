@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Placement and steal helpers
  *
- * Placement and steal helpers for the flow scheduler.
- * The functions mirror the BPF side so behavior stays
- * the same on both sides of the boundary. Frequency
- * plus LLC plus CPU cards stay display only and never
- * shape placement.
+ * Holds the placement and steal helpers that mirror the BPF side so behavior
+ * stays the same on both sides of the boundary. Frequency, LLC, and CPU cards
+ * stay display only and never shape placement.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 /* Compile time CPU bound. Mirrors the BPF header. */
@@ -15,7 +15,7 @@ pub const MAX_CPUS: u32 = 1024;
 /* Bound of peers visited by one steal scan. */
 #[cfg(test)]
 pub const STEAL_BOUND: usize = 8;
-/* Least donor depth that allows a steal. */
+/* Least donor depth that always allows a steal, depth 1 needs idle empty. */
 #[cfg(test)]
 pub const STEAL_MIN_DEPTH: u64 = 2;
 /* Coalesce window in nanos at 50us. */
@@ -23,70 +23,119 @@ pub const STEAL_MIN_DEPTH: u64 = 2;
 pub const KICK_COALESCE_NS: u64 = 50_000;
 
 /*
- * Queue id of one CPU. Returns none for an out of
- * range id, so callers fall back to the park queue.
+ * Start peer for one dispatch from the cursor.
+ * Masks rate plus stand then steps one with wrap,
+ * so repeated passes spread across peers with no
+ * hot spot. Mirrors the BPF start read once per
+ * dispatch with mask. See src/bpf/dispatch.bpf.c
+ * for the scan use.
  */
 #[cfg(test)]
-pub fn dsq_for_cpu(cpu: u32, max: usize) -> Option<u64> {
-    if (cpu as usize) >= max {
-        return None;
-    }
-    if (cpu as u64) >= MAX_CPUS as u64 {
-        return None;
-    }
-    Some(crate::flow_edf::DSQ_BASE + cpu as u64)
-}
-
-/*
- * Next peer for a steal scan. Returns none with one
- * or no CPUs, so scans end at once with a single CPU
- * and no peers. Returns none for an out of range CPU.
- */
-#[cfg(test)]
-pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
-    if nr_cpus <= 1 {
-        return None;
-    }
-    if (cpu as usize) >= nr_cpus {
-        return None;
-    }
-    Some((cpu + 1) % nr_cpus as u32)
-}
-
-/*
- * Bound of a peer scan. Zero with one or no CPUs, so
- * steal scans and rotation end at once with a single
- * CPU. Otherwise capped by the steal bound and by one
- * less than the CPU count.
- */
-#[cfg(test)]
-pub fn scan_bound(nr_cpus: usize) -> usize {
-    if nr_cpus <= 1 {
-        return 0;
-    }
-    (nr_cpus - 1).min(STEAL_BOUND)
-}
-
-/*
- * Next steal cursor. The cursor rotates, so repeated
- * scans spread across peers.
- */
-#[cfg(test)]
-pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
+pub fn steal_start(cursor: u32, nr_cpus: usize) -> u32 {
+    use crate::flow_preempt::CURSOR_MASK;
     if nr_cpus == 0 {
         return 0;
     }
-    (cursor + 1) % nr_cpus as u32
+    if nr_cpus == 1 {
+        return 0;
+    }
+    ((cursor & CURSOR_MASK) + 1) % nr_cpus as u32
 }
 
 /*
- * Check that a CPU may run a task with the given
- * mask. Mirrors the BPF live plus range plus mask
- * check. A negative CPU fails closed. A CPU at or
- * past 1024 fails closed as test only bound. Live
- * CPUs are modelled by the mask length in tests, so
- * callers keep the mask sized to live CPUs. A missing
- * entry fails closed.
+ * Peers visited by two rotation windows from a start.
+ * Steps 16 from start with wrap, so high CPUs
+ * reach low peers with no dead read. First 8
+ * feed one same group scan, next 8 preview the
+ * next scan after the stride 8 step with 4 compare
+ * and swap tries. BPF uses modulo with the same
+ * order for the verifier. Returns 16 entries in
+ * order. See src/bpf/dispatch.bpf.c for the scan use.
+ */
+#[cfg(test)]
+pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(16);
+    if nr_cpus == 0 {
+        return out;
+    }
+    for off in 0..16 {
+        out.push((start.wrapping_add(off)) % nr_cpus as u32);
+    }
+    out
+}
+
+/*
+ * Start step for one steal scan from a cursor.
+ * Masks rate plus stand then steps one with wrap,
+ * so this models the per dispatch start read with
+ * no queue use. The cursor advance is separate at
+ * stride 8 with 4 compare and swap tries that keep
+ * rate plus stand, see cursor_store in flow_preempt
+ * plus src/bpf/dispatch.bpf.c for the advance use.
+ */
+#[cfg(test)]
+pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
+    steal_start(cursor, nr_cpus)
+}
+
+/*
+ * Peers visited by one steal scan from one CPU.
+ * Takes bound peers from the start helper, so high
+ * CPUs wrap to low peers with no dead read. BPF uses
+ * modulo with the same order for the verifier.
+ * Returns the visit order with bound entries.
+ */
+#[cfg(test)]
+pub fn steal_peers(cpu: u32, nr_cpus: usize) -> Vec<u32> {
+    let start = steal_start(cpu, nr_cpus);
+    let full = steal_peers_from(start, nr_cpus);
+    full.into_iter().take(STEAL_BOUND).collect()
+}
+
+/*
+ * Peers visited by the perf only cross scan from a start.
+ * Steps bound peers from start plus 8 with wrap, so high
+ * CPUs reach low peers with no dead read. Feeds the other
+ * group scan on same group miss with same need and keep
+ * first. Mirrors the BPF second loop with modulo and the
+ * same order for the verifier. Returns the visit order
+ * with bound entries. See src/bpf/dispatch.bpf.c for the
+ * scan use.
+ */
+#[cfg(test)]
+pub fn steal_cross_peers(start: u32, nr_cpus: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(STEAL_BOUND);
+    if nr_cpus == 0 {
+        return out;
+    }
+    for off in 0..STEAL_BOUND as u32 {
+        out.push(start.wrapping_add(8).wrapping_add(off) % nr_cpus as u32);
+    }
+    out
+}
+
+/*
+ * Cross mark from one retained DSQ id and one owner group.
+ * Compares the DSQ low bit against the owner group low bit
+ * with xor, so same group maps to zero and cross maps to
+ * one with no branch. Holds pure after the shared drain
+ * with scalar-only live across the inline drain, no
+ * map-pointer live, so the verifier keeps one state.
+ * Mirrors the BPF post hoc xor with mask. Returns 0
+ * for same and 1 for cross. See src/bpf/dispatch.bpf.c for
+ * the fold use.
+ */
+#[cfg(test)]
+pub fn steal_cross_x(steal_dsq: u64, sgroup: u8) -> u64 {
+    ((steal_dsq & 1) ^ ((sgroup as u64) & 1)) & 1
+}
+
+/*
+ * Check that a CPU may run a task with the given mask. Mirrors the BPF live,
+ * range, and mask check. A negative CPU fails closed. A CPU at or past 1024
+ * fails closed as test only bound. Live CPUs are modelled by the mask length in
+ * tests, so callers keep the mask sized to live CPUs. A missing entry fails
+ * closed.
  */
 #[cfg(test)]
 pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
@@ -133,44 +182,9 @@ pub fn may_run_on_live(cpu: i32, allowed: &[bool], nr_cpus: usize) -> bool {
 }
 
 /*
- * True when a donor queue may lose one task. Tier 0
- * model only. Needs at least two queued tasks, or one
- * queued task with a rescue when the thief is idle
- * with no moved plus no own left past unmovable park
- * leftovers or when the donor is asleep with no running
- * task. Busy thieves with a running donor keep the last
- * task. BPF ships thief idle only by construction due
- * to verifier jump at 1000001 on asleep check, with
- * donor asleep handled by idle kick.
- */
-#[cfg(test)]
-pub fn donor_ok(depth: u64, allow_single: bool, donor_idle: bool) -> bool {
-    if depth >= STEAL_MIN_DEPTH {
-        return true;
-    }
-    if depth == 1 && (allow_single || donor_idle) {
-        return true;
-    }
-    false
-}
-
-/*
- * True when a thief may rescue a lone queued task.
- * Needs no moved work plus no own left past unmovable
- * park leftovers, so idle thieves rescue singletons
- * even when the park holds only unmovable entries.
- * Mirrors the BPF min depth gate with no park use.
- */
-#[cfg(test)]
-pub fn rescue_single_ok(moved: u32, own_left: u64) -> bool {
-    moved == 0 && own_left == 0
-}
-
-/*
- * First idle CPU in the mask. Models the any idle
- * step. Returns none when no allowed CPU is idle.
- * Frequency plus LLC plus CPU cards stay display only
- * and never feed this choice.
+ * First idle CPU in the mask. Models the any idle step. Returns none when no
+ * allowed CPU is idle. Frequency, LLC, and CPU cards stay display only and
+ * never feed this choice.
  */
 #[cfg(test)]
 pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -186,11 +200,9 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
 }
 
 /*
- * Full select model. Mirrors the BPF order of any idle
- * plus previous plus current plus first. Returns none
- * for park use when no CPU allows. Frequency plus LLC
- * plus CPU cards stay display only and never feed this
- * choice.
+ * Full select model. Mirrors the BPF order of any idle, previous, current, and
+ * first. Returns none for overflow use when no CPU allows. Frequency, LLC, and CPU
+ * cards stay display only and never feed this choice.
  */
 #[cfg(test)]
 pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -212,13 +224,11 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
 }
 
 /*
- * True when one CPU sits on a free core. Needs the CPU
- * plus no sibling with a running task. Singletons with
- * 0xffff read as free, so SMT off is a no-op with no
- * trap. Out of range CPUs fail closed with no
- * placement. Follows the partner table for up to 8
- * steps with no division. Mirrors the BPF walk with
- * the same table and the same bounds.
+ * True when one CPU sits on a free core. Needs the CPU and no sibling with a
+ * running task. Singletons with 0xffff read as free, so SMT off is a no-op with
+ * no trap. Out of range CPUs fail closed with no placement. Follows the partner
+ * table for up to 8 steps with no division. Mirrors the BPF walk with the same
+ * table and the same bounds.
  */
 #[cfg(test)]
 pub fn core_free(cpu: i32, partner: &[u16], running: &[bool], nr: usize) -> bool {
@@ -286,13 +296,11 @@ pub fn core_free(cpu: i32, partner: &[u16], running: &[bool], nr: usize) -> bool
 }
 
 /*
- * First free CPU in one group. Tier A model only.
- * Scans in id order with the table when ready, else
- * halves. Needs allowed plus group plus free core by
- * running pid. No scx idle use and no claim, so a miss
- * wastes no idle claim. Returns none when no such CPU
- * lives. Strict iff ready is zero, best effort iff
- * ready is one with live table in placement.
+ * First free CPU in one group. Tier A model only. Scans in id order with the
+ * table when ready, else halves. Needs allowed, group, and free core by running
+ * pid. No scx idle use and no claim, so a miss wastes no idle claim. Returns
+ * none when no such CPU lives. Strict iff ready is zero, best effort iff ready
+ * is one with live table in placement.
  */
 #[cfg(test)]
 pub fn pick_free_idle(
@@ -320,12 +328,10 @@ pub fn pick_free_idle(
 }
 
 /*
- * First idle CPU in one group. Tier B model only.
- * Scans in id order with the table when ready, else
- * halves. Needs idle plus allowed in the group.
- * Returns none when no such CPU lives. Strict iff
- * ready is zero, best effort iff ready is one with
- * live table in placement.
+ * First idle CPU in one group. Tier B model only. Scans in id order with the
+ * table when ready, else halves. Needs idle and allowed in the group. Returns
+ * none when no such CPU lives. Strict iff ready is zero, best effort iff ready
+ * is one with live table in placement.
  */
 #[cfg(test)]
 pub fn pick_idle_in_group(
@@ -352,10 +358,9 @@ pub fn pick_idle_in_group(
 }
 
 /*
- * True when the waker CPU may keep the task. Needs idle
- * with no running task plus allowed plus in group.
- * An idle core cannot stack, so locality is free.
- * Every other case keeps current behavior.
+ * True when the waker CPU may keep the task. Needs idle with no running task,
+ * allowed, and in group. An idle core cannot stack, so locality is free. Every
+ * other case keeps current behavior.
  */
 #[cfg(test)]
 pub fn waker_first_ok(
@@ -389,22 +394,17 @@ pub fn waker_first_ok(
 }
 
 /*
- * Full tiered select model with first fallback.
- * Mirrors the BPF order of waker CPU first plus free
- * scan plus any idle in the group plus previous plus
- * current plus first in the group plus first. Waker
- * wins when idle with no running task plus allowed
- * plus in group. An idle core cannot stack, so
- * locality is free. Every other case keeps current
- * behavior. Tier A scans for a free core with no
- * claim, so a miss wastes no idle claim. Tier B
- * prefers any idle in the group with claim only there.
- * Placement only with no dispatch use. Singletons treat
- * all running free as free, so Tier A equals Tier B
- * order with no trap. Strict iff ready is zero,
- * best effort iff ready is one with live table
- * in placement. First model only, see tiered least
- * for the live least used by select plus enqueue.
+ * Full tiered select model with first fallback. Mirrors the BPF order of waker
+ * CPU first, free scan, and any idle in the group. It then checks previous,
+ * current, first in the group, and first. Waker wins when idle with no
+ * running task, allowed, and in group. An idle core cannot stack, so locality
+ * is free. Every other case keeps current behavior. Tier A scans for a free
+ * core with no claim, so a miss wastes no idle claim. Tier B prefers any idle
+ * in the group with claim only there. Placement only with no dispatch use.
+ * Singletons treat all running free as free, so Tier A equals Tier B order with
+ * no trap. Strict iff ready is zero, best effort iff ready is one with live
+ * table in placement. First model only, see tiered least for the live least
+ * used by select and enqueue.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered(
@@ -449,16 +449,13 @@ pub fn select_cpu_tiered(
 }
 
 /*
- * Full tiered select model with least queued fallback.
- * Mirrors the BPF order of waker plus free plus any
- * idle plus previous plus current plus least in the
- * group plus first. The least step scans 0 to nr in
- * id order with live plus mask plus queued depth and
- * picks the smallest depth with lowest id on ties by
- * strict less only, so equal depths keep the first
- * id. Missing queued entries read as zero with no
- * trap. Placement keeps live, dispatch keeps halves,
- * constants frozen. Strict iff ready is zero, best
+ * Full tiered select model with least queued fallback. Mirrors the BPF order
+ * of waker, free, and any idle. It then checks previous, current, least in
+ * the group, and first. The least step scans 0 to nr in id order with live,
+ * per CPU plus group overflow depth and picks the smallest depth with
+ * lowest id on ties by strict less only, so equal depths keep the first
+ * id. Missing entries read as zero with no trap. Placement keeps live,
+ * dispatch keeps halves, constants frozen. Strict iff ready is zero, best
  * effort iff ready is one with live table use.
  */
 #[cfg(test)]
@@ -473,7 +470,8 @@ pub fn select_cpu_tiered_least(
     ready: u8,
     partner: &[u16],
     running: &[bool],
-    queued: &[u64],
+    overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
     if waker_first_ok(cur, allowed, group, nr, table, ready, running) {
         return Some(cur as u32);
@@ -494,7 +492,7 @@ pub fn select_cpu_tiered_least(
         }
     }
     if let Some(c) =
-        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
     {
         return Some(c);
     }
@@ -507,13 +505,11 @@ pub fn select_cpu_tiered_least(
 }
 
 /*
- * Target CPU in one group from selected plus least.
- * Mirrors the BPF pick in group used by enqueue. A
- * valid allowed selected CPU in the group wins.
- * Otherwise the least queued allowed CPU in the group
- * wins with lowest id on ties. No allowed CPU in the
- * group yields none for park use. Placement keeps
- * live, dispatch keeps halves, constants frozen.
+ * Target CPU in one group from selected and least. Mirrors the BPF pick in
+ * group used by enqueue. A valid allowed selected CPU in the group wins.
+ * Otherwise the least queued allowed CPU in the group wins with lowest id on
+ * ties. No allowed CPU in the group yields none for overflow use. Placement
+ * keeps live, dispatch keeps halves, constants frozen.
  */
 #[cfg(test)]
 pub fn pick_in_group_least(
@@ -523,7 +519,8 @@ pub fn pick_in_group_least(
     nr: usize,
     table: &[u8],
     ready: u8,
-    queued: &[u64],
+    overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
     if selected >= 0
         && may_run_on(selected, allowed)
@@ -532,20 +529,28 @@ pub fn pick_in_group_least(
     {
         return Some(selected as u32);
     }
-    crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+    crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
 }
 
 /*
  * Least queued allowed CPU in any group for S0 perf.
- * Scans in id order with mask only and no group check.
- * Picks the smallest queued depth with lowest id on
- * ties by strict less only, so equal depths keep the
- * first id. Missing queued entries read as zero with
- * no trap. Returns none when no allowed CPU lives.
- * Mirrors the BPF widened least over any allowed.
+ * The per CPU FIFO store keeps backlog per CPU, so depth
+ * reads each candidate per CPU queue plus its group
+ * overflow tail. Picks the smallest depth with lowest
+ * id on ties by strict less only, so equal depths keep
+ * the first id. Missing entries read as zero with no
+ * trap. Returns none when no allowed CPU lives. Mirrors
+ * the BPF widened least over any allowed.
  */
 #[cfg(test)]
-pub fn least_any(allowed: &[bool], nr: usize, queued: &[u64]) -> Option<u32> {
+pub fn least_any(
+    allowed: &[bool],
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    overflow: &[u64],
+    per_cpu: &[u64],
+) -> Option<u32> {
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
     for cpu in 0..nr {
@@ -555,7 +560,12 @@ pub fn least_any(allowed: &[bool], nr: usize, queued: &[u64]) -> Option<u32> {
         if (cpu as u64) >= MAX_CPUS as u64 {
             continue;
         }
-        let q = queued.get(cpu).copied().unwrap_or(0);
+        let g = crate::flow_group::group_live(cpu as u32, nr, table, ready);
+        let q = per_cpu
+            .get(cpu)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(overflow.get(g as usize).copied().unwrap_or(0));
         match best {
             None => {
                 best = Some(cpu as u32);
@@ -572,11 +582,10 @@ pub fn least_any(allowed: &[bool], nr: usize, queued: &[u64]) -> Option<u32> {
 }
 
 /*
- * First free CPU in any group for S0 perf. Scans in
- * id order with mask plus free core by running pid.
- * No group check, so cross group idle cores win on
- * in group miss. Returns none when no such CPU lives.
- * Mirrors the BPF widened free scan with mask win.
+ * First free CPU in any group for S0 perf. Scans in id order with mask and free
+ * core by running pid. No group check, so cross group idle cores win on in
+ * group miss. Returns none when no such CPU lives. Mirrors the BPF widened free
+ * scan with mask win.
  */
 #[cfg(test)]
 pub fn pick_free_any(
@@ -598,11 +607,10 @@ pub fn pick_free_any(
 }
 
 /*
- * True when the waker CPU may keep the task in S0
- * perf. Needs idle with no running task plus allowed.
- * Perf skips the group check, so any allowed idle
- * waker wins. Strict callers use waker_first_ok with
- * group, see tiered perf below. Mask always wins.
+ * True when the waker CPU may keep the task in S0 perf. Needs idle with no
+ * running task and allowed. Perf skips the group check, so any allowed idle
+ * waker wins. Strict callers use waker_first_ok with group, see tiered perf
+ * below. Mask always wins.
  */
 #[cfg(test)]
 pub fn waker_first_ok_perf(waker: i32, allowed: &[bool], nr: usize, running: &[bool]) -> bool {
@@ -625,13 +633,11 @@ pub fn waker_first_ok_perf(waker: i32, allowed: &[bool], nr: usize, running: &[b
 }
 
 /*
- * Target CPU in one group with S0 perf widening.
- * Mirrors the BPF pick in group with the flag. A
- * valid allowed selected CPU in the group wins. Perf
- * takes any allowed selected CPU on group miss. Then
- * the least in group wins, then perf takes the least
- * any on miss with lowest depth plus lowest id. No
- * allowed CPU yields none for park use. Mask wins.
+ * Target CPU in one group with S0 perf widening. Mirrors the BPF pick in group
+ * with the flag. A valid allowed selected CPU in the group wins. Perf takes any
+ * allowed selected CPU on group miss. Then the least in group wins, then perf
+ * takes the least any on miss with lowest depth and lowest id. No allowed CPU
+ * yields none for overflow use. Mask wins.
  */
 #[cfg(test)]
 pub fn pick_in_group_widened(
@@ -641,7 +647,8 @@ pub fn pick_in_group_widened(
     nr: usize,
     table: &[u8],
     ready: u8,
-    queued: &[u64],
+    overflow: &[u64],
+    per_cpu: &[u64],
     perf: bool,
 ) -> Option<u32> {
     if selected >= 0 && may_run_on(selected, allowed) && (selected as usize) < nr {
@@ -653,12 +660,12 @@ pub fn pick_in_group_widened(
         }
     }
     if let Some(c) =
-        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
     {
         return Some(c);
     }
     if perf {
-        if let Some(c) = least_any(allowed, nr, queued) {
+        if let Some(c) = least_any(allowed, nr, table, ready, overflow, per_cpu) {
             return Some(c);
         }
     }
@@ -666,15 +673,12 @@ pub fn pick_in_group_widened(
 }
 
 /*
- * Full tiered select with S0 perf widening. Mirrors
- * the BPF order of waker plus free plus any idle plus
- * previous plus current plus least plus first. Strict
- * keeps group checks, perf widens each miss to any
- * allowed with same order. Waker perf skips group.
- * Free perf scans any free core on miss. Idle perf
- * takes any idle on miss. Previous plus current perf
- * take any allowed on group miss. Least perf takes
- * least any on miss with lowest depth plus lowest id.
+ * Full tiered select with S0 perf widening. Mirrors the BPF order of waker,
+ * free, and any idle. It then checks previous, current, least, and first.
+ * Strict keeps group checks, perf widens each miss to any allowed with same
+ * Waker perf skips group. Free perf scans any free core on miss. Idle perf
+ * takes any idle on miss. Previous and current perf take any allowed on group
+ * miss. Least perf takes least any on miss with lowest depth and lowest id.
  * First stays any allowed. Mask always wins.
  */
 #[cfg(test)]
@@ -689,7 +693,8 @@ pub fn select_cpu_tiered_perf(
     ready: u8,
     partner: &[u16],
     running: &[bool],
-    queued: &[u64],
+    overflow: &[u64],
+    per_cpu: &[u64],
     perf: bool,
 ) -> Option<u32> {
     if perf {
@@ -726,12 +731,12 @@ pub fn select_cpu_tiered_perf(
         }
     }
     if let Some(c) =
-        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
     {
         return Some(c);
     }
     if perf {
-        if let Some(c) = least_any(allowed, nr, queued) {
+        if let Some(c) = least_any(allowed, nr, table, ready, overflow, per_cpu) {
             return Some(c);
         }
     }
@@ -759,14 +764,12 @@ pub fn exiting_local_ok(exiting: bool, tgt_allowed: bool) -> bool {
 }
 
 /*
- * True when an exiting fast path may kick the task CPU.
- * Needs the target state with no running task, so an idle
- * task CPU wakes at once for the exit. No queued depth plus
- * no coalesce plus no rate check, so q0 plus q1 plus q2 all
- * kick when idle with no slide. Busy targets stay quiet. A
- * missing state fails closed with no kick. Callers gate on
- * exiting_local_ok first, so non-exiting plus fallback paths
- * never kick here.
+ * True when an exiting fast path may kick the task CPU. Needs the target state
+ * with no running task, so an idle task CPU wakes at once for the exit. No
+ * queued depth, no coalesce, and no rate check, so q0, q1, and q2 all kick when
+ * idle with no slide. Busy targets stay quiet. A missing state fails closed
+ * with no kick. Callers gate on exiting_local_ok first, so non-exiting and
+ * fallback paths never kick here.
  */
 #[cfg(test)]
 pub fn exiting_kick_ok(running_pid: u32, has_state: bool) -> bool {
@@ -778,17 +781,15 @@ pub fn exiting_kick_ok(running_pid: u32, has_state: bool) -> bool {
 
 /*
  * True when an idle kick may run. Needs an idle target
- * with no running task and at most 2 queued, so a
- * missed empty to 1 kick is rescued on the next insert
- * while deep queues stay quiet with no storm. Busy
- * targets stay quiet. A missing state fails closed
- * with no kick.
+ * with no running task. Always kicks the idle target
+ * regardless of the shared queue depth, so no idle CPU
+ * with queued work sleeps unkicked. Q2 still coalesces
+ * in 50us, see below. Busy targets stay quiet. A
+ * missing state fails closed with no kick. The queue
+ * length stays for call compat and is ignored.
  */
 #[cfg(test)]
-pub fn kick_idle_ok(queue_len: u64, running_pid: u32, has_state: bool) -> bool {
-    if queue_len > STEAL_MIN_DEPTH {
-        return false;
-    }
+pub fn kick_idle_ok(_queue_len: u64, running_pid: u32, has_state: bool) -> bool {
     if !has_state {
         return false;
     }
@@ -809,12 +810,11 @@ pub fn kick_recent(now: u64, last: u64) -> bool {
 }
 
 /*
- * True when one idle kick coalesces with no kick. Needs
- * q2 plus idle plus recent plus not pinned, so q1 always
- * kicks and deep stays quiet with no count. Pinned never
- * skips. No slide on skip, the caller keeps the old last.
- * Park stays out with no kick use. Exiting uses its own
- * idle kick with no coalesce, see exiting_kick_ok.
+ * True when one idle kick coalesces with no kick. Needs q2, idle, recent, and
+ * not pinned, so q1 always kicks and deep always kicks with no coalesce.
+ * Pinned never skips. No slide on skip, the caller keeps the old last.
+ * Overflow sends no kick on its own. Exiting uses its own idle kick with
+ * no coalesce, see exiting_kick_ok.
  */
 #[cfg(test)]
 pub fn kick_coalesced(
@@ -841,23 +841,22 @@ pub fn kick_coalesced(
 }
 
 /*
- * False for park inserts with no kick. Park holds tasks
- * with no live allowed CPU after fallback, so no single
- * idle target can run them. The next dispatch pass on
- * any thief in the park group collects them when the
- * mask allows. A target scan would need a loop with
- * storm risk, so no kick is sent.
+ * False for overflow inserts with no kick. Overflow holds tasks with no live
+ * allowed CPU after fallback, so no single idle target can run them. The next
+ * rotation or rescue pass collects them when the mask allows. A target scan
+ * would need a loop with storm risk, so no kick is sent.
  */
 #[cfg(test)]
-pub fn park_kick_ok() -> bool {
+pub fn overflow_kick_ok() -> bool {
     false
 }
 
 /*
  * Target CPU from the selected CPU. A valid allowed
  * selected CPU wins. Otherwise the first allowed CPU
- * wins. No allowed CPU yields no target for park use.
- * Pinned tasks resolve to the single allowed CPU here.
+ * wins. No allowed CPU yields no target for overflow
+ * use. Pinned tasks resolve to the single allowed CPU
+ * here.
  */
 #[cfg(test)]
 pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
@@ -879,8 +878,8 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
 /*
  * Target CPU for a task that cannot move. Mirrors
  * the BPF local path with a mask check. An out of
- * range CPU yields no target for park use. A CPU
- * outside the mask yields no target for park use.
+ * range CPU yields no target for overflow use. A CPU
+ * outside the mask yields no target for overflow use.
  */
 #[cfg(test)]
 pub fn stay_target(here: i32, nr_cpus: usize, allowed: &[bool]) -> Option<u32> {
@@ -925,112 +924,4 @@ pub struct PendingTask {
     pub live: bool,
     /* True models a failed queue move. */
     pub fail: bool,
-}
-
-/*
- * True when one peer task may move to the thief.
- * Mirrors the BPF peer drain task check. A live and
- * allowed task with no move failure may move. Exiting
- * tasks may move when allowed, so they run to exit.
- * A dead, foreign, or failed task stays, so the scan
- * moves past it with progress. An empty queue yields
- * false.
- */
-#[cfg(test)]
-pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
-    if let Some(t) = head {
-        t.live && !t.fail && may_run_on(thief, &t.allowed)
-    } else {
-        false
-    }
-}
-
-/*
- * Steal up to budget tasks from peers for an idle CPU.
- * Tier 0 model only. The scan visits at most bound
- * peers starting after the cursor with wrap. Only idle
- * callers steal. Each peer needs at least two queued
- * tasks, or one with a rescue when the thief is idle
- * with no moved plus no own left past unmovable park
- * leftovers or when the donor is asleep with no running
- * task, so thin running donors keep the last task while
- * idle thieves plus asleep donors rescue singletons.
- * BPF ships thief idle only by construction due to
- * verifier jump at 1000001 on asleep check, with donor
- * asleep handled by idle kick. Each peer is scanned in
- * order past dead, foreign, and failed heads, so movable
- * work behind a bad head is rescued. The cursor advances
- * by the peers visited. Returns the count moved and the
- * new cursor.
- */
-#[cfg(test)]
-pub fn steal_model(
-    peers: &mut [std::collections::VecDeque<PendingTask>],
-    thief: usize,
-    cursor: u32,
-    budget: u32,
-    idle: bool,
-    allow_single: bool,
-    donor_idle: &[bool],
-) -> (u32, u32) {
-    if !idle {
-        return (0, cursor);
-    }
-    if peers.len() <= 1 {
-        return (0, cursor);
-    }
-    if budget == 0 {
-        return (0, cursor);
-    }
-    let mut moved = 0;
-    let mut cur = cursor;
-    let mut visited = 0;
-    let bound = scan_bound(peers.len());
-    while visited < bound && moved < budget {
-        let next = match next_peer(cur, peers.len()) {
-            Some(v) => v,
-            None => break,
-        };
-        cur = next;
-        visited += 1;
-        if next as usize == thief {
-            continue;
-        }
-        if let Some(q) = peers.get_mut(next as usize) {
-            let idle_donor = donor_idle.get(next as usize).copied().unwrap_or(false);
-            if !donor_ok(q.len() as u64, allow_single, idle_donor) {
-                continue;
-            }
-            let mut pos = None;
-            for (idx, task) in q.iter().enumerate() {
-                if peer_head_ok(thief as i32, Some(task)) {
-                    pos = Some(idx);
-                    break;
-                }
-            }
-            if let Some(idx) = pos {
-                q.remove(idx);
-                moved += 1;
-            }
-            if moved >= budget {
-                break;
-            }
-        }
-    }
-    (moved, cur)
-}
-
-/*
- * True when a CPU may steal after draining own and
- * park. An idle CPU with no moved work steals past
- * unmovable leftovers, so only unmovable work never
- * blocks a steal. A busy CPU with moved work steals
- * only when both queues are empty.
- */
-#[cfg(test)]
-pub fn may_steal(own_left: u64, park_left: u64, moved: u32) -> bool {
-    if moved == 0 {
-        return true;
-    }
-    own_left == 0 && park_left == 0
 }

@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Generated BPF bindings
  *
- * Generated bindings for the shared header. Naming
- * follows the C header. Lints for naming are allowed
- * here so generated names do not warn.
+ * Holds the generated bindings for the shared BPF header. Naming follows the C header and
+ * naming lints are allowed here so generated names do not warn.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
