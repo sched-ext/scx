@@ -16,9 +16,9 @@ version-compare = "0.2"
 glob = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-libbpf-cargo = "=0.27.0"
+libbpf-cargo = "=0.27.1"
 tar = "0.4"
-libbpf-rs = "=0.27.0"
+libbpf-rs = "=0.27.1"
 bindgen = ">=0.69"
 
 [build-dependencies]
