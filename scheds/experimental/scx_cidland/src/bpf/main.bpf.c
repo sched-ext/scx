@@ -453,6 +453,7 @@ struct busy_balance_env {
 	u32 level;
 	u32 dst_overloaded;
 	u32 local_overloaded;
+	u32 group_queued;
 };
 
 enum newidle_level {
@@ -483,7 +484,7 @@ struct cid_ctx {
 	u32 active_balance_interval_ms; /* destination: balance backoff */
 	u64 busy_balance_next[BUSY_BALANCE_LEVELS]; /* next balance per domain */
 	u32 busy_balance_interval_ms[BUSY_BALANCE_LEVELS]; /* domain backoff */
-	u32 busy_balance_cursor[BUSY_BALANCE_LEVELS]; /* rotating domain scan */
+	u32 busy_balance_cursor[BUSY_BALANCE_LEVELS]; /* source-cid tie-break cursor */
 	struct busy_balance_env busy_balance_env; /* tick scan scratch space */
 	u64 busy_balance_load; /* latest domain-scan load sample */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
@@ -2752,9 +2753,12 @@ static const u32 prio_to_weight[40] = {
  * an LLC. A pull requires capacity below the range average in the local group
  * and load above it in the source group. The movable load is the smaller of
  * that room and excess, and sd->imbalance_pct (117%) is required between busy
- * groups. The individual source and destination cids get the same guard when
- * the destination has something queued. A head is taken only if its weight
- * fits the group imbalance, as detach_tasks() does for migrate_load.
+ * groups. Like sched_balance_find_src_group() and
+ * sched_balance_find_src_rq(), the busiest eligible child group is selected
+ * first, then its busiest queued cid. The individual source and destination
+ * cids get the same guard when the destination has something queued. A head is
+ * taken only if its weight fits the group imbalance, as detach_tasks() does
+ * for migrate_load.
  *
  * Like should_we_balance(), one cid owns a pass for each local group. It
  * retains the calculated imbalance as a budget and dispatch drains it one
@@ -2763,8 +2767,6 @@ static const u32 prio_to_weight[40] = {
  * another allowed cid in the same local group.
  */
 #define BUSY_BALANCE_IMBALANCE_PCT	117U
-#define BUSY_BALANCE_SAMPLE		8U
-
 /*
  * The capacity-normalized load of the whole range, sds->avg_load, one read
  * per cid like update_sd_lb_stats().
@@ -2801,11 +2803,14 @@ busy_balance_group_delta(s32 dst_cid, u64 group, u64 avg_norm, bool excess)
 	u32 i;
 
 	TOUCH_ARENA();
+	env->group_queued = 0;
 	bpf_arena_for(i, base, base + nr) {
 		if (!cid_valid(i))
 			break;
 		load += READ_ONCE(cid_ctx(i)->busy_balance_load);
 		cap += cid_topo(i)->cap;
+		if (cid_queued_test(i))
+			env->group_queued = 1;
 	}
 	env->group_load = load;
 	env->group_cap = cap;
@@ -2815,6 +2820,113 @@ busy_balance_group_delta(s32 dst_cid, u64 group, u64 avg_norm, bool excess)
 			load - avg_norm * cap / 1024 : 0;
 	return avg_norm * cap / 1024 > load ?
 		avg_norm * cap / 1024 - load : 0;
+}
+
+/*
+ * Pick the busiest sched group outside the destination's local group, as
+ * sched_balance_find_src_group() does before looking at individual runqueues.
+ * The group load samples were collected by busy_balance_avg_load(), so this
+ * pass only aggregates those samples at the child level of the domain.
+ */
+__noinline bool busy_balance_find_src_group(s32 dst_cid, u32 base, u32 nr)
+{
+	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
+	u64 best_load = 0, best_cap = 1, best_excess = 0;
+	u32 best_base = 0, best_nr = 0;
+	u32 i;
+
+	TOUCH_ARENA();
+	bpf_arena_for(i, base, base + nr) {
+		u32 group_base, group_nr;
+		u64 excess, norm;
+
+		if (!cid_valid(i))
+			break;
+		if (env->level == BUSY_BALANCE_SYSTEM) {
+			group_base = cid_topo(i)->node_base;
+			group_nr = cid_topo(i)->node_nr;
+		} else if (env->level == BUSY_BALANCE_NODE) {
+			group_base = cid_topo(i)->llc_base;
+			group_nr = cid_topo(i)->llc_nr;
+		} else {
+			group_base = cid_topo(i)->core_base;
+			group_nr = cid_topo(i)->core_nr;
+		}
+		/* Each child group is contiguous; aggregate it only at its base. */
+		if (i != group_base ||
+		    group_base == env->local_base || !group_nr)
+			continue;
+		excess = busy_balance_group_delta(
+					dst_cid,
+					(u64)group_nr << 32 | group_base,
+					env->avg_norm, true);
+		if (!excess || !env->group_queued)
+			continue;
+		norm = env->group_load * 1024 / MAX(env->group_cap, 1ULL);
+		if (env->local_overloaded &&
+		    norm * 100 <=
+		    env->local_norm * BUSY_BALANCE_IMBALANCE_PCT)
+			continue;
+		/* Compare load / capacity without losing precision to division. */
+		if (env->group_load * best_cap <= best_load * env->group_cap)
+			continue;
+		best_load = env->group_load;
+		best_cap = env->group_cap;
+		best_excess = excess;
+		best_base = group_base;
+		best_nr = group_nr;
+	}
+
+	if (!best_nr)
+		return false;
+	env->group_base = best_base;
+	env->group_nr = best_nr;
+	env->source_excess = best_excess;
+	return true;
+}
+
+/*
+ * Within the busiest group, select the busiest queued cid, corresponding to
+ * sched_balance_find_src_rq(). Rotate equal-load choices after the previous
+ * source so that repeated passes do not always drain the lowest cid.
+ */
+__noinline s32 busy_balance_find_src_cid(s32 dst_cid, u32 start)
+{
+	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
+	u64 best_load = 0, best_cap = 1;
+	s32 best = -1;
+	u32 off;
+
+	TOUCH_ARENA();
+	if (!env->group_nr)
+		return -1;
+	if (start < env->group_base ||
+	    start >= env->group_base + env->group_nr)
+		start = env->group_base;
+	bpf_arena_for(off, 0, env->group_nr) {
+		s32 cid = env->group_base +
+			  (start - env->group_base + off) % env->group_nr;
+		u64 load, cap, norm;
+
+		if (!cid_valid(cid) || cid_idle_test(cid) || !cid_queued_test(cid))
+			continue;
+		load = READ_ONCE(cid_ctx(cid)->busy_balance_load);
+		cap = MAX(cid_topo(cid)->cap, 1ULL);
+		norm = load * 1024 / cap;
+		if (norm <= env->avg_norm)
+			continue;
+		if (env->dst_overloaded &&
+		    norm * 100 <=
+		    env->dst_norm * BUSY_BALANCE_IMBALANCE_PCT)
+			continue;
+		if (load * best_cap > best_load * cap) {
+			best_load = load;
+			best_cap = cap;
+			best = cid;
+		}
+	}
+
+	return best;
 }
 
 /*
@@ -2845,118 +2957,14 @@ busy_balance_dst_cid(const struct task_struct *p, s32 owner_cid)
 	return -1;
 }
 
-/*
- * Examine at most @limit queued cids from one bitmap word and return the first
- * movable one the imbalance above allows to pull from. Sources in the local
- * group are skipped, and the source-group excess is checked here so rejecting
- * one cid does not discard the rest of its bitmap word. The tick cannot insert
- * a task into LOCAL, so dispatch consumes this advisory choice at the next
- * natural scheduling boundary. Keeping this in a global function bounds
- * verifier exploration of the rotating domain scan, as steal_from_word() does
- * for newly-idle balance. @kls packs the word index, the remaining sample
- * budget and the rotation as k << 16 | limit << 8 | s.
- */
-__noinline u64
-busy_balance_from_word(u64 dst_kls, u64 w, u64 now)
-{
-	struct busy_balance_env __arena *env;
-	s32 dst_cid = dst_kls >> 32;
-	u32 kls = dst_kls;
-	u32 k = kls >> 16, limit = (kls >> 8) & 0xff, s = kls & 63;
-
-	TOUCH_ARENA();
-	if (!cid_valid(dst_cid))
-		return (u64)(u32)-1;
-	env = &cid_ctx(dst_cid)->busy_balance_env;
-	if (!env->local_room)
-		return (u64)(u32)-1;
-
-	w = rotr64(w, s);
-	while (w && limit && can_loop) {
-		u64 src_norm;
-		cid_edq_task_t *at;
-		struct task_struct *p;
-		s32 cid, move_dst;
-
-		cid = k * 64 + ((__builtin_ctzll(w) + s) & 63);
-		w &= w - 1;
-		if (cid == dst_cid || !cid_valid(cid))
-			continue;
-		if (cid >= env->local_base &&
-		    cid < env->local_base + env->local_nr)
-			continue;
-		limit--;
-		if (cid_idle_test(cid))
-			continue;
-
-		src_norm = cid_load(cid, now) * 1024 /
-			   MAX(cid_topo(cid)->cap, 1ULL);
-		if (src_norm <= env->avg_norm)
-			continue;
-		if (env->dst_overloaded &&
-		    src_norm * 100 <=
-		    env->dst_norm * BUSY_BALANCE_IMBALANCE_PCT)
-			continue;
-		if (env->level == BUSY_BALANCE_SYSTEM) {
-			env->group_base = cid_topo(cid)->node_base;
-			env->group_nr = cid_topo(cid)->node_nr;
-		} else if (env->level == BUSY_BALANCE_NODE) {
-			env->group_base = cid_topo(cid)->llc_base;
-			env->group_nr = cid_topo(cid)->llc_nr;
-		} else {
-			env->group_base = cid_topo(cid)->core_base;
-			env->group_nr = cid_topo(cid)->core_nr;
-		}
-		env->source_excess = busy_balance_group_delta(
-					     dst_cid,
-					     (u64)env->group_nr << 32 |
-					     env->group_base,
-					     env->avg_norm, true);
-		if (!env->source_excess)
-			continue;
-		if (env->local_overloaded &&
-		    env->group_load * 1024 / MAX(env->group_cap, 1ULL) * 100 <=
-		    env->local_norm * BUSY_BALANCE_IMBALANCE_PCT)
-			continue;
-
-		if (cid_edq_try_peek(cid, &at))
-			continue;
-		if (!at) {
-			cid_queued_check(cid);
-			continue;
-		}
-		/*
-		 * @cid is outside the owner's local child group, so none of the
-		 * alternate destinations can be its SMT sibling. task_hot() has
-		 * the same result for all of them; reject it before resolving p.
-		 */
-		if (READ_ONCE(at->state) == CID_EDQ_ENQUEUED &&
-		    ((task_ctx_t *)at)->vjoin_w <=
-			MIN(env->local_room, env->source_excess) &&
-		    !task_hot((task_ctx_t *)at, cid, dst_cid, now)) {
-			p = scx_bpf_tid_to_task(at->tid);
-			move_dst = p ? busy_balance_dst_cid(p, dst_cid) : -1;
-			if (move_dst >= 0) {
-				env->move_budget =
-					MIN(env->local_room, env->source_excess);
-				env->move_dst_cid = move_dst;
-				scx_edq_task_drop(&at->common);
-				return ((u64)limit << 32) | (u32)cid;
-			}
-		}
-		scx_edq_task_drop(&at->common);
-	}
-
-	return ((u64)limit << 32) | (u32)-1;
-}
-
 static __always_inline s32
 busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 			u32 level)
 {
 	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
-	u32 first = base / 64, last, kstart, i, span;
-	u32 limit = BUSY_BALANCE_SAMPLE;
+	cid_edq_task_t *at;
+	struct task_struct *p;
+	s32 cid, move_dst;
 
 	if (!nr)
 		return -1;
@@ -2985,34 +2993,37 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	env->level = level;
 	if (!env->local_room)
 		return -1;
-	last = (base + nr - 1) / 64;
-	span = last - first + 1;
-	if (start < base || start >= base + nr)
-		start = base;
-	kstart = start / 64;
-
-	bpf_arena_for(i, 0, span) {
-		u32 k = first + (kstart - first + i) % span;
-		u64 w, ret;
-		s32 cid;
-
-		w = cmask_word(queued_cids, k) &
-		    cmask_range_word(queued_cids, k, base, nr);
-		if (!w)
-			continue;
-		ret = busy_balance_from_word((u64)(u32)dst_cid << 32 |
-					     (k << 16) | (limit << 8) |
-					     (i ? 0 : start & 63),
-					     w, now);
-		cid = (s32)(u32)ret;
-		limit = ret >> 32;
-		if (cid >= 0)
-			return cid;
-		if (!limit)
-			break;
+	if (!busy_balance_find_src_group(dst_cid, base, nr))
+		return -1;
+	cid = busy_balance_find_src_cid(dst_cid, start);
+	if (cid < 0)
+		return -1;
+	if (cid_edq_try_peek(cid, &at))
+		return -1;
+	if (!at) {
+		cid_queued_check(cid);
+		return -1;
 	}
-
-	return -1;
+	/*
+	 * @cid is outside the owner's local child group, so none of the
+	 * alternate destinations can be its SMT sibling. task_hot() has the
+	 * same result for all of them; reject it before resolving p.
+	 */
+	if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
+	    ((task_ctx_t *)at)->vjoin_w >
+		MIN(env->local_room, env->source_excess) ||
+	    task_hot((task_ctx_t *)at, cid, dst_cid, now)) {
+		scx_edq_task_drop(&at->common);
+		return -1;
+	}
+	p = scx_bpf_tid_to_task(at->tid);
+	move_dst = p ? busy_balance_dst_cid(p, dst_cid) : -1;
+	scx_edq_task_drop(&at->common);
+	if (move_dst < 0)
+		return -1;
+	env->move_budget = MIN(env->local_room, env->source_excess);
+	env->move_dst_cid = move_dst;
+	return cid;
 }
 
 static __noinline bool
@@ -3061,7 +3072,7 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	start = READ_ONCE(dst->busy_balance_cursor[level]);
 	if (start < base || start >= base + nr)
 		start = base;
-	src = busy_balance_from_range(dst_cid, base, nr, start + 1, now,
+	src = busy_balance_from_range(dst_cid, base, nr, start, now,
 				      level);
 	if (src >= 0) {
 		move_dst = dst->busy_balance_env.move_dst_cid;
@@ -3086,7 +3097,7 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 			scx_bpf_kick_cid(move_dst, SCX_KICK_IDLE);
 	}
 	WRITE_ONCE(dst->busy_balance_cursor[level],
-		   src >= 0 ? src : start + BUSY_BALANCE_SAMPLE);
+		   src >= 0 ? src + 1 : start + 1);
 	interval = src >= 0 ? min_ms : MIN(interval * 2, max_ms);
 	WRITE_ONCE(dst->busy_balance_interval_ms[level], interval);
 	WRITE_ONCE(dst->busy_balance_next[level],
