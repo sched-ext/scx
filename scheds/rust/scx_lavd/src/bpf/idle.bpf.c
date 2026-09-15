@@ -10,6 +10,7 @@
 #include "lavd.bpf.h"
 #include "util.bpf.h"
 #include "power.bpf.h"
+#include <lib/topology.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -214,6 +215,71 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 		if (bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
 			return cpu;
 	};
+	return -ENOENT;
+}
+
+
+/*
+ * Pick a fresh CPU to add to the overflow set during ops.select_cpu()
+ * when active+overflow has no idle CPU usable by the waking task.
+ *
+ * Anchored to the same LLC as ctx->prev_cpu so the migration cost is
+ * negligible. Returns -ENOENT when extension is disabled, the system
+ * is already saturated, or no eligible candidate exists.
+ */
+static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
+{
+	const volatile u16 *cpu_order;
+	const struct cpumask *online_mask;
+	struct bpf_cpumask *online_src_mask, *ovrflw;
+	s32 cpu, prev_llc;
+	unsigned int i;
+
+	/* User disabled the feature. */
+	if (no_ovrflw_extend)
+		return -ENOENT;
+
+	/*
+	 * Saturation guard: O(1). When sys_stat.nr_active is bumped to
+	 * cover all online CPUs, there is no room to extend.
+	 */
+	if (sys_stat.nr_active >= nr_cpus_onln)
+		return -ENOENT;
+
+	/* Anchor LLC for proximity to prev_cpu. */
+	prev_llc = topo_cpu_to_llc_id(ctx->prev_cpu);
+	if (prev_llc < 0)
+		return -ENOENT;
+
+	online_src_mask = ctx->cpuc_cur->temp_mask;
+	ovrflw = ovrflw_cpumask;
+	if (!online_src_mask || !ovrflw)
+		return -ENOENT;
+
+	/*
+	 * Candidate pool = p->cpus_ptr ∩ online. Active is implicit
+	 * (iteration starts at sys_stat.nr_active); overflow exclusion
+	 * happens per-iteration.
+	 */
+	online_mask = scx_bpf_get_online_cpumask();
+	bpf_cpumask_and(online_src_mask, ctx->p->cpus_ptr, online_mask);
+	scx_bpf_put_cpumask(online_mask);
+
+	cpu_order = get_cpu_order();
+	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
+		if (i >= LAVD_CPU_ID_MAX)
+			break;
+		cpu = cpu_order[i];
+		/* Cheaper cpumask bit test first; LLC lookup is multi-load. */
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
+			continue;
+		/* Skip CPUs already in overflow. */
+		if (bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
+			continue;
+		if (topo_cpu_to_llc_id(cpu) != prev_llc)
+			continue;
+		return cpu;
+	}
 	return -ENOENT;
 }
 
@@ -576,6 +642,37 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	return true;
 }
 
+/*
+ * Is @ctx's task faster to completion on @target than on @sticky?
+ *
+ * Scoped to one LLC: both cpdoms must share L3, so the cost of moving is
+ * small and bounded, and the two estimates are comparable without modelling
+ * cache refill. A cross-LLC candidate is rejected outright.
+ *
+ * Within that scope, migrate only if the estimated completion time on @target
+ * is shorter by more than xmig_min_gain_ns. A smaller difference is treated as
+ * no difference, and the task stays where its cache is warm.
+ *
+ * The asymmetry between big -> LITTLE and LITTLE -> big falls out of the math:
+ * migrating to a less-powerful cluster grows the run term, gating short tasks,
+ * while migrating to a more-powerful one shrinks it, encouraging perf-critical
+ * tasks to migrate up.
+ */
+static __always_inline bool
+is_migration_faster(u64 svc_invr, u64 ct_s, struct cpdom_ctx *sticky,
+		    struct cpdom_ctx *target)
+{
+	u64 ct_t;
+
+	/* L3-sharing guard: only migrate within the same LLC. */
+	if (sticky->llc_id != target->llc_id)
+		return false;
+
+	ct_t = calc_comp_time_on_cpdom(svc_invr, target);
+
+	return ct_s > ct_t && (ct_s - ct_t) > xmig_min_gain_ns;
+}
+
 static
 s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			u64 scope, s64 *sticky_cpdom, bool *is_idle)
@@ -583,23 +680,40 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	struct cpdom_ctx *mig_cpdc;
 	s64 mig_cpdom, nr_nbr;
 	s32 cpu = -ENOENT;
+	/* Userspace forces this to 0 on a homogeneous machine. */
+	bool ct_enabled = xmig_min_gain_ns > 0;
+	u64 svc_invr = ctx->taskc->avg_runtime_invr;
+	u64 ct_s = ct_enabled ? calc_comp_time_on_cpdom(svc_invr, cpdc) : 0;
 	int i, j;
 
 	/*
-	 * Let's migrate a task to neighbor domain when:
-	 *  1) The sticky domain is over-loaded (cpdc->is_stealee)
-	 *  2) The target domain is under-loaded (mig_cpdc->is_stealer)
-	 *     that has a fully idle core.
+	 * Migrate a task (donate it) to a neighbor cpdom. Donation works
+	 * better than task stealing when DSQs are mostly empty (i.e., hard
+	 * to steal from a DSQ), so both gates below take this
+	 * redirect-at-wakeup approach.
 	 *
-	 * Note that when a system is under-loaded, task donation works better
-	 * than task stealing because DSQs are mostly empty (i.e., it is hard
-	 * to steal from a DSQ).
+	 * Two triggers compete per-neighbor in topology-distance order;
+	 * the first neighbor that satisfies either is chosen:
+	 *
+	 *  - Legacy stealer fast path: neighbor mig_cpdc->is_stealer.
+	 *
+	 *  - big.LITTLE completion-time path: ct_enabled AND
+	 *    is_migration_faster() (same LLC, and the estimated
+	 *    completion time is shorter on the neighbor by more than
+	 *    xmig_min_gain_ns). Both callers already require
+	 *    the sticky cpdom to be a stealee, so this path refines which
+	 *    neighbor is taken within an imbalance the load balancer has
+	 *    detected; it does not ask whether the neighbor is a stealer,
+	 *    and skips the flag-clearing below so as not to disturb
+	 *    load-balancer state it didn't consume.
 	 */
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
+			bool via_stealer;
+
 			if (j >= nr_nbr)
 				break;
 			mig_cpdom = get_neighbor_id(cpdc, i, j);
@@ -607,23 +721,30 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 				continue;
 
 			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
-			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+			if (!mig_cpdc)
+				continue;
+
+			via_stealer = READ_ONCE(mig_cpdc->is_stealer);
+			if (!via_stealer &&
+			    !(ct_enabled &&
+			      is_migration_faster(svc_invr, ct_s, cpdc, mig_cpdc)))
 				continue;
 
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
 			if (cpu >= 0) {
 				/*
-				 * Leave both stealer and stealee flags
-				 * active for the round. Donation redirects
-				 * a waking task — it was never queued in
-				 * the stealee domain, so don't touch the
-				 * budget. Flags are cleared only by budget
-				 * exhaustion in the stealing path.
+				 * Clear stealer/stealee flags only when we
+				 * actually consumed the legacy stealer
+				 * signal -- the CT path didn't rely on them.
 				 */
-				if (no_fast_lb) {
+				if (no_fast_lb && via_stealer) {
 					WRITE_ONCE(mig_cpdc->is_stealer, false);
 					WRITE_ONCE(cpdc->is_stealee, false);
 				}
+				debugln("migrate: neighbor %s[pid%d] cpdom%llu -> cpdom%llu cpu%d via=%s",
+					ctx->p->comm, ctx->p->pid,
+					cpdc->id, mig_cpdc->id, cpu,
+					via_stealer ? "stealer" : "completion-time");
 				*sticky_cpdom = mig_cpdom;
 				break;
 			}
@@ -634,7 +755,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 }
 
 __hidden __noinline
-s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
+s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
 	s32 cpu = -ENOENT, sticky_cpu;
@@ -709,7 +830,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 			 * pollute the overflow set with short-lived restrictions.
 			 */
 			if (is_permanently_pinned(ctx->p))
-				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
+				ovrflw_test_and_set(ctx->ovrflw, cpu);
 		}
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 		goto unlock_out;
@@ -762,7 +883,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
 		if (cpu >= 0) {
-			bpf_cpumask_set_cpu(cpu, ctx->ovrflw);
+			ovrflw_test_and_set(ctx->ovrflw, cpu);
 			*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 		}
 		goto unlock_out;
@@ -799,7 +920,8 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/* NOTE: There is a sticky domain. */
 
 	/*
-	 * If there is no idle CPU, stay on the sticky CPU or domain.
+	 * If there is no idle CPU even partially,
+	 * stay on the sticky CPU or domain.
 	 */
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	if (!init_idle_i_mask(ctx, idle_cpumask))
@@ -815,13 +937,13 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/* NOTE: There is at least one idle CPU. */
 
 	/*
-	 * If SMT is enabled and the sticky CPU is fully idle, stay on it.
+	 * If the sticky CPU is fully idle, stay on it.
 	 */
-	if (is_smt_active) {
+	if (is_smt_active)
 		idle_smtmask = scx_bpf_get_idle_smtmask();
-		i_smt_empty = bpf_cpumask_empty(idle_smtmask);
-	} else
-		i_smt_empty = true;
+	else
+		idle_smtmask = idle_cpumask;
+	i_smt_empty = bpf_cpumask_empty(idle_smtmask);
 
 	if (!i_smt_empty && sticky_cpu >= 0 &&
 	    bpf_cpumask_test_cpu(sticky_cpu, idle_smtmask) &&
@@ -832,8 +954,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	}
 
 	/*
-	 * If SMT is enabled and there is a fully idle CPU
-	 * in the sticky domain, stay on it.
+	 * If there is a fully idle CPU in the sticky domain, stay on it.
 	 */
 	if (!i_smt_empty) {
 		if (!init_idle_ato_masks(ctx, idle_smtmask))
@@ -875,6 +996,28 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!init_idle_ato_masks(ctx, ctx->i_mask))
 		goto err_out;
 	if (ctx->ia_empty && ctx->io_empty) {
+		/*
+		 * Bursty wake-up adaptation: when called from
+		 * ops.select_cpu() and the existing active+overflow set has
+		 * no idle CPU we can use, try to grow the overflow set with
+		 * a fresh LLC-anchored CPU. Claim it as idle first; only
+		 * commit the overflow extension when the claim succeeded so
+		 * we don't pollute the set with CPUs we couldn't use. The
+		 * caller wakes the CPU via the normal select_cpu return path.
+		 */
+		if (extend_ovrflw) {
+			s32 new_cpu = find_cpu_for_ovrflw_extend(ctx);
+			if (new_cpu >= 0 &&
+			    scx_bpf_test_and_clear_cpu_idle(new_cpu)) {
+				ovrflw_test_and_set(ctx->ovrflw, new_cpu);
+				debugln("migrate: ovrflw_extend %s[pid%d] prev_cpu=%d new_cpu=%d",
+					ctx->p->comm, ctx->p->pid,
+					ctx->prev_cpu, new_cpu);
+				cpu = new_cpu;
+				*is_idle = true;
+				goto unlock_out;
+			}
+		}
 		cpu = sticky_cpu;
 		if (cpu == -ENOENT) {
 			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
@@ -959,7 +1102,7 @@ unlock_out:
 	/*
 	 * Clean up.
 	 */
-	if (idle_smtmask)
+	if (is_smt_active && idle_smtmask)
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 	if (idle_cpumask)
 		scx_bpf_put_idle_cpumask(idle_cpumask);

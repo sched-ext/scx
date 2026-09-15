@@ -411,7 +411,13 @@ topo_cpu_to_llc_id(u32 cpu)
 {
 	topo_ptr topo;
 
-	if (cpu >= nr_cpu_ids) {
+	/*
+	 * Bound the index against the array size as well as nr_cpu_ids.
+	 * nr_cpu_ids lives in .rodata, so a verifier run against an
+	 * unpopulated .rodata reads it as 0xffffffff and cannot prove the
+	 * topo_nodes[] access is in range.
+	 */
+	if (cpu >= nr_cpu_ids || cpu >= NR_CPUS) {
 		bpf_printk("invalid cpu id: %u", cpu);
 		return -EINVAL;
 	}

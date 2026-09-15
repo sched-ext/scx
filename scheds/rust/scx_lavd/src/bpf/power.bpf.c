@@ -173,9 +173,6 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	} else {
 		cpuc->effective_capacity = capacity_observed;
 	}
-
-	debugln("[cpu%d] effective_capacity: %d -- capacity_policy: %d -- capacity_observed: %d -- maximum_freq_observed: %d -- hw_pressure: %u",
-		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
 }
 
 bool is_perf_cri(task_ctx __arg_arena *taskc)
@@ -371,7 +368,7 @@ int do_core_compaction(void)
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc || !cpuc->is_online) {
 			bpf_cpumask_clear_cpu(cpu, active);
-			bpf_cpumask_clear_cpu(cpu, ovrflw);
+			ovrflw_test_and_clear(ovrflw, cpu);
 			continue;
 		}
 
@@ -380,7 +377,7 @@ int do_core_compaction(void)
 		 */
 		if (i < nr_active) {
 			bpf_cpumask_set_cpu(cpu, active);
-			bpf_cpumask_clear_cpu(cpu, ovrflw);
+			ovrflw_test_and_clear(ovrflw, cpu);
 
 			/*
 			 * Accumulate the capacity of active CPUs and
@@ -403,7 +400,7 @@ int do_core_compaction(void)
 				 * If there is something to run on this CPU,
 				 * add this CPU to the overflow set.
 				 */
-				bpf_cpumask_set_cpu(cpu, ovrflw);
+				ovrflw_test_and_set(ovrflw, cpu);
 			} else {
 				if (!bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
 					continue;
@@ -425,7 +422,7 @@ int do_core_compaction(void)
 					 * overflow cpumask here for a while,
 					 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
 					 */
-					bpf_cpumask_clear_cpu(cpu, ovrflw);
+					ovrflw_test_and_clear(ovrflw, cpu);
 					continue;
 				}
 			}
@@ -735,15 +732,15 @@ int reinit_active_cpumask_for_performance(void)
 				continue;
 			if (!cpuc->is_online) {
 				bpf_cpumask_clear_cpu(cpu, active);
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
+				ovrflw_test_and_clear(ovrflw, cpu);
 				continue;
 			}
 
 			if (cpuc->big_core) {
 				bpf_cpumask_set_cpu(cpu, active);
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
+				ovrflw_test_and_clear(ovrflw, cpu);
 			} else {
-				bpf_cpumask_set_cpu(cpu, ovrflw);
+				ovrflw_test_and_set(ovrflw, cpu);
 				bpf_cpumask_clear_cpu(cpu, active);
 			}
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -760,9 +757,14 @@ int reinit_active_cpumask_for_performance(void)
 		bpf_cpumask_copy(active, online_cpumask);
 		scx_bpf_put_cpumask(online_cpumask);
 
-		bpf_cpumask_clear(ovrflw);
-
 		bpf_for(cpu, 0, nr_cpu_ids) {
+			/*
+			 * Clear overflow bits one by one (rather than the
+			 * bulk bpf_cpumask_clear) so per-cpdom counters are
+			 * decremented atomically alongside each bit.
+			 */
+			ovrflw_test_and_clear(ovrflw, cpu);
+
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
 				continue;
