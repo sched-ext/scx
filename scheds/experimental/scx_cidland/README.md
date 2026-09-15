@@ -130,20 +130,48 @@ be turned off on the command line to compare the two rules against each other.
    the CPU capacity is used to balance the load, never to discount the
    vruntime.
 
- - **Eligible selection at dispatch.** A priority DSQ orders tasks by deadline
-   but exposes only that order, while `fair.c` augments its deadline-ordered
-   tree with each subtree's minimum vruntime and finds the earliest-deadline
-   eligible task in logarithmic time. Dispatch walks a CPU's DSQ in deadline
-   order to make the same selection when an ineligible head hides an eligible
-   task behind it; an eligible head, or a single queued task, takes the
-   constant-time path. The worst case is linear in the queue depth, which an
-   augmented sched_ext queue interface would remove; measured, the walk stays
-   within noise on every benchmark and costs about a hundred nanoseconds per
-   `ops.dispatch()`. `--no-eligible-scan` takes the head instead, and
+ - **Eligible selection at dispatch.** Each per-CPU EDQ augments its
+   deadline-ordered tree with every subtree's minimum vruntime and finds the
+   earliest-deadline eligible task in logarithmic time, matching `fair.c`'s
+   selection rule. `--no-eligible-scan` takes the head instead, and
    `--no-eligibility` implies it. Wakeup preemption and keep-running decisions
    remain head-based approximations: applying a queue-only scan there cannot
    reproduce `pick_eevdf()`'s atomic view of the current task, queued
    entities, and virtual-time frontier.
+
+ - **Eligible deadline queues.** Per-cid runnable tasks are stored in
+   arena-backed eligible deadline queues; local DSQs remain the final kernel
+   handoff. EDQ is an intrusive AVL tree ordered by deadline and
+   insertion sequence. Every subtree caches its minimum vruntime, so
+   unless `--no-eligible-scan` is used, it atomically finds and removes the
+   earliest-deadline task at or before V in O(log n), rather than walking the
+   queue. Its cached leftmost node keeps ordinary head selection O(1).
+   Active balance remains head-only, because it must also test affinity and
+   cache hotness. Each EDQ entry also tracks the core
+   scheduler custody workflow (`NONE`, `ENQUEUED`, `DISPATCHING`,
+   `DISPATCHED`): a property-change `ops.dequeue()` invalidates the old entry,
+   and dispatch checks the state before handing the task to a terminal DSQ.
+   A popped or inspected intrusive node remains held through dispatch; a later
+   enqueue cannot reuse it and is direct-dispatched instead, preventing an old
+   pop from mistaking the new workflow for the one it removed. Remote pulls
+   also hold, validate, and remove the same intrusive node, so an enqueue which
+   changes the queue head cannot substitute a task with different affinity.
+   If a property change races the final affinity check, its state transition
+   invalidates the old pop and the core's matching enqueue retains
+   responsibility for it.
+   EDQ also rechecks affinity after a pop and drops an invalidated workflow so
+   the core's matching enqueue can place the task again. Remote inspection and
+   removal use trylocks and skip a busy queue, keeping idle scans from joining
+   contended lock wait queues. Mandatory queue operations use an abort-safe
+   test-and-set lock instead of an MCS queue whose timed-out waiter cannot
+   safely unlink itself. Cidland enables `SCX_OPS_TID_TO_TASK` and stores the
+   sched_ext tid assigned to each task. `scx_bpf_tid_to_task()` resolves that identity
+   under the callbacks' implicit RCU protection even after an exiting task has
+   left the PID map, so `SCX_OPS_ENQ_EXITING` remains enabled.
+   This is a hard requirement on the kernel: `SCX_OPS_TID_TO_TASK`,
+   `scx_bpf_tid_to_task()`, the `scx.tid` field and `SCX_DEQ_SCHED_CHANGE`
+   have to be there, and there is no fallback to a DSQ-backed queue on a
+   kernel without them; the scheduler fails to load.
 
  - **Deadlines on time.** A slice is only enforced from `task_tick_scx()`, so
    a task whose request runs out between two ticks holds the CPU until the next
@@ -175,7 +203,7 @@ be turned off on the command line to compare the two rules against each other.
    `wakeup_preempt_fair()` preempts only when the woken task is the pick,
    `nse == pse`, and a running task that has lost the pick to some other queued
    task is left to finish its slice. The preemption decision approximates that
-   pick with the DSQ head.
+   pick with the EDQ head.
    `--no-run-to-parity` drops the running task's half alone, the sense the
    feature had when EEVDF was merged; `--no-eligibility` decides on the
    deadlines alone; `--no-wakeup-preempt` never interrupts. The policies are
@@ -187,7 +215,7 @@ be turned off on the command line to compare the two rules against each other.
  - **Short-request preemption.** `PREEMPT_SHORT` lets an eligible wakee whose
    request is shorter than the current task's override RUN_TO_PARITY. The
    local-DSQ insertion acts as `set_short_buddy()` when that DSQ is empty: it
-   makes the wakee run before the deadline-ordered DSQ even if another task has
+   makes the wakee run before the deadline-ordered EDQ even if another task has
    an earlier virtual deadline. An existing local waiter is not displaced
    because the built-in DSQ is FIFO-only. `--no-preempt-short` keeps the
    current task's ordinary protection for comparison.
@@ -231,6 +259,12 @@ be turned off on the command line to compare the two rules against each other.
    `sd->max_newidle_lb_cost`, decaying by 1% a second, and gives up before a
    level it cannot pay for, since a CPU its own wakeups keep bringing back is
    about to have work of its own. `--no-newidle-cost` scans every time.
+   SMT contention is repaired independently of CPU capacity and
+   `SD_ASYM_PACKING`, matching `fair.c`'s `group_smt_balance`: a task whose
+   sibling has been busy for a slice asks a fully idle core in the same LLC to
+   balance, and that core moves one queued task or requests a running one
+   after queued pulling fails. This makes one runnable task per physical core
+   the steady state whenever affinity allows it.
 
  - **Utilization.** What a task uses is a running average of the time it spends
    on a CPU, read as the larger of that and what it used over its last
@@ -298,6 +332,23 @@ be turned off on the command line to compare the two rules against each other.
    `--disable-asym-packing` disables that independent policy, so placement
    follows the capacity classes chosen by the automatic mode,
    `--uniform-capacity`, or `--asym-capacity`.
+   `--smt-asym-packing` ranks the threads of a core by CPU ID when the kernel
+   exposes no priority between them: among the idle siblings of the selected
+   physical core the lowest CPU ID is preferred, at wakeup and when a balance
+   destination is picked. It never ranks different cores and never migrates a
+   running task between the threads of one core. It is a determinism aid for
+   comparisons, since equal threads otherwise leave the choice to timing, not
+   a performance policy.
+
+   `--smt-whole-core` lets a wakeup leave its LLC to find a whole idle
+   core rather than settle for the idle sibling of a busy one. Off by default,
+   because `select_idle_sibling()` stops at the LLC and takes that sibling.
+   Turning it on trades cache locality for core throughput, and only while a
+   whole idle core exists somewhere. It is meant for machines whose LLC spans
+   a whole NUMA node: once that node is saturated, every wakeup lands on one
+   of its busy cores' siblings and halves the thread already running there,
+   while another node's cores sit fully idle. Barrier-synchronized workloads
+   pay for that many times over, since every thread waits for the halved one.
 
 Time slices default to `fair.c`'s `sysctl_sched_base_slice` as
 `update_sysctl()` sets it, so the two schedulers issue requests of the same
@@ -328,8 +379,8 @@ that has not been done.
 
  - **The eligibility filter is head-based away from dispatch.** `pick_eevdf()`
    considers only the tasks that are owed service, `v_i <= V`, and takes the
-   earliest deadline among those. Dispatch makes that selection, walking the
-   DSQ past an ineligible head, see above; the wakeup preemption and the
+   earliest deadline among those. Dispatch makes that selection through the
+   augmented EDQ, see above; the wakeup preemption and the
    keep-running decision cannot, since neither sees the running task, the
    queue and the reference at once, and both judge the head of the queue
    alone. The case that matters is handled where the decision is made: a
@@ -348,7 +399,7 @@ that has not been done.
    reference on every wakeup that fails to preempt, `update_protect_slice()`.
    The direct `PREEMPT_SHORT` case is handled here, but a shorter ineligible
    wakee does not shorten protection for a later decision. Doing that exactly
-   needs the minimum request across a DSQ, which sched_ext does not expose.
+   needs the minimum request across an EDQ, which cidland does not track.
 
  - **`sched_yield()` costs more than it does in `fair.c`.** The rule is the
    same, `yield_task_fair()`'s: nothing happens unless someone is queued to
