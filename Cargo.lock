@@ -5893,6 +5893,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "libbpf-rs 0.27.0",
+ "libc",
  "log",
  "scx_arena",
  "scx_cargo",
@@ -5943,7 +5944,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flow"
-version = "3.1.2"
+version = "4.2.24"
 dependencies = [
  "anyhow",
  "clap",
