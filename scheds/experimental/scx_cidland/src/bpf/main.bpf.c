@@ -636,6 +636,8 @@ struct cid_ctx {
 	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
 	struct pack pack;	/* the tasks of this cid */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */
+	u64 hrtick_due;		/* when the running task's hrtick is due, see hrtick_fire() */
+	u64 hrtick_run_at;	/* the run @hrtick_due was armed for, pack.curr_run_at */
 	u64 clock_off;		/* rq clock minus task clock, see cid_clock_task_owned() */
 	u32 requeue_pending;	/* the task that was running comes back to the queue, see cid_queued_check() */
 	u64 active_balance_next;	/* destination: next asymmetric balance */
@@ -4287,6 +4289,13 @@ static void hrtick_start(s32 cid, u64 tnow)
 	 */
 	now = tnow + cctx->clock_off;
 	at = now + delta;
+	/*
+	 * The due time is taken on the rq clock itself: the offset is only
+	 * sampled when a task stops, and with IRQ time accounted apart it can
+	 * be milliseconds stale by now.
+	 */
+	cctx->hrtick_due = scx_bpf_now() + delta;
+	cctx->hrtick_run_at = cctx->pack.curr_run_at;
 
 	/*
 	 * A timer still pending for no later than this is left alone: it
@@ -4310,14 +4319,15 @@ static void hrtick_start(s32 cid, u64 tnow)
 
 /*
  * @cid's hrtick fired. Ask the running task to give the CPU up if it has
- * company and its deadline has come, hrtick() in core.c:
+ * company and its hrtick is due, hrtick() in core.c:
  *
  *	rq->donor->sched_class->task_tick(rq, rq->donor, 1);
  *
  * The timer was armed for the deadline of whatever was running when it
- * was armed. If the cid has since picked something else, whose deadline
- * is still ahead, this is that task's hrtick now: arm it again for that
- * deadline, which can be done from here directly, interrupts being on.
+ * was armed, or earlier, see hrtick_start(). If it is early for the run it
+ * was armed for, or the cid has since picked something else whose deadline
+ * is still ahead, arm it again for that, which can be done from here
+ * directly, interrupts being on.
  */
 static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 {
@@ -4336,8 +4346,19 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 		return 0;
 
 	now = scx_bpf_now();
-	delta = curr_dl_in(&cctx->pack, now - cctx->clock_off);
-	if (delta > HRTICK_MIN_NS) {
+
+	/*
+	 * The due time stands for the run it was armed for: that run is asked
+	 * to reschedule when it comes, whatever its task clock reads by then,
+	 * as entity_tick() does for a queued tick. A timer left from another
+	 * run, which fair.c would have cancelled at the switch, measures the
+	 * running task's own distance to its deadline instead.
+	 */
+	if (cctx->hrtick_run_at == cctx->pack.curr_run_at)
+		delta = (s64)(cctx->hrtick_due - now);
+	else
+		delta = curr_dl_in(&cctx->pack, now - cctx->clock_off);
+	if (delta > (s64)HRTICK_MIN_NS) {
 		cctx->hrtick_at = now + delta;
 		bpf_timer_start(&ht->timer, delta, 0);
 		return 0;
