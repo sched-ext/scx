@@ -22,6 +22,9 @@
 #define SLICE_BATCH (500 * NS_PER_US)
 #define SLICE_GREEDY (500 * NS_PER_US)
 
+#define GREEDY_GROUP_CAP 16                // don't divide the slice by more than this
+#define GREEDY_MIN_SLICE (50 * NS_PER_US)  // floor so slices don't collapse to nothing
+
 #define RUNTIME_PRIO_BOUNDARY_LC (50 * NS_PER_US)
 #define RUNTIME_PRIO_BOUNDARY_INTERACTIVE (500 * NS_PER_US)
 #define RUNTIME_PRIO_BOUNDARY_NORMAL (2000 * NS_PER_US)

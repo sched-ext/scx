@@ -25,18 +25,33 @@ struct task_ctx
   s64 duty;
   u64 run_acc;
   u64 sleep_acc;
-  u64 last_run_granted_slice;
   bool first_runtime_avg_sample_taken;
   u64 started_at;
   u64 duty_samples;
+  u64 last_run_granted_slice;
+  bool counted_in_greedy_group;
+  u64 counted_greedy_dsq;
 };
 
 struct dispatch_ctx
 {
-  u64 current_task_deadline;
   u64 current_task_dsq_type;
   u64 last_kick_timestamp;
 };
+
+struct greedy_group_key
+{
+  u64 dsq_id;
+  u32 tgid;
+};
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 1048576);
+  __type(key, struct greedy_group_key);
+  __type(value, u64);
+} greedy_group_store SEC(".maps");
 
 struct
 {
@@ -52,6 +67,6 @@ struct
   __uint(map_flags, BPF_F_NO_PREALLOC);
   __type(key, int);
   __type(value, struct task_ctx);
-} task_ctx_stor SEC(".maps");
+} task_ctx_store SEC(".maps");
 
 #endif  // DATATYPES_H

@@ -195,7 +195,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   struct task_ctx* tctx;
   u64 now = bpf_ktime_get_ns();
 
-  tctx = bpf_task_storage_get(&task_ctx_stor, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+  tctx = bpf_task_storage_get(&task_ctx_store, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
   if (!tctx)
     return -ENOMEM;
 
@@ -210,7 +210,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   return 0;
 }
 
-void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args) { }
+void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
+{
+  struct task_ctx* tctx = get_task_ctx(p);
+  if (tctx)
+  {
+    u32 tgid = p->tgid;
+    barrier_var(tgid);
+    greedy_group_leave(tctx, tgid);
+  }
+}
 
 s32 BPF_STRUCT_OPS(
   lunar_select_cpu,
@@ -251,6 +260,22 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     dsq = get_cpu_dsq_from_type(dsqType, cpu);
   }
   u64 slice = get_dsq_task_slice(dsqType);
+
+if (dsqType == DSQ_TYPE_GREEDY)
+{
+  u32 tgid = p->tgid;
+  barrier_var(tgid);
+
+  greedy_group_join(context, dsq, tgid);
+  slice = greedy_group_slice(dsq, tgid);
+}
+else
+{
+  u32 tgid = p->tgid;
+  barrier_var(tgid);
+  greedy_group_leave(context, tgid);
+}
+
   context->last_run_granted_slice = slice;
   scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 
@@ -300,6 +325,10 @@ void BPF_STRUCT_OPS(
   if (!runnable)
   {
     dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+
+    u32 tgid = task->tgid;
+    barrier_var(tgid);
+    greedy_group_leave(tctx, tgid);
   }
 }
 
@@ -319,7 +348,8 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   if (!context)
     return;
 
-  u32 cpu = scx_bpf_task_cpu(p);
+  u32 cpu = bpf_get_smp_processor_id();
+  //u32 cpu = scx_bpf_task_cpu(p);
 
   u32 key = 0;
   struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
@@ -332,9 +362,27 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
 
   dispatch_ctx->current_task_dsq_type = dsqType;
 
+  u64 slice = context->last_run_granted_slice;
+
+  if (dsqType == DSQ_TYPE_GREEDY)
+  {
+    u32 tgid = p->tgid;
+    barrier_var(tgid);
+
+    u64 real_dsq = get_greedy_dsq_for_cpu(cpu);
+
+    greedy_group_join(context, real_dsq, tgid);   // no-op unless a migration actually happened
+    slice = greedy_group_slice(real_dsq, tgid);
+    p->scx.slice = slice;                         // override the enqueue-time guess
+  }
+
+  context->last_run_granted_slice = slice;
+
   u64 now = bpf_ktime_get_ns();
-  dispatch_ctx->current_task_deadline = now + context->last_run_granted_slice;
   context->started_at = now;
+
+  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu greedy=%d dsq_id=%llu slice=%llu duty=%llu", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm,
+  //            context->current_dsq_type, context->counted_in_greedy_group, context->counted_greedy_dsq, context->last_run_granted_slice, context->duty);
 }
 
 void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)
