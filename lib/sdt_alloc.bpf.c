@@ -1464,9 +1464,9 @@ int scx_userspace_arena_free_pages(struct scx_userspace_arena_free_pages_args *c
 /*
  * Poor man's userspace-driven RCU, standing in until BPF grows bpf_call_rcu().
  * scx_urcu_free() pushes freed nodes onto the active side of a two-sided list.
- * Userspace waits using membarrier(MEMBARRIER_CMD_GLOBAL), which is
- * synchronize_rcu(), and then runs a BPF program which calls scx_urcu_reclaim()
- * to return the draining side to the allocator and flip the sides.
+ * Userspace waits for an RCU grace period, see rust/scx_arena, and then runs a
+ * BPF program which calls scx_urcu_reclaim() to return the draining side to the
+ * allocator and flip the sides.
  *
  * A side may only be reclaimed after a grace period which started after the
  * side stopped being active. Readers still holding pointers into the nodes and
