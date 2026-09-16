@@ -247,13 +247,16 @@ be turned off on the command line to compare the two rules against each other.
    M:N wakeup patterns. Forks do not use this wakeup-only idle-sibling path:
    they descend the kernel's live `SD_BALANCE_FORK` span through its NUMA,
    LLC and core groups, selecting the child group with the most completely
-   idle CPUs at each level and keeping the local group on a tie. Equal-idle
-   remote cores prefer the one least recently selected for a fork; the stamp
-   expires after the utilization half-life, preserving fair.c's recent-use
-   bias without recomputing every CPU's average in the fork path. The final CPU
-   is selected using averaged, capacity-normalized per-CPU utilization,
-   preferring an idle CPU. Affinity-restricted tasks use the flat domain scan
-   until cidland can represent fair.c's per-group affinity intersections.
+   idle CPUs at each level, then, when all are busy, the least runnable weight
+   per unit of CPU capacity, and keeping the local group on an exact tie.
+   Equal-idle, equal-load remote cores prefer the one least recently selected
+   for a fork; the stamp expires after the utilization half-life, preserving
+   fair.c's recent-use bias without recomputing every CPU's average in the fork
+   path.
+   The final CPU is selected using averaged, capacity-normalized per-CPU
+   utilization, preferring an idle CPU. Affinity-restricted tasks use the flat
+   domain scan until cidland can represent fair.c's per-group affinity
+   intersections.
 
  - **Load balancing.** A CPU that runs out of work pulls from the other queues
    of its node, walking its own LLC first the way the idle balancer walks the
@@ -309,9 +312,11 @@ be turned off on the command line to compare the two rules against each other.
 
  - **Asymmetric capacity and packing.** Capacity and CPU priority are separate
    kernel policies. The default capacity comes from the kernel's exported
-   `cpu_capacity`, the value behind `SD_ASYM_CPUCAPACITY`; `--uniform-capacity`
-   forces one capacity class and `--asym-capacity` instead uses the best CPPC or
-   cpufreq estimate. Independently, when the kernel has an active
+   `cpu_capacity`, and is used for placement when the kernel has a live
+   `SD_ASYM_CPUCAPACITY` domain; `--uniform-capacity` forces one capacity class
+   and `--asym-capacity` instead uses the best CPPC or cpufreq estimate even
+   when the kernel does not enable asymmetric-capacity scheduling.
+   Independently, when the kernel has an active
    `SD_ASYM_PACKING` domain, cidland reads `arch_asym_cpu_priority()` through
    `sched_core_priority` and uses its exact priority classes for asymmetric
    balancing. They do not rank ordinary cross-core wakeup placement: fair.c

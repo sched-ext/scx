@@ -38,6 +38,8 @@ struct cidland_arena_args {
 	unsigned long long	nr_place_tiers;
 	unsigned long long	nr_capacity_tiers;
 	unsigned long long	asym_capacity;
+	unsigned long long	sched_asym_capacity;
+	unsigned long long	force_asym_capacity;
 	unsigned long long	asym_packing;
 };
 

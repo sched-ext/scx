@@ -268,6 +268,8 @@ static u32 nr_cpu_ids;
 static u32 nr_place_tiers;
 static u32 nr_capacity_tiers;
 static bool asym_capacity;
+static bool sched_asym_capacity;
+static bool force_asym_capacity;
 static bool asym_packing;
 
 typedef struct cid_edq_task __arena cid_edq_task_t;
@@ -488,6 +490,10 @@ enum fork_child_level {
  */
 struct fork_pick_env {
 	u64 now;
+	u64 load;
+	u64 cap;
+	u64 best_load;
+	u64 best_cap;
 	u64 group_recent;
 	u64 best_recent;
 	u32 base;
@@ -2074,8 +2080,11 @@ static bool task_fits_cid(task_ctx_t *tctx, s32 cid, u64 now)
 /* fair.c's asym_fits_cpu(): asymmetric SMT placement requires an idle core. */
 static bool asym_fits_cid(task_ctx_t *tctx, s32 cid, u64 now)
 {
+	if (!sched_asym_capacity && !force_asym_capacity)
+		return true;
+
 	return task_fits_cid(tctx, cid, now) &&
-	       (!asym_capacity || !smt_enabled || core_is_idle(cid));
+	       (!smt_enabled || core_is_idle(cid));
 }
 
 static __always_inline bool cid_in_range(s32 cid, u32 base, u32 nr)
@@ -2158,7 +2167,8 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 	u32 off;
 
 	TOUCH_ARENA();
-	if (!asym_capacity || cmask_empty(idle_cids))
+	if ((!sched_asym_capacity && !force_asym_capacity) ||
+	    !target_topo->asym_capacity_nr || cmask_empty(idle_cids))
 		return -EBUSY;
 
 	bpf_arena_for(off, 0, nr_cpu_ids) {
@@ -3341,6 +3351,15 @@ static __always_inline void fork_pick_commit(struct fork_pick_env *env)
 		if (env->idle < env->best_idle)
 			return;
 		if (env->idle == env->best_idle) {
+			/* Fully busy groups are ordered by load per capacity. */
+			if (!env->idle) {
+				if (env->load * env->best_cap >
+				    env->best_load * env->cap)
+					return;
+				if (env->load * env->best_cap <
+				    env->best_load * env->cap)
+					goto commit;
+			}
 			/* Keep fair.c's local-group preference on an idle tie. */
 			if (env->best_local)
 				return;
@@ -3351,9 +3370,12 @@ static __always_inline void fork_pick_commit(struct fork_pick_env *env)
 		}
 	}
 
+commit:
 	env->best_base = env->group_base;
 	env->best_nr = env->group_nr;
 	env->best_idle = env->idle;
+	env->best_load = env->load;
+	env->best_cap = env->cap;
 	env->best_recent = env->group_recent;
 	env->best_local = local;
 }
@@ -3379,8 +3401,12 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 	env->group_nr = 0;
 	env->group_end = 0;
 	env->idle = 0;
+	env->load = 0;
+	env->cap = 0;
 	env->group_recent = 0;
 	env->best_idle = 0;
+	env->best_load = 0;
+	env->best_cap = 1;
 	env->best_recent = 0;
 	env->best_base = 0;
 	env->best_nr = 0;
@@ -3404,6 +3430,8 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 			}
 			env->group_end = env->group_base + env->group_nr;
 			env->idle = 0;
+			env->load = 0;
+			env->cap = 0;
 			env->group_recent = env->level == FORK_CHILD_CORE ?
 				READ_ONCE(cid_ctx(env->group_base)->fork_place_at) : 0;
 			if (env->group_recent &&
@@ -3412,6 +3440,8 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 		}
 		if (cid_idle_test(i) && !cid_queued_test(i))
 			env->idle++;
+		env->load += READ_ONCE(cid_pack(i)->vsum_w);
+		env->cap += MAX(cid_topo(i)->cap, 1ULL);
 	}
 	fork_pick_commit(env);
 	return env->best_nr ? (u64)env->best_nr << 32 | env->best_base : range;
@@ -7669,9 +7699,15 @@ static void init_topology(void)
 						  topo->llc_nr);
 			topo->wake_affine_base = range;
 			topo->wake_affine_nr = range >> 32;
-			range = topo_domain_range(topo, asym_span, nr_cids);
-			topo->asym_capacity_base = range;
-			topo->asym_capacity_nr = range >> 32;
+			if (asym_span || force_asym_capacity) {
+				range = topo_domain_range(topo, asym_span,
+						  nr_cids);
+				topo->asym_capacity_base = range;
+				topo->asym_capacity_nr = range >> 32;
+			} else {
+				topo->asym_capacity_base = 0;
+				topo->asym_capacity_nr = 0;
+			}
 		}
 	}
 }
@@ -7877,6 +7913,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	nr_place_tiers = args->nr_place_tiers;
 	nr_capacity_tiers = args->nr_capacity_tiers;
 	asym_capacity = args->asym_capacity;
+	sched_asym_capacity = args->sched_asym_capacity;
+	force_asym_capacity = args->force_asym_capacity;
 	asym_packing = args->asym_packing;
 
 	return 0;

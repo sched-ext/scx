@@ -167,8 +167,8 @@ struct Opts {
 
     /// Force every CPU to have the same capacity.
     ///
-    /// By default cidland uses the kernel-exported cpu_capacity values, matching
-    /// the capacity classes used to construct the kernel's scheduling domains.
+    /// By default cidland uses the kernel-exported cpu_capacity values when the
+    /// kernel has an active SD_ASYM_CPUCAPACITY domain.
     #[clap(
         short = 'u',
         long,
@@ -812,7 +812,7 @@ impl<'a> Scheduler<'a> {
             .unwrap_or(default_tolerance);
         let tiers = capacity_tiers(&capacities, tolerance);
         let nr_capacity_tiers = tiers.last().copied().unwrap_or(0) + 1;
-        let asym_capacity = nr_capacity_tiers > 1;
+        let has_capacity_tiers = nr_capacity_tiers > 1;
         // Keep capacity and SD_ASYM_PACKING tiers independent. fair.c uses
         // them in different paths; collapsing them into one ordering makes
         // packing priority affect every ordinary idle-CPU search.
@@ -834,7 +834,7 @@ impl<'a> Scheduler<'a> {
             "CPU capacity mode: {capacity_mode} ({nr_capacity_tiers} tier{}, tolerance {tolerance}%)",
             if nr_capacity_tiers == 1 { "" } else { "s" }
         );
-        if nr_capacity_tiers > 1 {
+        if has_capacity_tiers {
             info!(
                 "CPUs by capacity: {:?}",
                 cpus.iter().map(|(cpu, _)| cpu.id).collect::<Vec<_>>()
@@ -914,10 +914,17 @@ impl<'a> Scheduler<'a> {
             domain_spans
         );
 
+        let sched_asym_capacity =
+            !opts.uniform_capacity && cpu_tiers.iter().any(|entry| entry.7 != 0);
+        let asym_capacity = has_capacity_tiers && (sched_asym_capacity || opts.asym_capacity);
+        if has_capacity_tiers && !asym_capacity {
+            info!("CPU capacity placement: off (no kernel SD_ASYM_CPUCAPACITY domain)");
+        }
+
         priorities.sort_by_key(|(_, priority)| std::cmp::Reverse(*priority));
         let distinct_priorities = priorities.windows(2).any(|pair| pair[0].1 != pair[1].1);
         let asym_packing = all_asym_packing && distinct_priorities;
-        let mut nr_place_tiers = nr_capacity_tiers;
+        let mut nr_place_tiers = if asym_capacity { nr_capacity_tiers } else { 1 };
         if asym_packing {
             let mut tier = 0u64;
             for i in 0..priorities.len() {
@@ -938,16 +945,22 @@ impl<'a> Scheduler<'a> {
                 priorities.iter().map(|(cpu, _)| cpu).collect::<Vec<_>>()
             );
         } else {
-            for (_, _, _, _, smt_asym_packing, _, _, _) in &mut cpu_tiers {
+            for (_, _, capacity_tier, place_tier, smt_asym_packing, _, _, _) in &mut cpu_tiers {
+                *place_tier = if asym_capacity { *capacity_tier } else { 0 };
                 *smt_asym_packing = false;
             }
             info!(
-                "CPU asymmetric packing: {}; placement follows {capacity_mode} capacity tiers",
+                "CPU asymmetric packing: {}; placement follows {}",
                 if opts.disable_asym_packing {
                     "disabled"
                 } else {
                     "off"
-                }
+                },
+                if asym_capacity {
+                    format!("{capacity_mode} capacity tiers")
+                } else {
+                    "uniform capacity".to_string()
+                },
             );
         }
 
@@ -961,6 +974,8 @@ impl<'a> Scheduler<'a> {
             nr_place_tiers,
             nr_capacity_tiers,
             asym_capacity: asym_capacity as u64,
+            sched_asym_capacity: sched_asym_capacity as u64,
+            force_asym_capacity: opts.asym_capacity as u64,
             asym_packing: asym_packing as u64,
         };
         run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
