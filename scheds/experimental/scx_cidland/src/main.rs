@@ -156,6 +156,20 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_sis_util: bool,
 
+    /// Look past the target LLC for an idle CPU.
+    ///
+    /// By default, match select_idle_sibling(), which is scoped to sd_llc: when
+    /// the LLC has no idle CPU, queue the task on its affine target and leave
+    /// spreading across LLCs to load balance, where the migration cost is
+    /// weighed against the idle time it would use. This instead extends the
+    /// wakeup scan to the node and then the whole machine.
+    ///
+    /// This can keep work off a busy SMT sibling when a whole idle core exists
+    /// in another LLC, at the cost of weaker cache locality and a scan fair.c
+    /// never pays. It has no effect when one LLC spans every CPU.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    llc_extend: bool,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -789,6 +803,7 @@ impl<'a> Scheduler<'a> {
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
         rodata.sis_util = !opts.no_sis_util;
+        rodata.llc_extend = opts.llc_extend;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
         rodata.cpu_max_enabled = cpu_max_enabled;

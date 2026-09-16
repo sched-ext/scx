@@ -226,7 +226,13 @@ be turned off on the command line to compare the two rules against each other.
    machine those candidates must have a fully idle core, and the asymmetric
    capacity domain is scanned in wrapped CPU order before the ordinary LLC
    scan, as `select_idle_capacity()` does. The fallback takes a fully idle core
-   before a thread with a busy sibling, scanning the LLC and then the node. A
+   before a thread with a busy sibling and stops at the LLC, as
+   `select_idle_sibling()` does, leaving spreading across LLCs to load balance,
+   where the cost of the migration is weighed. `--llc-extend` restores
+   cidland's wider node and system scan, which can keep work off a busy SMT
+   sibling when another LLC has a whole idle core, at the cost of weaker cache
+   locality and more wakeup-path work. It is only observable on a machine with
+   more than one LLC. A
    synchronous wakeup from a waker that is the only runnable task on its CPU
    makes that CPU the affine target, `wake_affine_idle()`: idle alternatives
    around it still win, and only when the scan fails is the wakee stacked on

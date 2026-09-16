@@ -134,6 +134,14 @@ const volatile bool no_newidle_cost;
 const volatile bool sis_util = true;
 
 /*
+ * Extend the idle search past the target's LLC to the node and then the
+ * machine. By default, match select_idle_sibling(): give up at sd_llc, leave
+ * the task on its affine target, and let load balance spread work across LLCs
+ * after weighing the migration cost against the idle time it can use.
+ */
+const volatile bool llc_extend;
+
+/*
  * Do not interrupt a running task for one that wakes up with an earlier
  * deadline, leaving it to run until its slice ends.
  */
@@ -2792,17 +2800,15 @@ static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
 /*
  * Scan for an idle cid in fair.c's order within the target LLC: a fully idle
  * core when the LLC says one exists, otherwise an idle sibling of @prev_cid,
- * then any idle CPU. Cidland's node/global extensions follow only if the LLC
- * has no whole idle core left to offer.
+ * then any idle CPU. Stop there by default, as select_idle_sibling() does.
  *
- * Under @smt_whole_core the order departs from select_idle_sibling()
- * in one place: a whole idle core outside the target LLC is taken before a
- * half-busy core inside it. An idle sibling of a busy core is not a free CPU;
- * it is half of a core that is already working, and taking it costs the
+ * With @llc_extend, a whole idle core outside the target LLC is taken before
+ * a half-busy core inside it. An idle sibling of a busy core is not a free
+ * CPU; it is half of a core that is already working, and taking it costs the
  * thread running there about half its throughput for as long as the two
  * overlap. fair.c never has to choose, because select_idle_sibling() stops at
- * the LLC and leaves the rest to the periodic balancer; this scan does cross
- * LLCs, so it has to say which it prefers.
+ * the LLC and leaves the rest to the periodic balancer; the extended scan
+ * crosses LLCs, so it has to say which it prefers.
  *
  * Measured on a 2-node 176-core Olympus SMT machine with one LLC per node:
  * with node 0 saturated by an 88-thread NVPL SGEMM, everything else the
@@ -2821,8 +2827,9 @@ static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
  */
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 {
-	u32 flags = !is_restricted(p) || cid_allowed(p, target) ?
-		    PICK_IDLE_PREV_ALLOWED : 0;
+	u32 flags = (!is_restricted(p) || cid_allowed(p, target) ?
+		     PICK_IDLE_PREV_ALLOWED : 0) |
+		    (!llc_extend ? PICK_IDLE_LLC_ONLY : 0);
 	s32 cid = -EBUSY;
 	int i;
 
@@ -2866,14 +2873,14 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		}
 
 		/*
-		 * Cidland extends select_idle_sibling() beyond the target LLC.
-		 * The extension goes first while a whole idle core is left
+		 * With @llc_extend, carry select_idle_sibling() beyond the target
+		 * LLC. The extension goes first while a whole idle core is left
 		 * anywhere: everything below this settles for an idle sibling
 		 * of a busy core, which halves the thread already running on
 		 * it. The hint mask has no bit set once no LLC has an idle
 		 * core, which is the loaded case this must not slow down.
 		 */
-		if (smt_whole_core && smt_enabled &&
+		if (llc_extend && smt_whole_core && smt_enabled &&
 		    !cmask_empty(idle_core_llcs)) {
 			whole_scanned = true;
 			cid = pick_idle_cid_topology((struct task_struct *)p, target,
@@ -2917,7 +2924,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		 * when the hint said no LLC had an idle core, and the scan
 		 * still runs there because the hint is only a hint.
 		 */
-		if (smt_enabled && !whole_scanned) {
+		if (llc_extend && smt_enabled && !whole_scanned) {
 			cid = pick_idle_cid_topology((struct task_struct *)p, target,
 						   flags | PICK_IDLE_WHOLE_CORE);
 			if (cid >= 0)
