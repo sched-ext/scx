@@ -12,6 +12,7 @@ pub use bpf_intf::*;
 
 mod stats;
 
+use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -48,6 +49,37 @@ use scx_utils::uei_report;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cidland";
+
+fn kernel_major_minor(release: &str) -> Option<(u32, u32)> {
+    let mut fields = release.split('.');
+    let major = fields.next()?.parse().ok()?;
+    let minor = fields
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+
+    Some((major, minor))
+}
+
+fn warn_on_old_kernel() {
+    let mut uts = MaybeUninit::<libc::utsname>::uninit();
+
+    if unsafe { libc::uname(uts.as_mut_ptr()) } != 0 {
+        return;
+    }
+
+    let uts = unsafe { uts.assume_init() };
+    let release = unsafe { CStr::from_ptr(uts.release.as_ptr()) }.to_string_lossy();
+
+    if kernel_major_minor(&release).is_some_and(|version| version < (7, 2)) {
+        warn!(
+            "kernel {release} is older than v7.2; scx_cidland requires the sched_ext cid/tid support introduced in v7.2 and may fail to load (a kernel with the support backported may still work)"
+        );
+    }
+}
 
 /// Run a SEC("syscall") program with @args as its context.
 ///
@@ -1222,6 +1254,8 @@ fn main() -> Result<()> {
         }
     }
 
+    warn_on_old_kernel();
+
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
@@ -1236,6 +1270,15 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::capacity_tiers;
+    use super::kernel_major_minor;
+
+    #[test]
+    fn parses_kernel_major_minor() {
+        assert_eq!(kernel_major_minor("7.2.0-rc1"), Some((7, 2)));
+        assert_eq!(kernel_major_minor("6.18.12-arch1-1"), Some((6, 18)));
+        assert_eq!(kernel_major_minor("7.2-custom"), Some((7, 2)));
+        assert_eq!(kernel_major_minor("not-a-version"), None);
+    }
 
     #[test]
     fn capacity_tiers_use_current_tier_anchor() {
