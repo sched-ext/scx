@@ -3465,16 +3465,24 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 		if (restricted && !cid_allowed(p, cid))
 			continue;
 		/*
-		 * Keep the fractional running average here. A child that ran only
+		 * Keep the fractional running average for an idle cid, which is
+		 * ordered on how long it has been idle. A child that ran only
 		 * long enough to enter its startup barrier can round down to zero in
 		 * cid_util(), making its freshly-idled CPU look unused to the next
 		 * fork. Unlike load_avg, run_avg records sub-tick start/stop pairs
 		 * even when WA_WEIGHT is disabled.
+		 *
+		 * A busy cid is ordered by cpu_load(), the weight of what is
+		 * runnable on it, the quantity find_idlest_group_cpu() compares
+		 * once it has no idle CPU to hand out. run_avg cannot serve there:
+		 * it saturates at 1.0 on anything that is running, so every cid of
+		 * a busy group ties and the lowest one takes them all.
 		 */
-		load = ravg_read_arena(&cid_ctx(cid)->run_avg, now);
 		cap = MAX(cid_topo(cid)->cap, 1ULL);
 		if (cid_idle_test(cid) && !cid_queued_test(cid)) {
 			u64 stamp = READ_ONCE(cid_ctx(cid)->idle_stamp);
+
+			load = ravg_read_arena(&cid_ctx(cid)->run_avg, now);
 
 			if (best_idle < 0 ||
 			    load * best_idle_cap < best_idle_load * cap ||
@@ -3487,6 +3495,7 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 			}
 			continue;
 		}
+		load = READ_ONCE(cid_pack(cid)->vsum_w);
 		if (best < 0 || load * best_cap < best_load * cap) {
 			best = cid;
 			best_load = load;
