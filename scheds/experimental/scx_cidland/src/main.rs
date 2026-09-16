@@ -166,6 +166,18 @@ struct Opts {
     #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
     enable_cgroups: bool,
 
+    /// Ignore cpu.max while scheduling cgroups as groups.
+    ///
+    /// A cgroup is normally held to the bandwidth its cpu.max asks for: it
+    /// runs for at most its quota in every period, and its tasks wait for the
+    /// next one once it is spent. This turns that off and leaves cpu.weight
+    /// and cpu.idle in place, which is what the comparison against a kernel
+    /// with no bandwidth control needs.
+    ///
+    /// Has no effect without --enable-cgroups.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_cpu_max: bool,
+
     /// Force every CPU to have the same capacity.
     ///
     /// By default cidland uses the kernel-exported cpu_capacity values when the
@@ -476,11 +488,14 @@ fn tick_ns() -> u64 {
 /// upstream rule with its default log scaling; a kernel whose distribution
 /// changed the normalized value or an administrator who tuned the sysctl
 /// runs fair.c at some other slice, and --slice-us is how to match it.
-/// Return the number of cgroups with a cpu.weight other than the default, and
-/// one of them, walking the cgroup v2 hierarchy. A cgroup has a cpu.weight
-/// file only where its parent enables the cpu controller.
-fn cgroups_with_cpu_weight(root: &std::path::Path) -> (usize, Option<String>) {
-    const CGROUP_WEIGHT_DFL: u64 = 100;
+/// Return the number of cgroups whose `file` holds a value `set` accepts, and
+/// one of them, walking the cgroup v2 hierarchy. A cgroup has the cpu
+/// controller's files only where its parent enables the controller.
+fn cgroups_with(
+    root: &std::path::Path,
+    file: &str,
+    set: impl Fn(&str) -> bool,
+) -> (usize, Option<String>) {
     let mut stack = vec![(root.to_path_buf(), 0)];
     let (mut count, mut example, mut visited) = (0, None, 0);
 
@@ -489,12 +504,8 @@ fn cgroups_with_cpu_weight(root: &std::path::Path) -> (usize, Option<String>) {
         if visited > 100_000 {
             break;
         }
-        if let Ok(val) = std::fs::read_to_string(dir.join("cpu.weight")) {
-            if val
-                .trim()
-                .parse::<u64>()
-                .is_ok_and(|w| w != CGROUP_WEIGHT_DFL)
-            {
+        if let Ok(val) = std::fs::read_to_string(dir.join(file)) {
+            if set(val.trim()) {
                 count += 1;
                 if example.is_none() {
                     let name = dir.strip_prefix(root).unwrap_or(&dir);
@@ -520,12 +531,27 @@ fn cgroups_with_cpu_weight(root: &std::path::Path) -> (usize, Option<String>) {
 
 /// Tell whether cgroup scheduling can do what the options ask for: warn when
 /// it was asked for and the kernel or the cgroup setup leaves nothing to
-/// hook into, and when it is off while some cgroup has a cpu.weight that is
-/// then ignored.
-fn check_cgroup_support(requested: bool, kernel_support: bool) {
+/// hook into, and when a cpu.weight or a cpu.max somebody set is ignored
+/// because the feature that reads it is off.
+fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
     let root = std::path::Path::new("/sys/fs/cgroup");
     let cpu_controller = std::fs::read_to_string(root.join("cgroup.subtree_control"))
         .is_ok_and(|ctrl| ctrl.split_whitespace().any(|c| c == "cpu"));
+
+    if cpu_controller && !cpu_max {
+        let (count, example) = cgroups_with(root, "cpu.max", |v| {
+            v.split_whitespace().next().is_some_and(|q| q != "max")
+        });
+        if count > 0 {
+            warn!(
+                "{} cgroup(s) set cpu.max, e.g. {}, which is ignored: the bandwidth \
+                 of a cgroup is held to only with --enable-cgroups and without \
+                 --disable-cpu-max",
+                count,
+                example.unwrap_or_default()
+            );
+        }
+    }
 
     if requested {
         if !kernel_support {
@@ -546,7 +572,10 @@ fn check_cgroup_support(requested: bool, kernel_support: bool) {
     if !cpu_controller {
         return;
     }
-    let (count, example) = cgroups_with_cpu_weight(root);
+    const CGROUP_WEIGHT_DFL: u64 = 100;
+    let (count, example) = cgroups_with(root, "cpu.weight", |v| {
+        v.parse::<u64>().is_ok_and(|w| w != CGROUP_WEIGHT_DFL)
+    });
     if count > 0 {
         warn!(
             "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored without \
@@ -687,7 +716,22 @@ impl<'a> Scheduler<'a> {
         // them at all, and lets the scheduler load on a kernel whose
         // sched_ext_ops_cid has no cgroup members to bind them to.
         let cgroup_enabled = opts.enable_cgroups && (cpuctl_names || cgroup_names);
-        check_cgroup_support(opts.enable_cgroups, cpuctl_names || cgroup_names);
+
+        // cpu.max arrived after the rest of the cpu controller's callbacks, so
+        // it is probed on its own: a kernel that delivers cpu.weight may still
+        // have no member to bind the bandwidth callback to.
+        let bw_field = if cgroup_names {
+            "cgroup_set_bandwidth"
+        } else {
+            "cpuctl_set_bandwidth"
+        };
+        let bw_support = compat::struct_has_field("sched_ext_ops_cid", bw_field).unwrap_or(false);
+        let cpu_max_enabled = cgroup_enabled && !opts.disable_cpu_max && bw_support;
+        check_cgroup_support(
+            opts.enable_cgroups,
+            cpuctl_names || cgroup_names,
+            cpu_max_enabled,
+        );
         if !cgroup_enabled {
             let ops = skel.struct_ops.cidland_ops_mut();
             ops.cpuctl_init = std::ptr::null_mut();
@@ -707,6 +751,15 @@ impl<'a> Scheduler<'a> {
                 "cgroup scheduling: on ({}_* callbacks)",
                 if cgroup_names { "cgroup" } else { "cpuctl" }
             );
+            if opts.enable_cgroups && !opts.disable_cpu_max && !bw_support {
+                warn!("the kernel has no ops.{bw_field}(), cpu.max is ignored");
+            }
+        }
+        if !cpu_max_enabled {
+            skel.struct_ops.cidland_ops_mut().cpuctl_set_bandwidth = std::ptr::null_mut();
+            skel.struct_ops
+                .cidland_ops_cgroup_mut()
+                .cgroup_set_bandwidth = std::ptr::null_mut();
         }
 
         // Override default BPF scheduling parameters.
@@ -718,6 +771,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_newidle_cost = opts.no_newidle_cost;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
+        rodata.cpu_max_enabled = cpu_max_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
         rodata.force_smt_asym_packing = opts.smt_asym_packing;

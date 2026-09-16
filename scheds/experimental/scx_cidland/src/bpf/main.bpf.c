@@ -76,6 +76,13 @@ const volatile bool smt_whole_core;
 const volatile bool cgroup_enabled;
 
 /*
+ * Hold the cgroups of the cpu controller to the bandwidth their cpu.max asks
+ * for. Rides on @cgroup_enabled, which is what gives a cgroup the queues the
+ * bandwidth is accounted on. Off with --disable-cpu-max.
+ */
+const volatile bool cpu_max_enabled;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -406,6 +413,11 @@ struct grp_hdr {
 	u64 idle;		/* cpu.idle, see cidland_cpuctl_set_idle() */
 	u64 slot;		/* its index in @grp_hdrs */
 	u64 next_free;		/* next block to free, see grp_free_defer() */
+
+	/* cpu.max, see cidland_cpuctl_set_bandwidth() */
+	u64 quota;		/* what the group may run for in a period, 0 for no limit */
+	u64 period;		/* the period, cfs_bandwidth->period */
+	u64 burst;		/* what it may carry into one, cfs_bandwidth->burst */
 };
 
 struct grp_q {
@@ -937,6 +949,30 @@ static u64 grp_free_head;	/* blocks waiting to be freed, see grp_free_defer() */
  */
 #define GRP_SWEEP_NS		NSEC_PER_MSEC
 #define GRP_SWEEP_BUDGET	64
+
+/*
+ * cpu.max, the bandwidth the cpu controller gives a cgroup: the group may run
+ * for @quota nanoseconds in every @period, plus what it carried over into the
+ * period, up to @burst. A group is held to the limits of every group above it
+ * as well as its own, so what binds a task is the tightest of them.
+ *
+ * Most machines set no limit anywhere. @bw_nr_limited counts the cgroups that
+ * carry one, so that everything the accounting adds costs a single load until
+ * somebody writes a cpu.max. Written by the cgroup ops, which the kernel
+ * serializes; read from everywhere.
+ */
+#define BW_QUOTA_INF		((u64)~0ULL)	/* cpu.max "max", RUNTIME_INF */
+
+static u64 bw_nr_limited;
+
+/*
+ * Whether the cgroup of @hdr carries a cpu.max of its own. A cgroup without
+ * one still runs under the limits of the groups above it.
+ */
+static __always_inline bool grp_bw_limited(struct grp_hdr __arena *hdr)
+{
+	return READ_ONCE(hdr->quota) != 0;
+}
 
 /*
  * Set or clear the bit of @gq's cid in its cgroup's live bitmap. By compare
@@ -7526,6 +7562,12 @@ void BPF_STRUCT_OPS(cidland_cpuctl_exit, struct cgroup *cgrp)
 	cgc->ents = NULL;
 	cgc->hdr = NULL;
 
+	/* Its cpu.max goes with it. */
+	if (grp_bw_limited(hdr)) {
+		WRITE_ONCE(hdr->quota, 0);
+		bw_nr_limited--;
+	}
+
 	/* Out of the registry: no sweep that starts from now on can find it. */
 	if (grp_hdrs && hdr->slot < GRP_MAX_CGROUPS)
 		WRITE_ONCE(grp_hdrs[hdr->slot], 0);
@@ -7587,6 +7629,46 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
 
 	cgc->hdr->weight = idle ? WEIGHT_IDLEPRIO : cgrp_load_weight(CGROUP_WEIGHT_DFL);
 	WRITE_ONCE(cgc->hdr->idle, idle);
+}
+
+/*
+ * Somebody wrote cpu.max, tg_set_bandwidth(): the cgroup may run for
+ * @quota_us of every @period_us, and carry what it leaves unused into the next
+ * period, up to @burst_us. The kernel keeps "max" as RUNTIME_INF and refuses a
+ * quota or a period below a millisecond, so zero stands for no limit here.
+ *
+ * The limits are kept in nanoseconds, what the rest of the scheduler times in.
+ * A cgroup nested deeper than GRP_MAX_DEPTH has no block of its own to keep
+ * them in, and runs under the limits of the ancestor whose block it shares.
+ */
+void BPF_STRUCT_OPS(cidland_cpuctl_set_bandwidth, struct cgroup *cgrp,
+		    u64 period_us, u64 quota_us, u64 burst_us)
+{
+	u64 quota, period, burst;
+	struct grp_hdr __arena *hdr;
+	struct cgrp_ctx *cgc;
+	bool was, now;
+
+	TOUCH_ARENA();
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+	if (!cgc || !cgc->hdr)
+		return;
+	hdr = cgc->hdr;
+
+	quota = quota_us == BW_QUOTA_INF ? 0 : quota_us * NSEC_PER_USEC;
+	period = MAX(period_us * NSEC_PER_USEC, NSEC_PER_MSEC);
+	burst = quota ? burst_us * NSEC_PER_USEC : 0;
+
+	/* The period and the burst before the quota that makes them count. */
+	was = grp_bw_limited(hdr);
+	WRITE_ONCE(hdr->period, period);
+	WRITE_ONCE(hdr->burst, burst);
+	WRITE_ONCE(hdr->quota, quota);
+
+	now = quota != 0;
+	if (now != was)
+		bw_nr_limited += now ? 1 : -1;
 }
 
 /*
@@ -8019,6 +8101,7 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	.__cg##_init		= (void *)cidland_cpuctl_init,		\
 	.__cg##_exit		= (void *)cidland_cpuctl_exit,		\
 	.__cg##_set_weight	= (void *)cidland_cpuctl_set_weight,	\
+	.__cg##_set_bandwidth	= (void *)cidland_cpuctl_set_bandwidth,	\
 	.__cg##_set_idle	= (void *)cidland_cpuctl_set_idle,	\
 	.__cg##_move		= (void *)cidland_cpuctl_move,		\
 	.init			= (void *)cidland_init,			\
