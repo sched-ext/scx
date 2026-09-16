@@ -12,6 +12,7 @@ pub use bpf_intf::*;
 
 mod stats;
 
+use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -33,6 +34,7 @@ use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::SchedDomainSource;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::build_id;
@@ -47,6 +49,37 @@ use scx_utils::uei_report;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cidland";
+
+fn kernel_major_minor(release: &str) -> Option<(u32, u32)> {
+    let mut fields = release.split('.');
+    let major = fields.next()?.parse().ok()?;
+    let minor = fields
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+
+    Some((major, minor))
+}
+
+fn warn_on_old_kernel() {
+    let mut uts = MaybeUninit::<libc::utsname>::uninit();
+
+    if unsafe { libc::uname(uts.as_mut_ptr()) } != 0 {
+        return;
+    }
+
+    let uts = unsafe { uts.assume_init() };
+    let release = unsafe { CStr::from_ptr(uts.release.as_ptr()) }.to_string_lossy();
+
+    if kernel_major_minor(&release).is_some_and(|version| version < (7, 2)) {
+        warn!(
+            "kernel {release} is older than v7.2; scx_cidland requires the sched_ext cid/tid support introduced in v7.2 and may fail to load (a kernel with the support backported may still work)"
+        );
+    }
+}
 
 /// Run a SEC("syscall") program with @args as its context.
 ///
@@ -136,6 +169,39 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_newidle_cost: bool,
 
+    /// Do not bound wakeup idle scans by the target LLC's utilization.
+    ///
+    /// fair.c stops looking for an idle CPU once the LLC it is searching is
+    /// busy enough to make the search unlikely to pay, SIS_UTIL: periodic load
+    /// balance leaves a scan budget behind, computed from the LLC's average
+    /// utilization, which falls quadratically and reaches zero at about 85%.
+    /// cidland does the same, over a window that starts at the target and
+    /// wraps inside the LLC so a bounded scan still reaches every CPU across
+    /// successive wakeups, and gives up where select_idle_cpu() returns -1
+    /// rather than carrying the search on to the node and the machine.
+    ///
+    /// This disables it and scans the whole LLC on every wakeup. Worth trying
+    /// on a machine whose LLC is small: the scan reads the idle bitmap a word
+    /// at a time, so an LLC of 64 CPUs or fewer costs one read whatever the
+    /// budget says, and the bound then only loses idle CPUs it would have
+    /// found.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_sis_util: bool,
+
+    /// Look past the target LLC for an idle CPU.
+    ///
+    /// By default, match select_idle_sibling(), which is scoped to sd_llc: when
+    /// the LLC has no idle CPU, queue the task on its affine target and leave
+    /// spreading across LLCs to load balance, where the migration cost is
+    /// weighed against the idle time it would use. This instead extends the
+    /// wakeup scan to the node and then the whole machine.
+    ///
+    /// This can keep work off a busy SMT sibling when a whole idle core exists
+    /// in another LLC, at the cost of weaker cache locality and a scan fair.c
+    /// never pays. It has no effect when one LLC spans every CPU.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    llc_extend: bool,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -148,19 +214,39 @@ struct Opts {
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// Ignore the cpu controller: schedule on the nice levels alone.
+    /// Schedule the cpu controller's cgroups as groups.
     ///
-    /// By default a task's weight is its nice weight scaled by the cpu.weight
-    /// of the cgroup it is in and of the cgroups that one sits under. This
-    /// unhooks the scheduler from the cpu controller entirely, which is also
-    /// what happens on a kernel built without CONFIG_EXT_GROUP_SCHED.
+    /// A cgroup then competes with its siblings at its cpu.weight and its
+    /// tasks share what it gets, the way fair.c's group scheduling does, with
+    /// cpu.weight meaning the weight per active CPU (fair.c's default
+    /// cgroup_mode, "concur").
+    ///
+    /// Off by default: tasks are scheduled on their nice levels alone and
+    /// cpu.weight is ignored. Keeping the group loads and effective weights
+    /// up to date costs every wakeup of a task in a nested cgroup a walk of
+    /// its hierarchy, which on a systemd machine is every task, and shows up
+    /// as wakeup latency and throughput.
+    ///
+    /// Needs a kernel built with CONFIG_EXT_GROUP_SCHED.
     #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
-    disable_cgroups: bool,
+    enable_cgroups: bool,
+
+    /// Ignore cpu.max while scheduling cgroups as groups.
+    ///
+    /// A cgroup is normally held to the bandwidth its cpu.max asks for: it
+    /// runs for at most its quota in every period, and its tasks wait for the
+    /// next one once it is spent. This turns that off and leaves cpu.weight
+    /// and cpu.idle in place, which is what the comparison against a kernel
+    /// with no bandwidth control needs.
+    ///
+    /// Has no effect without --enable-cgroups.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_cpu_max: bool,
 
     /// Force every CPU to have the same capacity.
     ///
-    /// By default cidland uses the kernel-exported cpu_capacity values, matching
-    /// the capacity classes used to construct the kernel's scheduling domains.
+    /// By default cidland uses the kernel-exported cpu_capacity values when the
+    /// kernel has an active SD_ASYM_CPUCAPACITY domain.
     #[clap(
         short = 'u',
         long,
@@ -257,6 +343,11 @@ struct Opts {
     /// wakeup throughput for no measured gain, as it does in fair.c.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     wa_weight: bool,
+
+    /// Periodic busy load balancing runs every domain-weight milliseconds
+    /// times this factor, sd->busy_factor (16 in fair.c).
+    #[clap(long, default_value = "16", value_parser = clap::value_parser!(u32).range(1..=64))]
+    busy_balance_factor: u32,
 
     /// Service is charged in rq_clock_task(), the clock update_curr() uses:
     /// wall time less the interrupt time and the hypervisor steal time the
@@ -462,6 +553,104 @@ fn tick_ns() -> u64 {
 /// upstream rule with its default log scaling; a kernel whose distribution
 /// changed the normalized value or an administrator who tuned the sysctl
 /// runs fair.c at some other slice, and --slice-us is how to match it.
+/// Return the number of cgroups whose `file` holds a value `set` accepts, and
+/// one of them, walking the cgroup v2 hierarchy. A cgroup has the cpu
+/// controller's files only where its parent enables the controller.
+fn cgroups_with(
+    root: &std::path::Path,
+    file: &str,
+    set: impl Fn(&str) -> bool,
+) -> (usize, Option<String>) {
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    let (mut count, mut example, mut visited) = (0, None, 0);
+
+    while let Some((dir, depth)) = stack.pop() {
+        visited += 1;
+        if visited > 100_000 {
+            break;
+        }
+        if let Ok(val) = std::fs::read_to_string(dir.join(file)) {
+            if set(val.trim()) {
+                count += 1;
+                if example.is_none() {
+                    let name = dir.strip_prefix(root).unwrap_or(&dir);
+                    example = Some(format!("/{} ({})", name.display(), val.trim()));
+                }
+            }
+        }
+        if depth >= 64 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push((entry.path(), depth + 1));
+            }
+        }
+    }
+
+    (count, example)
+}
+
+/// Tell whether cgroup scheduling can do what the options ask for: warn when
+/// it was asked for and the kernel or the cgroup setup leaves nothing to
+/// hook into, and when a cpu.weight or a cpu.max somebody set is ignored
+/// because the feature that reads it is off.
+fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    let cpu_controller = std::fs::read_to_string(root.join("cgroup.subtree_control"))
+        .is_ok_and(|ctrl| ctrl.split_whitespace().any(|c| c == "cpu"));
+
+    if cpu_controller && !cpu_max {
+        let (count, example) = cgroups_with(root, "cpu.max", |v| {
+            v.split_whitespace().next().is_some_and(|q| q != "max")
+        });
+        if count > 0 {
+            warn!(
+                "{} cgroup(s) set cpu.max, e.g. {}, which is ignored: the bandwidth \
+                 of a cgroup is held to only with --enable-cgroups and without \
+                 --disable-cpu-max",
+                count,
+                example.unwrap_or_default()
+            );
+        }
+    }
+
+    if requested {
+        if !kernel_support {
+            warn!(
+                "--enable-cgroups: the kernel has no sched_ext cgroup support \
+                 (CONFIG_EXT_GROUP_SCHED), cgroups are not scheduled as groups"
+            );
+        } else if !cpu_controller {
+            warn!(
+                "--enable-cgroups: the cpu controller is not enabled in {}, \
+                 every task is scheduled as part of the root cgroup",
+                root.join("cgroup.subtree_control").display()
+            );
+        }
+        return;
+    }
+
+    if !cpu_controller {
+        return;
+    }
+    const CGROUP_WEIGHT_DFL: u64 = 100;
+    let (count, example) = cgroups_with(root, "cpu.weight", |v| {
+        v.parse::<u64>().is_ok_and(|w| w != CGROUP_WEIGHT_DFL)
+    });
+    if count > 0 {
+        warn!(
+            "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored without \
+             --enable-cgroups",
+            count,
+            example.unwrap_or_default()
+        );
+    }
+}
+
 fn base_slice_ns(nr_cpus: usize) -> u64 {
     const NORMALIZED_BASE_SLICE_NS: u64 = 700_000;
     let cpus = nr_cpus.clamp(1, 8) as u64;
@@ -562,24 +751,80 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
-        let mut skel = scx_ops_cid_open!(skel_builder, open_object, cidland_ops, open_opts)
-            .context("opening BPF skeleton (does this kernel support cid-form sched_ext?)")?;
+
+        // The cid form's cgroup callbacks were renamed from cgroup_* to
+        // cpuctl_*. The BPF object defines the ops under both names, as two
+        // struct_ops maps sharing the same programs: use the one the running
+        // kernel matches and leave the other uncreated.
+        let cpuctl_names =
+            compat::struct_has_field("sched_ext_ops_cid", "cpuctl_set_weight").unwrap_or(false);
+        let cgroup_names = !cpuctl_names
+            && compat::struct_has_field("sched_ext_ops_cid", "cgroup_set_weight").unwrap_or(false);
+        let mut skel = if cgroup_names {
+            scx_ops_cid_open!(skel_builder, open_object, cidland_ops_cgroup, open_opts)
+        } else {
+            scx_ops_cid_open!(skel_builder, open_object, cidland_ops, open_opts)
+        }
+        .context("opening BPF skeleton (does this kernel support cid-form sched_ext?)")?;
+        if cgroup_names {
+            skel.maps.cidland_ops.set_autocreate(false)?;
+        } else {
+            skel.maps.cidland_ops_cgroup.set_autocreate(false)?;
+        }
 
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
+        skel.struct_ops.cidland_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
 
-        // Honor cpu.weight, unless it was turned off or the kernel has no cpu
-        // controller support for sched_ext to hook into. Detaching the
-        // callbacks from the struct_ops keeps the kernel from delivering them
-        // at all, and lets the scheduler load on a kernel whose
-        // sched_ext_ops_cid has no cpuctl_* members to bind them to.
-        let cgroup_enabled = !opts.disable_cgroups
-            && compat::struct_has_field("sched_ext_ops_cid", "cpuctl_set_weight").unwrap_or(false);
+        // Schedule cgroups as groups only when asked to and when the kernel
+        // has cpu controller support for sched_ext to hook into. Detaching
+        // the callbacks from the struct_ops keeps the kernel from delivering
+        // them at all, and lets the scheduler load on a kernel whose
+        // sched_ext_ops_cid has no cgroup members to bind them to.
+        let cgroup_enabled = opts.enable_cgroups && (cpuctl_names || cgroup_names);
+
+        // cpu.max arrived after the rest of the cpu controller's callbacks, so
+        // it is probed on its own: a kernel that delivers cpu.weight may still
+        // have no member to bind the bandwidth callback to.
+        let bw_field = if cgroup_names {
+            "cgroup_set_bandwidth"
+        } else {
+            "cpuctl_set_bandwidth"
+        };
+        let bw_support = compat::struct_has_field("sched_ext_ops_cid", bw_field).unwrap_or(false);
+        let cpu_max_enabled = cgroup_enabled && !opts.disable_cpu_max && bw_support;
+        check_cgroup_support(
+            opts.enable_cgroups,
+            cpuctl_names || cgroup_names,
+            cpu_max_enabled,
+        );
         if !cgroup_enabled {
             let ops = skel.struct_ops.cidland_ops_mut();
             ops.cpuctl_init = std::ptr::null_mut();
+            ops.cpuctl_exit = std::ptr::null_mut();
             ops.cpuctl_set_weight = std::ptr::null_mut();
+            ops.cpuctl_set_idle = std::ptr::null_mut();
             ops.cpuctl_move = std::ptr::null_mut();
-            info!("cgroup weights: off");
+            let ops = skel.struct_ops.cidland_ops_cgroup_mut();
+            ops.cgroup_init = std::ptr::null_mut();
+            ops.cgroup_exit = std::ptr::null_mut();
+            ops.cgroup_set_weight = std::ptr::null_mut();
+            ops.cgroup_set_idle = std::ptr::null_mut();
+            ops.cgroup_move = std::ptr::null_mut();
+            info!("cgroup scheduling: off");
+        } else {
+            info!(
+                "cgroup scheduling: on ({}_* callbacks)",
+                if cgroup_names { "cgroup" } else { "cpuctl" }
+            );
+            if opts.enable_cgroups && !opts.disable_cpu_max && !bw_support {
+                warn!("the kernel has no ops.{bw_field}(), cpu.max is ignored");
+            }
+        }
+        if !cpu_max_enabled {
+            skel.struct_ops.cidland_ops_mut().cpuctl_set_bandwidth = std::ptr::null_mut();
+            skel.struct_ops
+                .cidland_ops_cgroup_mut()
+                .cgroup_set_bandwidth = std::ptr::null_mut();
         }
 
         // Override default BPF scheduling parameters.
@@ -589,8 +834,11 @@ impl<'a> Scheduler<'a> {
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
+        rodata.sis_util = !opts.no_sis_util;
+        rodata.llc_extend = opts.llc_extend;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
+        rodata.cpu_max_enabled = cpu_max_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
         rodata.force_smt_asym_packing = opts.smt_asym_packing;
@@ -603,6 +851,7 @@ impl<'a> Scheduler<'a> {
         }
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;
+        rodata.busy_balance_factor = opts.busy_balance_factor;
         rodata.no_task_clock = opts.no_task_clock;
         info!(
             "service clock: {}",
@@ -689,20 +938,34 @@ impl<'a> Scheduler<'a> {
             .unwrap_or(default_tolerance);
         let tiers = capacity_tiers(&capacities, tolerance);
         let nr_capacity_tiers = tiers.last().copied().unwrap_or(0) + 1;
-        let asym_capacity = nr_capacity_tiers > 1;
+        let has_capacity_tiers = nr_capacity_tiers > 1;
         // Keep capacity and SD_ASYM_PACKING tiers independent. fair.c uses
         // them in different paths; collapsing them into one ordering makes
         // packing priority affect every ordinary idle-CPU search.
-        let mut cpu_tiers: Vec<(u64, u64, u64, u64, bool)> = Vec::new();
+        let mut cpu_tiers: Vec<(u64, u64, u64, u64, bool, u64, u64, u64)> = Vec::new();
+        let mut sched_domain_source = None;
         for (i, (cpu, capacity)) in cpus.iter().enumerate() {
             let normalized = (*capacity * 1024 / max_cap).clamp(1, 1024);
-            cpu_tiers.push((cpu.id as u64, normalized as u64, tiers[i], tiers[i], false));
+            let domains = topo
+                .sched_domain_info(cpu.id)
+                .context("discovering scheduler-domain policy")?;
+            sched_domain_source.get_or_insert(domains.source);
+            cpu_tiers.push((
+                cpu.id as u64,
+                normalized as u64,
+                tiers[i],
+                tiers[i],
+                false,
+                domains.fork_span as u64,
+                domains.wake_affine_span as u64,
+                domains.asym_capacity_span as u64,
+            ));
         }
         info!(
             "CPU capacity mode: {capacity_mode} ({nr_capacity_tiers} tier{}, tolerance {tolerance}%)",
             if nr_capacity_tiers == 1 { "" } else { "s" }
         );
-        if nr_capacity_tiers > 1 {
+        if has_capacity_tiers {
             info!(
                 "CPUs by capacity: {:?}",
                 cpus.iter().map(|(cpu, _)| cpu.id).collect::<Vec<_>>()
@@ -713,16 +976,15 @@ impl<'a> Scheduler<'a> {
         //
         // SCX_OPS_BUILTIN_IDLE_PER_NODE is left out: a cid-form scheduler
         // cannot use the built-in idle tracking, this one does its own.
-        skel.struct_ops.cidland_ops_mut().flags = *compat::SCX_OPS_ENQ_LAST
+        let flags = *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
             | *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_TID_TO_TASK;
+        skel.struct_ops.cidland_ops_mut().flags = flags;
+        skel.struct_ops.cidland_ops_cgroup_mut().flags = flags;
 
-        info!(
-            "scheduler flags: {:#x}",
-            skel.struct_ops.cidland_ops_mut().flags
-        );
+        info!("scheduler flags: {:#x}", flags);
 
         // One hrtick per cid, over the same cid space the arena is sized
         // for below. A map is sized before the program is loaded.
@@ -733,37 +995,60 @@ impl<'a> Scheduler<'a> {
             .context("sizing the hrtick map")?;
 
         // Load the BPF program for validation.
-        let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei)?;
+        let mut skel = if cgroup_names {
+            scx_ops_cid_load!(skel, cidland_ops_cgroup, uei)
+        } else {
+            scx_ops_cid_load!(skel, cidland_ops, uei)
+        }?;
 
         // Capacity and asymmetric packing are separate kernel policies.
-        // Query arch_asym_cpu_priority() and the live sd_asym_packing pointer
-        // through BPF: neither has a stable userspace ABI. If asymmetric
-        // packing is active across the scheduler's CPU domain, use its exact
-        // priorities for placement ordering while retaining cpu_capacity for
-        // fit calculations.
-        let mut priorities = Vec::new();
+        // Topology reconstructs the portable domain spans, but neither
+        // SD_ASYM_PACKING nor arch_asym_cpu_priority() has a userspace ABI.
+        // Keep this narrow BPF query until sched_ext provides one.
+        let mut priorities = Vec::with_capacity(cpu_tiers.len());
         let mut all_asym_packing = !opts.disable_asym_packing;
-        if !opts.disable_asym_packing {
-            priorities.reserve(cpu_tiers.len());
-            for (cpu, _, _, _, smt_asym_packing) in &mut cpu_tiers {
-                let mut args = types::cidland_cpu_priority_args {
-                    cpu: *cpu,
-                    priority: 0,
-                    asym_packing: 0,
-                    smt_asym_packing: 0,
-                };
-                run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
-                    .context("running cidland_get_cpu_priority")?;
+        for (cpu, _, _, _, smt_asym_packing, _, _, _) in &mut cpu_tiers {
+            let mut args = types::cidland_cpu_priority_args {
+                cpu: *cpu,
+                priority: 0,
+                asym_packing: 0,
+                smt_asym_packing: 0,
+            };
+            run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
+                .context("querying CPU asymmetric-packing policy")?;
+            if !opts.disable_asym_packing {
                 all_asym_packing &= args.asym_packing != 0;
                 *smt_asym_packing = args.smt_asym_packing != 0;
                 priorities.push((*cpu, args.priority));
             }
         }
 
+        let mut domain_spans = cpu_tiers
+            .iter()
+            .map(|entry| (entry.5, entry.6, entry.7))
+            .collect::<Vec<_>>();
+        domain_spans.sort_unstable();
+        domain_spans.dedup();
+        info!(
+            "scheduler domain spans (fork, wake-affine, asym-capacity, source={}): {:?}",
+            match sched_domain_source {
+                Some(SchedDomainSource::Schedstat) => "schedstat",
+                Some(SchedDomainSource::Topology) | None => "topology",
+            },
+            domain_spans
+        );
+
+        let sched_asym_capacity =
+            !opts.uniform_capacity && cpu_tiers.iter().any(|entry| entry.7 != 0);
+        let asym_capacity = has_capacity_tiers && (sched_asym_capacity || opts.asym_capacity);
+        if has_capacity_tiers && !asym_capacity {
+            info!("CPU capacity placement: off (no kernel SD_ASYM_CPUCAPACITY domain)");
+        }
+
         priorities.sort_by_key(|(_, priority)| std::cmp::Reverse(*priority));
         let distinct_priorities = priorities.windows(2).any(|pair| pair[0].1 != pair[1].1);
         let asym_packing = all_asym_packing && distinct_priorities;
-        let mut nr_place_tiers = nr_capacity_tiers;
+        let mut nr_place_tiers = if asym_capacity { nr_capacity_tiers } else { 1 };
         if asym_packing {
             let mut tier = 0u64;
             for i in 0..priorities.len() {
@@ -784,16 +1069,22 @@ impl<'a> Scheduler<'a> {
                 priorities.iter().map(|(cpu, _)| cpu).collect::<Vec<_>>()
             );
         } else {
-            for (_, _, _, _, smt_asym_packing) in &mut cpu_tiers {
+            for (_, _, capacity_tier, place_tier, smt_asym_packing, _, _, _) in &mut cpu_tiers {
+                *place_tier = if asym_capacity { *capacity_tier } else { 0 };
                 *smt_asym_packing = false;
             }
             info!(
-                "CPU asymmetric packing: {}; placement follows {capacity_mode} capacity tiers",
+                "CPU asymmetric packing: {}; placement follows {}",
                 if opts.disable_asym_packing {
                     "disabled"
                 } else {
                     "off"
-                }
+                },
+                if asym_capacity {
+                    format!("{capacity_mode} capacity tiers")
+                } else {
+                    "uniform capacity".to_string()
+                },
             );
         }
 
@@ -807,17 +1098,32 @@ impl<'a> Scheduler<'a> {
             nr_place_tiers,
             nr_capacity_tiers,
             asym_capacity: asym_capacity as u64,
+            sched_asym_capacity: sched_asym_capacity as u64,
+            force_asym_capacity: opts.asym_capacity as u64,
             asym_packing: asym_packing as u64,
         };
         run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
             .context("running cidland_arena_init")?;
-        for (cpu, capacity, capacity_tier, place_tier, smt_asym_packing) in cpu_tiers {
+        for (
+            cpu,
+            capacity,
+            capacity_tier,
+            place_tier,
+            smt_asym_packing,
+            fork_span,
+            wake_affine_span,
+            asym_capacity_span,
+        ) in cpu_tiers
+        {
             let mut args = types::cidland_cpu_args {
                 cpu,
                 capacity,
                 place_tier,
                 capacity_tier,
                 smt_asym_packing: smt_asym_packing as u64,
+                fork_span,
+                wake_affine_span,
+                asym_capacity_span,
             };
             run_syscall_prog(&skel.progs.cidland_set_cpu, &mut args)
                 .context("running cidland_set_cpu")?;
@@ -829,7 +1135,11 @@ impl<'a> Scheduler<'a> {
             ArenaLib::start(skel.object_mut()).context("starting arena userspace services")?;
 
         // Attach the scheduler.
-        let struct_ops = Some(scx_ops_attach!(skel, cidland_ops)?);
+        let struct_ops = Some(if cgroup_names {
+            scx_ops_attach!(skel, cidland_ops_cgroup)
+        } else {
+            scx_ops_attach!(skel, cidland_ops)
+        }?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
@@ -844,11 +1154,15 @@ impl<'a> Scheduler<'a> {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
             nr_steals: bss_data.nr_steals,
+            nr_busy_balances: bss_data.nr_busy_balances,
             nr_active_balances: bss_data.nr_active_balances,
             nr_preempts: bss_data.nr_preempts,
             nr_delay_requeues: bss_data.nr_delay_requeues,
             nr_hrticks: bss_data.nr_hrticks,
             nr_newidle_skips: bss_data.nr_newidle_skips,
+            nr_sis_updates: bss_data.nr_sis_updates,
+            sis_scan_sum: bss_data.sis_scan_sum,
+            nr_sis_cutoffs: bss_data.nr_sis_cutoffs,
         }
     }
 
@@ -940,6 +1254,8 @@ fn main() -> Result<()> {
         }
     }
 
+    warn_on_old_kernel();
+
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
@@ -954,6 +1270,15 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::capacity_tiers;
+    use super::kernel_major_minor;
+
+    #[test]
+    fn parses_kernel_major_minor() {
+        assert_eq!(kernel_major_minor("7.2.0-rc1"), Some((7, 2)));
+        assert_eq!(kernel_major_minor("6.18.12-arch1-1"), Some((6, 18)));
+        assert_eq!(kernel_major_minor("7.2-custom"), Some((7, 2)));
+        assert_eq!(kernel_major_minor("not-a-version"), None);
+    }
 
     #[test]
     fn capacity_tiers_use_current_tier_anchor() {

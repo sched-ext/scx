@@ -38,6 +38,8 @@ struct cidland_arena_args {
 	unsigned long long	nr_place_tiers;
 	unsigned long long	nr_capacity_tiers;
 	unsigned long long	asym_capacity;
+	unsigned long long	sched_asym_capacity;
+	unsigned long long	force_asym_capacity;
 	unsigned long long	asym_packing;
 };
 
@@ -52,13 +54,15 @@ struct cidland_cpu_args {
 	unsigned long long	place_tier;
 	unsigned long long	capacity_tier;
 	unsigned long long	smt_asym_packing;
+	unsigned long long	fork_span;
+	unsigned long long	wake_affine_span;
+	unsigned long long	asym_capacity_span;
 };
 
 /*
- * Arguments to cidland_get_cpu_priority(). The program returns the live
- * arch_asym_cpu_priority() value, whether SD_ASYM_PACKING is active in a
- * scheduling domain containing the CPU, and whether the SMT domain itself has
- * both SD_SHARE_CPUCAPACITY and SD_ASYM_PACKING.
+ * Arguments to cidland_get_cpu_priority(). There is no portable userspace ABI
+ * for SD_ASYM_PACKING or arch_asym_cpu_priority(), so keep this narrow query
+ * until sched_ext provides one.
  */
 struct cidland_cpu_priority_args {
 	unsigned long long	cpu;

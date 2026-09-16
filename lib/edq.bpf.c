@@ -160,6 +160,16 @@ static __noinline scx_edq_node_t *leftmost(scx_edq_node_t __arg_arena *node)
 	return node && node->left ? NULL : node;
 }
 
+/* Return the in-order successor of @node. The caller holds the EDQ lock. */
+static __noinline scx_edq_node_t *next_node(scx_edq_node_t __arg_arena *node)
+{
+	if (node->right)
+		return leftmost(node->right);
+	while (node->parent && node == node->parent->right && can_loop)
+		node = node->parent;
+	return node->parent && node == node->parent->right ? NULL : node->parent;
+}
+
 static __noinline int remove_locked(scx_edq_t __arg_arena *edq,
 				    scx_edq_task_t __arg_arena *task,
 				    bool dead)
@@ -436,6 +446,32 @@ u64 scx_edq_pop_first_eligible_or_first(scx_edq_t __arg_arena *edq,
 	return task;
 }
 
+/*
+ * Return in @deadline the deadline of the earliest-deadline task whose
+ * eligibility is at or before @cutoff, without removing it. -ENOENT when no
+ * queued task is eligible, -EBUSY when the queue is contended: the caller
+ * decides without it.
+ */
+__weak
+int scx_edq_try_first_eligible_deadline(scx_edq_t __arg_arena *edq, u64 cutoff,
+					 u64 *deadline __arg_nonnull)
+{
+	scx_edq_node_t *node;
+	int ret;
+
+	*deadline = 0;
+	ret = scx_edq_trylock(edq);
+	if (ret)
+		return ret;
+	node = first_eligible(edq, cutoff);
+	if (node)
+		*deadline = node->deadline;
+	else
+		ret = -ENOENT;
+	scx_edq_unlock(edq);
+	return ret;
+}
+
 __weak
 u64 scx_edq_peek_hold(scx_edq_t __arg_arena *edq)
 {
@@ -470,6 +506,39 @@ int scx_edq_try_peek_hold(scx_edq_t __arg_arena *edq, u64 *taskp __arg_nonnull)
 	scx_edq_unlock(edq);
 	*taskp = (u64)task;
 	return 0;
+}
+
+/*
+ * Return and hold the @nth task in deadline order without removing it. This
+ * is an advisory, bounded-scan primitive: callers must still validate the
+ * task and use scx_edq_try_remove() to claim the exact node.
+ */
+__weak
+int scx_edq_try_peek_nth_hold(scx_edq_t __arg_arena *edq, u32 nth,
+			       u64 *taskp __arg_nonnull)
+{
+	scx_edq_node_t *node;
+	scx_edq_task_t *task = NULL;
+	int ret;
+
+	*taskp = 0;
+	ret = scx_edq_trylock(edq);
+	if (ret)
+		return ret;
+	node = edq->first;
+	while (node && nth && can_loop) {
+		node = next_node(node);
+		nth--;
+	}
+	if (node && nth) {
+		ret = -E2BIG;
+	} else if (node) {
+		task = node_task(node);
+		scx_edq_task_hold(task);
+	}
+	scx_edq_unlock(edq);
+	*taskp = (u64)task;
+	return ret;
 }
 
 __weak

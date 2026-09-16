@@ -70,6 +70,8 @@ pub use topology::NR_CPU_IDS;
 pub use topology::NR_CPUS_POSSIBLE;
 pub use topology::Node;
 pub use topology::Powermode;
+pub use topology::SchedDomainInfo;
+pub use topology::SchedDomainSource;
 pub use topology::Topology;
 pub use topology::get_primary_cpus;
 #[cfg(any(test, feature = "testutils"))]
