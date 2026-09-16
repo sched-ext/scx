@@ -6840,6 +6840,20 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 			task_h_refresh(tctx, now);
 			keep_charge(p, cid, tnow);
 		}
+
+		/*
+		 * Bring the bandwidth of the groups it runs in up to date and
+		 * end its slice if they have run out, entity_tick() asking
+		 * check_cfs_rq_runtime(). The dispatch that follows the ended
+		 * slice is where the task is actually given up, see
+		 * cidland_dispatch(); doing it here only means a task is not
+		 * left running a whole slice past a limit it has reached.
+		 */
+		if (bw_enabled() && tctx) {
+			keep_charge(p, cid, cid_clock_task_owned(cid, now));
+			if (task_bw_throttled(tctx, cid, now))
+				scx_bpf_task_set_slice(p, 0);
+		}
 	}
 
 	if (!no_newidle_cost)
@@ -7468,7 +7482,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 
 void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 {
-	bool has_prev, keep = false, active_balance = false;
+	bool has_prev, keep = false, active_balance = false, prev_throttled = false;
 	s32 migrate_cid = -EBUSY, busy_cid;
 	u64 now, tnow;
 
@@ -7506,6 +7520,21 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			active_balance = true;
 	}
 	if (has_prev) {
+		task_ctx_t *ptctx = bw_enabled() ? try_lookup_task_ctx(prev) : NULL;
+
+		/*
+		 * A task whose cgroup has run out of bandwidth may not go on,
+		 * whatever it is owed and whether or not anything else is
+		 * waiting here: its slice ends and it is handed back through
+		 * ops.enqueue(), which puts it aside. What
+		 * check_cfs_rq_runtime() does to the task of a cfs_rq that has
+		 * run out, and the only way a task that never blocks is ever
+		 * asked about its cgroup's limit again.
+		 */
+		prev_throttled = ptctx && task_bw_throttled(ptctx, cid, now);
+		if (prev_throttled)
+			scx_bpf_task_set_slice(prev, 0);
+
 		migrate_cid = active_balance_target(prev, cid, now);
 		if (migrate_cid >= 0) {
 			task_ctx_t *tctx = try_lookup_task_ctx(prev);
@@ -7515,7 +7544,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 			else
 				migrate_cid = -EBUSY;
 		}
-		if (migrate_cid < 0)
+		if (migrate_cid < 0 && !prev_throttled)
 			keep = keep_running(cid, tnow);
 	}
 
@@ -7622,6 +7651,15 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		/* Nothing to hand over: @prev stays, and no requeue follows. */
 		WRITE_ONCE(cid_ctx(cid)->requeue_pending, 0);
 		keep_charge(prev, cid, tnow);
+		/*
+		 * Unless its cgroup is out of bandwidth: leave the slice ended
+		 * and let the kernel hand it back. SCX_OPS_ENQ_LAST is what
+		 * makes that happen for a task with nothing to follow it, and
+		 * without it the CPU would simply go on running the task it
+		 * already has, quota or no quota.
+		 */
+		if (prev_throttled)
+			return;
 		scx_bpf_task_set_slice(prev, task_request(prev));
 		if (cid_queued_test(cid))
 			hrtick_start(cid, tnow);
