@@ -79,14 +79,15 @@ use crate::misc::read_from_file;
 use anyhow::Result;
 use anyhow::bail;
 use glob::glob;
+use log::debug;
 use log::info;
 use log::warn;
 use sscanf::sscanf;
 use std::cmp::min;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "gpu-topology")]
 use crate::gpu::{Gpu, GpuIndex, create_gpus};
@@ -241,6 +242,31 @@ pub struct Node {
     pub gpus: BTreeMap<GpuIndex, Gpu>,
 }
 
+/// Source used to reconstruct scheduler-domain policy.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SchedDomainSource {
+    /// Live scheduler-domain masks read from `/proc/schedstat`.
+    Schedstat,
+    /// Portable approximation built from sysfs topology.
+    Topology,
+}
+
+/// Scheduler-domain policy needed by userspace schedulers.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct SchedDomainInfo {
+    /// Size of the highest domain on which fork balancing is enabled.
+    pub fork_span: usize,
+    /// Size of the highest domain on which wake-affine is enabled.
+    pub wake_affine_span: usize,
+    /// Size of the lowest domain spanning every CPU-capacity class.
+    pub asym_capacity_span: usize,
+    /// Source used to reconstruct the domains.
+    pub source: SchedDomainSource,
+}
+
+const SCHEDSTAT_VERSION: usize = 17;
+const NUMA_RECLAIM_DISTANCE: usize = 30;
+
 #[derive(Debug)]
 pub struct Topology {
     pub nodes: BTreeMap<usize, Node>,
@@ -253,6 +279,12 @@ pub struct Topology {
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+
+    // `/proc/schedstat` does not expose sched_domain::flags, but its masks are
+    // still useful when the statistics static key is disabled. Policy is
+    // reconstructed from these live masks and the same topology inputs used
+    // by the kernel. If schedstat is unavailable, topology masks are used.
+    sched_domains: OnceLock<Option<BTreeMap<usize, Vec<Cpumask>>>>,
 }
 
 impl Topology {
@@ -315,7 +347,36 @@ impl Topology {
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
+            sched_domains: OnceLock::new(),
         })
+    }
+
+    fn sched_domains(&self) -> Option<&BTreeMap<usize, Vec<Cpumask>>> {
+        self.sched_domains
+            .get_or_init(|| {
+                let path = format!("{}/proc/schedstat", *ROOT_PREFIX);
+                match std::fs::read_to_string(&path).and_then(|data| {
+                    parse_schedstat(&data).map_err(|err| std::io::Error::other(err.to_string()))
+                }) {
+                    Ok(domains)
+                        if self
+                            .all_cpus
+                            .keys()
+                            .all(|cpu| domains.get(cpu).is_some_and(|spans| !spans.is_empty())) =>
+                    {
+                        Some(domains)
+                    }
+                    Ok(_) => {
+                        debug!("{path} has incomplete scheduler domains; using topology fallback");
+                        None
+                    }
+                    Err(err) => {
+                        debug!("cannot use {path}: {err}; using topology fallback");
+                        None
+                    }
+                }
+            })
+            .as_ref()
     }
 
     /// Build a complete host Topology
@@ -412,6 +473,80 @@ impl Topology {
             }
         }
         count
+    }
+
+    /// Reconstruct scheduler-domain policy for `cpu_id`.
+    ///
+    /// Linux does not expose scheduler-domain flags through a stable ABI.
+    /// When schedstat v17 is available, use its live domain masks and apply
+    /// the kernel's NUMA-reclaim and capacity-class rules. The counters may
+    /// all be zero when `kernel.sched_schedstats=0`; that does not affect the
+    /// masks consumed here. If schedstat is absent or incompatible, construct
+    /// portable core, LLC, NUMA-node and system masks from sysfs instead.
+    pub fn sched_domain_info(&self, cpu_id: usize) -> Result<SchedDomainInfo> {
+        let cpu = self
+            .all_cpus
+            .get(&cpu_id)
+            .ok_or_else(|| anyhow::anyhow!("CPU {cpu_id} is not in the topology"))?;
+
+        let (mut domains, source) = match self.sched_domains().and_then(|all| all.get(&cpu_id)) {
+            Some(domains) => (domains.clone(), SchedDomainSource::Schedstat),
+            None => {
+                let mut domains = vec![
+                    self.all_cores[&cpu.core_id].span.clone(),
+                    self.all_llcs[&cpu.llc_id].span.clone(),
+                    self.nodes[&cpu.node_id].span.clone(),
+                    self.span.clone(),
+                ];
+                domains.sort_by_key(Cpumask::weight);
+                domains.dedup();
+                (domains, SchedDomainSource::Topology)
+            }
+        };
+        domains = domains
+            .into_iter()
+            .map(|span| span.and(&self.span))
+            .filter(|span| span.test_cpu(cpu_id))
+            .collect();
+        domains.sort_by_key(Cpumask::weight);
+        domains.dedup();
+
+        let balance_span = domains
+            .iter()
+            .filter(|span| self.within_numa_reclaim_distance(cpu.node_id, span))
+            .map(Cpumask::weight)
+            .max()
+            .unwrap_or(1);
+
+        let capacities: Option<BTreeMap<_, _>> = self
+            .all_cpus
+            .iter()
+            .map(|(&id, cpu)| Some((id, cpu.kernel_cpu_capacity?)))
+            .collect();
+        let asym_capacity_span = capacities
+            .as_ref()
+            .map(|capacities| smallest_full_capacity_span(&domains, capacities))
+            .unwrap_or(0);
+
+        Ok(SchedDomainInfo {
+            fork_span: balance_span,
+            wake_affine_span: balance_span,
+            asym_capacity_span,
+            source,
+        })
+    }
+
+    fn within_numa_reclaim_distance(&self, source_node: usize, span: &Cpumask) -> bool {
+        let Some(source) = self.nodes.get(&source_node) else {
+            return false;
+        };
+
+        span.iter().all(|cpu_id| {
+            self.all_cpus
+                .get(&cpu_id)
+                .and_then(|cpu| source.distance.get(cpu.node_id))
+                .is_some_and(|&distance| distance <= NUMA_RECLAIM_DISTANCE)
+        })
     }
 
     /// Format a cpumask as a topology-aware visual grid.
@@ -528,6 +663,73 @@ impl Topology {
             nr_cpus, nr_cores, min_cpus, max_cpus
         )
     }
+}
+
+fn parse_schedstat(data: &str) -> Result<BTreeMap<usize, Vec<Cpumask>>> {
+    let mut lines = data.lines();
+    let version = lines
+        .next()
+        .and_then(|line| line.strip_prefix("version "))
+        .ok_or_else(|| anyhow::anyhow!("missing schedstat version"))?
+        .parse::<usize>()?;
+    if version != SCHEDSTAT_VERSION {
+        bail!("unsupported schedstat version {version}");
+    }
+
+    let mut domains = BTreeMap::<usize, Vec<Cpumask>>::new();
+    let mut current_cpu = None;
+    for line in lines {
+        let mut fields = line.split_ascii_whitespace();
+        let Some(kind) = fields.next() else {
+            continue;
+        };
+        if let Some(cpu) = kind.strip_prefix("cpu") {
+            let cpu = cpu.parse::<usize>()?;
+            domains.entry(cpu).or_default();
+            current_cpu = Some(cpu);
+            continue;
+        }
+        if !kind.starts_with("domain") {
+            continue;
+        }
+
+        let cpu = current_cpu.ok_or_else(|| anyhow::anyhow!("domain before CPU record"))?;
+        let _name = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing scheduler-domain name"))?;
+        let mask = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing scheduler-domain mask"))?
+            .replace(',', "");
+        domains
+            .entry(cpu)
+            .or_default()
+            .push(Cpumask::from_str(&mask)?);
+    }
+
+    for spans in domains.values_mut() {
+        spans.sort_by_key(Cpumask::weight);
+        spans.dedup();
+    }
+    Ok(domains)
+}
+
+fn smallest_full_capacity_span(domains: &[Cpumask], capacities: &BTreeMap<usize, usize>) -> usize {
+    let all = capacities.values().copied().collect::<BTreeSet<_>>();
+    if all.len() <= 1 {
+        return 0;
+    }
+
+    domains
+        .iter()
+        .find(|span| {
+            span.iter()
+                .filter_map(|cpu| capacities.get(&cpu).copied())
+                .collect::<BTreeSet<_>>()
+                == all
+        })
+        .map(Cpumask::weight)
+        .unwrap_or(0)
 }
 
 /******************************************************
@@ -1383,12 +1585,69 @@ pub mod testutils {
 mod tests {
     use super::testutils::*;
     use super::*;
+    use crate::set_cpumask_test_width;
 
     fn grid_output(topo: &Topology, cpumask: &Cpumask) -> String {
         let mut buf = Vec::new();
         topo.format_cpumask_grid(&mut buf, cpumask, "    ", 80)
             .unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_parse_schedstat_domains() {
+        set_cpumask_test_width(8);
+        let data = concat!(
+            "version 17\n",
+            "timestamp 42\n",
+            "cpu0 0 0 0 0 0 0 0 0 0\n",
+            "domain0 SMT 03 0 0\n",
+            "domain1 MC 0f 0 0\n",
+            "cpu1 0 0 0 0 0 0 0 0 0\n",
+            "domain0 SMT 03 0 0\n",
+            "domain1 MC ff 0 0\n",
+        );
+        let domains = parse_schedstat(data).unwrap();
+        assert_eq!(
+            domains[&0].iter().map(Cpumask::weight).collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert_eq!(
+            domains[&1].iter().map(Cpumask::weight).collect::<Vec<_>>(),
+            [2, 8]
+        );
+        assert!(parse_schedstat(&data.replace("version 17", "version 18")).is_err());
+    }
+
+    #[test]
+    fn test_capacity_domain_selection() {
+        set_cpumask_test_width(8);
+        let domains = vec![
+            mask_from_bits(8, &[0, 1]),
+            mask_from_bits(8, &[0, 1, 2, 3]),
+            mask_from_bits(8, &[0, 1, 2, 3, 4, 5, 6, 7]),
+        ];
+        let capacities = (0..8)
+            .map(|cpu| (cpu, if cpu < 4 { 512 } else { 1024 }))
+            .collect();
+        assert_eq!(smallest_full_capacity_span(&domains, &capacities), 8);
+
+        let capacities = (0..8).map(|cpu| (cpu, 1024)).collect();
+        assert_eq!(smallest_full_capacity_span(&domains, &capacities), 0);
+    }
+
+    #[test]
+    fn test_topology_sched_domain_fallback() {
+        let (mut topo, _) = make_test_topo(2, 1, 2, 1);
+        topo.sched_domains.set(None).unwrap();
+        topo.nodes.get_mut(&0).unwrap().distance = vec![10, 100];
+        topo.nodes.get_mut(&1).unwrap().distance = vec![100, 10];
+
+        let info = topo.sched_domain_info(0).unwrap();
+        assert_eq!(info.source, SchedDomainSource::Topology);
+        assert_eq!(info.fork_span, 2);
+        assert_eq!(info.wake_affine_span, 2);
+        assert_eq!(info.asym_capacity_span, 0);
     }
 
     #[test]
