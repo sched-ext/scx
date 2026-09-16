@@ -124,6 +124,16 @@ const volatile u32 cache_nice_tries = 1;
 const volatile bool no_newidle_cost;
 
 /*
+ * Bound the ordinary LLC idle scan by its averaged utilization, the way
+ * fair.c's SIS_UTIL feature uses sched_domain_shared::nr_idle_scan. The
+ * hint is refreshed by periodic load balance, never on the wakeup path.
+ *
+ * On by default, as the feature is in fair.c. User space clears it for
+ * --no-sis-util.
+ */
+const volatile bool sis_util = true;
+
+/*
  * Do not interrupt a running task for one that wakes up with an earlier
  * deadline, leaving it to run until its slice ends.
  */
@@ -241,6 +251,26 @@ volatile u64 nr_preempts __hot_written;
 volatile u64 nr_delay_requeues __hot_written;
 volatile u64 nr_hrticks __hot_written;
 volatile u64 nr_newidle_skips __hot_written;
+/*
+ * Not __hot_written: these are touched once per periodic LLC balance, a couple
+ * of dozen times a second for the whole machine, so they have no business
+ * taking a cache line each the way the per-wakeup counters above do.
+ */
+volatile u64 nr_sis_updates;
+volatile u64 sis_scan_sum;
+
+/*
+ * How often a bounded budget ended the search and left the task on its target.
+ * This one is written from the wakeup path, but only where --sis-util is on and
+ * the scan it bounded has already failed, so a machine that does not ask for
+ * the feature never reaches it. It is what says the budget decides anything:
+ * without it, a scan that stops short and is then repeated unbounded looks
+ * exactly like a scan that was never bounded at all.
+ */
+volatile u64 nr_sis_cutoffs __hot_written;
+
+volatile u64 user_util_sum __hot_written;
+volatile u64 user_util_snapshot_at __hot_written;
 
 /*
  * Scheduler's exit status.
@@ -757,6 +787,11 @@ struct cid_ctx {
 	u64 busy_balance_budget; /* load left in this deferred balance pass */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
 	s32 active_balance_cid;	/* idle cid asking for the running task */
+	u64 user_acc;
+	u64 user_util_ewma;
+	u64 user_eval_at;
+	bool user_busy;
+	u32 sis_idle_scan;	/* nr_idle_scan, meaningful at llc_base */
 };
 
 /*
@@ -2358,6 +2393,95 @@ scan_idle_capacity_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 	return -EBUSY;
 }
 
+/*
+ * Scan a domain for an idle cid, over a window of @nr of its cids counted from
+ * @start and wrapping, which is what select_idle_cpu() walks:
+ *
+ *	for_each_cpu_wrap(cpu, cpus, target + 1)
+ *
+ * The window matters only when something has bounded it, see sis_idle_scan_nr():
+ * a budget spent on the front of the domain every time would leave the cids
+ * above it unreachable for as long as the budget lasts, where a window that
+ * moves with the target reaches all of them over successive wakeups. With @nr
+ * covering the whole domain this is the plain scan, one extra mask per word.
+ *
+ * @range packs the domain as span:base and @win the window as nr:start, two
+ * u32 halves each: a subprogram takes five arguments at most, and this one is
+ * verified on its own rather than inside the scan of every tier that calls it,
+ * which is what the wakeup path has no room left for.
+ */
+#define SCAN_WINDOW_RESTRICTED	(1ULL << 0)
+#define SCAN_WINDOW_WHOLE_CORE	(1ULL << 1)
+
+__noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
+				u64 range, u64 win, u64 flags)
+{
+	u32 base = (u32)range, span = range >> 32;
+	u32 start = (u32)win, nr = win >> 32;
+	bool restricted = flags & SCAN_WINDOW_RESTRICTED;
+	bool whole_core = flags & SCAN_WINDOW_WHOLE_CORE;
+	u32 seg, head;
+
+	TOUCH_ARENA();
+
+	if (!nr || !span)
+		return -EBUSY;
+	if (start < base || start >= base + span)
+		start = base;
+
+	/*
+	 * A window that covers the domain is the domain, and is taken in cid
+	 * order, which is what this scan has always done. Reading it from the
+	 * target instead would move every wakeup's placement on every machine,
+	 * which is a change of its own and not one the budget needs.
+	 */
+	if (nr >= span) {
+		start = base;
+		nr = span;
+	}
+	head = MIN(nr, base + span - start);
+
+	/*
+	 * A shorter window is taken as the two ranges for_each_cpu_wrap() walks,
+	 * in that order: from @start to the end of the domain, then from its
+	 * base. Scanning their union in one pass would hand back the lowest cid
+	 * of both wherever they share a bitmap word, which is the wrong end of
+	 * the window and the opposite of the locality the window is for.
+	 */
+	bpf_for(seg, 0, 2) {
+		u32 sbase = seg ? base : start;
+		u32 snr = seg ? nr - head : head;
+		u32 k, last;
+
+		if (!snr)
+			continue;
+		last = (sbase + snr - 1) / 64;
+		bpf_arena_for(k, sbase / 64, last + 1) {
+			u64 w = cmask_word(idle_cids, k) & capacity_tier_word(t, k) &
+				cmask_range_word(idle_cids, k, sbase, snr);
+			s32 cid;
+
+			if (!w)
+				continue;
+			cid = first_idle_cid(p, w, k, restricted, whole_core);
+			if (cid >= 0)
+				return cid;
+		}
+	}
+
+	return -EBUSY;
+}
+
+static __always_inline u32 sis_idle_scan_nr(s32 cid)
+{
+	struct cid_topo __arena *topo;
+
+	if (!sis_util || !cid_valid(cid))
+		return UINT_MAX;
+	topo = cid_topo(cid);
+	return READ_ONCE(cid_ctx(topo->llc_base)->sis_idle_scan);
+}
+
 /* Flags for pick_idle_cid_topology() */
 enum pick_idle_flags {
 	/* @prev_cid is in @p's allowed set and can be returned as is */
@@ -2490,6 +2614,7 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 	u64 best_cap = 0;
 	s32 best = -EBUSY;
 	u32 best_rank = 3;
+	u32 scan_nr = sis_idle_scan_nr(target);
 	u32 off;
 
 	TOUCH_ARENA();
@@ -2510,8 +2635,12 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 		if (!cid_valid(cid) ||
 		    !cid_in_range(cid, target_topo->asym_capacity_base,
 				  target_topo->asym_capacity_nr) ||
-		    !cid_idle_test(cid) ||
 		    (restricted && !cid_allowed(p, cid)))
+			continue;
+		/* select_idle_capacity() spends the hint only without an idle core. */
+		if (!has_idle_core && scan_nr != UINT_MAX && !scan_nr--)
+			break;
+		if (!cid_idle_test(cid))
 			continue;
 		core = !has_idle_core || core_is_idle(cid);
 		fits = task_fits_cid(tctx, cid, now);
@@ -2574,6 +2703,8 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	bool restricted;
 	s32 best = -EBUSY;
 	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
+	u32 scan_nr = whole_core || !llc_only ? UINT_MAX : sis_idle_scan_nr(prev_cid);
+	u32 llc_scan_nr;
 	u32 t;
 	/* Only an asymmetric machine asks task_fits_cid() anything. */
 	task_ctx_t *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
@@ -2585,6 +2716,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
 	restricted = is_restricted(p);
+	llc_scan_nr = MIN(prev->llc_nr, scan_nr);
 	if (is_prev_allowed && cid_idle_test(prev_cid) &&
 	    (!whole_core || core_is_idle(prev_cid)) &&
 	    task_fits_cid(tctx, prev_cid, now)) {
@@ -2597,12 +2729,11 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 		 * A domain that is the whole of the next one is not scanned
 		 * twice.
 		 */
-		if (asym_capacity)
-			best = scan_idle_capacity_range(p, t, prev->llc_base,
-						prev->llc_nr, restricted, whole_core);
-		else
-			best = scan_idle_unranked_range(p, prev->llc_base,
-						prev->llc_nr, restricted, whole_core);
+		best = scan_idle_window(p, t,
+					(u64)prev->llc_nr << 32 | prev->llc_base,
+					(u64)llc_scan_nr << 32 | (u32)(prev_cid + 1),
+					(restricted ? SCAN_WINDOW_RESTRICTED : 0) |
+					(whole_core ? SCAN_WINDOW_WHOLE_CORE : 0));
 		if (best < 0 && !llc_only && numa_enabled && prev->node_nr > prev->llc_nr)
 			best = asym_capacity ?
 				scan_idle_capacity_range(p, t, prev->node_base,
@@ -2765,6 +2896,19 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 			return cid;
 		if (cid == -EAGAIN)
 			continue;
+
+		/*
+		 * A budget that bounded the scan above has to bound the rest
+		 * of the search too, or it decides nothing: every scan below
+		 * covers the whole LLC again without one, so the budget would
+		 * only add a pass. This is where select_idle_cpu() returns -1
+		 * and the task is left on its affine target.
+		 */
+		if (sis_util &&
+		    sis_idle_scan_nr(target) < cid_topo(target)->llc_nr) {
+			__sync_fetch_and_add(&nr_sis_cutoffs, 1);
+			return -EBUSY;
+		}
 
 		/*
 		 * The same extension in its original place, still ahead of
@@ -3970,9 +4114,10 @@ static const u32 prio_to_weight[40] = {
  * The capacity-normalized load of the whole range, sds->avg_load, one read
  * per cid like update_sd_lb_stats().
  */
-__noinline u64 busy_balance_avg_load(u32 base, u32 nr, u64 now)
+__noinline u64 busy_balance_avg_load(u32 base, u32 nr, u64 now,
+				     u64 *sum_util __arg_nonnull)
 {
-	u64 load = 0, cap = 0;
+	u64 load = 0, cap = 0, util = 0;
 	u32 i;
 
 	TOUCH_ARENA();
@@ -3987,9 +4132,42 @@ __noinline u64 busy_balance_avg_load(u32 base, u32 nr, u64 now)
 		WRITE_ONCE(cid_ctx(cid)->busy_balance_load, sample);
 		load += sample;
 		cap += cid_topo(cid)->cap;
+		/* What SIS_UTIL wants, off the walk that is happening anyway. */
+		if (sis_util)
+			util += cid_util(cid, now);
 	}
 
+	*sum_util = util;
+
 	return cap ? load * 1024 / cap : 0;
+}
+
+/*
+ * update_idle_cpu_scan(): cache how much of an LLC wakeups should search. The
+ * utilization it needs is summed by the walk the balance is doing anyway, as
+ * update_sd_lb_stats() collects sum_util for it rather than walking again.
+ * With x equal to its average utilization per CPU, fair.c computes
+ *
+ *   y = 1024 - min(x^2 * imbalance_pct^2 / (10000 * 1024), 1024)
+ *   nr_idle_scan = llc_weight * y / 1024
+ *
+ * so the scan shrinks quadratically and reaches zero at 100 / 117, about
+ * 85% utilization. This runs only from periodic balance on the LLC owner.
+ */
+static __noinline void update_sis_idle_scan(u32 base, u32 nr, u64 sum)
+{
+	u64 x, scaled, y;
+
+	if (!sis_util || !nr)
+		return;
+	x = sum / nr;
+	scaled = x * x * BUSY_BALANCE_IMBALANCE_PCT *
+		 BUSY_BALANCE_IMBALANCE_PCT;
+	scaled /= 10000 * 1024;
+	y = 1024 - MIN(scaled, 1024ULL);
+	WRITE_ONCE(cid_ctx(base)->sis_idle_scan, nr * y / 1024);
+	__sync_fetch_and_add(&sis_scan_sum, nr * y / 1024);
+	__sync_fetch_and_add(&nr_sis_updates, 1);
 }
 
 /* Load above or capacity below @avg_norm for one sched group. */
@@ -4208,11 +4386,14 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 			u32 level)
 {
 	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
+	u64 sum_util = 0;
 	s32 cid;
 
 	if (!nr)
 		return -1;
-	env->avg_norm = busy_balance_avg_load(base, nr, now);
+	env->avg_norm = busy_balance_avg_load(base, nr, now, &sum_util);
+	if (level == BUSY_BALANCE_LLC)
+		update_sis_idle_scan(base, nr, sum_util);
 	env->dst_norm = cid_load(dst_cid, now) * 1024 /
 			MAX(cid_topo(dst_cid)->cap, 1ULL);
 	if (env->dst_norm >= env->avg_norm)
@@ -8635,6 +8816,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 
 		cctx->avg_idle = 2 * migration_cost_ns;
 		cctx->max_idle_balance_cost = migration_cost_ns;
+		if (cid == (s32)cid_topo(cid)->llc_base)
+			cctx->sis_idle_scan = cid_topo(cid)->llc_nr;
 	}
 
 	/*

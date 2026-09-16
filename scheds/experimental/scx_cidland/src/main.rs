@@ -137,6 +137,25 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_newidle_cost: bool,
 
+    /// Do not bound wakeup idle scans by the target LLC's utilization.
+    ///
+    /// fair.c stops looking for an idle CPU once the LLC it is searching is
+    /// busy enough to make the search unlikely to pay, SIS_UTIL: periodic load
+    /// balance leaves a scan budget behind, computed from the LLC's average
+    /// utilization, which falls quadratically and reaches zero at about 85%.
+    /// cidland does the same, over a window that starts at the target and
+    /// wraps inside the LLC so a bounded scan still reaches every CPU across
+    /// successive wakeups, and gives up where select_idle_cpu() returns -1
+    /// rather than carrying the search on to the node and the machine.
+    ///
+    /// This disables it and scans the whole LLC on every wakeup. Worth trying
+    /// on a machine whose LLC is small: the scan reads the idle bitmap a word
+    /// at a time, so an LLC of 64 CPUs or fewer costs one read whatever the
+    /// budget says, and the bound then only loses idle CPUs it would have
+    /// found.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_sis_util: bool,
+
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     disable_numa: bool,
@@ -769,6 +788,7 @@ impl<'a> Scheduler<'a> {
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
+        rodata.sis_util = !opts.no_sis_util;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
         rodata.cpu_max_enabled = cpu_max_enabled;
@@ -1093,6 +1113,9 @@ impl<'a> Scheduler<'a> {
             nr_delay_requeues: bss_data.nr_delay_requeues,
             nr_hrticks: bss_data.nr_hrticks,
             nr_newidle_skips: bss_data.nr_newidle_skips,
+            nr_sis_updates: bss_data.nr_sis_updates,
+            sis_scan_sum: bss_data.sis_scan_sum,
+            nr_sis_cutoffs: bss_data.nr_sis_cutoffs,
         }
     }
 

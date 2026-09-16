@@ -35,13 +35,22 @@ pub struct Metrics {
 
     #[stat(desc = "Idle scans skipped for costing more than the CPU's idle time")]
     pub nr_newidle_skips: u64,
+
+    #[stat(desc = "Periodic SIS_UTIL scan-budget updates")]
+    pub nr_sis_updates: u64,
+
+    #[stat(desc = "Sum of the scan budgets produced by SIS_UTIL updates")]
+    pub sis_scan_sum: u64,
+
+    #[stat(desc = "Wakeup searches a bounded SIS_UTIL budget ended early")]
+    pub nr_sis_cutoffs: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] steals={} busy_balances={} active_balances={} preempts={} delay_requeues={} hrticks={} newidle_skips={}",
+            "[{}] steals={} busy_balances={} active_balances={} preempts={} delay_requeues={} hrticks={} newidle_skips={} sis_updates={} sis_avg_scan={:.1} sis_cutoffs={}",
             crate::SCHEDULER_NAME,
             self.nr_steals,
             self.nr_busy_balances,
@@ -50,6 +59,13 @@ impl Metrics {
             self.nr_delay_requeues,
             self.nr_hrticks,
             self.nr_newidle_skips,
+            self.nr_sis_updates,
+            if self.nr_sis_updates > 0 {
+                self.sis_scan_sum as f64 / self.nr_sis_updates as f64
+            } else {
+                0.0
+            },
+            self.nr_sis_cutoffs,
         )?;
         Ok(())
     }
@@ -63,6 +79,9 @@ impl Metrics {
             nr_delay_requeues: self.nr_delay_requeues - rhs.nr_delay_requeues,
             nr_hrticks: self.nr_hrticks - rhs.nr_hrticks,
             nr_newidle_skips: self.nr_newidle_skips - rhs.nr_newidle_skips,
+            nr_sis_updates: self.nr_sis_updates - rhs.nr_sis_updates,
+            sis_scan_sum: self.sis_scan_sum - rhs.sis_scan_sum,
+            nr_sis_cutoffs: self.nr_sis_cutoffs - rhs.nr_sis_cutoffs,
         }
     }
 }
