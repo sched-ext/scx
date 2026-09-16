@@ -13,9 +13,10 @@ of the queue it left. Each rule below names the `fair.c` function it comes
 from, and several can be turned off on the command line so the two can be
 compared against each other, which is what this scheduler is for.
 
-It is not a complete `fair.c`. What is faithful is the EEVDF core; the load
-balancing goes by queue depth rather than by measured load, and several
-subsystems around the edges are simply absent.
+It is not a complete `fair.c`. What is faithful is the EEVDF core; placement
+and load balancing follow its topology and averaged-load mechanics where the
+`sched_ext` interfaces expose enough state, while several subsystems around
+the edges are simply absent.
 [What is missing](#what-is-missing) lists them.
 
 ### cid form
@@ -134,10 +135,13 @@ be turned off on the command line to compare the two rules against each other.
    deadline-ordered tree with every subtree's minimum vruntime and finds the
    earliest-deadline eligible task in logarithmic time, matching `fair.c`'s
    selection rule. `--no-eligible-scan` takes the head instead, and
-   `--no-eligibility` implies it. Wakeup preemption and keep-running decisions
-   remain head-based approximations: applying a queue-only scan there cannot
-   reproduce `pick_eevdf()`'s atomic view of the current task, queued
-   entities, and virtual-time frontier.
+   `--no-eligibility` implies it. Wakeup preemption and the keep-running
+   decision compare against that same eligible pick rather than the queue
+   head, so a queued task `pick_eevdf()` would skip no longer decides
+   either; a queue a remote scan holds is read from its lockless head
+   instead. What they cannot reproduce is `pick_eevdf()`'s atomic view of
+   the current task, the queued entities and the virtual-time frontier
+   together, see below.
 
  - **Eligible deadline queues.** Per-cid runnable tasks are stored in
    arena-backed eligible deadline queues; local DSQs remain the final kernel
@@ -264,16 +268,28 @@ be turned off on the command line to compare the two rules against each other.
    domain scan until cidland can represent fair.c's per-group affinity
    intersections.
 
+ - **SCHED_IDLE-only CPUs as wake targets.** `choose_idle_cpu()` counts a
+   runqueue running nothing but `SCHED_IDLE` work as available to a normal
+   wakee. The target, previous and recently-used candidates are tested for it
+   here too: such a CPU is returned without a direct dispatch, since it is not
+   physically idle, and the ordinary enqueue then interrupts the idle-policy
+   task. A remote queue holding several `SCHED_IDLE` tasks is not recognized;
+   sched_ext does not expose `fair.c`'s per-runqueue idle-policy count.
+
  - **Load balancing.** A CPU that runs out of work pulls from the other queues
    of its node, walking its own LLC first the way the idle balancer walks the
    domains bottom up, and leaves alone a task that ran a moment ago,
-   `task_hot()` with `sysctl_sched_migration_cost`. A busy CPU samples a couple
-   of remote queues once per slice, the way the balancer runs on the tick, and
-   only takes from a queue that is clearly deeper than its own, the equivalent
-   of `imbalance_pct`. An idle CPU that keeps finding nothing it is allowed to
-   take eventually stops honoring cache hotness, `sd->cache_nice_tries` against
-   `sd->nr_balance_failed` in `can_migrate_task()`. And an idle CPU does not
-   scan at all when its idle periods have been shorter than its scans:
+   `task_hot()` with `sysctl_sched_migration_cost`. Busy balancing runs from
+   the tick at a separate, backing-off interval for each LLC, NUMA node and
+   system domain. It averages capacity-normalized runnable load, classifies
+   the local and busiest groups, computes the excess load, and moves only that
+   budget, with one elected destination per local group, following
+   `sched_balance_domains()`, `update_sd_lb_stats()` and
+   `calculate_imbalance()`. An idle CPU that keeps finding nothing it is
+   allowed to take eventually stops honoring cache hotness,
+   `sd->cache_nice_tries` against `sd->nr_balance_failed` in
+   `can_migrate_task()`. And an idle CPU does not scan at all when its idle
+   periods have been shorter than its scans:
    `sched_balance_newidle()` measures how long the CPU stays idle after a
    pull, `rq->avg_idle`, and what a pull at each level has cost at most,
    `sd->max_newidle_lb_cost`, decaying by 1% a second, and gives up before a
@@ -315,6 +331,44 @@ be turned off on the command line to compare the two rules against each other.
    depth-3 session scope. The scheduler warns at startup when some cgroup sets
    `cpu.weight` while this is off, and when it is on but the kernel has no
    sched_ext cgroup support or the cpu controller is not enabled.
+
+ - **`cpu.max`.** A cgroup runs for at most its quota in every period, plus
+   what it carried into the period up to its burst, and is held to the limits
+   of every group above it as well as its own. It is accounted the way
+   `fair.c`'s bandwidth control is: the group keeps a pool for the period it is
+   in, and a cid takes a slice of that pool to charge against, so the shared
+   count is touched once every few milliseconds of runtime rather than at every
+   context switch. Periods turn over on the next charge that finds one expired,
+   so an idle group costs nothing, and a cid gives back all but a millisecond
+   of what it holds once the sweep finds nothing of the group left on it. One
+   timer covers the case every CPU is asleep with a group's tasks all waiting.
+
+   A task of a group that has run out waits for the next period in a backlog of
+   its cgroup's own, out of its cid's queue and out of its pack and its group's
+   load, and goes back through placement when the group has bandwidth again.
+   `ops.dispatch()` puts them back before it picks, so the CPU still goes to
+   the earliest deadline among them rather than to whichever was let out first.
+   A task that is already running has its slice ended at the tick, and the
+   dispatch that follows hands it back rather than renewing it.
+
+   Four hogs in one cgroup over eight seconds, against `fair.c` on the same
+   cgroups, in CPUs used:
+
+   | `cpu.max` | cidland | `fair.c` |
+   | --- | --- | --- |
+   | `20000 100000` | 0.18 | 0.22 |
+   | `50000 100000` | 0.50 | 0.54 |
+   | `100000 100000` | 0.99 | 1.04 |
+   | `250000 100000` (8 hogs) | 2.46 | 2.60 |
+   | `20000 20000` | 0.93 | 1.03 |
+
+   cidland stays under the limit where `fair.c` runs a little over it, and is
+   up to about a tenth under at a small quota: what a cid holds and does not
+   use is stranded until the sweep comes by for it, where `fair.c` gives it
+   back as the last task leaves. Rides on `--enable-cgroups`;
+   `--disable-cpu-max` turns it off, and a cpu.max nobody reads is warned about
+   at startup. A kernel without `ops.cpuctl_set_bandwidth()` gets the warning
+   too and the callback is left unbound.
 
  - **Asymmetric capacity and packing.** Capacity and CPU priority are separate
    kernel policies. The default capacity comes from the kernel's exported
@@ -391,22 +445,17 @@ that has not been done.
 
 ### EEVDF itself
 
- - **The eligibility filter is head-based away from dispatch.** `pick_eevdf()`
-   considers only the tasks that are owed service, `v_i <= V`, and takes the
-   earliest deadline among those. Dispatch makes that selection through the
-   augmented EDQ, see above; the wakeup preemption and the
-   keep-running decision cannot, since neither sees the running task, the
-   queue and the reference at once, and both judge the head of the queue
-   alone. The case that matters is handled where the decision is made: a
-   running task that has had its share is dropped from the wakeup comparison
-   whatever its deadline, the way `pick_eevdf()` drops an ineligible `curr`,
-   and once displaced it has its deadline reissued so it cannot sort back
-   ahead of the task that woke. Without that, a thread waking against a CPU
-   hog on a saturated machine waited for the tick on a third of its wakeups.
-   What is left is a heavier over-served queued task, whose `r_i / w_i` is
-   smaller, standing at the head for those two comparisons in place of the
-   lighter under-served one behind it - a bounded latency skew, not a fairness
-   leak, since the vruntime is charged either way.
+ - **The current task and reference are read from a published snapshot.**
+   `pick_eevdf()` sees the running task, the tree and the reference under one
+   runqueue lock. Dispatch, wakeup preemption and the keep-running decision
+   ask the EDQ for the earliest-deadline task eligible at the supplied
+   cutoff, with the cutoff and the current-task state projected from the
+   pack just before the queue is read. The lookup takes the queue with a
+   trylock, so a queue a remote scan is holding is answered from its
+   lockless head instead, which may be the deadline of a task that is not
+   eligible. `fair.c` observes all three together under the runqueue lock.
+   `--no-eligible-scan` takes the head everywhere, and `--no-eligibility`
+   drops the eligibility test.
 
  - **A wakeup that does not preempt leaves the running task's protection
    whole.** `wakeup_preempt_fair()` clips it to one minimum slice ahead of the
@@ -419,20 +468,34 @@ that has not been done.
    same, `yield_task_fair()`'s: nothing happens unless someone is queued to
    take the CPU, and then the yielder's vruntime is moved to its deadline and
    the slice given up. The forfeit itself is a BPF op and a dispatch where
-   `fair.c` has `update_curr()` and a pick, so a task yielding in a loop
-   against a competitor does so at about seven tenths of the kernel's rate:
-   `stress-ng --yield` runs at 16M yields/s against 22M. The scheduler ran
-   that test faster than the kernel before it had an `ops.yield()`, at 31M,
-   because the kernel's fallback ended the slice and the dispatch that
-   followed handed the CPU straight back: a yield that never yielded.
+   `fair.c` has `update_curr()` and a pick, so two yielders pinned to one CPU
+   switch at about 1.7 us per yield against the kernel's 0.9 us.
 
 ### Wakeup placement
 
- - **The idle scan never gives up.** `select_idle_cpu()` looks for an idle CPU
-   under a budget, `SIS_UTIL`, that shrinks as the LLC fills, and past it the
-   waking task is left to queue on the target `wake_affine()` chose. Here the
-   idle bitmap is scanned whole, so a woken task gets an idle CPU whenever one
-   exists.
+ - **The idle scan gives up only when asked to.** `select_idle_cpu()` looks for
+   an idle CPU under a budget, `SIS_UTIL`, that shrinks as the LLC fills, and
+   past it the waking task is left to queue on the target `wake_affine()`
+   chose. cidland computes the same budget, from the same quadratic in the LLC's
+   average utilization, and honours it: the window it allows starts at the
+   target and wraps inside the LLC, and a search that runs out of it ends there
+   rather than carrying on into the node and the machine. `--no-sis-util`
+   scans the whole LLC on every wakeup instead.
+
+   On by default, as it is in `fair.c`, but what it is worth depends on the
+   size of the LLC. `select_idle_cpu()` tests one CPU at a time, so a fruitless
+   scan of a busy LLC is work proportional to its size; the scan here reads the
+   idle bitmap a word at a time and skips busy CPUs for nothing. On a 352-CPU
+   Olympus, two LLCs of 176, `hackbench -l 20000 -g 20` runs at 10.17s against
+   12.84s, 20.8% better with every sample of six clear of every sample without
+   it, while a pinned pipe handoff is unchanged at 2.81 us/op: it pays where
+   the scan is long and hopeless and nowhere else. On a 20-CPU laptop whose
+   single LLC is one bitmap word there is no scan cost to bound, and the budget
+   only loses idle CPUs the fallback passes would have found: five benchmarks
+   land between 0 and 8% worse, none of them separated, all five pointing the
+   same way. `--no-sis-util` is there for that case. The budget itself tracks
+   the kernel's curve, 176 of 176 cids scanned on an idle LLC falling to 10 at
+   89% utilization.
 
  - **uclamp, on the placement side.** `asym_fits_cpu()` asks whether a task
    fits a CPU using `uclamp_eff_value()`, so a task with `uclamp_min` set is
@@ -440,55 +503,33 @@ that has not been done.
    ignored. The *frequency* side is unaffected: uclamp is aggregated per
    runqueue by the core kernel and reaches the governor whatever the class.
 
- - **`sched_idle_cpu()`.** `fair.c` prefers a CPU running nothing but
-   `SCHED_IDLE` tasks over a busy one. `SCHED_IDLE` is weighted correctly here,
-   but the idle search does not know about it.
-
 ### Load balancing
 
- - **The load signal is not used for balancing.** There *is* a PELT
-   equivalent here: `ravg` is a geometric running average over a 32 ms
-   half-life, `LOAD_AVG_PERIOD`, kept per task and per cid, and since the
-   wake affinity needed it there is a `cfs_rq->avg.load_avg` analogue too,
-   the runnable weight of a cid averaged over time, and a `task_h_load()`,
-   the weight scaled by the time runnable, without the hierarchical part.
-   But only the wakeup path reads them: `cid_util()` feeds the cpufreq
-   governor, `task_util()` decides whether a task fits a CPU, and every
-   balancing decision reads queue depth instead. So a cid running one task
-   at 5% duty and a cid running a spinner are the same number to the
-   balancer, though not to the governor or, with `--wa-weight`, to
-   `wake_affine_weight()`. This
-   is the missing piece underneath most of the rest of this section.
+ - **Only a bounded prefix of a queue is searched.** `detach_tasks()` walks the
+   busiest runqueue looking for something it may take. Here balancing scans the
+   first eight deadline-ordered tasks (`BALANCE_TASK_SCAN`), so a blocked head
+   no longer hides immediately movable work, but a long prefix of pinned or
+   cache-hot tasks can still stop the search.
 
- - **No group classification.** `fair.c` sorts groups into overloaded, misfit,
-   fully busy and has-spare and computes an imbalance from that
-   (`calculate_imbalance()`). Here a busy CPU takes from a queue that is more
-   than twice as deep as its own and at least two tasks deeper, which is a
-   cruder `imbalance_pct` and nothing else.
+ - **The group taxonomy is narrower than `fair.c`'s.** Balancing runs per
+   domain from the tick, classifies an imbalance and moves capacity-normalized
+   averaged load, following `sched_balance_rq()` and `calculate_imbalance()`,
+   with `sd->imbalance_pct` between busy groups and one elected balancer per
+   local group as `should_we_balance()` has. What is missing is the full
+   `group_type` ladder: `group_misfit_task` on the busy side, without an
+   `update_misfit_status()` equivalent, capacity pressure from RT and IRQ
+   work, and `SD_PREFER_SIBLING`. Capacity misfits are repaired from the idle
+   side only, `idle_misfit_cid()`.
 
- - **Only a bounded queue prefix can move.** `detach_tasks()` walks the busiest
-   runqueue looking for something it may take. Here balancing scans the first
-   eight deadline-ordered tasks, so a blocked head no longer hides immediately
-   movable work, but a long prefix of pinned or cache-hot tasks can still stop
-   the search.
-
- - **No active balancing.** A *running* task is never migrated.
-   `active_load_balance_cpu_stop()` exists in `fair.c` for exactly the case
-   where the only thing worth moving is the task on the CPU.
-
- - **No misfit detection.** `update_misfit_status()` and the balancing that
-   acts on it. The pull up the capacity tiers is a partial stand-in.
+ - **A group's cpuset is not known.** `fair.c` scales a task group's shares by
+   `min(tg_tasks, tg_cpus)`, where `tg_cpus` is the weight of the effective
+   cpuset. sched_ext has no interface to that, and cpuset changes are not
+   reported at all, so a group confined to part of the machine counts as the
+   whole of it: eight hogs in a two-CPU cpuset against eight pinned to the same
+   two CPUs get 576/423 where `fair.c` gives 247/752. This one is blocked on a
+   kernel ABI, see `~/scx-kernel-todo.txt`.
 
 ### Not implemented at all
-
- - **`cpu.max`.** `ops.cpuctl_set_bandwidth()` exists and is not implemented,
-   so the quota, period and burst of the cgroup bandwidth controller are
-   ignored. `cpu.weight` *is* honored, see above.
-
- - **`cpu.idle`.** `ops.cpuctl_set_idle()` is not implemented.
-
- - **CPU hotplug.** The cid space is read once at start, so a CPU that comes
-   online later is not used for the lifetime of the instance.
 
  - **NUMA balancing.** No page-fault sampling, no preferred node, no task
    grouping. Placement is topology-aware but blind to where a task's memory
@@ -499,11 +540,13 @@ that has not been done.
    for the work; this picks by capacity and idleness.
 
  - **Core scheduling.** `ops.core_sched_before()` is not implemented, so a
-   core-scheduled system gets no ordering from here.
+   core-scheduled system gets no ordering from here, and the SMT isolation it
+   is enabled for is not preserved.
 
- - **Affinity changes.** `ops.set_cmask()` is not implemented; a changed
-   affinity is noticed lazily the next time the task is placed, rather than
-   fixed up at the moment it changes.
+ - **Affinity changes.** `ops.set_cmask()` is not implemented. A changed
+   affinity is honored at the next decision that reads it, and an EDQ pop
+   rechecks it and hands the task back to the core's enqueue, rather than the
+   task being moved at the moment the mask changes.
 
 ## Requirements
 
