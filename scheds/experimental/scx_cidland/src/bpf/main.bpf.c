@@ -418,6 +418,13 @@ struct grp_hdr {
 	u64 quota;		/* what the group may run for in a period, 0 for no limit */
 	u64 period;		/* the period, cfs_bandwidth->period */
 	u64 burst;		/* what it may carry into one, cfs_bandwidth->burst */
+	u64 period_start;	/* when the period it is in began */
+	u64 pool;		/* what is left of its bandwidth in it, cfs_b->runtime */
+	u64 throttled;		/* whether it has run out, cfs_rq->throttled */
+	u64 throttled_at;	/* when it did */
+	u64 throttled_ns;	/* how long it has spent out of bandwidth */
+	u64 nr_throttled;	/* how often it has run out */
+	u64 bw_gen;		/* bumped when cpu.max changes, see grp_bw_charge() */
 };
 
 struct grp_q {
@@ -432,6 +439,8 @@ struct grp_q {
 	u64 load_avg_contrib;	/* what @hdr->load_avg holds of this queue */
 	u64 nr_avg_contrib;	/* what @hdr->nr_avg holds of this queue */
 	u64 shares_at;		/* when @shares was last computed */
+	s64 runtime_remaining;	/* what the cid holds of the group's bandwidth */
+	u64 bw_gen;		/* the cpu.max @runtime_remaining was taken under */
 	u32 cid;
 	u32 avg_lock;		/* serializes the averages, see grp_avg_trylock() */
 };
@@ -974,6 +983,173 @@ static __always_inline bool grp_bw_limited(struct grp_hdr __arena *hdr)
 	return READ_ONCE(hdr->quota) != 0;
 }
 
+static __always_inline bool bw_enabled(void)
+{
+	return cpu_max_enabled && READ_ONCE(bw_nr_limited);
+}
+
+/*
+ * What a cid takes from its group's bandwidth at a time, and what it keeps in
+ * hand once the group is spent: sysctl_sched_cfs_bandwidth_slice, and the
+ * millisecond assign_cfs_rq_runtime() leaves a throttled cfs_rq so that the
+ * task on its way out is not charged against the next period.
+ */
+#define BW_SLICE_NS		(5 * NSEC_PER_MSEC)
+
+/*
+ * The group has run out of bandwidth for this period. Its tasks keep running
+ * until somebody looks at this, see grp_bw_throttled().
+ */
+static void grp_bw_throttle(struct grp_hdr __arena *hdr, u64 now)
+{
+	if (READ_ONCE(hdr->throttled) ||
+	    __sync_val_compare_and_swap(&hdr->throttled, 0, 1) != 0)
+		return;
+
+	WRITE_ONCE(hdr->throttled_at, now);
+	hdr->nr_throttled++;
+}
+
+/*
+ * The group has bandwidth again, whether because its period turned over or
+ * because somebody widened its cpu.max.
+ */
+static void grp_bw_unthrottle(struct grp_hdr __arena *hdr, u64 now)
+{
+	if (!READ_ONCE(hdr->throttled))
+		return;
+
+	hdr->throttled_ns += now - READ_ONCE(hdr->throttled_at);
+	WRITE_ONCE(hdr->throttled, 0);
+}
+
+/*
+ * Start @hdr's next period if the one it is in has run out,
+ * __refill_cfs_bandwidth_runtime(): the group gets its quota back, and keeps
+ * what it left unused as long as its burst covers it.
+ *
+ * Whoever moves @period_start refills; everybody else goes on with what is
+ * there. Periods are not aligned to anything, so a group that stops running
+ * takes its next one from wherever it starts again, as fair.c's period timer
+ * does once it has been let stop.
+ */
+static void grp_bw_refill(struct grp_hdr __arena *hdr, u64 now)
+{
+	u64 period = READ_ONCE(hdr->period);
+	u64 start = READ_ONCE(hdr->period_start);
+	u64 quota, burst, pool;
+
+	if (!period || now - start < period)
+		return;
+	if (__sync_val_compare_and_swap(&hdr->period_start, start, now) != start)
+		return;
+
+	quota = READ_ONCE(hdr->quota);
+	burst = READ_ONCE(hdr->burst);
+	while (can_loop) {
+		pool = READ_ONCE(hdr->pool);
+		if (__sync_val_compare_and_swap(&hdr->pool, pool,
+						MIN(pool + quota, quota + burst)) == pool)
+			break;
+	}
+
+	grp_bw_unthrottle(hdr, now);
+}
+
+/*
+ * Hand a cid that has run out @want of the group's bandwidth, and a slice
+ * ahead of it so that it does not come back for every charge,
+ * assign_cfs_rq_runtime(). Returns what there was to give.
+ */
+static u64 grp_bw_assign(struct grp_hdr __arena *hdr, u64 want)
+{
+	u64 pool, take;
+
+	while (can_loop) {
+		pool = READ_ONCE(hdr->pool);
+		if (!pool)
+			return 0;
+		take = MIN(pool, want + BW_SLICE_NS);
+		if (__sync_val_compare_and_swap(&hdr->pool, pool, pool - take) == pool)
+			return take;
+	}
+
+	return 0;
+}
+
+/*
+ * Charge @delta of runtime to the group of @gq and to every group above it,
+ * account_cfs_rq_runtime() at each level of update_curr(): the time a cgroup
+ * spends is spent by all of its ancestors too. A level that runs through what
+ * its cid was given asks the group's pool for more, and one whose pool is
+ * empty throttles itself and everything under it.
+ *
+ * The cid keeps what it is given across periods, as fair.c has done since it
+ * stopped expiring local slices: what a cid holds and does not use is given
+ * back when its queue goes quiet, see grp_bw_return().
+ *
+ * It does not keep it across a change of cpu.max. tg_set_cfs_bandwidth() resets
+ * every cfs_rq of the group when the limit moves, and without that a cid could
+ * go on spending a slice taken under the old quota: on a machine with hundreds
+ * of them, a group that had touched many could overrun a lowered limit by a
+ * slice apiece. The generation says which limit a slice was taken under.
+ */
+static void grp_bw_charge(grp_q_t *gq, u64 delta, u64 now)
+{
+	int i;
+
+	for (i = 0; gq && i < GRP_MAX_DEPTH; i++, gq = gq->parent) {
+		struct grp_hdr __arena *hdr = gq->hdr;
+		u64 gen;
+		s64 rem;
+
+		if (!hdr || !grp_bw_limited(hdr))
+			continue;
+
+		grp_bw_refill(hdr, now);
+
+		gen = READ_ONCE(hdr->bw_gen);
+		if (READ_ONCE(gq->bw_gen) != gen) {
+			WRITE_ONCE(gq->runtime_remaining, 0);
+			WRITE_ONCE(gq->bw_gen, gen);
+		}
+
+		rem = READ_ONCE(gq->runtime_remaining) - (s64)delta;
+		if (rem < 0)
+			rem += grp_bw_assign(hdr, -rem);
+		WRITE_ONCE(gq->runtime_remaining, rem);
+		if (rem < 0)
+			grp_bw_throttle(hdr, now);
+	}
+}
+
+/*
+ * Nothing of the group is left on the cid of @gq: give back what the cid holds
+ * of the group's bandwidth, less the millisecond __return_cfs_rq_runtime()
+ * keeps behind for whoever runs there next. Without this the time a cid was
+ * handed and did not use would sit there for good, and a group that moves
+ * around would be held to a fraction of its quota.
+ */
+static void grp_bw_return(grp_q_t *gq)
+{
+	struct grp_hdr __arena *hdr = gq->hdr;
+	s64 rem = READ_ONCE(gq->runtime_remaining);
+
+	if (!hdr || !grp_bw_limited(hdr) || rem <= (s64)NSEC_PER_MSEC)
+		return;
+
+	/* A slice taken under a limit that has since moved is dropped, not
+	 * given back: it is not this limit's time to hand out.
+	 */
+	if (READ_ONCE(gq->bw_gen) != READ_ONCE(hdr->bw_gen)) {
+		WRITE_ONCE(gq->runtime_remaining, 0);
+		return;
+	}
+
+	WRITE_ONCE(gq->runtime_remaining, (s64)NSEC_PER_MSEC);
+	__sync_fetch_and_add(&hdr->pool, rem - NSEC_PER_MSEC);
+}
+
 /*
  * Set or clear the bit of @gq's cid in its cgroup's live bitmap. By compare
  * and swap: the verifier takes no atomic or/and on arena memory.
@@ -1016,6 +1192,9 @@ __noinline int grp_decay(grp_q_t *gq __arg_arena, u64 now)
 		return 0;
 	}
 	hdr = gq->hdr;
+
+	if (bw_enabled())
+		grp_bw_return(gq);
 
 	ravg_accumulate_arena(&gq->load_avg, 0, now);
 	ravg_accumulate_arena(&gq->nr_avg, 0, now);
@@ -4984,6 +5163,21 @@ static bool task_in_idle_cgroup(const task_ctx_t *tctx)
 }
 
 /*
+ * Charge @delta to the cgroup of @tctx for the time it ran on @cid.
+ *
+ * @delta is the cid's task clock, what fair.c charges from rq_clock_task, and
+ * the period it counts against is wall time: a group is held to its quota of
+ * the time it is given, not of the time the CPU spends elsewhere.
+ */
+static void task_bw_charge(task_ctx_t *tctx, s32 cid, u64 delta)
+{
+	if (!bw_enabled() || !tctx->grp || !cid_valid(cid) || !delta)
+		return;
+
+	grp_bw_charge(&tctx->grp[cid], delta, scx_bpf_now());
+}
+
+/*
  * Take @tctx out of its pack's reference and out of its group's load, the
  * two memberships a task has on a cid and gives up together.
  */
@@ -5122,6 +5316,7 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 		return;
 	pk = task_pack(tctx, cid);
 
+	task_bw_charge(tctx, cid, now - tctx->last_run_at);
 	tctx->se.vruntime += calc_delta_fair(p, tctx, now - tctx->last_run_at);
 	tctx->last_run_at = now;
 	vref_charge(&tctx->se);
@@ -7228,6 +7423,9 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	tctx->se.vruntime += calc_delta_fair(p, tctx, slice);
 	vref_charge(&tctx->se);
 
+	/* The same service against the bandwidth of the task's cgroup. */
+	task_bw_charge(tctx, cid, slice);
+
 	/*
 	 * The service just charged is in the reference for real now, so
 	 * there is nothing left for pack_vref_at() to project on this cid
@@ -7644,10 +7842,10 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
 void BPF_STRUCT_OPS(cidland_cpuctl_set_bandwidth, struct cgroup *cgrp,
 		    u64 period_us, u64 quota_us, u64 burst_us)
 {
-	u64 quota, period, burst;
+	u64 quota, period, burst, now;
 	struct grp_hdr __arena *hdr;
 	struct cgrp_ctx *cgc;
-	bool was, now;
+	bool was, limited;
 
 	TOUCH_ARENA();
 
@@ -7659,16 +7857,26 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_bandwidth, struct cgroup *cgrp,
 	quota = quota_us == BW_QUOTA_INF ? 0 : quota_us * NSEC_PER_USEC;
 	period = MAX(period_us * NSEC_PER_USEC, NSEC_PER_MSEC);
 	burst = quota ? burst_us * NSEC_PER_USEC : 0;
+	now = scx_bpf_now();
 
-	/* The period and the burst before the quota that makes them count. */
+	/*
+	 * A limit that is new or has moved starts a period of its own, as
+	 * tg_set_cfs_bandwidth() refills the group and restarts its timer. The
+	 * period and the burst go in before the quota that makes them count.
+	 */
 	was = grp_bw_limited(hdr);
 	WRITE_ONCE(hdr->period, period);
 	WRITE_ONCE(hdr->burst, burst);
+	WRITE_ONCE(hdr->period_start, now);
+	WRITE_ONCE(hdr->pool, quota);
+	/* Whatever the cids are holding was taken under the old limit. */
+	__sync_fetch_and_add(&hdr->bw_gen, 1);
 	WRITE_ONCE(hdr->quota, quota);
+	grp_bw_unthrottle(hdr, now);
 
-	now = quota != 0;
-	if (now != was)
-		bw_nr_limited += now ? 1 : -1;
+	limited = quota != 0;
+	if (limited != was)
+		bw_nr_limited += limited ? 1 : -1;
 }
 
 /*
