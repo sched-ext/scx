@@ -60,19 +60,15 @@ struct cidland_cpu_args {
 };
 
 /*
- * Arguments to cidland_get_cpu_priority(). The program returns the live
- * arch_asym_cpu_priority() value, whether SD_ASYM_PACKING is active in a
- * scheduling domain containing the CPU, and whether the SMT domain itself has
- * both SD_SHARE_CPUCAPACITY and SD_ASYM_PACKING.
+ * Arguments to cidland_get_cpu_priority(). There is no portable userspace ABI
+ * for SD_ASYM_PACKING or arch_asym_cpu_priority(), so keep this narrow query
+ * until sched_ext provides one.
  */
 struct cidland_cpu_priority_args {
 	unsigned long long	cpu;
 	long long		priority;
 	unsigned long long	asym_packing;
 	unsigned long long	smt_asym_packing;
-	unsigned long long	fork_span;
-	unsigned long long	wake_affine_span;
-	unsigned long long	asym_capacity_span;
 };
 
 #endif /* __INTF_H */

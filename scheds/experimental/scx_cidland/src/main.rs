@@ -33,6 +33,7 @@ use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::SchedDomainSource;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::build_id;
@@ -489,7 +490,11 @@ fn cgroups_with_cpu_weight(root: &std::path::Path) -> (usize, Option<String>) {
             break;
         }
         if let Ok(val) = std::fs::read_to_string(dir.join("cpu.weight")) {
-            if val.trim().parse::<u64>().is_ok_and(|w| w != CGROUP_WEIGHT_DFL) {
+            if val
+                .trim()
+                .parse::<u64>()
+                .is_ok_and(|w| w != CGROUP_WEIGHT_DFL)
+            {
                 count += 1;
                 if example.is_none() {
                     let name = dir.strip_prefix(root).unwrap_or(&dir);
@@ -817,17 +822,22 @@ impl<'a> Scheduler<'a> {
         // them in different paths; collapsing them into one ordering makes
         // packing priority affect every ordinary idle-CPU search.
         let mut cpu_tiers: Vec<(u64, u64, u64, u64, bool, u64, u64, u64)> = Vec::new();
+        let mut sched_domain_source = None;
         for (i, (cpu, capacity)) in cpus.iter().enumerate() {
             let normalized = (*capacity * 1024 / max_cap).clamp(1, 1024);
+            let domains = topo
+                .sched_domain_info(cpu.id)
+                .context("discovering scheduler-domain policy")?;
+            sched_domain_source.get_or_insert(domains.source);
             cpu_tiers.push((
                 cpu.id as u64,
                 normalized as u64,
                 tiers[i],
                 tiers[i],
                 false,
-                0,
-                0,
-                0,
+                domains.fork_span as u64,
+                domains.wake_affine_span as u64,
+                domains.asym_capacity_span as u64,
             ));
         }
         info!(
@@ -871,31 +881,20 @@ impl<'a> Scheduler<'a> {
         }?;
 
         // Capacity and asymmetric packing are separate kernel policies.
-        // Query arch_asym_cpu_priority() and the live sd_asym_packing pointer
-        // through BPF: neither has a stable userspace ABI. If asymmetric
-        // packing is active across the scheduler's CPU domain, use its exact
-        // priorities for placement ordering while retaining cpu_capacity for
-        // fit calculations.
-        let mut priorities = Vec::new();
+        // Topology reconstructs the portable domain spans, but neither
+        // SD_ASYM_PACKING nor arch_asym_cpu_priority() has a userspace ABI.
+        // Keep this narrow BPF query until sched_ext provides one.
+        let mut priorities = Vec::with_capacity(cpu_tiers.len());
         let mut all_asym_packing = !opts.disable_asym_packing;
-        priorities.reserve(cpu_tiers.len());
-        for (cpu, _, _, _, smt_asym_packing, fork_span, wake_affine_span, asym_capacity_span) in
-            &mut cpu_tiers
-        {
+        for (cpu, _, _, _, smt_asym_packing, _, _, _) in &mut cpu_tiers {
             let mut args = types::cidland_cpu_priority_args {
                 cpu: *cpu,
                 priority: 0,
                 asym_packing: 0,
                 smt_asym_packing: 0,
-                fork_span: 0,
-                wake_affine_span: 0,
-                asym_capacity_span: 0,
             };
             run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
-                .context("querying CPU scheduler domains")?;
-            *fork_span = args.fork_span;
-            *wake_affine_span = args.wake_affine_span;
-            *asym_capacity_span = args.asym_capacity_span;
+                .context("querying CPU asymmetric-packing policy")?;
             if !opts.disable_asym_packing {
                 all_asym_packing &= args.asym_packing != 0;
                 *smt_asym_packing = args.smt_asym_packing != 0;
@@ -910,7 +909,11 @@ impl<'a> Scheduler<'a> {
         domain_spans.sort_unstable();
         domain_spans.dedup();
         info!(
-            "scheduler domain spans (fork, wake-affine, asym-capacity): {:?}",
+            "scheduler domain spans (fork, wake-affine, asym-capacity, source={}): {:?}",
+            match sched_domain_source {
+                Some(SchedDomainSource::Schedstat) => "schedstat",
+                Some(SchedDomainSource::Topology) | None => "topology",
+            },
             domain_spans
         );
 

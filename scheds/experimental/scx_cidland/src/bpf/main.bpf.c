@@ -27,9 +27,6 @@
 
 char _license[] SEC("license") = "GPL";
 
-extern struct rq runqueues __ksym __weak;
-extern struct sched_domain *sd_asym_cpucapacity __ksym __weak;
-
 /*
  * The verifier only associates a program with the arena if the program
  * loads the map itself. Reaching the arena through a pointer kept in a
@@ -7949,48 +7946,21 @@ int cidland_set_cpu(struct cidland_cpu_args *args)
 }
 
 /*
- * Return one CPU's live scheduler-domain spans, SD_ASYM_PACKING state and
- * arch_asym_cpu_priority() value. Reading the per-CPU symbols here avoids
- * treating hardware topology or a performance estimate as scheduler policy.
+ * Return one CPU's SD_ASYM_PACKING state and arch_asym_cpu_priority().
+ * Topology supplies the other scheduler-domain policy; packing has no stable
+ * userspace ABI and is deliberately kept separate from CPU capacity.
  */
 SEC("syscall")
 int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 {
 	struct sched_domain *sd;
-	struct sched_domain **sdp;
-	struct rq *rq;
 	u64 cpu = args->cpu;
 	int priority;
 
 	args->priority = 0;
 	args->asym_packing = 0;
 	args->smt_asym_packing = 0;
-	args->fork_span = 0;
-	args->wake_affine_span = 0;
-	args->asym_capacity_span = 0;
-	if (cpu > INT_MAX)
-		return 0;
-
-	if (&runqueues && (rq = bpf_per_cpu_ptr(&runqueues, cpu))) {
-		sd = BPF_CORE_READ(rq, sd);
-		bpf_repeat(16) {
-			u32 flags;
-
-			if (!sd)
-				break;
-			flags = BPF_CORE_READ(sd, flags);
-			if (flags & SD_BALANCE_FORK)
-				args->fork_span = BPF_CORE_READ(sd, span_weight);
-			if (flags & SD_WAKE_AFFINE)
-				args->wake_affine_span = BPF_CORE_READ(sd, span_weight);
-			sd = BPF_CORE_READ(sd, parent);
-		}
-	}
-	if (&sd_asym_cpucapacity &&
-	    (sdp = bpf_per_cpu_ptr(&sd_asym_cpucapacity, cpu)) && *sdp)
-		args->asym_capacity_span = BPF_CORE_READ(*sdp, span_weight);
-
-	if (!&sched_core_priority || !&sd_asym_packing)
+	if (cpu > INT_MAX || !&sched_core_priority || !&sd_asym_packing)
 		return 0;
 
 	priority = cpu_priority(cpu);

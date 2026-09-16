@@ -316,42 +316,30 @@ be turned off on the command line to compare the two rules against each other.
    `SD_ASYM_CPUCAPACITY` domain; `--uniform-capacity` forces one capacity class
    and `--asym-capacity` instead uses the best CPPC or cpufreq estimate even
    when the kernel does not enable asymmetric-capacity scheduling.
-   Independently, when the kernel has an active
-   `SD_ASYM_PACKING` domain, cidland reads `arch_asym_cpu_priority()` through
-   `sched_core_priority` and uses its exact priority classes for asymmetric
-   balancing. They do not rank ordinary cross-core wakeup placement: fair.c
-   searches the target LLC in topology order and applies packing priority
-   later through load balance. Thus a machine may have uniform capacity and
-   still prefer high-performance cores without making every wakeup walk its
-   priority classes. Capacity tiers remain independent and continue to rank
-   placement when `SD_ASYM_CPUCAPACITY` is in use. An idle previous CPU is
-   retained. Within its LLC, cidland tracks `has_idle_core` as fair.c does:
+   Scheduler-domain spans are discovered by `scx_utils::Topology` without
+   reading scheduler-internal kernel objects. It prefers the live domain masks
+   in schedstat v17 when `/proc/schedstat` is available; schedstat counters may
+   remain disabled. If the file is missing or incompatible, it reconstructs
+   candidate domains from sysfs topology. In both cases it applies the kernel's
+   NUMA-reclaim-distance and complete-capacity-class rules to select the fork,
+   wake-affine and asymmetric-capacity domains.
+
+   `/proc/schedstat` does not expose `SD_ASYM_PACKING` or
+   `arch_asym_cpu_priority()`, and there is no other portable ABI for them.
+   Cidland retains a narrow BPF query for that independent policy until
+   sched_ext provides a stable query. This matters for x86 ITMT systems, where
+   every CPU may export the same capacity while the kernel assigns cores
+   distinct packing priorities. `--disable-asym-packing` disables this policy.
+   Capacity tiers remain independent and continue to rank placement when
+   `SD_ASYM_CPUCAPACITY` is in use. An idle previous CPU is retained.
+   Within its LLC, cidland tracks `has_idle_core` as fair.c does:
    it looks for a fully idle core while that hint is set; when none is known,
    it tries an idle sibling of the task's previous CPU before the general idle
-   CPU scan. A selected CPU is redirected to a higher-priority idle sibling
-   when the SMT domain has `SD_ASYM_PACKING`, matching
-   `select_idle_smt_cpu()`. Idle preferred CPUs pull non-hot work from
-   lower-priority ones, but only onto a fully idle core when SMT is active,
-   matching `sched_use_asym_prio()`. Queued pulling alone cannot move the sole
-   task running on a lower-priority CPU. Follow fair.c's active-balance order
-   for that case: a source tick wakes a suitable idle balancer; the idle CPU
-   first tries to detach queued work and only after that fails asks one source
-   for its running task. The source revalidates the request at dispatch.
-   `SD_ASYM_PACKING` uses the same `sched_asym()` ordering: the destination
-   must be able to use asymmetric priority, and must either be preferred to
-   the source or the source must be unable to use asymmetric priority because
-   an SMT sibling is busy. The latter permits a CPU-heavy task to move to a
-   fully idle core of the same or a lower tier instead of sharing a core while
-   another is idle. Cidland additionally requires that task to fail
-   `fits_capacity()` on the source, so a bursty task can keep its fast shared
-   core while the CPU hog beside it moves. `SD_ASYM_CPUCAPACITY` can move a
+   CPU scan. `SD_ASYM_CPUCAPACITY` can move a
    task that does not fit its current CPU to a fully idle CPU of its maximum
    allowed capacity. The consumed service is charged normally before the
    destination handoff, and cross-core moves require the whole destination
    core to be idle under SMT.
-   `--disable-asym-packing` disables that independent policy, so placement
-   follows the capacity classes chosen by the automatic mode,
-   `--uniform-capacity`, or `--asym-capacity`.
    `--smt-asym-packing` ranks the threads of a core by CPU ID when the kernel
    exposes no priority between them: among the idle siblings of the selected
    physical core the lowest CPU ID is preferred, at wakeup and when a balance
