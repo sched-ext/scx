@@ -111,19 +111,6 @@ struct Opts {
     #[clap(short = 'm', long, default_value = "500")]
     migration_cost_us: u64,
 
-    /// Number of remote queues a busy CPU samples on each dispatch.
-    ///
-    /// A CPU with a queue of its own looks at this many other queues, rotating
-    /// through them across dispatches, and takes the head of one that is more than
-    /// twice as deep as its own and at least two tasks deeper; this is what spreads
-    /// out a pile-up created on a single CPU, the way the load balancer moves tasks
-    /// off the busiest runqueue. A larger value finds an imbalance sooner and costs
-    /// more work on every dispatch; 0 disables the sampling, leaving a busy CPU with
-    /// its own queue only. Idle CPUs are not affected: they always scan the whole
-    /// node for work.
-    #[clap(short = 'b', long, default_value = "2", value_parser = clap::value_parser!(u32).range(0..=255))]
-    balance_sample: u32,
-
     /// Failed scans an idle CPU tolerates before it stops honouring cache hotness.
     ///
     /// An idle CPU that finds nothing it is allowed to take, while work is queued
@@ -212,6 +199,44 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_asym_packing: bool,
 
+    /// Prefer lower-numbered CPUs within each SMT core.
+    ///
+    /// When the kernel exposes no priority between the threads of a core,
+    /// pick the lowest-numbered idle sibling of the selected core, at wakeup
+    /// and for balance destinations. Placement only: cores are not ranked by
+    /// CPU ID and no task is migrated between the threads of one core. A
+    /// determinism aid for comparisons, not a performance policy.
+    #[clap(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "disable_smt"
+    )]
+    smt_asym_packing: bool,
+
+    /// Let a wakeup leave its LLC to find a whole idle core.
+    ///
+    /// An idle SMT sibling of a busy core is half of a core that is already
+    /// working: placing a task there costs the thread running on the other
+    /// sibling about half its throughput for as long as the two overlap. By
+    /// default the idle scan follows select_idle_sibling() and takes that
+    /// sibling, because fair.c stops at the LLC and leaves the rest to the
+    /// periodic balancer. This makes the scan prefer a whole idle core in
+    /// another LLC instead, trading cache locality for core throughput, and
+    /// only while such a core exists.
+    ///
+    /// It matters on machines whose LLC spans a whole NUMA node: once that
+    /// node is saturated, everything the machine wakes lands on its busy
+    /// cores' siblings while another node's cores sit fully idle. Barrier-
+    /// synchronized workloads pay for it many times over, since every thread
+    /// waits for the halved one. Balancing cannot repair it, as those visits
+    /// are far shorter than any balance interval.
+    #[clap(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "disable_smt"
+    )]
+    smt_whole_core: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -235,9 +260,9 @@ struct Opts {
 
     /// Service is charged in rq_clock_task(), the clock update_curr() uses:
     /// wall time less the interrupt time and the hypervisor steal time the
-    /// CPU spent on something else. This charges plain wall time,
-    /// bpf_ktime_get_ns(), instead, so a task pays for the interrupts that
-    /// land on its CPU and for the time the host took from its vCPU.
+    /// CPU spent on something else. This charges plain wall time, the rq
+    /// clock, instead, so a task pays for the interrupts that land on its
+    /// CPU and for the time the host took from its vCPU.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_task_clock: bool,
 
@@ -253,14 +278,11 @@ struct Opts {
 
     /// Take the head of a deadline-ordered queue at dispatch, eligible or not.
     ///
-    /// A sched_ext priority DSQ is ordered by deadline but, unlike fair.c's
-    /// augmented EEVDF tree, cannot directly find the earliest-deadline task
-    /// whose vruntime is eligible. Dispatch normally walks the queue for that
-    /// task when the head is not eligible, which matches the selection rule
-    /// there at a linear worst-case cost. This option takes the head instead;
-    /// --no-eligibility implies it. Wakeup preemption and keep-running
-    /// decisions are head-based either way because they cannot observe the
-    /// current task, queue, and virtual-time frontier atomically.
+    /// The EDQ normally uses its augmented tree to find the earliest-deadline
+    /// task whose vruntime is eligible in logarithmic time. This option takes
+    /// the head instead; --no-eligibility implies it. Wakeup preemption and
+    /// keep-running decisions are head-based either way because they cannot
+    /// observe the current task, queue, and virtual-time frontier atomically.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_eligible_scan: bool,
 
@@ -565,13 +587,20 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = slice_ns;
         rodata.tick_ns = tick_ns();
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
-        rodata.balance_sample = opts.balance_sample;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.cgroup_enabled = cgroup_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.smt_enabled = smt_enabled;
+        rodata.force_smt_asym_packing = opts.smt_asym_packing;
+        if opts.smt_asym_packing {
+            info!("SMT sibling priority: lower CPU IDs first (--smt-asym-packing)");
+        }
+        rodata.smt_whole_core = opts.smt_whole_core && smt_enabled;
+        if opts.smt_whole_core && smt_enabled {
+            info!("Idle scan: a whole idle core wins over a busy core's sibling, across LLCs");
+        }
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;
         rodata.no_task_clock = opts.no_task_clock;
@@ -684,10 +713,11 @@ impl<'a> Scheduler<'a> {
         //
         // SCX_OPS_BUILTIN_IDLE_PER_NODE is left out: a cid-form scheduler
         // cannot use the built-in idle tracking, this one does its own.
-        skel.struct_ops.cidland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
-            | *compat::SCX_OPS_ENQ_LAST
+        skel.struct_ops.cidland_ops_mut().flags = *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | *compat::SCX_OPS_ENQ_EXITING
+            | *compat::SCX_OPS_TID_TO_TASK;
 
         info!(
             "scheduler flags: {:#x}",
