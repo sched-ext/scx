@@ -7,7 +7,6 @@
 #include <scx/common.bpf.h>
 
 #include <lib/arena.h>
-#include <lib/percpu.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
 

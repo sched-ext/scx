@@ -7,7 +7,6 @@
 #include <lib/sdt_task.h>
 
 #include <lib/arena.h>
-#include <lib/percpu.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
 #include <lib/rbtree.h>
@@ -73,12 +72,6 @@ int arena_init(struct arena_init_args *args)
 	ret = cmask_distribute_init(&arena);
 	if (ret) {
 		bpf_printk("cmask_distribute_init failed with %d", ret);
-		return ret;
-	}
-
-	ret = scx_percpu_storage_init();
-	if (ret) {
-		bpf_printk("scx_percpu_storage_init failed with %d", ret);
 		return ret;
 	}
 
