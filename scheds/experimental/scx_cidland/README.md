@@ -295,8 +295,10 @@ be turned off on the command line to compare the two rules against each other.
    `calculate_imbalance()`. An idle CPU that keeps finding nothing it is
    allowed to take eventually stops honoring cache hotness,
    `sd->cache_nice_tries` against `sd->nr_balance_failed` in
-   `can_migrate_task()`. And an idle CPU does not scan at all when its idle
-   periods have been shorter than its scans:
+   `can_migrate_task()`. Each BPF invocation examines at most eight tasks in a
+   source queue, but retains its deadline-order cursor so a pinned, hot or
+   oversized prefix cannot permanently hide movable work. And an idle CPU
+   does not scan at all when its idle periods have been shorter than its scans:
    `sched_balance_newidle()` measures how long the CPU stays idle after a
    pull, `rq->avg_idle`, and what a pull at each level has cost at most,
    `sd->max_newidle_lb_cost`, decaying by 1% a second, and gives up before a
@@ -504,12 +506,6 @@ that has not been done.
    runqueue by the core kernel and reaches the governor whatever the class.
 
 ### Load balancing
-
- - **Only a bounded prefix of a queue is searched.** `detach_tasks()` walks the
-   busiest runqueue looking for something it may take. Here balancing scans the
-   first eight deadline-ordered tasks (`BALANCE_TASK_SCAN`), so a blocked head
-   no longer hides immediately movable work, but a long prefix of pinned or
-   cache-hot tasks can still stop the search.
 
  - **The group taxonomy is narrower than `fair.c`'s.** Balancing runs per
    domain from the tick, classifies an imbalance and moves capacity-normalized

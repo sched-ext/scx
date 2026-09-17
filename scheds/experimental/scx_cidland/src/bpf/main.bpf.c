@@ -723,6 +723,8 @@ struct busy_balance_env {
 	u64 group_cap;
 	u64 source_excess;
 	u64 move_budget;
+	u64 scan_deadline;
+	u64 scan_seq;
 	u64 local_norm;
 	u32 local_base;
 	u32 local_nr;
@@ -733,6 +735,7 @@ struct busy_balance_env {
 	u32 dst_overloaded;
 	u32 local_overloaded;
 	u32 group_queued;
+	u32 scan_valid;
 };
 
 enum newidle_level {
@@ -784,6 +787,11 @@ struct cid_ctx {
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 curr_sched_idle;	/* that, or it is in an idle cgroup, see cid_sched_idle_target() */
 	u32 steal_cursor;
+	/* Persistent scans of this cid as a source. */
+	struct scx_edq_cursor detach_cursor;
+	struct scx_edq_cursor busy_scan_cursor;
+	/* Candidate handed from a periodic scan to destination dispatch. */
+	struct scx_edq_cursor busy_dispatch_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 	u64 idle_stamp;		/* when the last idle pull began, see newidle_cost() */
 	u64 avg_idle;		/* how long the cid stays idle after one, rq->avg_idle */
@@ -1826,34 +1834,18 @@ static cid_edq_task_t *cid_edq_task(task_ctx_t *tctx)
  * preemption decision or a remote steal scan; the queue owner will make
  * progress and a later dispatch can try again.
  */
-static int cid_edq_try_peek(s32 cid, cid_edq_task_t **atp)
+static int cid_edq_try_peek_next(s32 cid, scx_edq_cursor_t *cursor,
+				 cid_edq_task_t **atp)
 {
 	u64 task;
 	int ret;
 
 	*atp = NULL;
-	ret = scx_edq_try_peek_hold(&cid_pack(cid)->edq, &task);
+	ret = scx_edq_try_peek_next_hold(&cid_pack(cid)->edq, cursor, &task);
 	if (ret) {
 		if (ret != -EBUSY)
-			scx_bpf_error("EDQ peek failed for cid %d: %d", cid, ret);
-		return ret;
-	}
-	*atp = (cid_edq_task_t *)task;
-	return 0;
-}
-
-static int cid_edq_try_peek_nth(s32 cid, u32 nth, cid_edq_task_t **atp)
-{
-	u64 task;
-	int ret;
-
-	if (!nth)
-		return cid_edq_try_peek(cid, atp);
-	*atp = NULL;
-	ret = scx_edq_try_peek_nth_hold(&cid_pack(cid)->edq, nth, &task);
-	if (ret) {
-		if (ret != -EBUSY)
-			scx_bpf_error("EDQ nth peek failed for cid %d: %d", cid, ret);
+			scx_bpf_error("EDQ cursor peek failed for cid %d: %d",
+				      cid, ret);
 		return ret;
 	}
 	*atp = (cid_edq_task_t *)task;
@@ -3293,6 +3285,26 @@ static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
 
 #define BALANCE_TASK_SCAN	8U
 
+static __always_inline void
+edq_scan_reset(scx_edq_cursor_t *cursor)
+{
+	scx_edq_cursor_reset(cursor);
+}
+
+/*
+ * Fetch the next task in deadline order and advance @cursor past it. A queue
+ * mutation cannot invalidate the cursor because it contains the ordering key,
+ * not a node pointer. Reaching the end resets the scan so its next bounded
+ * pass wraps to the head and tasks inserted before the cursor are eventually
+ * considered too.
+ */
+static __always_inline int
+edq_scan_next(s32 src_cid, scx_edq_cursor_t *cursor,
+	      cid_edq_task_t **atp)
+{
+	return cid_edq_try_peek_next(src_cid, cursor, atp);
+}
+
 /*
  * Validate and remove the first usable task in a bounded deadline-ordered EDQ
  * prefix. Holding each node across the affinity and hotness checks and
@@ -3304,6 +3316,7 @@ static __noinline enum cid_edq_move_result
 cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 				  bool check_hot)
 {
+	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->detach_cursor;
 	u32 nth;
 
 	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
@@ -3312,7 +3325,7 @@ cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 		enum cid_edq_move_result move;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret)
 			return ret == -EBUSY ? CID_EDQ_MOVE_BUSY :
 					      CID_EDQ_MOVE_MISS;
@@ -3348,6 +3361,7 @@ cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 					     u64 now)
 {
+	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->detach_cursor;
 	bool pinned = false;
 	u32 nth;
 
@@ -3359,7 +3373,7 @@ static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 		bool movable;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret == -EBUSY)
 			break;
 		if (ret || !at) {
@@ -4352,6 +4366,7 @@ static __noinline bool
 busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 {
 	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
+	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->busy_scan_cursor;
 	u64 budget = MIN(env->local_room, env->source_excess);
 	u32 nth;
 
@@ -4359,10 +4374,11 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
 		cid_edq_task_t *at;
 		struct task_struct *p;
+		u64 candidate_deadline, candidate_seq;
 		s32 move_dst;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret)
 			return false;
 		if (!at) {
@@ -4376,6 +4392,8 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
+		candidate_deadline = at->common.node.deadline;
+		candidate_seq = at->common.node.seq;
 		p = scx_bpf_tid_to_task(at->tid);
 		move_dst = p ? busy_balance_dst_cid(p, dst_cid) : -1;
 		scx_edq_task_drop(&at->common);
@@ -4383,6 +4401,10 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 			continue;
 		env->move_budget = budget;
 		env->move_dst_cid = move_dst;
+		/* Dispatch must begin at, rather than after, this candidate. */
+		env->scan_deadline = candidate_deadline;
+		env->scan_seq = candidate_seq;
+		env->scan_valid = SCX_EDQ_CURSOR_AT;
 		return true;
 	}
 
@@ -4498,6 +4520,12 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 			src = -1;
 	}
 	if (src >= 0) {
+		scx_edq_cursor_t *cursor =
+			&move->busy_dispatch_cursor;
+
+		cursor->deadline = dst->busy_balance_env.scan_deadline;
+		cursor->seq = dst->busy_balance_env.scan_seq;
+		cursor->valid = dst->busy_balance_env.scan_valid;
 		WRITE_ONCE(move->busy_balance_expire,
 			   now + (u64)min_ms * NSEC_PER_MSEC);
 		WRITE_ONCE(move->busy_balance_budget,
@@ -7719,6 +7747,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			   u64 now, u64 tnow)
 {
 	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
+	scx_edq_cursor_t *cursor = &dst->busy_dispatch_cursor;
 	u64 rival_dl = 0, head_dl = 0, min_slice;
 	bool rival = false;
 	bool retry = false;
@@ -7739,7 +7768,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		u64 dl, v, weight;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret)
 			return ret == -EBUSY ? -EAGAIN : 0;
 		if (!at) {
@@ -7775,6 +7804,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			return -EAGAIN;
 		if (ret != CID_EDQ_MOVE_MOVED)
 			continue;
+		edq_scan_reset(cursor);
 		dst->busy_balance_budget -= weight;
 		return 1;
 	}
