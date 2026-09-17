@@ -740,6 +740,8 @@ impl<'a> Scheduler<'a> {
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
+        // Replenishment wakes dispatch through the built-in idle tracking.
+        rodata.bw_kick_builtin_idle = true;
 
         // Fail hard if cpu.max was explicitly requested but the kernel lacks
         // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
