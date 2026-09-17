@@ -201,13 +201,20 @@ be turned off on the command line to compare the two rules against each other.
    the one the CPU is running is a task that CPU would pick if it were asked
    again, so the CPU is interrupted for it rather than left to finish its
    slice: `wakeup_preempt_fair()`. The woken task has to be owed service to
-   qualify and the running one is left alone while it is still owed its own,
-   which is what `pick_eevdf()` does when it drops an ineligible `curr` before
-   looking at the tree. And it has to be what the CPU would run next:
+   qualify and the running one is left alone while it is still both eligible
+   and inside its protected virtual-time interval. The interval starts at one
+   minimum request among the current and queued tasks; every wakeup that does
+   not preempt clips it again to include the wakee's request,
+   `update_protect_slice()`. Once current becomes ineligible, `pick_eevdf()`
+   drops it before looking at protection. And the wakee has to be what the CPU
+   would run next:
    `wakeup_preempt_fair()` preempts only when the woken task is the pick,
    `nse == pse`, and a running task that has lost the pick to some other queued
-   task is left to finish its slice. The preemption decision approximates that
-   pick with the EDQ head.
+   task is left alone. When its lock is available, the EDQ returns the exact
+   earliest eligible deadline and its augmented minimum request from one tree
+   snapshot. A contended lookup falls back to the lockless head and cached
+   minimum rather than spinning in the scheduling callback; an ineligible
+   head can conservatively suppress a preemption until the next decision.
    `--no-run-to-parity` drops the running task's half alone, the sense the
    feature had when EEVDF was merged; `--no-eligibility` decides on the
    deadlines alone; `--no-wakeup-preempt` never interrupts. The policies are
@@ -456,13 +463,6 @@ that has not been done.
    eligible. `fair.c` observes all three together under the runqueue lock.
    `--no-eligible-scan` takes the head everywhere, and `--no-eligibility`
    drops the eligibility test.
-
- - **A wakeup that does not preempt leaves the running task's protection
-   whole.** `wakeup_preempt_fair()` clips it to one minimum slice ahead of the
-   reference on every wakeup that fails to preempt, `update_protect_slice()`.
-   The direct `PREEMPT_SHORT` case is handled here, but a shorter ineligible
-   wakee does not shorten protection for a later decision. Doing that exactly
-   needs the minimum request across an EDQ, which cidland does not track.
 
  - **`sched_yield()` costs more than it does in `fair.c`.** The rule is the
    same, `yield_task_fair()`'s: nothing happens unless someone is queued to

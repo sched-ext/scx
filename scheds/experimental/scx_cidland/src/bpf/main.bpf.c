@@ -758,6 +758,7 @@ struct pack {
 	u64 curr_run_at;	/* when its service was last charged */
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
+	u64 curr_vprot;		/* protected vruntime, see set_protect_slice() */
 	s32 cid;		/* the cid whose task clock the pack runs in */
 	struct scx_edq edq;
 };
@@ -2048,7 +2049,7 @@ static __always_inline bool cid_queue_insert(struct task_struct *p, task_ctx_t *
 	/* Publish custody before the node becomes visible to another CPU's pop. */
 	WRITE_ONCE(at->state, CID_EDQ_ENQUEUED);
 	ret = scx_edq_insert(&cid_pack(cid)->edq, &at->common, deadline,
-			      vruntime);
+			      vruntime, tctx->se.request);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_ENQUEUED,
 					CID_EDQ_NONE);
@@ -4991,6 +4992,86 @@ static bool curr_owed_service(pack_t *pk, u64 now)
 	return !time_after(pk->curr_v + dv, pack_vref_at(pk, now));
 }
 
+/* Project the running entity's vruntime to @now. */
+static u64 curr_vruntime_at(pack_t *pk, u64 now)
+{
+	u64 run_at = pk->curr_run_at;
+
+	if (time_before(now, run_at))
+		now = run_at;
+
+	return pk->curr_v + (now - run_at) * NICE_0_WEIGHT / pk->curr_w;
+}
+
+/*
+ * Give the entity just picked the protection set_protect_slice() gives
+ * fair.c's current entity. The EDQ augmentation supplies the shortest
+ * queued request, so protection is bounded by the smallest competitor
+ * instead of always extending to the current entity's deadline.
+ */
+static void set_protect_slice(pack_t *pk, u64 weight)
+{
+	u64 slice = pk->curr_request, min_slice;
+	u64 vprot = pk->curr_dl;
+
+	if (no_run_to_parity) {
+		pk->curr_vprot = pk->curr_v;
+		return;
+	}
+
+	if (!scx_edq_min_slice(&pk->edq, &min_slice) && min_slice < slice)
+		slice = min_slice;
+	if (slice != pk->curr_request) {
+		u64 limit = pk->curr_v +
+			slice * NICE_0_WEIGHT / weight;
+
+		if (time_before(limit, vprot))
+			vprot = limit;
+	}
+	pk->curr_vprot = vprot;
+}
+
+/* Never let concurrent wakeups move the protection endpoint forward. */
+static void shorten_protect_slice(pack_t *pk, u64 vprot)
+{
+	u64 old = READ_ONCE(pk->curr_vprot);
+
+	while (time_before(vprot, old) && can_loop) {
+		u64 prev = cmpxchg(&pk->curr_vprot, old, vprot);
+
+		if (prev == old)
+			return;
+		old = prev;
+	}
+}
+
+/*
+ * A wakeup which does not win the pick can still shorten the current
+ * entity's protection. fair.c does this after pick_next_entity() returns a
+ * different entity: vprot never moves forward, and is clipped to one minimum
+ * competing request beyond the current vruntime.
+ */
+static void update_protect_slice(pack_t *pk, u64 now, u64 wakee_slice,
+				 u64 queued_min_slice)
+{
+	u64 slice = MIN(pk->curr_request, wakee_slice);
+	u64 vprot;
+
+	if (no_run_to_parity || no_eligibility || !pk->curr_w)
+		return;
+	if (queued_min_slice && queued_min_slice < slice)
+		slice = queued_min_slice;
+	vprot = curr_vruntime_at(pk, now) +
+		slice * NICE_0_WEIGHT / pk->curr_w;
+	shorten_protect_slice(pk, vprot);
+}
+
+static void cancel_protect_slice(pack_t *pk, u64 now)
+{
+	if (pk->curr_w)
+		shorten_protect_slice(pk, curr_vruntime_at(pk, now));
+}
+
 /*
  * Shortest an hrtick is armed for, the floor hrtick_start() in core.c
  * applies to its own:
@@ -5282,21 +5363,30 @@ static bool curr_pick_dl(pack_t *pk, u64 now, u64 *dlp)
  *		break;
  *	}
  *
- * or false when nothing queued is eligible. A queue contended by a remote
- * scan is read off its head instead, which is what selection without an
- * eligibility scan picks too.
+ * or false when nothing queued is eligible. Take the exact eligible pick and
+ * minimum slice when the EDQ lock is immediately available. A remote balance
+ * operation can hold the independent EDQ lock while this callback owns the
+ * runqueue; do not spin behind it. Fall back to the lockless queue head and
+ * cached minimum instead. The head can be ineligible, which conservatively
+ * suppresses a preemption rather than letting a wakee bypass queued work.
  */
-static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp)
+static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp,
+			      u64 *min_slice)
 {
 	int ret;
 
-	if (no_eligible_scan || no_eligibility)
+	if (no_eligible_scan || no_eligibility) {
+		*min_slice = 0;
 		return !scx_edq_first_deadline(&pk->edq, dlp);
+	}
 
 	ret = scx_edq_try_first_eligible_deadline(&pk->edq,
-						  pack_vref_place(pk, now), dlp);
-	if (ret == -EBUSY)
+						pack_vref_place(pk, now), dlp,
+						min_slice);
+	if (ret == -EBUSY) {
+		scx_edq_min_slice(&pk->edq, min_slice);
 		return !scx_edq_first_deadline(&pk->edq, dlp);
+	}
 
 	return !ret;
 }
@@ -5331,7 +5421,7 @@ static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp)
 static bool keep_running(s32 cid, u64 now)
 {
 	pack_t *pk = cid_pack(cid);
-	u64 dl, head_dl;
+	u64 dl, head_dl, min_slice;
 
 	if (!curr_pick_dl(pk, now, &dl))
 		return false;
@@ -5348,7 +5438,7 @@ static bool keep_running(s32 cid, u64 now)
 	if (!cid_queued_test(cid))
 		return false;
 	/* Nothing queued is eligible: pick_eevdf() returns curr. */
-	if (!pack_pick_head_dl(pk, now, &head_dl))
+	if (!pack_pick_head_dl(pk, now, &head_dl, &min_slice))
 		return true;
 
 	/* A tie is kept: giving the CPU up costs a switch. */
@@ -5643,6 +5733,7 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
+	u64 weight;
 	pack_t *pk;
 
 	if (!tctx)
@@ -5656,9 +5747,11 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 
 	pk->curr_dl = task_dl(p, tctx);
 	pk->curr_v = tctx->se.vruntime;
-	pk->curr_w = task_weight(p, tctx);
 	pk->curr_run_at = now;
 	pk->curr_request = task_request(p);
+	weight = task_weight(p, tctx);
+	set_protect_slice(pk, weight);
+	pk->curr_w = weight;
 	cctx->curr_idle = p->policy == SCHED_IDLE;
 }
 
@@ -6141,18 +6234,18 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  *		return curr;
  *
  * plus the queued task being eligible itself and holding the earlier
- * deadline, which is what makes it the pick. set_protect_slice() protects
- * the running task up to its own deadline, so for its whole request, but
- * that protection is dropped before it is ever tested once the task is no
- * longer eligible: served past the average of its pack, it keeps the CPU
- * only until something that is owed service asks for it.
+ * deadline, which is what makes it the pick. set_protect_slice() gives the
+ * running task an explicit virtual-time protection bounded by the shortest
+ * request in the queue. A normal wakeup that does not win the pick clips the
+ * endpoint again through update_protect_slice(), including the new wakee's
+ * request even though it has not entered the EDQ yet. The EDQ's augmented
+ * minimum makes both operations constant time.
  *
- * So the protection needs no window of its own. A task just picked is
- * owed service and holds the CPU; it becomes interruptible exactly when
- * it has had the share the pack owes it, which under load is a fraction
- * of the slice, and the woken task waits for that instead of for the
- * slice to end. What the running task gives up is the rest of a slice it
- * is still owed and takes up again, not its place in the order: it keeps
+ * Eligibility still comes first: once the current entity has been served
+ * past the average of its pack, pick_eevdf() drops it before testing its
+ * protection. PREEMPT_SHORT does the inverse for an eligible shorter wakee:
+ * it cancels the endpoint before requesting preemption. What the running
+ * task gives up is protected service, not its place in the order; it keeps
  * the deadline it was picked with, see task_dl().
  *
  * Nothing here reads a reference that is behind: the service the running
@@ -6195,15 +6288,16 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  */
 static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 				      const task_ctx_t *tctx, u64 dl,
-				      u64 now)
+				      u64 now, bool *cancel_protect)
 {
 	struct cid_ctx __arena *cctx;
 	bool owed, p_idle, has_head;
-	u64 head_dl;
+	u64 head_dl, min_slice = 0;
 	pack_t *pk;
 
 	if (cid_idle_test(cid))
 		goto idle;
+	*cancel_protect = false;
 
 	cctx = cid_ctx(cid);
 	pk = task_pack(tctx, cid);
@@ -6219,10 +6313,19 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * away between them is any wakee that is not of a normal policy.
 	 */
 	p_idle = p->policy == SCHED_IDLE;
-	if (cctx->curr_idle && !p_idle)
+	if (cctx->curr_idle && !p_idle) {
+		*cancel_protect = true;
 		goto preempt;
+	}
 	if (p_idle || p->policy == SCHED_BATCH)
 		goto queued;
+
+	/*
+	 * Take the eligible head and the queue's shortest request under the
+	 * same EDQ lock. Even when the current entity keeps the CPU, the latter
+	 * is needed to apply update_protect_slice().
+	 */
+	has_head = pack_pick_head_dl(pk, now, &head_dl, &min_slice);
 
 	/*
 	 * The queued task has to be owed service to be a candidate at all:
@@ -6230,7 +6333,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 */
 	if (!no_eligibility &&
 	    time_after(tctx->se.vruntime, pack_vref_place(pk, now)))
-		goto queued;
+		goto update;
 
 	/*
 	 * PREEMPT_SHORT lets an eligible task with a shorter request override
@@ -6249,8 +6352,10 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * to the existing wakeup path.
 	 */
 	if (!no_preempt_short && tctx->se.request < pk->curr_request &&
-	    pk->curr_w)
+	    pk->curr_w) {
+		*cancel_protect = true;
 		goto preempt;
+	}
 
 	/*
 	 * Is the running task still owed service? Once it has run for a
@@ -6259,8 +6364,9 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * RUN_TO_PARITY governed, and --no-run-to-parity drops it alone.
 	 */
 	owed = !no_eligibility && curr_owed_service(pk, now);
-	if (owed && !no_run_to_parity)
-		goto queued;
+	if (owed && !no_run_to_parity &&
+	    time_before(curr_vruntime_at(pk, now), pk->curr_vprot))
+		goto update;
 
 	/*
 	 * Only a curr that is still owed service is in the running at all:
@@ -6273,7 +6379,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * say. --no-eligibility keeps deciding on the deadlines alone.
 	 */
 	if ((owed || no_eligibility) && !time_before(dl, pk->curr_dl))
-		goto queued;
+		goto update;
 
 	/*
 	 * The task is only worth interrupting the CPU for if it is what the
@@ -6297,16 +6403,17 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * CPU that was one context switch in three, and perf bench sched
 	 * messaging ran at half its speed.
 	 */
-	has_head = pack_pick_head_dl(pk, now, &head_dl);
 	if (has_head) {
 		bool loses = !time_before(dl, head_dl);
 
 		if (loses)
-			goto queued;
+			goto update;
 	}
 
 preempt:
 	return true;
+update:
+	update_protect_slice(pk, now, tctx->se.request, min_slice);
 queued:
 	/*
 	 * The task waits behind the running one. See that the running one
@@ -6487,7 +6594,7 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 	at->cid = cid;
 	WRITE_ONCE(at->state, CID_EDQ_PARKED);
 	ret = scx_edq_insert(&hdr->bq, &at->common, tctx->se.vruntime,
-			      tctx->se.vruntime);
+			      tctx->se.vruntime, at->slice);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_PARKED,
 					    CID_EDQ_NONE);
@@ -6813,15 +6920,22 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * local task has already requested rescheduling; later wakees retain
 	 * their deadline order on the per-cid EDQ.
 	 */
-	if (!displaced &&
-	    queued_cid_should_preempt(prev_cid, p, tctx, dl, tnow) &&
-	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
-		cid_edq_mark_dispatched(tctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
-				   task_request(p),
-				   enq_flags | SCX_ENQ_PREEMPT);
-		__sync_fetch_and_add(&nr_preempts, 1);
-		return;
+	if (!displaced) {
+		bool cancel_protect = false;
+
+		if (queued_cid_should_preempt(prev_cid, p, tctx, dl, tnow,
+					      &cancel_protect) &&
+		    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
+			if (cancel_protect)
+				cancel_protect_slice(task_pack(tctx, prev_cid),
+						     tnow);
+			cid_edq_mark_dispatched(tctx);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
+					   task_request(p),
+					   enq_flags | SCX_ENQ_PREEMPT);
+			__sync_fetch_and_add(&nr_preempts, 1);
+			return;
+		}
 	}
 
 	if (!cid_queue_insert(p, tctx, prev_cid, task_request(p), dl,
@@ -7605,7 +7719,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			   u64 now, u64 tnow)
 {
 	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
-	u64 rival_dl = 0, head_dl = 0;
+	u64 rival_dl = 0, head_dl = 0, min_slice;
 	bool rival = false;
 	bool retry = false;
 	u32 nth;
@@ -7613,7 +7727,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 	if (has_prev && curr_pick_dl(cid_pack(dst_cid), tnow, &rival_dl))
 		rival = true;
 	if (cid_queued_test(dst_cid) &&
-	    pack_pick_head_dl(&dst->pack, tnow, &head_dl) &&
+	    pack_pick_head_dl(&dst->pack, tnow, &head_dl, &min_slice) &&
 	    (!rival || time_before(head_dl, rival_dl))) {
 		rival_dl = head_dl;
 		rival = true;
@@ -8007,7 +8121,7 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
 	task_ctx_t *tctx;
-	u64 now;
+	u64 now, weight;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -8074,7 +8188,10 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		pk->curr_run_at = tctx->last_run_at;
 		pk->curr_since = tctx->last_run_at;
 		pk->curr_request = task_request(p);
-		pk->curr_w = task_weight(p, tctx);
+		weight = task_weight(p, tctx);
+		set_protect_slice(pk, weight);
+		/* Publish a complete current-task snapshot to remote wakeups. */
+		pk->curr_w = weight;
 		cctx->curr_idle = p->policy == SCHED_IDLE;
 		cctx->curr_sched_idle = cctx->curr_idle ||
 					(tctx->grp && task_in_idle_cgroup(tctx));
