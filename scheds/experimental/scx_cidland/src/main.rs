@@ -164,10 +164,25 @@ struct Opts {
     /// the most a scan at each level has cost, and does not start a scan its
     /// idle time would not pay for, since a CPU its own wakeups keep bringing
     /// back is about to have work of its own: sched_balance_newidle()'s
-    /// avg_idle against sd->max_newidle_lb_cost. This drops the budget and
-    /// scans every time.
+    /// avg_idle against sd->max_newidle_lb_cost. This drops only the cost
+    /// budget; --no-newidle-sampling separately disables success-rate
+    /// sampling.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_newidle_cost: bool,
+
+    /// Do not sample new-idle scans from their observed success rate.
+    ///
+    /// fair.c's NI_RANDOM and NI_RATE features avoid repeatedly scanning a
+    /// domain that rarely supplies work. Each cid and topology level tracks
+    /// successful pulls and call frequency, then probabilistically admits
+    /// scans in proportion to that estimate. The estimator compensates a
+    /// successful sampled scan by its inverse sampling probability.
+    ///
+    /// Sampling is enabled by default, as both fair.c features are. This
+    /// option makes every new-idle level eligible to scan, subject only to
+    /// the separate avg-idle cost budget controlled by --no-newidle-cost.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_newidle_sampling: bool,
 
     /// Do not bound wakeup idle scans by the target LLC's utilization.
     ///
@@ -834,6 +849,7 @@ impl<'a> Scheduler<'a> {
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
+        rodata.newidle_sampling = !opts.no_newidle_sampling;
         rodata.sis_util = !opts.no_sis_util;
         rodata.llc_extend = opts.llc_extend;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;

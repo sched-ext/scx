@@ -124,6 +124,13 @@ const volatile u32 cache_nice_tries = 1;
 const volatile bool no_newidle_cost;
 
 /*
+ * Sample new-idle scans from their observed success and call rates, fair.c's
+ * NI_RANDOM and NI_RATE. On by default; user space clears it for
+ * --no-newidle-sampling.
+ */
+const volatile bool newidle_sampling = true;
+
+/*
  * Bound the ordinary LLC idle scan by its averaged utilization, the way
  * fair.c's SIS_UTIL feature uses sched_domain_shared::nr_idle_scan. The
  * hint is refreshed by periodic load balance, never on the wakeup path.
@@ -725,6 +732,13 @@ enum newidle_level {
 	NEWIDLE_LEVELS,
 };
 
+struct newidle_stats {
+	u64 stamp[NEWIDLE_LEVELS];
+	u32 call[NEWIDLE_LEVELS];
+	u32 success[NEWIDLE_LEVELS];
+	u32 ratio[NEWIDLE_LEVELS];
+};
+
 /*
  * A pack, cfs_rq: the entities queued on one cid, in deadline order, and the
  * one running there, with the reference all of them are placed against and
@@ -805,6 +819,7 @@ struct cid_ctx {
 static struct cid_topo __arena *topos;
 static struct cid_ctx __arena *cctxs;
 static struct core_sched_state __arena *core_sched_states;
+static struct newidle_stats __arena *newidle_stats;
 static struct scx_cmask __arena *idle_cids;	/* one bit per idle cid */
 static struct scx_cmask __arena *idle_core_llcs; /* LLCs known to have an idle core */
 static struct scx_cmask __arena *queued_cids;	/* one bit per cid with a queued task */
@@ -7083,6 +7098,55 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 #define NEWIDLE_DECAY_NS	1000000000ULL
 
 /*
+ * Feed one scan result into fair.c's newidle success and call-rate
+ * estimator. @success is one for an ordinary scan and its inverse sampling
+ * weight for a scan admitted by newidle_should_scan().
+ */
+static void update_newidle_stats(s32 cid, u32 level, u32 success, u64 now)
+{
+	struct newidle_stats __arena *stats = &newidle_stats[cid];
+	u64 delta, ratio;
+
+	stats->call[level]++;
+	stats->success[level] += success;
+	if (stats->call[level] < 1024)
+		return;
+
+	delta = time_before(now, stats->stamp[level]) ? 0 :
+		now - stats->stamp[level];
+	stats->stamp[level] = now;
+
+	/* NI_RATE: 4.194 ms between calls contributes one ratio point. */
+	ratio = (delta >> 22) + stats->success[level];
+	stats->ratio[level] = MIN(1024, ratio);
+	stats->call[level] /= 2;
+	stats->success[level] /= 2;
+}
+
+/*
+ * NI_RANDOM: admit a scan in proportion to the success and call-rate ratio.
+ * Return the inverse sampling weight used to account a successful scan.
+ */
+static bool newidle_should_scan(s32 cid, u32 level, u64 now, u32 *weight)
+{
+	struct newidle_stats __arena *stats = &newidle_stats[cid];
+	u32 ratio = stats->ratio[level], sample;
+
+	*weight = 1;
+	if (ratio >= 1024)
+		return true;
+
+	sample = 1 + ratio;
+	if ((bpf_get_prandom_u32() & 1023) > sample) {
+		update_newidle_stats(cid, level, 0, now);
+		return false;
+	}
+
+	*weight = (1024 + sample / 2) / sample;
+	return true;
+}
+
+/*
  * Decay the level costs of @cctx that have not been raised for a second,
  * and refresh its worst pull from them: sched_balance_domains(), which
  * does this from the tick.
@@ -7603,8 +7667,11 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
+	bool sample_newidle = newidle_sampling && !force_steal && !kicked;
 	bool budget = false, node_skipped = false, system_skipped = false;
+	bool scanned = false, admitted;
 	u64 curr_cost = 0, t0 = 0;
+	u32 weight;
 	u32 start;
 	s32 src = -1;
 
@@ -7660,56 +7727,76 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 		return false;
 	}
 
-	if (nr_place_tiers > 1 &&
-	    (!smt_enabled || core_is_idle(dst_cid))) {
-		u32 t;
-
-		/* Less-preferred tiers first, from the last, leaving hot tasks alone. */
-		bpf_arena_for(t, 0, nr_place_tiers - topo->place_tier - 1) {
-			src = steal_from_range(dst_cid, nr_place_tiers - 1 - t, node_base,
-					       node_nr, node_base, now,
-					       !force_steal &&
-					       failed <= cache_nice_tries,
-					       0xff);
-			if (src >= 0) {
-				cctx->nr_balance_failed = 0;
-				goto pick;
-			}
-		}
-	}
-
 	/*
 	 * An idle cid walks its own LLC before the rest of the node and then
 	 * the system, honouring hotness until it has failed often enough to
 	 * stop. With NUMA disabled the node level covers the whole machine.
 	 * A domain that is the whole of the next one is not walked twice.
 	 */
-	src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
-			       start + 1, now,
-			       !force_steal && failed <= cache_nice_tries,
-			       0xff);
-	if (budget) {
-		u64 t1 = bpf_ktime_get_ns();
+	admitted = !sample_newidle ||
+		newidle_should_scan(dst_cid, NEWIDLE_LLC, now, &weight);
+	if (admitted) {
+		u64 t1;
 
-		curr_cost = t1 - t0;
-		update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
-		t0 = t1;
-		if (node_nr > topo->llc_nr)
-			node_skipped = cctx->avg_idle <
-				       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
-	}
-	if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
-		src = steal_from_range(dst_cid, -1, node_base, node_nr,
-				       start + 1, now,
-				       !force_steal &&
-				       failed <= cache_nice_tries + 1,
-				       0xff);
+		scanned = true;
+		if (nr_place_tiers > 1 &&
+		    (!smt_enabled || core_is_idle(dst_cid))) {
+			u32 t;
+
+			/* Less-preferred tiers first, leaving hot tasks alone. */
+			bpf_arena_for(t, 0, nr_place_tiers - topo->place_tier - 1) {
+				src = steal_from_range(dst_cid,
+						nr_place_tiers - 1 - t,
+						node_base, node_nr, node_base,
+						now, !force_steal &&
+						failed <= cache_nice_tries,
+						0xff);
+				if (src >= 0)
+					break;
+			}
+		}
+		if (src < 0)
+			src = steal_from_range(dst_cid, -1, topo->llc_base,
+					       topo->llc_nr, start + 1, now,
+					       !force_steal &&
+					       failed <= cache_nice_tries,
+					       0xff);
+
+		t1 = (budget || sample_newidle) ? bpf_ktime_get_ns() : now;
 		if (budget) {
-			u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
-
-			curr_cost += cost;
-			update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
+			curr_cost = t1 - t0;
+			update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
 			t0 = t1;
+		}
+		if (sample_newidle)
+			update_newidle_stats(dst_cid, NEWIDLE_LLC,
+					     src >= 0 ? weight : 0, t1);
+	}
+	if (budget && node_nr > topo->llc_nr)
+		node_skipped = cctx->avg_idle <
+			       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
+	if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
+		admitted = !sample_newidle ||
+			newidle_should_scan(dst_cid, NEWIDLE_NODE, now, &weight);
+		if (admitted) {
+			u64 t1, cost;
+
+			scanned = true;
+			src = steal_from_range(dst_cid, -1, node_base, node_nr,
+					       start + 1, now,
+					       !force_steal &&
+					       failed <= cache_nice_tries + 1,
+					       0xff);
+			t1 = (budget || sample_newidle) ? bpf_ktime_get_ns() : now;
+			if (budget) {
+				cost = t1 - t0;
+				curr_cost += cost;
+				update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
+				t0 = t1;
+			}
+			if (sample_newidle)
+				update_newidle_stats(dst_cid, NEWIDLE_NODE,
+						     src >= 0 ? weight : 0, t1);
 		}
 	}
 	if (budget && nr_cids > node_nr)
@@ -7717,33 +7804,44 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			cctx->avg_idle <
 			curr_cost + cctx->newidle_cost[NEWIDLE_SYSTEM];
 	if (src < 0 && nr_cids > node_nr && !system_skipped) {
-		src = steal_from_range(dst_cid, -1, 0, nr_cids,
-				       start + 1, now,
-				       !force_steal &&
-				       failed <= cache_nice_tries + 2,
-				       0xff);
-		if (budget) {
-			u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
+		admitted = !sample_newidle ||
+			newidle_should_scan(dst_cid, NEWIDLE_SYSTEM, now, &weight);
+		if (admitted) {
+			u64 t1, cost;
 
-			curr_cost += cost;
-			update_newidle_cost(cctx, NEWIDLE_SYSTEM, cost, t1);
+			scanned = true;
+			src = steal_from_range(dst_cid, -1, 0, nr_cids,
+					       start + 1, now,
+					       !force_steal &&
+					       failed <= cache_nice_tries + 2,
+					       0xff);
+			t1 = (budget || sample_newidle) ? bpf_ktime_get_ns() : now;
+			if (budget) {
+				cost = t1 - t0;
+				curr_cost += cost;
+				update_newidle_cost(cctx, NEWIDLE_SYSTEM, cost, t1);
+			}
+			if (sample_newidle)
+				update_newidle_stats(dst_cid, NEWIDLE_SYSTEM,
+						     src >= 0 ? weight : 0, t1);
 		}
 	}
 	if (curr_cost > cctx->max_idle_balance_cost)
 		cctx->max_idle_balance_cost = curr_cost;
 
-	/* Nothing queued anywhere is a balanced system, not a failure. */
-	if (src >= 0 || cmask_empty(queued_cids))
-		cctx->nr_balance_failed = 0;
-	else
-		cctx->nr_balance_failed = failed + 1;
-	cctx->steal_cursor = src >= 0 ? src : start + 1;
+	if (scanned) {
+		/* Nothing queued anywhere is a balanced system, not a failure. */
+		if (src >= 0 || cmask_empty(queued_cids))
+			cctx->nr_balance_failed = 0;
+		else
+			cctx->nr_balance_failed = failed + 1;
+		cctx->steal_cursor = src >= 0 ? src : start + 1;
+	}
 
 own:
 	if (src < 0 && own)
 		src = dst_cid;
 
-pick:
 	if (src < 0)
 		return false;
 
@@ -8996,7 +9094,8 @@ static void init_topology(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 {
 	struct hrtick *ht;
-	u32 cid;
+	u64 now;
+	u32 cid, level;
 	int err;
 
 	TOUCH_ARENA();
@@ -9045,13 +9144,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	nr_words = cmask_nr_words(idle_cids);
 
 	init_topology();
+	now = bpf_ktime_get_ns();
 
 	/* sched_init(): the idle pull budget starts open by a migration cost. */
 	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
+		struct newidle_stats __arena *stats = &newidle_stats[cid];
 
 		cctx->avg_idle = 2 * migration_cost_ns;
 		cctx->max_idle_balance_cost = migration_cost_ns;
+		bpf_arena_for(level, 0, NEWIDLE_LEVELS) {
+			stats->call[level] = 512;
+			stats->success[level] = 256;
+			stats->ratio[level] = 512;
+			stats->stamp[level] = now;
+		}
 		if (cid == (s32)cid_topo(cid)->llc_base)
 			cctx->sis_idle_scan = cid_topo(cid)->llc_nr;
 	}
@@ -9175,7 +9282,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	mask = (sizeof(struct scx_cmask) + (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = nr * sizeof(struct cid_topo) + nr * sizeof(struct cid_ctx) +
 		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
-		nr * (sizeof(struct core_sched_state) + sizeof(u64) +
+		nr * (sizeof(struct core_sched_state) + sizeof(struct newidle_stats) +
+		      sizeof(u64) +
 		      6 * sizeof(u32)) + 13 * 64;
 	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
@@ -9188,6 +9296,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	topos = arena_carve(nr * sizeof(struct cid_topo), 64);
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
 	core_sched_states = arena_carve(nr * sizeof(struct core_sched_state), 64);
+	newidle_stats = arena_carve(nr * sizeof(struct newidle_stats), 64);
 	idle_cids = arena_carve(mask, 64);
 	idle_core_llcs = arena_carve(mask, 64);
 	queued_cids = arena_carve(mask, 64);
@@ -9202,7 +9311,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	cpu_fork_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_wake_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_asym_span_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !core_sched_states || !idle_cids ||
+	if (!topos || !cctxs || !core_sched_states || !newidle_stats || !idle_cids ||
 	    !idle_core_llcs || !queued_cids ||
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||

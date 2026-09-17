@@ -303,7 +303,17 @@ be turned off on the command line to compare the two rules against each other.
    pull, `rq->avg_idle`, and what a pull at each level has cost at most,
    `sd->max_newidle_lb_cost`, decaying by 1% a second, and gives up before a
    level it cannot pay for, since a CPU its own wakeups keep bringing back is
-   about to have work of its own. `--no-newidle-cost` scans every time.
+   about to have work of its own. Fair's `NI_RANDOM` and `NI_RATE` avoid
+   repeatedly paying even an affordable scan at a domain that rarely supplies
+   work: each CPU and level combine the weighted success count with the call
+   rate every 1024 attempts, then admit scans in proportion to that ratio.
+   Cidland keeps the same estimator and inverse-probability success weighting.
+   `--no-newidle-cost` removes the idle-time budget and
+   `--no-newidle-sampling` removes the success-rate sampling independently.
+   On a 24-CPU SMT machine, sampling cuts saturated schbench's remote steals
+   by roughly one third and adds about 2 us to its 99th-percentile wakeup and
+   request latency, improves a pinned pipe handoff by about 3%, and leaves
+   hackbench and `stress-ng --sock` throughput within noise.
    SMT contention is repaired independently of CPU capacity and
    `SD_ASYM_PACKING`, matching `fair.c`'s `group_smt_balance`: a task whose
    sibling has been busy for a slice asks a fully idle core in the same LLC to
