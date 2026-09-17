@@ -2,8 +2,9 @@
 /*
  * Generated BPF bindings
  *
- * Holds the generated bindings for the shared BPF header. Naming follows the C header and
- * naming lints are allowed here so generated names do not warn.
+ * Holds the generated bindings for the shared BPF header.
+ * Naming follows the C header and naming lints are allowed
+ * here so generated names do not warn.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

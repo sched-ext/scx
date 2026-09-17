@@ -41,10 +41,6 @@ fn delay_consts_match_header() {
         crate::bpf_intf::flow_consts_FLOW_DESERVED_SLACK_NS as u64
     );
     assert_eq!(
-        CURSOR_RATE_BIT,
-        crate::bpf_intf::flow_consts_FLOW_CURSOR_RATE_BIT as u32
-    );
-    assert_eq!(
         crate::flow_preempt::CURSOR_STAND_BIT,
         crate::bpf_intf::flow_consts_FLOW_CURSOR_STAND_BIT as u32
     );
@@ -100,7 +96,6 @@ fn stand_holds_16_to_14_until_8() {
     assert!(!delay_armed_latched(0, true));
     assert!(!stand_held(0));
     assert!(stand_held(crate::flow_preempt::CURSOR_STAND_BIT));
-    assert!(!stand_held(CURSOR_RATE_BIT));
     let win = delay_close(16, 0);
     assert_eq!(win, 14);
     assert!(delay_armed_latched(win, true));
@@ -258,51 +253,6 @@ fn deserved_slack_eases_by_32us() {
 }
 
 #[test]
-fn rate_bit_gates_once_per_slice() {
-    use crate::flow_preempt::CURSOR_STAND_BIT;
-    assert!(rate_clear(0));
-    assert!(rate_clear(5));
-    assert!(rate_clear(CURSOR_MASK));
-    assert!(!rate_clear(CURSOR_RATE_BIT));
-    assert!(!rate_clear(CURSOR_RATE_BIT | 5));
-    assert_eq!(cursor_val(CURSOR_RATE_BIT | 5), 5);
-    assert_eq!(cursor_val(CURSOR_STAND_BIT | 5), 5);
-    assert_eq!(cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | 5), 5);
-    assert_eq!(cursor_val(5), 5);
-    assert_eq!(cursor_val(0), 0);
-    assert_eq!(rate_set(5), CURSOR_RATE_BIT | 5);
-    assert!(!rate_clear(rate_set(5)));
-    assert_eq!(cursor_val(rate_set(1023)), 1023);
-    let masked = cursor_val(CURSOR_RATE_BIT | 2);
-    assert_eq!(steal_next(masked, 4), 3);
-    assert_eq!(steal_next(2, 4), 3);
-    let masked_stand = cursor_val(CURSOR_STAND_BIT | 2);
-    assert_eq!(masked_stand, 2);
-    assert_eq!(steal_next(masked_stand, 4), 3);
-    let both = cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
-    assert_eq!(both, 2);
-    assert_eq!(steal_next(both, 4), steal_next(2, 4));
-}
-
-#[test]
-fn rate_claim_wins_once_per_slice() {
-    let mut c = 0u32;
-    assert!(rate_claim(&mut c));
-    assert!(!rate_clear(c));
-    assert!(!rate_claim(&mut c));
-    assert!(!rate_clear(c));
-    assert_eq!(cursor_val(c), 0);
-    let mut d = CURSOR_RATE_BIT | 5;
-    assert!(!rate_claim(&mut d));
-    assert_eq!(cursor_val(d), 5);
-    let mut e = crate::flow_preempt::CURSOR_STAND_BIT | 5;
-    assert!(rate_claim(&mut e));
-    assert!(stand_held(e));
-    assert_eq!(cursor_val(e), 5);
-    assert!(!rate_claim(&mut e));
-}
-
-#[test]
 fn delay_stamp_has_no_count() {
     let (w, c) = delay_stamp(0, 0, 62);
     assert_eq!(w, 62);
@@ -335,12 +285,11 @@ fn delay_stamp_has_no_count() {
 }
 
 #[test]
-fn cursor_store_keeps_rate_plus_stand() {
+fn cursor_store_keeps_stand() {
     use crate::flow_preempt::CURSOR_STAND_BIT;
-    let old = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;
-    assert_eq!(cursor_store(2, old), CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    let old = CURSOR_STAND_BIT | 7;
+    assert_eq!(cursor_store(2, old), CURSOR_STAND_BIT | 2);
     assert_eq!(cursor_store(2, 0), 2);
-    assert_eq!(cursor_store(2, CURSOR_RATE_BIT | 7), CURSOR_RATE_BIT | 2);
     assert_eq!(cursor_store(2, CURSOR_STAND_BIT | 7), CURSOR_STAND_BIT | 2);
     assert_eq!(stand_set(5), CURSOR_STAND_BIT | 5);
     assert!(stand_held(stand_set(5)));
@@ -461,23 +410,22 @@ fn delay_max_concurrent_keeps_bound() {
 }
 
 /*
- * Cursor store keeps fresh flags, so CAS avoids the
- * stale overwrite. Sequential model matches BPF CAS
- * with no race, timing only, see dispatch.
+ * Cursor store keeps the stand flag, so CAS avoids
+ * the stale overwrite. Sequential model matches BPF
+ * CAS with no race, timing only, see dispatch.
  */
 #[test]
 fn cursor_cas_keeps_fresh_flags() {
     use crate::flow_preempt::CURSOR_STAND_BIT;
     let old = 7u32;
-    let fresh = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;
+    let fresh = CURSOR_STAND_BIT | 7;
     let peer = 2u32;
     let stale = cursor_store(peer, old);
     let kept = cursor_store(peer, fresh);
     assert_eq!(stale, 2);
-    assert_eq!(kept, CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    assert_eq!(kept, CURSOR_STAND_BIT | 2);
     assert!(stand_held(kept));
-    assert!(!rate_clear(kept));
-    assert!(rate_clear(stale));
+    assert!(!stand_held(stale));
     assert_eq!(cursor_store(peer, old), cursor_store(peer, old));
     assert_eq!(cursor_val(kept), peer);
 }
@@ -485,8 +433,8 @@ fn cursor_cas_keeps_fresh_flags() {
 /*
  * Split reasons follow bound order pinned, empty,
  * deserved or hog, same, mask, and rate. First fail
- * wins, rate last as the atomic claim. Pinned plus
- * empty count total only at 296B with no reason, so
+ * wins, rate last as the window check. Pinned plus
+ * empty count total only at 272B with no reason, so
  * total covers reasons plus total only. Deserved is
  * 2, group is 3, mask is 4, rate is 5 with armed 1
  * retired frozen.
@@ -527,7 +475,7 @@ fn skip_reason_follows_branch_order() {
  * Skip reason matches the bound gate check. None means
  * all pass with kick, some means first fail wins in
  * pinned, empty, deserved or hog, same, mask, and
- * rate order at 296B.
+ * rate order at 272B.
  */
 #[test]
 fn skip_reason_matches_preempt_ok() {
@@ -537,9 +485,9 @@ fn skip_reason_matches_preempt_ok() {
         let hog = bits & 4 != 0;
         let same = bits & 8 != 0;
         let mask = bits & 16 != 0;
-        let rate = bits & 32 != 0;
-        let ok = preempt_ok(pinned, empty, hog, same, mask, rate);
-        let reason = skip_reason(pinned, empty, hog, same, mask, rate);
+        let rate_ok = bits & 32 != 0;
+        let ok = preempt_ok(pinned, empty, hog, same, mask, rate_ok);
+        let reason = skip_reason(pinned, empty, hog, same, mask, rate_ok);
         assert_eq!(reason.is_none(), ok);
         if !ok {
             assert!(reason.is_some());
@@ -557,7 +505,7 @@ fn skip_reason_matches_preempt_ok() {
 
 /*
  * Deep queues stay quiet past one queued with no
- * storm. Delay dots stay display only since 4.2.41,
+ * storm. Delay dots stay display only with no gate,
  * so armed never gates. Rate holds one kick per
  * slice in the bound gate order.
  */
@@ -675,35 +623,10 @@ fn hog_or_truth_needs_no_time_cap() {
 }
 
 /*
- * Rate claim keeps a single winner per slice. First
- * claim wins, second fails, fresh wins once more with
- * stand kept. Mirrors the BPF fetch OR claim with no
- * check then set.
- */
-#[test]
-fn rate_claim_holds_single_winner_stable() {
-    let mut a = 0u32;
-    assert!(rate_claim(&mut a));
-    assert!(!rate_claim(&mut a));
-    assert!(!rate_clear(a));
-    let mut b = CURSOR_RATE_BIT | 7;
-    assert!(!rate_claim(&mut b));
-    assert_eq!(cursor_val(b), 7);
-    let mut c = 0u32;
-    assert!(rate_claim(&mut c));
-    assert!(!rate_claim(&mut c));
-    let mut d = crate::flow_preempt::CURSOR_STAND_BIT | 3;
-    assert!(rate_claim(&mut d));
-    assert!(stand_held(d));
-    assert_eq!(cursor_val(d), 3);
-    assert!(!rate_claim(&mut d));
-}
-
-/*
  * Skip reason holds bound gate order stable with total
  * only intact. None means all pass with kick, some means
  * first fail wins in pinned, empty, deserved or hog,
- * same, mask, and rate order at 296B. Deserved stays
+ * same, mask, and rate order at 272B. Deserved stays
  * 2, group stays 3, mask stays 4, rate stays 5 with
  * armed 1 retired frozen and total only 6 for pinned
  * plus deep. Empty boundary plus hog OR stay live with

@@ -2,13 +2,13 @@
 /*
  * Slot store helpers
  *
- * Holds the per CPU FIFO slot helpers that mirror the BPF header so behavior
- * stays the same on both sides of the boundary. Each CPU holds two queues
- * plus 2 overflow tails with FIFO only and no knob. The probe maps a
- * deadline to near or overflow, pinned tasks rest in overflow, dispatch
- * drains own plus overflow plus peer steal with same group first and perf
- * only cross second, defer counts capped drains with work left, and the
- * kick chain keeps idle owners moving.
+ * Holds the per CPU bounded LIFO slot helpers that mirror the BPF header so
+ * behavior stays the same on both sides of the boundary. Each CPU holds two
+ * queues plus 2 overflow tails with bounded LIFO at K 8 and no knob. The
+ * probe maps one deadline to near or overflow, pinned tasks rest in
+ * overflow, dispatch drains own plus overflow plus peer steal with same
+ * group first and perf only cross second, defer counts capped drains with
+ * work left, and the kick chain keeps idle owners moving.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -56,6 +56,15 @@ pub const WHEEL_QUANT_LO: u64 = 0xFFFF;
 /* Tokens held per CPU for the sleeper boost. */
 #[cfg(test)]
 pub const TOKEN_MAX: u32 = 255;
+/* Head inserts in one LIFO period at 8 with one tail. */
+#[cfg(test)]
+pub const LIFO_K: u64 = 8;
+/* Inserts in one LIFO period at 9 with 8 heads. */
+#[cfg(test)]
+pub const LIFO_PERIOD: u64 = 9;
+/* LIFO sequences at 2050 with per CPU plus overflow. */
+#[cfg(test)]
+pub const LIFO_NSEQ: u64 = 2050;
 
 /*
  * Deadline with the low 16 bits cleared near 64us
@@ -116,10 +125,10 @@ pub fn token_eligible(clamped: bool, tok: u32, est: u64, burn: u32, err: u64) ->
 }
 
 /*
- * FIFO id of one group overflow with light as
+ * Slot id of one group overflow with light as
  * default. Holds overflow base plus group, so two
- * tails keep arrival order per group with no share.
- * Bad group falls to light with no trap. FIFO only,
+ * tails keep queue order per group with no share.
+ * Bad group falls to light with no trap. Slot only,
  * never vtime.
  */
 #[cfg(test)]
@@ -132,10 +141,10 @@ pub fn slot_overflow_dsq(group: u8) -> u64 {
 }
 
 /*
- * FIFO id of one CPU group with light as default.
+ * Slot id of one CPU group with light as default.
  * Holds base plus CPU times two plus group, so two
  * per CPU keep light and hog apart with no share.
- * Bad group falls to light with no trap. FIFO only,
+ * Bad group falls to light with no trap. Slot only,
  * never vtime. Mirrors the BPF per CPU helper.
  */
 #[cfg(test)]
@@ -250,8 +259,8 @@ pub fn slot_own_cap(budget: u32) -> u32 {
 }
 
 /*
- * Drain up to a cap from one FIFO queue for one CPU.
- * The scan visits every queued task in arrival order
+ * Drain up to a cap from one slot queue for one CPU.
+ * The scan visits every queued task in queue order
  * and moves each live task with the CPU in the mask
  * and with no move failure. Dead, foreign, and failed
  * tasks are skipped with progress, so one bad head
@@ -423,4 +432,37 @@ pub fn steal_pick_fold(
         return Some((dsq, true));
     }
     None
+}
+
+/*
+ * True when one insert takes head with bounded LIFO at K 8. Takes head for 8
+ * of 9 with one tail plus one forced tail at MAX, so fresh work wins fast
+ * with no starve or preempt use. Forced tails at period plus MAX keep
+ * max gap 9 with 8 heads everywhere with wrap, so the bound stays exact
+ * with one compare and no new state. Pure with no BSS use, so BPF and
+ * tests share the period with no drift. Mirrors the BPF take head with
+ * the same modulo plus MAX.
+ */
+#[cfg(test)]
+pub fn lifo_take_head(seq: u32) -> bool {
+    if seq == u32::MAX {
+        return false;
+    }
+    (seq as u64 % LIFO_PERIOD) != LIFO_K
+}
+
+/*
+ * Index of one LIFO sequence with per CPU plus overflow at 2050. Per CPU
+ * holds CPU times 2 plus group, overflow holds 2048 plus group, so total
+ * 2050 matches slot max with no share. Bad group falls to light with no
+ * trap. Pure with no state. Mirrors the BPF index with the same map.
+ */
+#[cfg(test)]
+pub fn lifo_idx(over: bool, cpu: u32, group: u8) -> u32 {
+    let g = if group == crate::flow_group::GROUP_HOG {
+        1
+    } else {
+        0
+    };
+    if over { 2048 + g } else { cpu * 2 + g }
 }

@@ -133,7 +133,7 @@ fn s3_frontier_monotonic_with_wrap_holds() {
     assert_eq!(frontier_max(old, next), next);
     assert_eq!(frontier_step(old, next, true, 1), next);
     assert_eq!(frontier_step(old, next, false, 0), next);
-    let lag = u64::MAX - 2_000_000;
+    let lag = u64::MAX - 22_000_000;
     let top = u64::MAX - 1_000_000;
     assert_eq!(
         clamp_vruntime(lag, top, SLICE_NS),
@@ -246,7 +246,8 @@ fn kick_recent_needs_50us_with_zero_open() {
 /*
  * Coalesce needs q2, idle, recent, and not pinned. Q1, busy, missing, and
  * pinned stay open with a kick. Overflow stays out with no kick use, see the
- * overflow helper. Exiting uses its own idle kick with no coalesce, see exiting helpers.
+ * overflow helper. Exiting uses its own idle kick with no coalesce, see
+ * exiting helpers.
  */
 #[test]
 fn kick_coalesce_needs_q2_idle_recent_unpinned() {
@@ -1405,7 +1406,10 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
     assert_eq!(m2.slice_ns, 1_000_000);
     assert_eq!(m2.delay_win, 0);
     assert!(!m2.delay_armed);
-    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":494,\"slice_ns\":1000000}";
+    let txt3 = concat!(
+        "{\"id\":2,\"running_nice\":10,",
+        "\"running_weight\":494,\"slice_ns\":1000000}"
+    );
     let m3: crate::stats::PerCpuMetrics = serde_json::from_str(txt3).unwrap();
     assert_eq!(m3.slice_ns, 1_000_000);
     assert_eq!(m3.running_nice, 10);
@@ -1440,7 +1444,7 @@ fn facade_matches_weight_helpers() {
 /*
  * Tiered least fallback picks the first allowed in
  * the group with lowest id on ties. Earlier tiers still
- * win. The per CPU FIFO store keeps backlog per CPU,
+ * win. The per CPU slot store keeps backlog per CPU,
  * so per CPU depth spreads the pick with lowest id
  * on ties. Earlier tiers still win when they hit, so
  * the least step only covers the old first fallback.
@@ -1527,7 +1531,7 @@ fn tiered_least_fallback_picks_least() {
 
 /*
  * Pick in group least prefers the selected CPU when allowed and in group, else
- * the least queued in the group. The per CPU FIFO store keeps backlog
+ * the least queued in the group. The per CPU slot store keeps backlog
  * per CPU, so per CPU depth spreads the pick. No allowed CPU in
  * the group yields none for overflow use. Mirrors BPF enqueue pick with live
  * view and frozen bounds.
@@ -1626,7 +1630,7 @@ fn corrected_frontier_feeds_clamp_and_deserved() {
     let (_, dl_target, _) = edf_insert(v, target, slice, est, weight);
     assert!(time_before(dl_target, dl_corrected));
     let gran = crate::flow_preempt::granule_for_weight(weight, slice);
-    let woken_dl = 95_000_000u64;
+    let woken_dl = 100_000_000u64;
     let deserved_target = crate::flow_preempt::deserved(woken_dl, target, gran);
     let deserved_corrected = crate::flow_preempt::deserved(woken_dl, corrected, gran);
     assert!(!deserved_target);
