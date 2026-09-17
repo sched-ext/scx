@@ -27,7 +27,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /*
- * Counters at 296B with bound gate live since 4.2.41.
+ * Counters at 272B with bound gate and live kick detail.
  * Kicks plus deserved plus group plus mask plus rate
  * stay live with armed retired frozen for compat.
  */
@@ -86,7 +86,7 @@ pub struct Metrics {
     #[stat(desc = "Hog to light moves by wake hits")]
     #[serde(default)]
     pub group_wake_promote: u64,
-    #[stat(desc = "Live since 4.2.41, busy preempt kicks")]
+    #[stat(desc = "Busy preempt kicks")]
     #[serde(default)]
     pub preempt_kicks: u64,
     #[stat(desc = "Total busy non-kicks without reason")]
@@ -98,46 +98,31 @@ pub struct Metrics {
     #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_armed: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for undeserved")]
+    #[stat(desc = "Busy no-kicks for undeserved")]
     #[serde(default)]
     pub preempt_skipped_deserved: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for cross group")]
+    #[stat(desc = "Busy no-kicks for cross group")]
     #[serde(default)]
     pub preempt_skipped_group: u64,
-    #[stat(desc = "Live since 4.2.41, defensive mask, expect ~0")]
+    #[stat(desc = "Defensive mask with near zero")]
     #[serde(default)]
     pub preempt_skipped_mask: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for rate held")]
+    #[stat(desc = "Busy no-kicks for rate held")]
     #[serde(default)]
     pub preempt_skipped_rate: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
-    #[serde(default)]
-    pub wheel_skips: u64,
     #[stat(desc = "Tail pins past the horizon")]
     #[serde(default)]
     pub wheel_overflow: u64,
     #[stat(desc = "Sleeper token spends")]
     #[serde(default)]
     pub token_boosts: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
-    #[serde(default)]
-    pub wheel_head_hits: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
-    #[serde(default)]
-    pub wheel_fine_hits: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
-    #[serde(default)]
-    pub wheel_coarse_hits: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
-    #[serde(default)]
-    pub wheel_empty: u64,
     #[stat(desc = "Safety net kicks sent")]
     #[serde(default)]
     pub slot_kicks: u64,
     #[stat(desc = "Lost token races")]
     #[serde(default)]
     pub token_cas_fails: u64,
-    #[stat(desc = "FIFO tasks moved via slots")]
+    #[stat(desc = "Slot tasks moved via slots")]
     #[serde(default)]
     pub slot_moves: u64,
     #[stat(desc = "Capped drains with work left")]
@@ -146,6 +131,12 @@ pub struct Metrics {
     #[stat(desc = "Moves from a cross group peer queue")]
     #[serde(default)]
     pub steal_xmoves: u64,
+    #[stat(desc = "LIFO head inserts at K 8")]
+    #[serde(default)]
+    pub lifo_heads: u64,
+    #[stat(desc = "LIFO tail inserts for bound")]
+    #[serde(default)]
+    pub lifo_bound_hits: u64,
 }
 
 /*
@@ -197,72 +188,36 @@ pub struct PerCpuMetrics {
     /* decodes via the alias for one release. */
     #[serde(default, alias = "tq_ns")]
     pub slice_ns: u64,
-    /* Lifetime active nanos from BPF. Full u64 wrap deltas. */
-    /* Display only for the energy probe plausibility. */
+    /* Lifetime active nanos from BPF. Display only. */
     #[serde(default)]
     pub active_ns: u64,
 }
 
-impl PerCpuMetrics {
-    /*
-     * Active delta since one older card. Full u64 wrap,
-     * so BPF lifetime growth never traps in userspace.
-     */
-    pub fn active_delta(&self, prev: &Self) -> u64 {
-        self.active_ns.wrapping_sub(prev.active_ns)
-    }
-}
-
 /* Default state text of the energy object. Unavailable */
-/* keeps old JSON honest with no silent zero headline. */
+/* keeps old JSON honest with no silent meter. */
 fn default_energy_state() -> String {
     "unavailable".to_string()
 }
 
 /*
- * Energy savings view for the web dashboard. One nested object with defaults on
+ * Energy meter view for the web dashboard. One nested object with defaults on
  * every field, so old JSON without energy still decodes into the unavailable
- * state. Headline, daily, and yearly share one savings ratio from measured
- * package joules. Daily, yearly, and since running energies come from the same
- * saved W over different spans. Trace holds the live derivation in monospace
- * for the page.
+ * state. Since running holds used kWh from package joules since launch.
+ * Live watts holds the last good watts. Trace holds the live derivation in
+ * monospace for the page.
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnergyMetrics {
     /* Probe state. unavailable, baseline, collecting, waiting, backoff. */
     #[serde(default = "default_energy_state")]
     pub state: String,
-    /* True once three accepted pairs back the headline. */
-    #[serde(default)]
-    pub has_headline: bool,
-    /* True with three to four pairs. Yearly stays a projection. */
-    #[serde(default)]
-    pub low_confidence: bool,
-    /* Saved percent from the ratio of sums. Signed. */
-    #[serde(default)]
-    pub headline_pct: f64,
-    /* Accepted pairs in the sums. */
-    #[serde(default)]
-    pub accepted_pairs: u64,
-    /* Rejected pairs kept out of the sums. */
-    #[serde(default)]
-    pub rejected_pairs: u64,
-    /* Daily saved percent. Same ratio as the headline. */
-    #[serde(default)]
-    pub daily_pct: f64,
-    /* Daily saved energy in kWh. */
-    #[serde(default)]
-    pub daily_kwh: f64,
-    /* Yearly saved percent. Same ratio as the headline. */
-    #[serde(default)]
-    pub yearly_pct: f64,
-    /* Yearly saved energy in kWh, a projection. */
-    #[serde(default)]
-    pub yearly_kwh: f64,
-    /* Saved energy since attach in kWh, an estimate. */
+    /* Used energy since launch in kWh, a meter. */
     #[serde(default)]
     pub since_running_kwh: f64,
-    /* Seconds left in the running arm or settle. */
+    /* Last good watts for the live readout. Zero before use. */
+    #[serde(default)]
+    pub live_watts: f64,
+    /* Seconds left in waiting or backoff from wall clock. */
     #[serde(default)]
     pub countdown_s: u64,
     /* Live derivation in monospace for the page. */
@@ -271,20 +226,12 @@ pub struct EnergyMetrics {
 }
 
 impl Default for EnergyMetrics {
-    /* Missing energy means unavailable, never zero headline. */
+    /* Missing energy means unavailable with an empty meter. */
     fn default() -> Self {
         Self {
             state: default_energy_state(),
-            has_headline: false,
-            low_confidence: false,
-            headline_pct: 0.0,
-            accepted_pairs: 0,
-            rejected_pairs: 0,
-            daily_pct: 0.0,
-            daily_kwh: 0.0,
-            yearly_pct: 0.0,
-            yearly_kwh: 0.0,
             since_running_kwh: 0.0,
+            live_watts: 0.0,
             countdown_s: 0,
             trace: String::new(),
         }
@@ -330,7 +277,7 @@ pub struct WebMetrics {
     /* Governor display with EPP and platform suffix. */
     #[serde(default)]
     pub governor: String,
-    /* Energy savings view. Defaults to unavailable. */
+    /* Energy meter view. Defaults to unavailable. */
     #[serde(default)]
     pub energy: EnergyMetrics,
 }
@@ -345,9 +292,9 @@ impl Metrics {
             demote={} promote={} wpromote={} pinfl={} gskip={} \
             pkick={} pskip={} kcoal={} \
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
-            wskips={} wover={} tboost={} \
-            whead={} wfine={} wcoarse={} wempty={} \
-            skicks={} tcas={} smoves={} sdefer={} stealx={}",
+            wover={} tboost={} \
+            skicks={} tcas={} smoves={} sdefer={} stealx={} \
+            lheads={} lbound={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -375,18 +322,15 @@ impl Metrics {
             self.preempt_skipped_group,
             self.preempt_skipped_mask,
             self.preempt_skipped_rate,
-            self.wheel_skips,
             self.wheel_overflow,
             self.token_boosts,
-            self.wheel_head_hits,
-            self.wheel_fine_hits,
-            self.wheel_coarse_hits,
-            self.wheel_empty,
             self.slot_kicks,
             self.token_cas_fails,
             self.slot_moves,
             self.slot_defer,
             self.steal_xmoves,
+            self.lifo_heads,
+            self.lifo_bound_hits,
         )?;
         Ok(())
     }
@@ -437,18 +381,15 @@ impl Metrics {
             preempt_skipped_rate: self
                 .preempt_skipped_rate
                 .wrapping_sub(rhs.preempt_skipped_rate),
-            wheel_skips: self.wheel_skips.wrapping_sub(rhs.wheel_skips),
             wheel_overflow: self.wheel_overflow.wrapping_sub(rhs.wheel_overflow),
             token_boosts: self.token_boosts.wrapping_sub(rhs.token_boosts),
-            wheel_head_hits: self.wheel_head_hits.wrapping_sub(rhs.wheel_head_hits),
-            wheel_fine_hits: self.wheel_fine_hits.wrapping_sub(rhs.wheel_fine_hits),
-            wheel_coarse_hits: self.wheel_coarse_hits.wrapping_sub(rhs.wheel_coarse_hits),
-            wheel_empty: self.wheel_empty.wrapping_sub(rhs.wheel_empty),
             slot_kicks: self.slot_kicks.wrapping_sub(rhs.slot_kicks),
             token_cas_fails: self.token_cas_fails.wrapping_sub(rhs.token_cas_fails),
             slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
             slot_defer: self.slot_defer.wrapping_sub(rhs.slot_defer),
             steal_xmoves: self.steal_xmoves.wrapping_sub(rhs.steal_xmoves),
+            lifo_heads: self.lifo_heads.wrapping_sub(rhs.lifo_heads),
+            lifo_bound_hits: self.lifo_bound_hits.wrapping_sub(rhs.lifo_bound_hits),
         }
     }
 }

@@ -2,8 +2,8 @@
 /*
  * Build helper
  *
- * Adds a warning suppression for the generated kernel header and then builds the BPF object
- * and the userspace bindings.
+ * Adds a warning suppression for the generated kernel header
+ * and then builds the BPF object and the userspace bindings.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

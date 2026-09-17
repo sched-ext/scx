@@ -2,9 +2,9 @@
 /*
  * Validated scheduling constants
  *
- * Holds the validated scheduling constants with defaults that match the shared BPF header.
- * Validation keeps bad values from reaching the BPF object. The slice is fixed at 1ms with
- * no knob.
+ * Holds the validated scheduling constants with defaults that match the
+ * shared BPF header. Validation keeps bad values from reaching the BPF
+ * object. The slice is fixed at 1ms with no knob.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -222,6 +222,8 @@ mod tests {
         assert!(a.is_err());
         let b = ConfigBuilder::default().slice_ns(8_000_000).build();
         assert!(b.is_err());
+        let c = ConfigBuilder::default().slice_ns(20_000_000).build();
+        assert!(c.is_err());
     }
 
     #[test]
@@ -235,9 +237,31 @@ mod tests {
     }
 
     #[test]
+    /*
+     * Summary holds the fixed slice at 1000us with no knob.
+     * Slice plus batch stay stable for the start log.
+     */
     fn describe_is_stable() {
         let s = Config::default().describe();
         assert!(s.contains("slice=1000us"));
         assert!(s.contains("batch=32"));
+    }
+
+    #[test]
+    /*
+     * Defaults match the shared header with the fixed slice at 1ms.
+     * Kick coalesce stays at 50us with no slice use, see flow_select.
+     */
+    fn defaults_match_intf_h() {
+        assert_eq!(
+            Config::default().slice_ns,
+            crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
+        );
+        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
+        assert_eq!(
+            crate::flow_select::KICK_COALESCE_NS,
+            crate::bpf_intf::flow_consts_FLOW_KICK_COALESCE_NS as u64
+        );
+        assert_eq!(crate::flow_select::KICK_COALESCE_NS, 50_000);
     }
 }

@@ -14,7 +14,7 @@
 pub const EST_MIN_NS: u64 = 1;
 /* Upper bound of a per task estimate in nanos. */
 pub const EST_MAX_NS: u64 = 1_000_000_000;
-/* Fixed slice in nanos. */
+/* Fixed slice in nanos at 1ms. */
 pub const SLICE_NS: u64 = 1_000_000;
 /* Running repack holds weight in u16. */
 const _: () = assert!(2048 <= u16::MAX as u64);

@@ -2,9 +2,11 @@
 /*
  * Package energy reads
  *
- * Discovers the RAPL package zone by name, samples the energy counter on the snapshot tick,
- * and turns counter wraps into plain joule deltas. Missing files yield fallback values with
- * no trap, so the scheduler keeps running with the probe parked in the unavailable state.
+ * Discovers the RAPL package zone by name, samples the energy
+ * counter on the snapshot tick, and turns counter wraps into
+ * plain joule deltas. Missing files yield fallback values with
+ * no trap, so the scheduler keeps running with the probe parked
+ * in the unavailable state.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -457,8 +459,10 @@ mod tests {
         );
         let path = z.join("energy_uj");
         let tick = path.clone();
+        /* Hold movement for 2s, far past the 100ms startup pause, */
+        /* so a loaded runner still sees a live counter. */
         let writer = std::thread::spawn(move || {
-            for _ in 0..40 {
+            for _ in 0..400 {
                 std::thread::sleep(Duration::from_millis(5));
                 let cur: u64 = fs::read_to_string(&tick)
                     .ok()

@@ -52,19 +52,22 @@ volatile u16 flow_sibling_by_cpu[1024];
 /* Zero init, so first kick always runs with wrap. */
 /* Enqueue only with no slide on skip, see enqueue. */
 volatile u64 flow_kick_at[1024];
-/* Governor flag for S0 and S1 with zero init strict. Zero keeps 4.2.21 paths */
+/* Last busy kick time per CPU in nanos at 1ms. */
+/* Zero init, so first kick always runs with wrap. */
+/* Enqueue only with no slide on skip, see enqueue. */
+volatile u64 flow_rate_at[1024];
+/* Per queue LIFO sequence at 2050 with BSS zero start. */
+/* Holds one u32 per CPU queue plus two overflow tails, so per CPU holds */
+/* CPU times 2 plus group and overflow holds 2048 plus group with total 2050 */
+/* matching slot max. BSS zero starts at head with no init pass. */
+volatile u32 flow_lifo_seq[2050];
+/* Governor flag for S0 and S1 with zero init strict. Zero keeps strict paths */
 /* bit identical with group and mask isolation. One widens placement to any */
 /* allowed on in group miss with same tier order and bypasses the kick group */
 /* gate with no recount. Mask always wins in both modes with no CLI knob. */
 /* Userspace writes on governor transition only. Single flag with no per CPU */
 /* array. */
 volatile u8 flow_perf_mode;
-/* Probe force for A/B arms with zero init strict. Zero keeps strict paths */
-/* bit identical with group and mask isolation. One widens placement with */
-/* natural hints on the perf arm with no governor write, so the probe */
-/* measures the grouping split with no hint split. Userspace writes on arm */
-/* transition only. Single flag with no per CPU array. */
-volatile u8 flow_probe_perf;
 /* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
 /* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
 /* atomic compare and swap on 32 bits, since 8 bit atomics stay unsupported. */
@@ -204,8 +207,8 @@ static __always_inline void flow_on_cpu_dec(void)
 			    &flow_stats.on_cpu, 0);
 	}
 }
-/* Clear running estimate, pid, nice, and occupant to 0, weight to 1024, */
-/* and rate bit. Atomic clear, so a concurrent claim never loses. */
+/* Clear running estimate, pid, nice, and occupant to 0, weight to 1024. */
+/* Plain stores with no cursor use, see enqueue rate window. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
 	struct flow_cpu_state *st;
@@ -221,8 +224,6 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_nice = 0;
 	st->running_weight = 1024;
 	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-	__sync_fetch_and_and(&st->cursor,
-	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
 /* Clear running only when the pid owns it, so a disable and an exit never */
 /* clears a new owner after a switch. */
@@ -244,8 +245,6 @@ static __always_inline void flow_clear_running_if_owner(
 	st->running_nice = 0;
 	st->running_weight = 1024;
 	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-	__sync_fetch_and_and(&st->cursor,
-	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
 /* Charge one leftover run segment at most once. stopping owns the normal */
 /* charge and clears run at, so a later disable and exit sees zero with no */
@@ -306,8 +305,8 @@ static __always_inline u8 flow_group_live(u32 cpu,
 /* CPU, so depth reads each candidate per CPU queue with one read per */
 /* candidate. The scan keeps mask and group order with lowest id on ties */
 /* by strict less only. Missing reads zero with no trap. Placement only */
-/* scans up to nr CPUs outside the queue store O1 claim with no dispatch */
-/* use. Placement keeps live, constants frozen. */
+/* scans up to nr CPUs, bounded nr<=1024, outside queue-store O(1) with */
+/* no dispatch use. Placement keeps live, constants frozen. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
 {
@@ -428,8 +427,8 @@ static __always_inline s32 flow_free_in_group(
 /* backlog per CPU, so depth reads each candidate per CPU queue plus its */
 /* group overflow tail. The scan keeps mask order with lowest id on ties */
 /* by strict less only, so equal depths keep the first id with no extra */
-/* pass. Placement only scans up to nr CPUs outside the queue store O1 */
-/* claim with no dispatch use. Perf only on in group miss with same rule */
+/* pass. Placement scans up to nr CPUs, bounded nr<=1024, outside */
+/* queue-store O(1) with no dispatch use. Perf only on group miss, same rule */
 /* over the widened set. Mask always wins with no dispatch use. */
 static __always_inline s32 flow_first_allowed(
 	const struct task_struct *p)
@@ -552,7 +551,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			scx_bpf_cpuperf_set(cpu,
 			    (u32)FLOW_CPUPERF_LEVEL);
 	}
-	/* Per CPU queues at 2 times nr plus 2 overflow with FIFO only. One */
+	/* Per CPU queues at 2 times nr plus 2 overflow with bounded LIFO. One */
 	/* bounded pass creates all per CPU ids with a LOCAL_ON check per id, */
 	/* so init pays once with no dispatch cost. Each CPU holds base plus */
 	/* CPU times 2 plus group, overflows hold new base plus group, so groups */
@@ -579,7 +578,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			return ret;
 		}
 	}
-	/* Group overflow tails at 2 with FIFO only. One bounded pass creates */
+	/* Group overflow tails at 2 with bounded LIFO. One bounded pass creates */
 	/* both overflow ids with a LOCAL_ON check per id, so groups stay apart */
 	/* with no share. Needs restart on upgrade with no live move. */
 	bpf_for(cpu, 0, 2) {

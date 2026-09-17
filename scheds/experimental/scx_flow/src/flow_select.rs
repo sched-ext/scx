@@ -24,7 +24,7 @@ pub const KICK_COALESCE_NS: u64 = 50_000;
 
 /*
  * Start peer for one dispatch from the cursor.
- * Masks rate plus stand then steps one with wrap,
+ * Masks stand then steps one with wrap,
  * so repeated passes spread across peers with no
  * hot spot. Mirrors the BPF start read once per
  * dispatch with mask. See src/bpf/dispatch.bpf.c
@@ -66,11 +66,11 @@ pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
 
 /*
  * Start step for one steal scan from a cursor.
- * Masks rate plus stand then steps one with wrap,
+ * Masks stand then steps one with wrap,
  * so this models the per dispatch start read with
  * no queue use. The cursor advance is separate at
  * stride 8 with 4 compare and swap tries that keep
- * rate plus stand, see cursor_store in flow_preempt
+ * stand, see cursor_store in flow_preempt
  * plus src/bpf/dispatch.bpf.c for the advance use.
  */
 #[cfg(test)]
@@ -200,9 +200,9 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
 }
 
 /*
- * Full select model. Mirrors the BPF order of any idle, previous, current, and
- * first. Returns none for overflow use when no CPU allows. Frequency, LLC, and CPU
- * cards stay display only and never feed this choice.
+ * Full select model. Mirrors the BPF order of any idle, previous, current,
+ * and first. Returns none for overflow use when no CPU allows. Frequency,
+ * LLC, and CPU cards stay display only and never feed this choice.
  */
 #[cfg(test)]
 pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -534,7 +534,7 @@ pub fn pick_in_group_least(
 
 /*
  * Least queued allowed CPU in any group for S0 perf.
- * The per CPU FIFO store keeps backlog per CPU, so depth
+ * The per CPU slot store keeps backlog per CPU, so depth
  * reads each candidate per CPU queue plus its group
  * overflow tail. Picks the smallest depth with lowest
  * id on ties by strict less only, so equal depths keep

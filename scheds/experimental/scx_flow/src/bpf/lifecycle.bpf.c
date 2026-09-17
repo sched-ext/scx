@@ -34,8 +34,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		u16 ncnt;
 		/* Pure-EMA hint at M2 uniform both groups. No group branch, so light and */
 		/* hog share the same map from the stored EMA. Cold zero maps to zero until */
-		/* the first climb. Perf arm keeps natural hints with no pin, so the probe */
-		/* measures the grouping split with no hint split. */
+		/* the first climb. Keeps natural hints with no pin, so no hint split. */
 		perf = flow_cpuperf_from_ema(
 		    st->cpuperf_ema);
 		if (scx_bpf_cpuperf_set)
@@ -55,8 +54,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 			st->occupant_group = (u8)FLOW_GROUP_HOG;
 		else
 			st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-		__sync_fetch_and_and(&st->cursor,
-		    ~(u32)FLOW_CURSOR_RATE_BIT);
 		/* Own count and close with no loop. Enqueue stamps max only, so 8 means 8 */
 		/* runnings with no double count. Dual max drops one sample max, decay */
 		/* intact, persists idle, decays at 1/8. Sample reads the per CPU */
@@ -181,7 +178,7 @@ static __always_inline u64 flow_refresh_pressure(s32 cpu)
 }
 /* Burn step for one stop with window, burst, and wake. Burst allowance */
 /* adapts to light depth with 4ms quiet to 2ms mild to 1ms floor during */
-/* flood. Short blocks below 1ms with burn below 4ms count toward 8 for fast */
+/* flood. Short blocks below 1ms with burn below 4ms count toward 8 fast */
 /* promote. A burst at the allowance clears wake hits. A short with burn at */
 /* or past 4ms clears wake hits. A hot window at or past 16ms clears wake */
 /* hits. A middle window at the end clears wake hits with low runs. A low */
@@ -365,10 +362,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    (u32)FLOW_CPUPERF_IDLE;
 				/* M2 maps the decayed EMA. */
 				/* Long idle still maps to zero. */
-				/* Perf arm keeps natural hints */
-				/* with no pin, so the probe */
-				/* measures the grouping split */
-				/* with no hint split. */
+				/* Keeps natural hints with no pin, */
+				/* so no hint split. */
 				if (est)
 					perf =
 					    flow_cpuperf_from_ema(
@@ -463,10 +458,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			/* the decayed EMA with no hard zero. */
 			/* Long sleep decays to zero before */
 			/* the climb, so zero delta maps zero. */
-			/* Perf arm keeps natural hints */
-			/* with no pin, so the probe */
-			/* measures the grouping split */
-			/* with no hint split. */
+			/* Keeps natural hints with no pin, */
+			/* so no hint split. */
 			if (st)
 				perf = flow_cpuperf_from_ema(
 				    st->cpuperf_ema);
