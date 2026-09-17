@@ -766,6 +766,11 @@ struct pack {
 	struct scx_edq edq;
 };
 
+struct core_sched_state {
+	u64 vzero;	/* virtual-time origin for core scheduling */
+	u64 gen;	/* pack empty generation plus one; zero is invalid */
+};
+
 struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
@@ -819,6 +824,7 @@ struct cid_ctx {
  */
 static struct cid_topo __arena *topos;
 static struct cid_ctx __arena *cctxs;
+static struct core_sched_state __arena *core_sched_states;
 static struct scx_cmask __arena *idle_cids;	/* one bit per idle cid */
 static struct scx_cmask __arena *idle_core_llcs; /* LLCs known to have an idle core */
 static struct scx_cmask __arena *queued_cids;	/* one bit per cid with a queued task */
@@ -5033,6 +5039,68 @@ static u64 curr_vruntime_at(pack_t *pk, u64 now)
 }
 
 /*
+ * Return @p's virtual service in the coordinate shared by contenders on an
+ * SMT core. Core scheduling compares tasks selected independently by two cid
+ * runqueues, so their absolute vruntimes are meaningful only relative to the
+ * epoch in which their pack has stayed non-empty. Snapshot a new origin after
+ * the pack empties; continuous contenders then accumulate service from
+ * comparable zeroes, while a task entering a reused cid does not inherit the
+ * old pack's coordinate.
+ *
+ * Unlike fair.c's zero_vruntime_fi, sched_ext is not told when forced idle
+ * starts or ends. This is therefore an ABI-free approximation: the empty
+ * generation supplies a stable epoch, and the running task is projected to
+ * @now because ops.stopping() has not charged its latest service yet.
+ */
+static u64 core_vruntime(const struct task_struct *p, task_ctx_t *tctx, u64 now)
+{
+	pack_t *pk = tctx->se.vpack;
+	struct core_sched_state __arena *state;
+	u64 gen, zero, v = tctx->se.vruntime;
+
+	if (!pk)
+		return v;
+	state = &core_sched_states[pk->cid];
+
+	gen = READ_ONCE(pk->empty_gen) + 1;
+	if (READ_ONCE(state->gen) != gen) {
+		WRITE_ONCE(state->vzero, READ_ONCE(pk->vref));
+		WRITE_ONCE(state->gen, gen);
+	}
+	zero = READ_ONCE(state->vzero);
+
+	if (scx_bpf_task_running(p) && READ_ONCE(pk->curr_w))
+		v = curr_vruntime_at(pk, cid_clock_task_at(pk->cid, now));
+
+	return v - zero;
+}
+
+bool BPF_STRUCT_OPS(cidland_core_sched_before, struct task_struct *a,
+			   struct task_struct *b)
+{
+	task_ctx_t *at, *bt;
+	u64 av, bv, now;
+	bool ar, br;
+
+	TOUCH_ARENA();
+	at = try_lookup_task_ctx(a);
+	bt = try_lookup_task_ctx(b);
+	if (!at || !bt || !at->se.vpack || !bt->se.vpack) {
+		ar = scx_bpf_task_running(a);
+		br = scx_bpf_task_running(b);
+		if (ar != br)
+			return !ar;
+		return time_before(a->scx.runnable_at, b->scx.runnable_at);
+	}
+
+	now = scx_bpf_now();
+	av = core_vruntime(a, at, now);
+	bv = core_vruntime(b, bt, now);
+
+	return time_before(av, bv);
+}
+
+/*
  * Give the entity just picked the protection set_protect_slice() gives
  * fair.c's current entity. The EDQ augmentation supplies the shortest
  * queued request, so protection is bounded by the smallest competitor
@@ -9141,7 +9209,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	mask = (sizeof(struct scx_cmask) + (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = nr * sizeof(struct cid_topo) + nr * sizeof(struct cid_ctx) +
 		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
-		nr * (sizeof(u64) + 6 * sizeof(u32)) + 12 * 64;
+		nr * (sizeof(struct core_sched_state) + sizeof(u64) +
+		      6 * sizeof(u32)) + 13 * 64;
 	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
 	arena_base = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
@@ -9152,6 +9221,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
 
 	topos = arena_carve(nr * sizeof(struct cid_topo), 64);
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
+	core_sched_states = arena_carve(nr * sizeof(struct core_sched_state), 64);
 	idle_cids = arena_carve(mask, 64);
 	idle_core_llcs = arena_carve(mask, 64);
 	queued_cids = arena_carve(mask, 64);
@@ -9166,7 +9236,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	cpu_fork_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_wake_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_asym_span_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !idle_cids || !idle_core_llcs || !queued_cids ||
+	if (!topos || !cctxs || !core_sched_states || !idle_cids ||
+	    !idle_core_llcs || !queued_cids ||
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)
@@ -9266,6 +9337,7 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	.enqueue		= (void *)cidland_enqueue,		\
 	.dequeue		= (void *)cidland_dequeue,		\
 	.tick			= (void *)cidland_tick,			\
+	.core_sched_before	= (void *)cidland_core_sched_before,	\
 	.yield			= (void *)cidland_yield,		\
 	.dispatch		= (void *)cidland_dispatch,		\
 	.runnable		= (void *)cidland_runnable,		\
