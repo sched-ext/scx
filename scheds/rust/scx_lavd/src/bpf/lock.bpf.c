@@ -21,13 +21,12 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 
 	/*
 	 * These hooks are system-wide, so they also fire for RT and DL
-	 * tasks. sched_ext does not manage those, so they have no task_ctx
-	 * and get_task_ctx() would report the miss as an error.
+	 * tasks, which sched_ext never runs and so never boosts.
 	 */
 	if (rt_or_dl_task(p))
 		return;
 
-	taskc = get_task_ctx(p);
+	taskc = find_task_ctx(p);
 
 	if (taskc) {
 		if (!cpuc)
@@ -50,13 +49,12 @@ static void __dec_futex_boost(struct cpu_ctx *cpuc)
 
 	/*
 	 * These hooks are system-wide, so they also fire for RT and DL
-	 * tasks. sched_ext does not manage those, so they have no task_ctx
-	 * and get_task_ctx() would report the miss as an error.
+	 * tasks, which sched_ext never runs and so never boosts.
 	 */
 	if (rt_or_dl_task(p))
 		return;
 
-	taskc = get_task_ctx(p);
+	taskc = find_task_ctx(p);
 
 	if (taskc && test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST)) {
 		if (!cpuc)
@@ -136,24 +134,17 @@ void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc)
  */
 
 /*
- * We trace the following futex calls:
- * - int __futex_wait(u32 *uaddr, unsigned int flags, u32 val, struct hrtimer_sleeper *to, u32 bitset)
- * - int futex_wait_multiple(struct futex_vector *vs, unsigned int count, struct hrtimer_sleeper *to)
- * - int futex_wait_requeue_pi(u32 *uaddr, unsigned int flags, u32 val, ktime_t *abs_time, u32 bitset, u32 *uaddr2)
- *
- * - int futex_wake(u32 *uaddr, unsigned int flags, int nr_wake, u32 bitset)
- * - int futex_wake_op(u32 *uaddr1, unsigned int flags, u32 *uaddr2, int nr_wake, int nr_wake2, int op)
- *
- * - int futex_lock_pi(u32 *uaddr, unsigned int flags, ktime_t *time, int trylock)
- * - int futex_unlock_pi(u32 *uaddr, unsigned int flags)
+ * Futex argument lists can change across kernels. These hooks only need the
+ * return value.
  */
-struct futex_vector;
-struct hrtimer_sleeper;
 
 SEC("?fexit/__futex_wait")
-int BPF_PROG(fexit___futex_wait, u32 *uaddr, unsigned int flags, u32 val, struct hrtimer_sleeper *to, u32 bitset, int ret)
+int BPF_PROG(fexit___futex_wait)
 {
-	if (ret == 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval == 0) {
 		/*
 		 * A futex is acquired.
 		 */
@@ -163,9 +154,12 @@ int BPF_PROG(fexit___futex_wait, u32 *uaddr, unsigned int flags, u32 val, struct
 }
 
 SEC("?fexit/futex_wait_multiple")
-int BPF_PROG(fexit_futex_wait_multiple, struct futex_vector *vs, unsigned int count, struct hrtimer_sleeper *to, int ret)
+int BPF_PROG(fexit_futex_wait_multiple)
 {
-	if (ret == 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval == 0) {
 		/*
 		 * All of futexes are acquired.
 		 *
@@ -180,9 +174,12 @@ int BPF_PROG(fexit_futex_wait_multiple, struct futex_vector *vs, unsigned int co
 }
 
 SEC("?fexit/futex_wait_requeue_pi")
-int BPF_PROG(fexit_futex_wait_requeue_pi, u32 *uaddr, unsigned int flags, u32 val, ktime_t *abs_time, u32 bitset, u32 *uaddr2, int ret)
+int BPF_PROG(fexit_futex_wait_requeue_pi)
 {
-	if (ret == 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval == 0) {
 		/*
 		 * A futex is acquired.
 		 */
@@ -192,9 +189,12 @@ int BPF_PROG(fexit_futex_wait_requeue_pi, u32 *uaddr, unsigned int flags, u32 va
 }
 
 SEC("?fexit/futex_wake")
-int BPF_PROG(fexit_futex_wake, u32 *uaddr, unsigned int flags, int nr_wake, u32 bitset, int ret)
+int BPF_PROG(fexit_futex_wake)
 {
-	if (ret >= 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval >= 0) {
 		/*
 		 * A futex is released.
 		 */
@@ -205,9 +205,12 @@ int BPF_PROG(fexit_futex_wake, u32 *uaddr, unsigned int flags, int nr_wake, u32 
 
 
 SEC("?fexit/futex_wake_op")
-int BPF_PROG(fexit_futex_wake_op, u32 *uaddr1, unsigned int flags, u32 *uaddr2, int nr_wake, int nr_wake2, int op, int ret)
+int BPF_PROG(fexit_futex_wake_op)
 {
-	if (ret >= 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval >= 0) {
 		/*
 		 * A futex is released.
 		 */
@@ -217,9 +220,12 @@ int BPF_PROG(fexit_futex_wake_op, u32 *uaddr1, unsigned int flags, u32 *uaddr2, 
 }
 
 SEC("?fexit/futex_lock_pi")
-int BPF_PROG(fexit_futex_lock_pi, u32 *uaddr, unsigned int flags, ktime_t *time, int trylock, int ret)
+int BPF_PROG(fexit_futex_lock_pi)
 {
-	if (ret == 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval == 0) {
 		/*
 		 * A futex is acquired.
 		 */
@@ -229,9 +235,12 @@ int BPF_PROG(fexit_futex_lock_pi, u32 *uaddr, unsigned int flags, ktime_t *time,
 }
 
 SEC("?fexit/futex_unlock_pi")
-int BPF_PROG(fexit_futex_unlock_pi, u32 *uaddr, unsigned int flags, int ret)
+int BPF_PROG(fexit_futex_unlock_pi)
 {
-	if (ret == 0) {
+	u64 retval;
+
+	bpf_get_func_ret(ctx, &retval);
+	if ((s32)retval == 0) {
 		/*
 		 * A futex is released.
 		 */
