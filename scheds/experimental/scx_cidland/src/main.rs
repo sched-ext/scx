@@ -229,21 +229,30 @@ struct Opts {
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// Schedule the cpu controller's cgroups as groups.
+    /// Do not schedule the cpu controller's cgroups as groups.
     ///
-    /// A cgroup then competes with its siblings at its cpu.weight and its
+    /// By default, a cgroup competes with its siblings at its cpu.weight and its
     /// tasks share what it gets, the way fair.c's group scheduling does, with
     /// cpu.weight meaning the weight per active CPU (fair.c's default
     /// cgroup_mode, "concur").
     ///
-    /// Off by default: tasks are scheduled on their nice levels alone and
-    /// cpu.weight is ignored. Keeping the group loads and effective weights
-    /// up to date costs every wakeup of a task in a nested cgroup a walk of
-    /// its hierarchy, which on a systemd machine is every task, and shows up
-    /// as wakeup latency and throughput.
+    /// This schedules tasks on their nice levels alone and ignores cpu.weight.
+    /// It avoids walking a nested cgroup hierarchy as tasks wake and sleep,
+    /// trading the cpu controller's isolation semantics for some throughput.
     ///
-    /// Needs a kernel built with CONFIG_EXT_GROUP_SCHED.
-    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    /// Group scheduling needs a kernel built with CONFIG_EXT_GROUP_SCHED. If
+    /// the running kernel lacks it, cidland falls back to this behavior.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_cgroups: bool,
+
+    /// Deprecated compatibility alias; cgroup scheduling is already enabled.
+    #[clap(
+        short = 'g',
+        long,
+        hide = true,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "disable_cgroups"
+    )]
     enable_cgroups: bool,
 
     /// Ignore cpu.max while scheduling cgroups as groups.
@@ -254,7 +263,7 @@ struct Opts {
     /// and cpu.idle in place, which is what the comparison against a kernel
     /// with no bandwidth control needs.
     ///
-    /// Has no effect without --enable-cgroups.
+    /// Has no further effect with --disable-cgroups.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_cpu_max: bool,
 
@@ -636,8 +645,8 @@ fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
         });
         if count > 0 {
             warn!(
-                "{} cgroup(s) set cpu.max, e.g. {}, which is ignored: the bandwidth \
-                 of a cgroup is held to only with --enable-cgroups and without \
+                "{} cgroup(s) set cpu.max, e.g. {}, which is ignored: cgroup \
+                 bandwidth control is disabled by --disable-cgroups or \
                  --disable-cpu-max",
                 count,
                 example.unwrap_or_default()
@@ -648,12 +657,12 @@ fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
     if requested {
         if !kernel_support {
             warn!(
-                "--enable-cgroups: the kernel has no sched_ext cgroup support \
+                "the kernel has no sched_ext cgroup support \
                  (CONFIG_EXT_GROUP_SCHED), cgroups are not scheduled as groups"
             );
         } else if !cpu_controller {
             warn!(
-                "--enable-cgroups: the cpu controller is not enabled in {}, \
+                "the cpu controller is not enabled in {}, \
                  every task is scheduled as part of the root cgroup",
                 root.join("cgroup.subtree_control").display()
             );
@@ -670,8 +679,8 @@ fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
     });
     if count > 0 {
         warn!(
-            "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored without \
-             --enable-cgroups",
+            "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored with \
+             --disable-cgroups",
             count,
             example.unwrap_or_default()
         );
@@ -802,12 +811,13 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
         skel.struct_ops.cidland_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
 
-        // Schedule cgroups as groups only when asked to and when the kernel
+        // Schedule cgroups as groups by default when the kernel
         // has cpu controller support for sched_ext to hook into. Detaching
         // the callbacks from the struct_ops keeps the kernel from delivering
         // them at all, and lets the scheduler load on a kernel whose
         // sched_ext_ops_cid has no cgroup members to bind them to.
-        let cgroup_enabled = opts.enable_cgroups && (cpuctl_names || cgroup_names);
+        let cgroup_requested = opts.enable_cgroups || !opts.disable_cgroups;
+        let cgroup_enabled = cgroup_requested && (cpuctl_names || cgroup_names);
 
         // cpu.max arrived after the rest of the cpu controller's callbacks, so
         // it is probed on its own: a kernel that delivers cpu.weight may still
@@ -820,7 +830,7 @@ impl<'a> Scheduler<'a> {
         let bw_support = compat::struct_has_field("sched_ext_ops_cid", bw_field).unwrap_or(false);
         let cpu_max_enabled = cgroup_enabled && !opts.disable_cpu_max && bw_support;
         check_cgroup_support(
-            opts.enable_cgroups,
+            cgroup_requested,
             cpuctl_names || cgroup_names,
             cpu_max_enabled,
         );
@@ -843,7 +853,7 @@ impl<'a> Scheduler<'a> {
                 "cgroup scheduling: on ({}_* callbacks)",
                 if cgroup_names { "cgroup" } else { "cpuctl" }
             );
-            if opts.enable_cgroups && !opts.disable_cpu_max && !bw_support {
+            if cgroup_requested && !opts.disable_cpu_max && !bw_support {
                 warn!("the kernel has no ops.{bw_field}(), cpu.max is ignored");
             }
         }

@@ -336,20 +336,20 @@ be turned off on the command line to compare the two rules against each other.
    through `cpu_util_cfs_boost()`. `--disable-cpufreq` leaves the governor
    alone.
 
- - **cgroup scheduling.** Off by default: tasks are scheduled on their nice
-   levels alone and `cpu.weight` is ignored. `--enable-cgroups` schedules the
-   cpu controller's cgroups as groups the way `fair.c` does since it moved to a
-   single runqueue: every task stays in its cid's queue at an effective weight,
-   its nice weight scaled by `shares / load` at every level of its hierarchy,
-   and a group's shares on a cid are the load-proportional part of its
-   `cpu.weight` scaled by how many CPUs' worth of tasks it runs (`fair.c`'s
-   default `cgroup_mode`, "concur"). Keeping the group loads and effective
-   weights current costs every wakeup of a task in a nested cgroup a walk of
-   its hierarchy, which on a systemd machine is every task: about 2% of
-   throughput and a few microseconds of wakeup latency in schbench from a
-   depth-3 session scope. The scheduler warns at startup when some cgroup sets
-   `cpu.weight` while this is off, and when it is on but the kernel has no
-   sched_ext cgroup support or the cpu controller is not enabled.
+ - **cgroup scheduling.** On by default, as `CONFIG_FAIR_GROUP_SCHED` normally
+   is for `fair.c`: the cpu controller's cgroups compete as groups, every task
+   staying in its cid's queue at an effective weight made from its nice weight
+   scaled by `shares / load` at every level of its hierarchy. A group's shares
+   on a cid are the load-proportional part of its `cpu.weight` scaled by how
+   many CPUs' worth of tasks it runs (`fair.c`'s default `cgroup_mode`,
+   "concur"). Keeping the group loads and effective weights current costs every
+   wakeup of a task in a nested cgroup a walk of its hierarchy, which on a
+   systemd machine is nearly every task. A depth-3 hierarchy reduced saturated
+   schbench throughput by about 1% on a 24-CPU machine and 3% on a 352-CPU
+   Olympus system. `--disable-cgroups` avoids that cost by scheduling tasks on
+   their nice levels alone and ignoring `cpu.weight`. The scheduler warns when
+   this would ignore a non-default weight, or when the kernel has no sched_ext
+   cgroup support or the cpu controller is not enabled.
 
  - **`cpu.max`.** A cgroup runs for at most its quota in every period, plus
    what it carried into the period up to its burst, and is held to the limits
@@ -384,10 +384,11 @@ be turned off on the command line to compare the two rules against each other.
    cidland stays under the limit where `fair.c` runs a little over it, and is
    up to about a tenth under at a small quota: what a cid holds and does not
    use is stranded until the sweep comes by for it, where `fair.c` gives it
-   back as the last task leaves. Rides on `--enable-cgroups`;
-   `--disable-cpu-max` turns it off, and a cpu.max nobody reads is warned about
-   at startup. A kernel without `ops.cpuctl_set_bandwidth()` gets the warning
-   too and the callback is left unbound.
+   back as the last task leaves. `--disable-cgroups` turns off all group
+   scheduling; `--disable-cpu-max` turns only bandwidth control off. A cpu.max
+   nobody reads is warned about at startup. A kernel without
+   `ops.cpuctl_set_bandwidth()` gets the warning too and the callback is left
+   unbound.
 
  - **Asymmetric capacity and packing.** Capacity and CPU priority are separate
    kernel policies. The default capacity comes from the kernel's exported
