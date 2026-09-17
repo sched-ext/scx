@@ -971,28 +971,73 @@ static __always_inline u32 cmask_next_and_set_wrap(const struct scx_cmask __aren
 	return found < start ? found : a_end;
 }
 
-/* per-cpu rotor for cmask_any_distribute() */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, u32);
-} cmask_distribute_rotor __weak SEC(".maps");
+/*
+ * The distribute helpers rotate through one slot per cid, a cacheline each so
+ * picks on one CPU do not bounce the line of another. A missing allocation is a
+ * setup bug and aborts the scheduler. On a CPU outside the scheduler's cid
+ * space the helpers fall back to the first matching cid.
+ *
+ * TODO: The slots are one allocation without node placement. Move them to a
+ * per-cid arena allocator once the library has one, for node-local slots
+ * without the cacheline padding.
+ */
+struct cmask_rotor_slot {
+	u32 cid;
+} __attribute__((aligned(SCX_CACHELINE_SIZE)));
+
+struct cmask_rotor_slot __arena *cmask_distribute_rotors __weak;
+
+/**
+ * cmask_distribute_init - Allocate the distribute rotor from @map
+ * @map: the scheduler's arena map
+ *
+ * The shared arena init calls this once. A scheduler with its own arena calls
+ * it before the first distribute pick. On a kernel without the cid kfuncs
+ * nothing can pick, so the call allocates nothing and succeeds. Return 0 on
+ * success, -ENOMEM if the allocation fails.
+ */
+static __always_inline int cmask_distribute_init(void *map)
+{
+	u64 size;
+	u32 pages;
+
+	/* no cid kfuncs means no picks and nothing to allocate */
+	if (!bpf_ksym_exists(scx_bpf_nr_cids))
+		return 0;
+
+	size = scx_bpf_nr_cids() * sizeof(*cmask_distribute_rotors);
+	pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+	cmask_distribute_rotors = bpf_arena_alloc_pages(map, NULL, pages, NUMA_NO_NODE, 0);
+	return cmask_distribute_rotors ? 0 : -ENOMEM;
+}
+
+static __always_inline u32 __arena *__cmask_distribute_rotor(void)
+{
+	s32 cid = scx_bpf_this_cid();
+
+	if (unlikely(!cmask_distribute_rotors)) {
+		scx_bpf_error("cmask distribute rotor not allocated");
+		return NULL;
+	}
+	if (cid < 0)
+		return NULL;
+	return &cmask_distribute_rotors[cid].cid;
+}
 
 /**
  * cmask_any_distribute - Pick a set cid, spreading successive picks
  * @m: cmask to pick from
  *
- * Counterpart of bpf_cpumask_any_distribute(): a per-cpu rotor makes successive
+ * Counterpart of bpf_cpumask_any_distribute(): a per-cid rotor makes successive
  * picks rotate through the set cids instead of repeating the first one. Returns
  * cmask_end(@m) if @m is empty.
  */
 static __always_inline u32 cmask_any_distribute(const struct scx_cmask __arena *m)
 {
-	u32 zero = 0, pick;
-	u32 *rotor;
+	u32 __arena *rotor = __cmask_distribute_rotor();
+	u32 pick;
 
-	if (unlikely(!(rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero))))
+	if (unlikely(!rotor))
 		return cmask_first_set(m);
 
 	pick = cmask_next_set_wrap(m, *rotor + 1);
@@ -1013,10 +1058,10 @@ static __always_inline u32 cmask_any_distribute(const struct scx_cmask __arena *
 static __always_inline u32 cmask_any_and_distribute(const struct scx_cmask __arena *a,
 						    const struct scx_cmask __arena *b)
 {
-	u32 zero = 0, pick;
-	u32 *rotor;
+	u32 __arena *rotor = __cmask_distribute_rotor();
+	u32 pick;
 
-	if (unlikely(!(rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero))))
+	if (unlikely(!rotor))
 		return cmask_next_and_set(a, b, a->base);
 
 	pick = cmask_next_and_set_wrap(a, b, *rotor + 1);
@@ -1029,14 +1074,16 @@ static __always_inline u32 cmask_any_and_distribute(const struct scx_cmask __are
  * cmask_distribute_rotor_pos - Last cid picked by the distribute helpers
  *
  * For callers that anchor scans of their own on the shared rotor. Returns 0
- * when nothing has been picked on this cpu yet.
+ * when nothing has been picked on this cid yet or the CPU is outside the cid
+ * space.
  */
 static __always_inline u32 cmask_distribute_rotor_pos(void)
 {
-	u32 zero = 0;
-	u32 *rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero);
+	u32 __arena *rotor = __cmask_distribute_rotor();
 
-	return likely(rotor) ? *rotor : 0;
+	if (unlikely(!rotor))
+		return 0;
+	return *rotor;
 }
 
 /*

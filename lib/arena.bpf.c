@@ -70,6 +70,12 @@ int arena_init(struct arena_init_args *args)
 		return ret;
 	}
 
+	ret = cmask_distribute_init(&arena);
+	if (ret) {
+		bpf_printk("cmask_distribute_init failed with %d", ret);
+		return ret;
+	}
+
 	ret = scx_percpu_storage_init();
 	if (ret) {
 		bpf_printk("scx_percpu_storage_init failed with %d", ret);
