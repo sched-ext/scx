@@ -9,39 +9,39 @@ use crate::bpf_intf;
 use crate::bpf_intf::*;
 use crate::bpf_skel::*;
 
+use std::ffi::CStr;
 use std::ffi::c_int;
 use std::ffi::c_ulong;
-use std::ffi::CStr;
 
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Once;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 
 use plain::Plain;
 use procfs::process::all_processes;
 
-use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 
 use libc::{c_char, pthread_self, pthread_setschedparam, sched_param};
 
 #[cfg(target_env = "musl")]
 use libc::timespec;
 
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::compat;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
 
 use scx_rustland_core::ALLOCATOR;
 
@@ -518,7 +518,7 @@ impl<'cb> BpfScheduler<'cb> {
     // Receive a task to be scheduled from the BPF dispatcher.
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         let bss_data = self.skel.maps.bss_data.as_mut().unwrap();
-        
+
         // Try to consume the first task from the ring buffer.
         match self.queued.consume_raw_n(1) {
             0 => {
