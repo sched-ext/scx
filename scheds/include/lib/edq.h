@@ -23,6 +23,8 @@ struct scx_edq_node {
 	u64 deadline;
 	u64 eligibility;
 	u64 min_eligibility;
+	u64 slice;
+	u64 min_slice;
 	u64 seq;
 	u32 height;
 };
@@ -37,8 +39,8 @@ typedef struct scx_edq_task __arena scx_edq_task_t;
 
 /*
  * A deadline-ordered intrusive AVL tree augmented with the minimum
- * eligibility value of every subtree. The queue itself can be embedded in
- * another arena object, avoiding a per-queue allocation.
+ * eligibility value and shortest slice of every subtree. The queue itself
+ * can be embedded in another arena object, avoiding a per-queue allocation.
  *
  * All queue operations must run with preemption disabled. EDQ deliberately
  * leaves context protection to its caller so sched_ext callbacks which
@@ -49,6 +51,8 @@ struct scx_edq {
 	scx_edq_node_t *first;
 	/* Lockless advisory snapshot for deadline-only policy decisions. */
 	u64 first_deadline;
+	/* Lockless advisory input to protection setup. */
+	u64 min_slice;
 	u32 lock;
 	u64 nr;
 	u64 seq;
@@ -57,7 +61,7 @@ struct scx_edq {
 #ifdef __BPF__
 int scx_edq_insert(scx_edq_t __arg_arena *edq,
 		    scx_edq_task_t __arg_arena *task,
-		    u64 deadline, u64 eligibility);
+		    u64 deadline, u64 eligibility, u64 slice);
 int scx_edq_remove(scx_edq_t __arg_arena *edq,
 		    scx_edq_task_t __arg_arena *task);
 int scx_edq_try_remove(scx_edq_t __arg_arena *edq,
@@ -68,7 +72,8 @@ u64 scx_edq_pop_first_eligible(scx_edq_t __arg_arena *edq, u64 cutoff,
 u64 scx_edq_pop_first_eligible_or_first(scx_edq_t __arg_arena *edq,
 					 u64 cutoff, bool hold);
 int scx_edq_try_first_eligible_deadline(scx_edq_t __arg_arena *edq, u64 cutoff,
-					 u64 *deadline __arg_nonnull);
+				     u64 *deadline __arg_nonnull,
+				     u64 *min_slice __arg_nonnull);
 u64 scx_edq_peek_hold(scx_edq_t __arg_arena *edq);
 int scx_edq_try_peek_hold(scx_edq_t __arg_arena *edq, u64 *task __arg_nonnull);
 int scx_edq_try_peek_nth_hold(scx_edq_t __arg_arena *edq, u32 nth,
@@ -88,6 +93,18 @@ static __always_inline int scx_edq_first_deadline(scx_edq_t __arg_arena *edq,
 {
 	*deadline = READ_ONCE(edq->first_deadline);
 	return READ_ONCE(edq->nr) ? 0 : -ENOENT;
+}
+
+/*
+ * Lockless snapshot of the shortest slice for initial protection setup. A
+ * shorter task entering concurrently also clips protection from the enqueue
+ * path before becoming visible in the tree.
+ */
+static __always_inline int scx_edq_min_slice(scx_edq_t __arg_arena *edq,
+					     u64 *min_slice)
+{
+	*min_slice = READ_ONCE(edq->min_slice);
+	return *min_slice ? 0 : -ENOENT;
 }
 
 static __always_inline void scx_edq_task_hold(scx_edq_task_t __arg_arena *task)
