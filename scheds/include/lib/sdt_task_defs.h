@@ -96,6 +96,7 @@ struct scx_alloc_stats {
 	__u64		free_ops;
 	__u64		active_allocs;
 	__u64		arena_pages_used;
+	__u64		alloc_nomem;	/* allocations the kernel refused a page for */
 };
 
 struct scx_allocator {

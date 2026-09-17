@@ -25,6 +25,34 @@ struct scx_alloc_stack __arena *prealloc_stack;
 static __u64 zero = 0;
 
 /*
+ * Workaround for a kernel problem: bpf_arena_alloc_pages() can fail from a
+ * sleepable program although memory is available. Since commit b8467290edab
+ * ("bpf: arena: make arena kfuncs any context safe") the kernel hands out arena
+ * pages under the arena's raw spinlock with interrupts disabled, so they come
+ * from alloc_pages_nolock() whatever the caller's context: a trylock on the
+ * per-CPU and zone free lists, no reclaim, and NULL as soon as another CPU
+ * holds them. A sleepable caller should never see that, and the fix belongs in
+ * the kernel; until the kernel has it, retry a bounded number of times before
+ * treating the failure as out of memory, since the contention it comes from is
+ * over in microseconds.
+ */
+#define ARENA_ALLOC_PAGES_RETRIES	64
+
+static void __arena *arena_alloc_pages_retry(__u64 nr_pages)
+{
+	void __arena *mem = NULL;
+	__u32 i;
+
+	bpf_for(i, 0, ARENA_ALLOC_PAGES_RETRIES) {
+		mem = bpf_arena_alloc_pages(&arena, NULL, nr_pages, NUMA_NO_NODE, 0);
+		if (mem)
+			break;
+	}
+
+	return mem;
+}
+
+/*
  * XXX Hack to get the verifier to find the arena for sdt_exit_task.
  * As of 6.12-rc5, The verifier associates arenas with programs by
  * checking LD.IMM instruction operands for an arena and populating
@@ -116,7 +144,7 @@ int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 
 	bpf_spin_unlock(&alloc_lock);
 
-	slab = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
+	slab = arena_alloc_pages_retry(1);
 	if (slab == NULL)
 		return -ENOMEM;
 
@@ -221,7 +249,7 @@ void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 	bpf_spin_unlock(&alloc_lock);
 
 	nr_pages = div_round_up(max_elems * elem_size, PAGE_SIZE);
-	slab = bpf_arena_alloc_pages(&arena, NULL, nr_pages, NUMA_NO_NODE, 0);
+	slab = arena_alloc_pages_retry(nr_pages);
 	if (!slab)
 		return NULL;
 
@@ -313,10 +341,8 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size, __u64 align)
 		if (ret != 0)
 			return ret;
 
-		prealloc_stack = bpf_arena_alloc_pages(&arena, NULL,
-						       div_round_up(sizeof(*prealloc_stack),
-								    PAGE_SIZE),
-						       NUMA_NO_NODE, 0);
+		prealloc_stack = arena_alloc_pages_retry(div_round_up(sizeof(*prealloc_stack),
+								      PAGE_SIZE));
 		if (prealloc_stack == NULL)
 			return -ENOMEM;
 	}
@@ -595,7 +621,14 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	/* On success, call returns with the lock taken. */
 	ret = scx_alloc_attempt(stack);
 	if (ret != 0) {
-		scx_bpf_error("scx_alloc_attempt failed with %d\n", ret);
+		/*
+		 * The kernel would not hand out a page even after the retries:
+		 * free memory is at the zone's minimum watermark and this
+		 * allocator cannot wait for reclaim. Fail this allocation, not
+		 * the scheduler: the caller reports -ENOMEM and one fork fails,
+		 * where an scx_bpf_error() would take every task with it.
+		 */
+		__sync_fetch_and_add(&alloc_stats.alloc_nomem, 1);
 		return (u64)NULL;
 	}
 
@@ -617,8 +650,9 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	if (!data) {
 		data = scx_alloc_from_pool_sleepable(&alloc->pool);
 		if (!data) {
+			/* As above: one failed allocation, not a dead scheduler. */
 			scx_alloc_free_idx(alloc, idx);
-			scx_bpf_error("failed to allocate data from pool");
+			__sync_fetch_and_add(&alloc_stats.alloc_nomem, 1);
 			return (u64)NULL;
 		}
 	}
@@ -681,9 +715,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		 * allocation memory.
 		 */
 
-		memory = bpf_arena_alloc_pages(&arena, NULL,
-					       scx_static.max_alloc_bytes / PAGE_SIZE,
-					       NUMA_NO_NODE, 0);
+		memory = arena_alloc_pages_retry(scx_static.max_alloc_bytes / PAGE_SIZE);
 		if (!memory)
 			return (u64)NULL;
 
@@ -727,7 +759,7 @@ int scx_static_init(size_t alloc_pages)
 	size_t max_bytes = alloc_pages * PAGE_SIZE;
 	void __arena *memory;
 
-	memory = bpf_arena_alloc_pages(&arena, NULL, alloc_pages, NUMA_NO_NODE, 0);
+	memory = arena_alloc_pages_retry(alloc_pages);
 	if (!memory)
 		return -ENOMEM;
 
@@ -926,7 +958,7 @@ int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nstk_s
 	if (!stack)
 		return -EINVAL;
 
-	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nstk_segs * nr_pages, NUMA_NO_NODE, 0);
+	mem = (__u64)arena_alloc_pages_retry(nstk_segs * nr_pages);
 	if (!mem)
 		return -ENOMEM;
 
