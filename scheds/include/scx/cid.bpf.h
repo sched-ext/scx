@@ -748,7 +748,7 @@ static __always_inline u32 cmask_first_set(const struct scx_cmask __arena *m)
 
 #define cmask_for_each(cid, m)							\
 	for ((cid) = cmask_first_set(m);					\
-	     (cid) < (m)->base + (m)->nr_cids;					\
+	     (cid) < (m)->base + (m)->nr_cids && can_loop;			\
 	     (cid) = cmask_next_set((m), (cid) + 1))
 
 /*
@@ -805,7 +805,8 @@ static __always_inline bool cmask_subset(const struct scx_cmask __arena *a,
 static __always_inline u32 cmask_weight(const struct scx_cmask __arena *m)
 {
 	u32 nr_words, i;
-	u32 count = 0;
+	/* callers compare the sum, see bpf_arena_loop_zero */
+	u32 count = bpf_arena_loop_zero;
 
 	if (!m->nr_cids)
 		return 0;

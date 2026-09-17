@@ -25,6 +25,14 @@
  */
 static volatile u32 bpf_arena_loop_one = 1;
 
+/*
+ * A loop-carried accumulator that a caller later compares is kept precise, and
+ * a precise scalar whose range grows every iteration keeps a may_goto loop from
+ * converging. Initializing it from this zero makes it unknown from the first
+ * iteration, so every pass through the loop head looks the same.
+ */
+static volatile u32 bpf_arena_loop_zero = 0;
+
 #define __bpf_arena_loop_start(var, start)				\
 	({								\
 		_Static_assert(sizeof(var) <= sizeof(u32),		\
