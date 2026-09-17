@@ -1502,7 +1502,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * if the task can run on either active or overflow set,
 		 * try another task.
 		 */
-		taskc = get_task_ctx(p);
+		taskc = find_task_ctx(p);
 		if(taskc &&
 		(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
 		bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
@@ -1618,7 +1618,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	else
 		reset_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
 
-	waker_taskc = get_task_ctx(waker);
+	waker_taskc = find_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
 		 * In this case, the waker could be an idle task
@@ -2174,7 +2174,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	 *   https://man7.org/linux/man-pages/man2/sched_setscheduler.2.html
 	 */
 	parent = bpf_task_from_pid(p->real_parent->pid);
-	if (parent && (taskc_parent = get_task_ctx(parent))) {
+	bpf_rcu_read_lock();
+	if (parent && (taskc_parent = find_task_ctx(parent))) {
 		/* Do not inherit cgroup status. */
 		for (i = 0; i < sizeof(taskc->atq) && can_loop; i++)
 			((char __arena *)taskc)[i] = 0;
@@ -2193,6 +2194,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		taskc->avg_runtime_invr = sys_stat.slice_wall;
 		taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt;
 	}
+
+	bpf_rcu_read_unlock();
 
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
@@ -2248,12 +2251,12 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	/*
 	 * Mark the task dead in the bandwidth-throttle queues before freeing
 	 * taskc. Concurrent drains or cgroup moves that already hold the task
-	 * must finish before scx_task_free() releases the arena storage.
+	 * must finish before the arena storage can be reclaimed.
 	 */
 	if (enable_cpu_bw && taskc)
 		scx_cgroup_bw_cancel((u64)taskc, SCX_CGROUP_BW_CANCEL_DROP);
 
-	scx_task_free(p);
+	scx_task_free_rcu(p);
 	return 0;
 }
 
@@ -2832,7 +2835,7 @@ int set_aggressive_migration(void)
 	cpuc = get_cpu_ctx();
 	if (cpuc &&
 	    (curr = bpf_get_current_task_btf()) &&
-	    (taskc = get_task_ctx_curcpu(curr, cpuc)) &&
+	    (taskc = find_task_ctx(curr)) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		set_task_flag(taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE);

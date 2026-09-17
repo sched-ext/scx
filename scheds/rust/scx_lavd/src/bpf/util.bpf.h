@@ -55,18 +55,24 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
 }
 
 /*
- * task_ctx lookup with per-CPU cache.
+ * Two lookups, chosen by which task a program is asking about.
  *
- * get_task_ctx_curcpu(p, cpuc) -- @cpuc MUST be the current CPU's cpu_ctx
- * (i.e. obtained via get_cpu_ctx(), not get_cpu_ctx_id(...) or
- * get_cpu_ctx_task(...) for an arbitrary CPU). Misuse silently corrupts
- * the cache of a remote CPU and racing reads can return torn results.
+ * get_task_ctx() is for the task a scheduler callback was invoked for. The
+ * kernel keeps that task alive across the callback, its context must exist, and
+ * the callback runs with preemption disabled, so the lookup may cache the
+ * result in this CPU's cpu_ctx and treats a miss as an error.
+ * get_task_ctx_curcpu() is the same with the current CPU's cpu_ctx the caller
+ * already holds.
  *
- * get_task_ctx(p) is a foot-gun-free wrapper that always uses
- * get_cpu_ctx() internally.
+ * find_task_ctx() is for every other task: wakers, DSQ candidates, the parent
+ * in init_task() and the current task in tracing hooks. Those may have no
+ * context or may exit concurrently, so it returns NULL instead of reporting the
+ * miss on the error stream, and it never touches the cache, because a
+ * preemptible or sleepable caller can tear a cache entry or write another
+ * CPU's. Keep the returned pointer inside one RCU read-side critical section.
  */
 struct cpu_ctx;
-u64 __get_task_ctx_slowpath(struct task_struct *p, struct cpu_ctx *cpuc);
+u64 __find_task_ctx(struct task_struct *p, struct cpu_ctx *cpuc, bool quiet);
 
 static __always_inline u64
 __get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx *cpuc)
@@ -83,12 +89,16 @@ __get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx *cpuc)
 		    cpuc->cached_pid == p->pid)
 			return cpuc->cached_taskc_raw;
 	}
-	return __get_task_ctx_slowpath(p, cpuc);
+	return __find_task_ctx(p, cpuc, false);
 }
 
 #define get_task_ctx_curcpu(p, cpuc) \
 	((task_ctx *)__get_task_ctx_curcpu((p), (cpuc)))
 #define get_task_ctx(p)	get_task_ctx_curcpu((p), get_cpu_ctx())
 
+static __always_inline task_ctx *find_task_ctx(struct task_struct *p)
+{
+	return (task_ctx *)__find_task_ctx(p, NULL, true);
+}
 
 #endif /* __UTIL_H */

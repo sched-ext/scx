@@ -63,10 +63,9 @@ struct {
 } cpu_ctx_stor SEC(".maps");
 
 __hidden
-u64 __get_task_ctx_slowpath(struct task_struct __arg_trusted *p,
-			    struct cpu_ctx *cpuc)
+u64 __find_task_ctx(struct task_struct __arg_trusted *p, struct cpu_ctx *cpuc, bool quiet)
 {
-	u64 raw = (u64)scx_task_data(p);
+	u64 raw = (u64)(quiet ? __scx_task_data(p) : scx_task_data(p));
 
 	if (cpuc && raw) {
 		cpuc->cached_task = (u64)p;
