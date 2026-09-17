@@ -279,6 +279,43 @@ volatile u64 user_util_snapshot_at __hot_written;
 UEI_DEFINE(uei);
 
 /*
+ * Arena pages in use, counted where they are handed out. Every allocator
+ * the BPF side uses, the tables carved at init, the library's static and
+ * task context pools, ends in bpf_arena_alloc_pages(), and the kernel only
+ * started to account arena pages in the map's memlock in 7.3. Loaded and
+ * attached only when the usage is reported, --stats: user space turns
+ * them on before load, sets @arena_map_id before the first allocation and
+ * reads the two counters. Not a hot path: a page is allocated once and
+ * then carved for thousands of objects.
+ */
+u32 arena_map_id;
+u64 arena_pages_allocated;
+u64 arena_pages_freed;
+
+static bool arena_is_ours(void *map)
+{
+	return arena_map_id &&
+	       BPF_CORE_READ((struct bpf_map *)map, id) == arena_map_id;
+}
+
+SEC("?fexit/bpf_arena_alloc_pages")
+int BPF_PROG(cidland_arena_alloc_pages, void *map, void *addr, u32 page_cnt,
+	     int node_id, u64 flags, void *ret)
+{
+	if (ret && arena_is_ours(map))
+		__sync_fetch_and_add(&arena_pages_allocated, page_cnt);
+	return 0;
+}
+
+SEC("?fentry/bpf_arena_free_pages")
+int BPF_PROG(cidland_arena_free_pages, void *map, void *ptr, u32 page_cnt)
+{
+	if (arena_is_ours(map))
+		__sync_fetch_and_add(&arena_pages_freed, page_cnt);
+	return 0;
+}
+
+/*
  * Size of the cid space this scheduler schedules on, [0, nr_cids), the
  * number of u64 words one bit per cid takes, and the size of the cid
  * space the arena was allocated for, which is what the kernel says it can
