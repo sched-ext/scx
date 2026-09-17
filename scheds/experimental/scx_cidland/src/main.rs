@@ -1153,16 +1153,8 @@ impl<'a> Scheduler<'a> {
     fn get_metrics(&self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
-            nr_steals: bss_data.nr_steals,
-            nr_busy_balances: bss_data.nr_busy_balances,
-            nr_active_balances: bss_data.nr_active_balances,
-            nr_preempts: bss_data.nr_preempts,
-            nr_delay_requeues: bss_data.nr_delay_requeues,
-            nr_hrticks: bss_data.nr_hrticks,
-            nr_newidle_skips: bss_data.nr_newidle_skips,
             nr_sis_updates: bss_data.nr_sis_updates,
             sis_scan_sum: bss_data.sis_scan_sum,
-            nr_sis_cutoffs: bss_data.nr_sis_cutoffs,
         }
     }
 

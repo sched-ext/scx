@@ -15,73 +15,33 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Tasks stolen from another CPU's queue")]
-    pub nr_steals: u64,
-
-    #[stat(desc = "Queued tasks moved by periodic busy load balance")]
-    pub nr_busy_balances: u64,
-
-    #[stat(desc = "Running tasks moved to an idle core by asymmetric balance")]
-    pub nr_active_balances: u64,
-
-    #[stat(desc = "Running tasks interrupted for a woken task")]
-    pub nr_preempts: u64,
-
-    #[stat(desc = "Wakeups sent back to the CPU the task blocked on while over-served")]
-    pub nr_delay_requeues: u64,
-
-    #[stat(desc = "Running tasks asked to give the CPU up at their deadline")]
-    pub nr_hrticks: u64,
-
-    #[stat(desc = "Idle scans skipped for costing more than the CPU's idle time")]
-    pub nr_newidle_skips: u64,
-
     #[stat(desc = "Periodic SIS_UTIL scan-budget updates")]
     pub nr_sis_updates: u64,
 
     #[stat(desc = "Sum of the scan budgets produced by SIS_UTIL updates")]
     pub sis_scan_sum: u64,
-
-    #[stat(desc = "Wakeup searches a bounded SIS_UTIL budget ended early")]
-    pub nr_sis_cutoffs: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] steals={} busy_balances={} active_balances={} preempts={} delay_requeues={} hrticks={} newidle_skips={} sis_updates={} sis_avg_scan={:.1} sis_cutoffs={}",
+            "[{}] sis_updates={} sis_avg_scan={:.1}",
             crate::SCHEDULER_NAME,
-            self.nr_steals,
-            self.nr_busy_balances,
-            self.nr_active_balances,
-            self.nr_preempts,
-            self.nr_delay_requeues,
-            self.nr_hrticks,
-            self.nr_newidle_skips,
             self.nr_sis_updates,
             if self.nr_sis_updates > 0 {
                 self.sis_scan_sum as f64 / self.nr_sis_updates as f64
             } else {
                 0.0
             },
-            self.nr_sis_cutoffs,
         )?;
         Ok(())
     }
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
-            nr_steals: self.nr_steals - rhs.nr_steals,
-            nr_busy_balances: self.nr_busy_balances - rhs.nr_busy_balances,
-            nr_active_balances: self.nr_active_balances - rhs.nr_active_balances,
-            nr_preempts: self.nr_preempts - rhs.nr_preempts,
-            nr_delay_requeues: self.nr_delay_requeues - rhs.nr_delay_requeues,
-            nr_hrticks: self.nr_hrticks - rhs.nr_hrticks,
-            nr_newidle_skips: self.nr_newidle_skips - rhs.nr_newidle_skips,
             nr_sis_updates: self.nr_sis_updates - rhs.nr_sis_updates,
             sis_scan_sum: self.sis_scan_sum - rhs.sis_scan_sum,
-            nr_sis_cutoffs: self.nr_sis_cutoffs - rhs.nr_sis_cutoffs,
         }
     }
 }

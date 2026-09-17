@@ -250,32 +250,12 @@ const volatile bool no_hrtick;
 #define __hot_written	__attribute__((aligned(64)))
 
 /*
- * Scheduler statistics.
- */
-volatile u64 nr_steals __hot_written;
-volatile u64 nr_busy_balances __hot_written;
-volatile u64 nr_active_balances __hot_written;
-volatile u64 nr_preempts __hot_written;
-volatile u64 nr_delay_requeues __hot_written;
-volatile u64 nr_hrticks __hot_written;
-volatile u64 nr_newidle_skips __hot_written;
-/*
  * Not __hot_written: these are touched once per periodic LLC balance, a couple
  * of dozen times a second for the whole machine, so they have no business
  * taking a cache line each the way the per-wakeup counters above do.
  */
 volatile u64 nr_sis_updates;
 volatile u64 sis_scan_sum;
-
-/*
- * How often a bounded budget ended the search and left the task on its target.
- * This one is written from the wakeup path, but only where --sis-util is on and
- * the scan it bounded has already failed, so a machine that does not ask for
- * the feature never reaches it. It is what says the budget decides anything:
- * without it, a scan that stops short and is then repeated unbounded looks
- * exactly like a scan that was never bounded at all.
- */
-volatile u64 nr_sis_cutoffs __hot_written;
 
 volatile u64 user_util_sum __hot_written;
 volatile u64 user_util_snapshot_at __hot_written;
@@ -2912,7 +2892,6 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		 */
 		if (sis_util &&
 		    sis_idle_scan_nr(target) < cid_topo(target)->llc_nr) {
-			__sync_fetch_and_add(&nr_sis_cutoffs, 1);
 			return -EBUSY;
 		}
 
@@ -3406,7 +3385,6 @@ static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 		}
 		move = cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
 		if (move == CID_EDQ_MOVE_MOVED) {
-			__sync_fetch_and_add(&nr_steals, 1);
 			cid_queued_check(src_cid);
 			return ACTIVE_BALANCE_MOVED;
 		}
@@ -5353,8 +5331,6 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 	}
 
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
-	__sync_fetch_and_add(&nr_hrticks, 1);
-
 	return 0;
 }
 
@@ -6271,10 +6247,8 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	 * task on its runqueue before select_task_rq() is ever asked.
 	 */
 	cid = delay_requeue_cid(p, tctx, now);
-	if (cid >= 0) {
-		__sync_fetch_and_add(&nr_delay_requeues, 1);
+	if (cid >= 0)
 		return cid;
-	}
 
 	/*
 	 * Follow select_task_rq_fair()'s SD_BALANCE_FORK slow path before its
@@ -6890,7 +6864,6 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
-			__sync_fetch_and_add(&nr_active_balances, 1);
 			/* The requeue ops.dispatch() expected went elsewhere. */
 			if (displaced)
 				cid_queued_check(prev_cid);
@@ -7030,7 +7003,6 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
 					   task_request(p),
 					   enq_flags | SCX_ENQ_PREEMPT);
-			__sync_fetch_and_add(&nr_preempts, 1);
 			return;
 		}
 	}
@@ -7685,7 +7657,6 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	if (budget)
 		t0 = bpf_ktime_get_ns();
 	if (budget && cctx->avg_idle < cctx->newidle_cost[NEWIDLE_LLC]) {
-		__sync_fetch_and_add(&nr_newidle_skips, 1);
 		return false;
 	}
 
@@ -7786,9 +7757,6 @@ pick:
 		}
 	}
 	cid_queued_check(src);
-
-	if (src != dst_cid)
-		__sync_fetch_and_add(&nr_steals, 1);
 
 	return true;
 }
@@ -8004,8 +7972,6 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 				__sync_val_compare_and_swap(
 					&cid_ctx(cid)->busy_balance_cid,
 					-1, busy_cid);
-			__sync_fetch_and_add(&nr_steals, 1);
-			__sync_fetch_and_add(&nr_busy_balances, 1);
 			/*
 			 * The destination found work before asking for a
 			 * running task, as the pulls below would have.
