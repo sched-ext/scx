@@ -120,6 +120,17 @@ int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u6
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime);
 
 /**
+ * scx_cgroup_bw_kick_idle_cb - Wake a CPU after bandwidth replenishment.
+ *
+ * Called by the replenish timer after publishing replenishment results when the
+ * bw_kick_builtin_idle rodata knob is left off before load. The override claims
+ * and kicks an idle CPU through the scheduler's own idle tracking so dispatch
+ * runs even when all CPUs are idle. No kick is needed if every CPU is already
+ * busy. The weak default exits the scheduler with an error.
+ */
+void scx_cgroup_bw_kick_idle_cb(void);
+
+/**
  * scx_cgroup_bw_reenqueue - Reenqueue backlogged tasks.
  *
  * When a cgroup is throttled, a task should be put aside at the ops.enqueue()
