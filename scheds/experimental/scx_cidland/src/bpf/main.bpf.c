@@ -163,6 +163,9 @@ const volatile bool no_wakeup_preempt;
  */
 const volatile bool wa_weight;
 const volatile u32 busy_balance_factor = 16;
+#define BUSY_BALANCE_IMBALANCE_PCT	117U
+/* Account for capacity unavailable to sched_ext in periodic busy balance. */
+const volatile bool capacity_pressure;
 const volatile bool no_task_clock;
 
 /*
@@ -371,6 +374,7 @@ struct task_ctx {
 	s32 last_wakee_pid;
 	s32 recent_used_cid;
 	s32 dispatch_migrate_cid; /* preferred destination chosen for running @p */
+	bool pressure_migrate; /* requeue this detached task on a less loaded cid */
 
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
@@ -712,17 +716,21 @@ struct busy_balance_env {
 	u64 move_budget;
 	u64 scan_deadline;
 	u64 scan_seq;
+	u64 alternate_deadline;
+	u64 alternate_seq;
 	u64 local_norm;
 	u32 local_base;
 	u32 local_nr;
 	u32 group_base;
 	u32 group_nr;
 	s32 move_dst_cid;
+	s32 alternate_dst_cid;
 	u32 level;
 	u32 dst_overloaded;
 	u32 local_overloaded;
 	u32 group_queued;
 	u32 scan_valid;
+	u32 detach_failed;
 };
 
 enum newidle_level {
@@ -781,8 +789,22 @@ struct cid_ctx {
 	u64 busy_balance_next[BUSY_BALANCE_LEVELS]; /* next balance per domain */
 	u32 busy_balance_interval_ms[BUSY_BALANCE_LEVELS]; /* domain backoff */
 	u32 busy_balance_cursor[BUSY_BALANCE_LEVELS]; /* source-cid tie-break cursor */
+	u32 busy_balance_failed[BUSY_BALANCE_LEVELS]; /* failed periodic detach passes */
 	struct busy_balance_env busy_balance_env; /* tick scan scratch space */
 	u64 busy_balance_load; /* latest domain-scan load sample */
+	u64 busy_balance_cap; /* latest delivered-capacity estimate */
+	u64 busy_balance_scan_cap; /* capacity paired with the load sample */
+	u64 pressure_lost; /* cumulative higher-class displacement time */
+	u64 pressure_lost_at; /* displacement time at the window start */
+	u64 pressure_blocked_at; /* task clock when a higher class displaced it */
+	u64 pressure_clock_off_at; /* IRQ/steal clock offset at window start */
+	u64 pressure_at; /* wall-clock start of the pressure window */
+	u64 pressure_idle_at; /* demand disappeared; stale estimates expire */
+	u64 pressure_migrate_next; /* pace higher-class displacement handoffs */
+	u32 pressure_migrate_failed; /* detach passes rejected by move guards */
+	u32 pressure_avail; /* delivered capacity, 1024 = no pressure */
+	u32 pressure_demand; /* sched_ext has runnable work on this cid */
+	u32 pressure_valid; /* a current demand window has been sampled */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 curr_sched_idle;	/* that, or it is in an idle cgroup, see cid_sched_idle_target() */
 	u32 steal_cursor;
@@ -799,6 +821,8 @@ struct cid_ctx {
 	u64 newidle_decay_at[NEWIDLE_LEVELS]; /* sd->last_decay_max_lb_cost */
 	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
 	s32 busy_balance_cid; /* queued cid selected by periodic busy balance */
+	s32 busy_balance_owner; /* cid which owns the selected domain pass */
+	u32 busy_balance_level; /* domain whose failure count the pass updates */
 	u64 busy_balance_expire; /* when an unconsumed selection is dropped */
 	u64 busy_balance_budget; /* load left in this deferred balance pass */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
@@ -1686,6 +1710,130 @@ static void cid_util_set_running(s32 cid, bool running, u64 now)
 static u64 cid_util(s32 cid, u64 now)
 {
 	return ravg_read_arena(&cid_ctx(cid)->run_avg, now) >> UTIL_SHIFT;
+}
+
+static u64 cid_clock_task_owned(s32 cid, u64 now);
+
+/*
+ * Record whether @cid has sched_ext work which could consume the CPU. A new
+ * demand period starts a fresh sample: an old reduced-capacity estimate must
+ * not affect placement until current demand has observed the pressure again.
+ */
+static void cid_demand_set(s32 cid, bool demand, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!capacity_pressure || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	if (demand == cctx->pressure_demand)
+		return;
+	cctx->pressure_demand = demand;
+	if (demand) {
+		/*
+		 * Unlike fair's RT PELT, cidland has no clock source while no
+		 * sched_ext task wants the cid. Retain short gaps so pressure
+		 * cannot attract work straight back, but do not let an old event
+		 * suppress this cid forever.
+		 */
+		if (cctx->pressure_idle_at &&
+		    now - cctx->pressure_idle_at >= NSEC_PER_SEC) {
+			cctx->pressure_avail = 1024;
+			cctx->pressure_migrate_next = 0;
+			cctx->pressure_migrate_failed = 0;
+			WRITE_ONCE(cctx->busy_balance_cap, cid_topo(cid)->cap);
+		}
+		cctx->pressure_idle_at = 0;
+		cctx->pressure_at = now;
+		cctx->pressure_lost_at = cctx->pressure_lost;
+		cctx->pressure_clock_off_at = cctx->clock_off;
+		cctx->pressure_valid = 0;
+	} else {
+		cctx->pressure_idle_at = now;
+		cctx->pressure_blocked_at = 0;
+		cctx->pressure_migrate_next = 0;
+		cctx->pressure_migrate_failed = 0;
+		cctx->pressure_valid = 0;
+		WRITE_ONCE(cctx->busy_balance_cap, cid_topo(cid)->cap);
+	}
+}
+
+/*
+ * A runnable task stopped with slice remaining was displaced by a higher
+ * scheduling class or core scheduling. Measure the interval until sched_ext
+ * next runs on this cid. Unlike service/wall accounting, this does not count
+ * ordinary dispatch and context-switch overhead as unavailable capacity.
+ */
+static void cid_pressure_displaced(s32 cid, u64 tnow)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!capacity_pressure || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	if (cctx->pressure_demand && !cctx->pressure_blocked_at)
+		cctx->pressure_blocked_at = tnow;
+}
+
+static void cid_pressure_resumed(s32 cid, u64 tnow)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!capacity_pressure || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	if (cctx->pressure_blocked_at) {
+		cctx->pressure_lost += tnow - cctx->pressure_blocked_at;
+		cctx->pressure_blocked_at = 0;
+	}
+}
+
+#define PRESSURE_EVAL_NS	(32ULL * NSEC_PER_MSEC)
+
+static void update_balance_cap(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	u64 cap = cid_topo(cid)->cap;
+	u64 elapsed, lost, off, available;
+
+	if (!capacity_pressure)
+		return;
+	if (!cctx->pressure_demand)
+		return;
+	elapsed = now - cctx->pressure_at;
+	if (elapsed < PRESSURE_EVAL_NS)
+		return;
+	/* Refresh rq_clock - rq_clock_task; its delta is IRQ plus steal time. */
+	cid_clock_task_owned(cid, now);
+	off = cctx->clock_off;
+	lost = cctx->pressure_lost - cctx->pressure_lost_at;
+	if (off > cctx->pressure_clock_off_at)
+		lost += off - cctx->pressure_clock_off_at;
+	available = 1024 - MIN(lost * 1024 / elapsed, 1024ULL);
+	if (cctx->pressure_valid)
+		cctx->pressure_avail = (3 * cctx->pressure_avail + available) / 4;
+	else
+		cctx->pressure_avail = available;
+	cctx->pressure_at = now;
+	cctx->pressure_lost_at = cctx->pressure_lost;
+	cctx->pressure_clock_off_at = off;
+	cctx->pressure_valid = 1;
+	WRITE_ONCE(cctx->busy_balance_cap,
+		   MAX(cap * cctx->pressure_avail / 1024, 1ULL));
+}
+
+/* fair.c's check_cpu_capacity(), using the domain's imbalance threshold. */
+static bool cid_capacity_reduced(s32 cid)
+{
+	u64 cap;
+
+	if (!capacity_pressure || !cid_valid(cid) ||
+	    !READ_ONCE(cid_ctx(cid)->pressure_demand) ||
+	    !READ_ONCE(cid_ctx(cid)->pressure_valid))
+		return false;
+	cap = READ_ONCE(cid_ctx(cid)->busy_balance_cap);
+	return cap && cap * BUSY_BALANCE_IMBALANCE_PCT <
+		cid_topo(cid)->cap * 100;
 }
 
 /*
@@ -4131,7 +4279,6 @@ static const u32 prio_to_weight[40] = {
  * on the owner, can_migrate_task()'s new_dst_cpu rule redirects the reservation
  * to another allowed cid in the same local group.
  */
-#define BUSY_BALANCE_IMBALANCE_PCT	117U
 /*
  * The capacity-normalized load of the whole range, sds->avg_load, one read
  * per cid like update_sd_lb_stats().
@@ -4145,15 +4292,23 @@ __noinline u64 busy_balance_avg_load(u32 base, u32 nr, u64 now,
 	TOUCH_ARENA();
 	bpf_arena_for(i, base, base + nr) {
 		s32 cid = i;
-		u64 sample;
+		u64 sample, sample_cap;
 
 		if (!cid_valid(cid))
 			break;
 		sample = cid_load(cid, now);
+		sample_cap = capacity_pressure &&
+			READ_ONCE(cid_ctx(cid)->pressure_demand) &&
+			READ_ONCE(cid_ctx(cid)->pressure_valid) ?
+			READ_ONCE(cid_ctx(cid)->busy_balance_cap) :
+			cid_topo(cid)->cap;
+		if (!sample_cap)
+			sample_cap = cid_topo(cid)->cap;
 		/* Group totals below reuse the samples collected by this pass. */
 		WRITE_ONCE(cid_ctx(cid)->busy_balance_load, sample);
+		WRITE_ONCE(cid_ctx(cid)->busy_balance_scan_cap, sample_cap);
 		load += sample;
-		cap += cid_topo(cid)->cap;
+		cap += sample_cap;
 		/* What SIS_UTIL wants, off the walk that is happening anyway. */
 		if (sis_util)
 			util += cid_util(cid, now);
@@ -4207,7 +4362,7 @@ busy_balance_group_delta(s32 dst_cid, u64 group, u64 avg_norm, bool excess)
 		if (!cid_valid(i))
 			break;
 		load += READ_ONCE(cid_ctx(i)->busy_balance_load);
-		cap += cid_topo(i)->cap;
+		cap += READ_ONCE(cid_ctx(i)->busy_balance_scan_cap);
 		if (cid_queued_test(i))
 			env->group_queued = 1;
 	}
@@ -4310,7 +4465,7 @@ __noinline s32 busy_balance_find_src_cid(s32 dst_cid, u32 start)
 		if (!cid_valid(cid) || cid_idle_test(cid) || !cid_queued_test(cid))
 			continue;
 		load = READ_ONCE(cid_ctx(cid)->busy_balance_load);
-		cap = MAX(cid_topo(cid)->cap, 1ULL);
+		cap = MAX(READ_ONCE(cid_ctx(cid)->busy_balance_scan_cap), 1ULL);
 		norm = load * 1024 / cap;
 		if (norm <= env->avg_norm)
 			continue;
@@ -4368,13 +4523,15 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
 	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->busy_scan_cursor;
 	u64 budget = MIN(env->local_room, env->source_excess);
+	u32 failed = READ_ONCE(cid_ctx(dst_cid)->busy_balance_failed[env->level]);
 	u32 nth;
 
+	env->alternate_dst_cid = -1;
 	TOUCH_ARENA();
 	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
 		cid_edq_task_t *at;
 		struct task_struct *p;
-		u64 candidate_deadline, candidate_seq;
+		u64 candidate_deadline, candidate_seq, candidate_weight;
 		s32 move_dst;
 		int ret;
 
@@ -4386,9 +4543,11 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 				cid_queued_check(src_cid);
 			break;
 		}
+		candidate_weight = ((task_ctx_t *)at)->se.vjoin_w;
 		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-		    ((task_ctx_t *)at)->se.vjoin_w > budget ||
-		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
+		    (candidate_weight >> MIN(failed, 63U)) > budget ||
+		    (task_hot((task_ctx_t *)at, src_cid, dst_cid, now) &&
+		     failed <= cache_nice_tries)) {
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
@@ -4399,11 +4558,34 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 		scx_edq_task_drop(&at->common);
 		if (move_dst < 0)
 			continue;
+		/*
+		 * can_migrate_task() first drains tasks which can use the
+		 * elected destination. LBF_DST_PINNED only revisits an alternate
+		 * CPU in the local group if imbalance remains after that scan.
+		 * Remember the first such candidate, but keep looking for work
+		 * that does not need the redirect.
+		 */
+		if (move_dst != dst_cid) {
+			if (env->alternate_dst_cid < 0) {
+				env->alternate_dst_cid = move_dst;
+				env->alternate_deadline = candidate_deadline;
+				env->alternate_seq = candidate_seq;
+			}
+			continue;
+		}
 		env->move_budget = budget;
 		env->move_dst_cid = move_dst;
 		/* Dispatch must begin at, rather than after, this candidate. */
 		env->scan_deadline = candidate_deadline;
 		env->scan_seq = candidate_seq;
+		env->scan_valid = SCX_EDQ_CURSOR_AT;
+		return true;
+	}
+	if (env->alternate_dst_cid >= 0) {
+		env->move_budget = budget;
+		env->move_dst_cid = env->alternate_dst_cid;
+		env->scan_deadline = env->alternate_deadline;
+		env->scan_seq = env->alternate_seq;
 		env->scan_valid = SCX_EDQ_CURSOR_AT;
 		return true;
 	}
@@ -4419,13 +4601,14 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	u64 sum_util = 0;
 	s32 cid;
 
+	env->detach_failed = 0;
 	if (!nr)
 		return -1;
 	env->avg_norm = busy_balance_avg_load(base, nr, now, &sum_util);
 	if (level == BUSY_BALANCE_LLC)
 		update_sis_idle_scan(base, nr, sum_util);
 	env->dst_norm = cid_load(dst_cid, now) * 1024 /
-			MAX(cid_topo(dst_cid)->cap, 1ULL);
+			MAX(READ_ONCE(cid_ctx(dst_cid)->busy_balance_scan_cap), 1ULL);
 	if (env->dst_norm >= env->avg_norm)
 		return -1;
 	env->dst_overloaded = cid_queue_nr(dst_cid) > 0;
@@ -4453,8 +4636,20 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	cid = busy_balance_find_src_cid(dst_cid, start);
 	if (cid < 0)
 		return -1;
-	if (!busy_balance_has_movable_task(dst_cid, cid, now))
+	if (!busy_balance_has_movable_task(dst_cid, cid, now)) {
+		u32 failed = READ_ONCE(cid_ctx(dst_cid)->busy_balance_failed[level]);
+
+		/*
+		 * detach_tasks() progressively relaxes both its migration-size
+		 * bound and cache-hotness after a periodic pass found imbalance
+		 * but could not detach anything. Without that relaxation, an
+		 * imbalance smaller than one task can never be repaired.
+		 */
+		env->detach_failed = 1;
+		WRITE_ONCE(cid_ctx(dst_cid)->busy_balance_failed[level],
+			   MIN(failed + 1, 63U));
 		return -1;
+	}
 	return cid;
 }
 
@@ -4488,6 +4683,13 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	if (READ_ONCE(dst->busy_balance_cid) != -1)
 		return true;
 	min_ms = MAX(nr * busy_balance_factor, 1U);
+	/*
+	 * get_sd_balance_interval() subtracts one tick from a busy interval so
+	 * adjacent domains, and periodic activity such as RT runtime, cannot
+	 * remain phase-locked to the balance pass.
+	 */
+	if (min_ms > 1)
+		min_ms--;
 	max_ms = 2 * min_ms;
 	interval = READ_ONCE(dst->busy_balance_interval_ms[level]);
 	if (!interval) {
@@ -4506,6 +4708,9 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 		start = base;
 	src = busy_balance_from_range(dst_cid, base, nr, start, now,
 				      level);
+	/* fair resets nr_balance_failed once the domain is balanced again. */
+	if (src < 0 && !dst->busy_balance_env.detach_failed)
+		WRITE_ONCE(dst->busy_balance_failed[level], 0);
 	if (src >= 0) {
 		move_dst = dst->busy_balance_env.move_dst_cid;
 		if (!cid_valid(move_dst))
@@ -4530,6 +4735,8 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 			   now + (u64)min_ms * NSEC_PER_MSEC);
 		WRITE_ONCE(move->busy_balance_budget,
 			   dst->busy_balance_env.move_budget);
+		WRITE_ONCE(move->busy_balance_owner, dst_cid);
+		WRITE_ONCE(move->busy_balance_level, level);
 		WRITE_ONCE(move->busy_balance_cid, src);
 		if (move_dst != dst_cid)
 			scx_bpf_kick_cid(move_dst, SCX_KICK_IDLE);
@@ -4542,6 +4749,102 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 		   now + (u64)interval * NSEC_PER_MSEC);
 
 	return src >= 0;
+}
+
+/*
+ * A higher scheduling class just displaced @p from @src_cid. Once the
+ * measured capacity is materially reduced, choose a less-loaded allowed cid
+ * for the now-detached task. ops.enqueue() puts it into that cid's EDQ, where
+ * it competes by the ordinary EEVDF rules. This is the sched_ext equivalent
+ * of fair's detach_tasks() followed by attach_tasks(), not a forced dispatch.
+ */
+static __noinline s32
+capacity_pressure_target(const struct task_struct *p, s32 src_cid, u64 now)
+{
+	task_ctx_t *tctx = try_lookup_task_ctx(p);
+	u64 src_load, src_cap, src_norm;
+	u64 best_load = 0, best_cap = 1;
+	u64 move_budget, weight;
+	u32 best_smt_rank = 0;
+	u32 failed;
+	u32 interval_ms;
+	s32 best = -1;
+	u32 i;
+
+	if (!tctx || !capacity_pressure || !cid_valid(src_cid) ||
+	    time_before(now, READ_ONCE(cid_ctx(src_cid)->pressure_migrate_next)) ||
+	    !cid_capacity_reduced(src_cid))
+		return -1;
+	src_cap = READ_ONCE(cid_ctx(src_cid)->busy_balance_cap);
+	/* Pace the scan, including misses, at the LLC busy-balance interval. */
+	interval_ms = MAX(cid_topo(src_cid)->llc_nr * busy_balance_factor, 1U);
+	if (interval_ms > 1)
+		interval_ms--;
+	WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_next,
+		   now + (u64)interval_ms * NSEC_PER_MSEC);
+	src_load = READ_ONCE(cid_pack(src_cid)->vsum_w);
+	if (!src_load)
+		return -1;
+
+	TOUCH_ARENA();
+	bpf_arena_for(i, 0, nr_cids) {
+		u64 load, cap;
+		u32 smt_rank = 0;
+		s32 cid = i;
+
+		if (cid == src_cid || !cid_valid(cid) || !cid_allowed(p, cid))
+			continue;
+		if (smt_whole_core && smt_enabled) {
+			if (core_is_idle(cid))
+				smt_rank = 0;
+			else if (!cid_idle_test(cid))
+				smt_rank = 1;
+			else
+				smt_rank = 2;
+		}
+		load = READ_ONCE(cid_pack(cid)->vsum_w);
+		cap = READ_ONCE(cid_ctx(cid)->pressure_demand) &&
+		      READ_ONCE(cid_ctx(cid)->pressure_valid) ?
+			READ_ONCE(cid_ctx(cid)->busy_balance_cap) :
+			cid_topo(cid)->cap;
+		if (!cap)
+			cap = cid_topo(cid)->cap;
+		if (best < 0 || smt_rank < best_smt_rank ||
+		    (smt_rank == best_smt_rank &&
+		     (load * best_cap < best_load * cap ||
+		      (load * best_cap == best_load * cap &&
+		       smt_prefer(cid, best))))) {
+			best = cid;
+			best_load = load;
+			best_cap = cap;
+			best_smt_rank = smt_rank;
+		}
+	}
+	if (best < 0)
+		return -1;
+	src_norm = src_load * 1024 / src_cap;
+	if (src_norm * 100 <= best_load * 1024 / best_cap *
+				 BUSY_BALANCE_IMBALANCE_PCT)
+		return -1;
+
+	/*
+	 * detach_tasks() does not move more load than calculate_imbalance()
+	 * requested, and relaxes that bound together with cache hotness after
+	 * failed passes. Do the same for this single detached current task.
+	 */
+	move_budget = (src_load * best_cap - best_load * src_cap) /
+		      (src_cap + best_cap);
+	weight = tctx->se.vjoin_w;
+	failed = READ_ONCE(cid_ctx(src_cid)->pressure_migrate_failed);
+	if ((weight >> MIN(failed, 63U)) > move_budget ||
+	    (task_hot(tctx, src_cid, best, now) &&
+	     failed <= cache_nice_tries)) {
+		WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_failed,
+			   MIN(failed + 1, 255U));
+		return -1;
+	}
+	WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_failed, 0);
+	return best;
 }
 
 /*
@@ -5821,15 +6124,16 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
-	u64 weight;
+	u64 delta, weight;
 	pack_t *pk;
 
 	if (!tctx)
 		return;
 	pk = task_pack(tctx, cid);
 
-	task_bw_charge(tctx, cid, now - tctx->last_run_at);
-	tctx->se.vruntime += calc_delta_fair(p, tctx, now - tctx->last_run_at);
+	delta = now - tctx->last_run_at;
+	task_bw_charge(tctx, cid, delta);
+	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
 	tctx->last_run_at = now;
 	vref_charge(&tctx->se);
 
@@ -6836,7 +7140,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct grp_hdr __arena *hdr;
 	task_ctx_t *tctx;
-	bool displaced;
+	bool displaced, pressure_migrate;
 	u64 dl, now, tnow;
 
 	TOUCH_ARENA();
@@ -6858,6 +7162,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	hdr = task_bw_throttled(tctx, prev_cid, now);
 	if (hdr && cid_park(p, tctx, hdr, prev_cid)) {
 		tctx->dispatch_migrate_cid = -1;
+		tctx->pressure_migrate = false;
 		if (displaced)
 			cid_queued_check(prev_cid);
 		return;
@@ -6871,6 +7176,26 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	cid = tctx->dispatch_migrate_cid;
 	tctx->dispatch_migrate_cid = -1;
+	pressure_migrate = tctx->pressure_migrate;
+	tctx->pressure_migrate = false;
+	if (!(enq_flags & SCX_ENQ_WAKEUP) && pressure_migrate &&
+	    cid_valid(cid) && cid != prev_cid && cid_allowed(p, cid)) {
+		place_task(cid, p, tctx, now, false);
+		dl = task_dl(p, tctx);
+		if (cid_queue_insert(p, tctx, cid, task_request(p), dl,
+				     tctx->se.vruntime, enq_flags)) {
+			cid_queued_set(cid);
+			if (cid_idle_test(cid))
+				scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+		}
+		if (displaced) {
+			cid_queued_check(prev_cid);
+			cid_pressure_resumed(prev_cid,
+				cid_clock_task_owned(prev_cid, now));
+			cid_demand_set(prev_cid, cid_queue_nr(prev_cid) > 0, now);
+		}
+		return;
+	}
 	if (!(enq_flags & SCX_ENQ_WAKEUP) && cid_valid(cid) && cid != prev_cid &&
 	    cid_idle_test(cid) && cid_allowed(p, cid)) {
 		cid = claim_idle_cid(p, cid);
@@ -6919,7 +7244,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * point; absent that request, preserve the local EEVDF placement.
 	 */
 	if ((task_should_migrate(p, enq_flags) && !reenq_immed(p, enq_flags)) ||
-	    (reenq_preempted(p, enq_flags) && p->scx.slice && !cid_idle_test(prev_cid))) {
+	    (reenq_preempted(p, enq_flags) && p->scx.slice &&
+	     !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid, prev_cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
@@ -7295,6 +7621,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	if (!no_newidle_cost)
 		newidle_decay(cid_ctx(cid), now);
 	cid_load_accumulate(cid, now);
+	update_balance_cap(cid, now);
 
 	/*
 	 * Run wider, less frequent domains first when two happen to be due on
@@ -7903,6 +8230,10 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
 	scx_edq_cursor_t *cursor = &dst->busy_dispatch_cursor;
 	u64 rival_dl = 0, head_dl = 0, min_slice;
+	s32 owner = READ_ONCE(dst->busy_balance_owner);
+	u32 level = READ_ONCE(dst->busy_balance_level);
+	u32 failed = cid_valid(owner) && level < BUSY_BALANCE_LEVELS ?
+		READ_ONCE(cid_ctx(owner)->busy_balance_failed[level]) : 0;
 	bool rival = false;
 	bool retry = false;
 	u32 nth;
@@ -7932,8 +8263,10 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		}
 		weight = ((task_ctx_t *)at)->se.vjoin_w;
 		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-		    weight > READ_ONCE(dst->busy_balance_budget) ||
-		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
+		    (weight >> MIN(failed, 63U)) >
+			    READ_ONCE(dst->busy_balance_budget) ||
+		    (task_hot((task_ctx_t *)at, src_cid, dst_cid, now) &&
+		     failed <= cache_nice_tries)) {
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
@@ -7947,8 +8280,8 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		v = pack_vref_place(task_pack((task_ctx_t *)at, dst_cid), tnow) - lag;
 		dl = v + (at->common.node.deadline -
 			  at->common.node.eligibility);
-		if (rival && ((!no_eligibility && lag < 0) ||
-			      !time_before(dl, rival_dl))) {
+		if (rival &&
+		    ((!no_eligibility && lag < 0) || !time_before(dl, rival_dl))) {
 			retry = true;
 			scx_edq_task_drop(&at->common);
 			continue;
@@ -7959,7 +8292,8 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		if (ret != CID_EDQ_MOVE_MOVED)
 			continue;
 		edq_scan_reset(cursor);
-		dst->busy_balance_budget -= weight;
+		dst->busy_balance_budget = weight >= dst->busy_balance_budget ? 0 :
+					   dst->busy_balance_budget - weight;
 		return 1;
 	}
 
@@ -8061,6 +8395,11 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		moved = busy_balance_move_to_local(cid, busy_cid, has_prev,
 						   now, tnow);
 		if (moved > 0) {
+			s32 owner = READ_ONCE(cid_ctx(cid)->busy_balance_owner);
+			u32 level = READ_ONCE(cid_ctx(cid)->busy_balance_level);
+
+			if (cid_valid(owner) && level < BUSY_BALANCE_LEVELS)
+				WRITE_ONCE(cid_ctx(owner)->busy_balance_failed[level], 0);
 			cid_queued_check(busy_cid);
 			/* Drain no more than the imbalance calculated by the tick. */
 			if (READ_ONCE(cid_ctx(cid)->busy_balance_budget) &&
@@ -8168,6 +8507,7 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 	TOUCH_ARENA();
 
 	if (idle) {
+		cid_demand_set(cid, false, scx_bpf_now());
 		cid_idle_set(cid);
 		/*
 		 * The tick stops with the CPU: record the empty pack now, or the
@@ -8320,8 +8660,10 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 */
 	now = scx_bpf_now();
 	tctx->last_run_at = cid_valid(cid) ? cid_clock_task_owned(cid, now) : now;
+	cid_pressure_resumed(cid, tctx->last_run_at);
 	util_set_running(tctx, true, now);
 	cid_util_set_running(cid, true, now);
+	cid_demand_set(cid, true, now);
 	cid_load_update(cid, now);
 
 	/*
@@ -8420,7 +8762,12 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	slice = tnow - tctx->last_run_at;
 	util_set_running(tctx, false, tctx->last_stop_at);
 	cid_util_set_running(cid, false, tctx->last_stop_at);
+	cid_demand_set(cid, runnable ||
+			       (cid_valid(cid) && cid_queue_nr(cid) > 0),
+		       tctx->last_stop_at);
 	cid_load_update(cid, tctx->last_stop_at);
+	if (runnable && p->scx.slice)
+		cid_pressure_displaced(cid, tnow);
 
 	/*
 	 * The runtime is charged as wall-clock time whatever the CPU it was
@@ -8443,6 +8790,22 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 
 	/* The same service against the bandwidth of the task's cgroup. */
 	task_bw_charge(tctx, cid, slice);
+
+	/*
+	 * A runnable task stopped with slice left was displaced rather than
+	 * yielding at a cidland boundary. Once the measured capacity is reduced,
+	 * detach it for requeueing on a less-loaded cid. The enqueue path inserts
+	 * it into that cid's EDQ, so this migration does not bypass EEVDF order.
+	 */
+	if (capacity_pressure && runnable && p->scx.slice && cid_valid(cid)) {
+		s32 target = capacity_pressure_target(p, cid, tctx->last_stop_at);
+
+		if (target >= 0) {
+			tctx->dispatch_migrate_cid = target;
+			tctx->pressure_migrate = true;
+			scx_bpf_task_set_slice(p, 0);
+		}
+	}
 
 	/*
 	 * The service just charged is in the reference for real now, so
@@ -8506,6 +8869,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->delay_cid = -1;
 		tctx->recent_used_cid = -1;
 		tctx->dispatch_migrate_cid = -1;
+		tctx->pressure_migrate = false;
 		tctx->direct_placed = false;
 	}
 }
@@ -9002,6 +9366,7 @@ static void init_topology(void)
 		s32 cpu = scx_bpf_cid_to_cpu(cid);
 
 		cid_ctx(cid)->busy_balance_cid = -1;
+		cid_ctx(cid)->busy_balance_owner = -1;
 		cid_pack(cid)->cid = cid;
 		cid_ctx(cid)->active_balance_cid = -1;
 
@@ -9153,6 +9518,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 
 		cctx->avg_idle = 2 * migration_cost_ns;
 		cctx->max_idle_balance_cost = migration_cost_ns;
+		cctx->busy_balance_cap = cid_topo(cid)->cap;
+		cctx->busy_balance_scan_cap = cid_topo(cid)->cap;
+		cctx->pressure_avail = 1024;
 		bpf_arena_for(level, 0, NEWIDLE_LEVELS) {
 			stats->call[level] = 512;
 			stats->success[level] = 256;

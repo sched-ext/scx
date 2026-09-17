@@ -364,6 +364,18 @@ struct Opts {
     #[clap(long, default_value = "16", value_parser = clap::value_parser!(u32).range(1..=64))]
     busy_balance_factor: u32,
 
+    /// Do not account for CPU capacity unavailable to sched_ext.
+    ///
+    /// By default, measure higher-class displacement from stopping/running
+    /// events and IRQ/steal time from rq_clock - rq_clock_task. Periodic
+    /// balance normalizes load by the resulting effective capacity, while
+    /// retaining its normal imbalance, affinity, hotness, and EEVDF gates.
+    /// A task displaced by a higher class may be requeued into a less-loaded
+    /// cid's EDQ, where it still competes in EEVDF order. Hardware capacity
+    /// and wakeup placement remain unchanged.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_capacity_pressure: bool,
+
     /// Service is charged in rq_clock_task(), the clock update_curr() uses:
     /// wall time less the interrupt time and the hypervisor steal time the
     /// CPU spent on something else. This charges plain wall time, the rq
@@ -868,6 +880,10 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.wa_weight = opts.wa_weight;
         rodata.busy_balance_factor = opts.busy_balance_factor;
+        rodata.capacity_pressure = !opts.no_capacity_pressure;
+        if opts.no_capacity_pressure {
+            info!("RT/IRQ capacity pressure: disabled (--no-capacity-pressure)");
+        }
         rodata.no_task_clock = opts.no_task_clock;
         info!(
             "service clock: {}",

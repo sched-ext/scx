@@ -523,9 +523,20 @@ that has not been done.
    with `sd->imbalance_pct` between busy groups and one elected balancer per
    local group as `should_we_balance()` has. What is missing is the full
    `group_type` ladder: `group_misfit_task` on the busy side, without an
-   `update_misfit_status()` equivalent, capacity pressure from RT and IRQ
-   work, and `SD_PREFER_SIBLING`. Capacity misfits are repaired from the idle
-   side only, `idle_misfit_cid()`.
+   `update_misfit_status()` equivalent, and `SD_PREFER_SIBLING`. Capacity
+   misfits are repaired from the idle side only, `idle_misfit_cid()`.
+   Capacity unavailable to sched_ext because of RT/DL work, interrupts and
+   steal time is estimated from explicit higher-class displacement intervals
+   and from the difference between the rq and task clocks. Periodic balance
+   uses that reduced capacity through its ordinary imbalance, affinity,
+   hotness and EEVDF gates. This is enabled by default, as capacity pressure
+   is in `fair.c`; `--no-capacity-pressure` disables it. A task displaced by
+   a higher class may also be requeued into a less-loaded cid's EDQ, the
+   attach side of fair's detach/attach migration; it does not bypass the
+   destination's EEVDF order. Unlike `fair.c`'s RT and IRQ PELT signals, the
+   estimate cannot keep observing an empty sched_ext runqueue, so a new
+   demand period must collect a fresh sample before the estimate affects
+   placement.
 
  - **A group's cpuset is not known.** `fair.c` scales a task group's shares by
    `min(tg_tasks, tg_cpus)`, where `tg_cpus` is the weight of the effective
