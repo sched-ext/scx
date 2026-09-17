@@ -37,6 +37,18 @@ struct scx_edq_task {
 
 typedef struct scx_edq_task __arena scx_edq_task_t;
 
+struct scx_edq_cursor {
+	u64 deadline;
+	u64 seq;
+	/* 0 starts at the head, 1 resumes after the key, 2 includes the key. */
+	u32 valid;
+};
+
+#define SCX_EDQ_CURSOR_AFTER	1U
+#define SCX_EDQ_CURSOR_AT	2U
+
+typedef struct scx_edq_cursor __arena scx_edq_cursor_t;
+
 /*
  * A deadline-ordered intrusive AVL tree augmented with the minimum
  * eligibility value and shortest slice of every subtree. The queue itself
@@ -78,6 +90,9 @@ u64 scx_edq_peek_hold(scx_edq_t __arg_arena *edq);
 int scx_edq_try_peek_hold(scx_edq_t __arg_arena *edq, u64 *task __arg_nonnull);
 int scx_edq_try_peek_nth_hold(scx_edq_t __arg_arena *edq, u32 nth,
 			       u64 *task __arg_nonnull);
+int scx_edq_try_peek_next_hold(scx_edq_t __arg_arena *edq,
+			       scx_edq_cursor_t __arg_arena *cursor,
+			       u64 *task __arg_nonnull);
 u64 scx_edq_nr_queued(scx_edq_t __arg_arena *edq);
 int scx_edq_task_init(scx_edq_task_t __arg_arena *task);
 int scx_edq_task_fini(scx_edq_task_t __arg_arena *task);
@@ -115,6 +130,12 @@ static __always_inline void scx_edq_task_hold(scx_edq_task_t __arg_arena *task)
 static __always_inline void scx_edq_task_drop(scx_edq_task_t __arg_arena *task)
 {
 	__atomic_add_fetch(&task->holdcnt, -1, 0);
+}
+
+static __always_inline void
+scx_edq_cursor_reset(scx_edq_cursor_t __arg_arena *cursor)
+{
+	WRITE_ONCE(cursor->valid, 0);
 }
 
 static __always_inline int scx_edq_lock(scx_edq_t __arg_arena *edq)

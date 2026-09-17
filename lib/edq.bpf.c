@@ -560,6 +560,62 @@ int scx_edq_try_peek_nth_hold(scx_edq_t __arg_arena *edq, u32 nth,
 	return ret;
 }
 
+/*
+ * Return and hold the next task in deadline order and advance @cursor. This
+ * lets a caller resume a bounded scan even when the nodes it inspected have
+ * since left the tree. Updating the cursor under the queue lock serializes
+ * multiple destinations scanning the same source.
+ */
+__weak
+int scx_edq_try_peek_next_hold(scx_edq_t __arg_arena *edq,
+			       scx_edq_cursor_t __arg_arena *cursor,
+			       u64 *taskp __arg_nonnull)
+{
+	scx_edq_node_t *node, *next = NULL;
+	scx_edq_task_t *task = NULL;
+	int ret;
+
+	*taskp = 0;
+	ret = scx_edq_trylock(edq);
+	if (ret)
+		return ret;
+	if (!cursor->valid) {
+		next = edq->first;
+	} else {
+		bool include = cursor->valid == SCX_EDQ_CURSOR_AT;
+
+		node = edq->root;
+		while (node && can_loop) {
+			bool key_before;
+
+			key_before = cursor->deadline != node->deadline ?
+				time_before(cursor->deadline, node->deadline) :
+				cursor->seq < node->seq ||
+				(include && cursor->seq == node->seq);
+			if (key_before) {
+				next = node;
+				node = node->left;
+			} else {
+				node = node->right;
+			}
+		}
+		if (node)
+			ret = -E2BIG;
+	}
+	if (!ret && next) {
+		task = node_task(next);
+		scx_edq_task_hold(task);
+		cursor->deadline = next->deadline;
+		cursor->seq = next->seq;
+		cursor->valid = SCX_EDQ_CURSOR_AFTER;
+	} else if (!ret) {
+		cursor->valid = 0;
+	}
+	scx_edq_unlock(edq);
+	*taskp = (u64)task;
+	return ret;
+}
+
 __weak
 u64 scx_edq_nr_queued(scx_edq_t __arg_arena *edq)
 {
