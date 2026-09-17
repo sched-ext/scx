@@ -47,7 +47,7 @@ struct greedy_group_key
 
 struct
 {
-  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1048576);
   __type(key, struct greedy_group_key);
   __type(value, u64);
