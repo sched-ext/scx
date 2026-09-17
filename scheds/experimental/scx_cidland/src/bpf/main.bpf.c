@@ -8407,6 +8407,34 @@ void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
 	reweight_task(p, tctx, p->on_rq);
 }
 
+/*
+ * The core affinity path already moves a queued or running task whose current
+ * CPU is no longer allowed, and every cidland placement and balance handoff
+ * reads or revalidates p->cpus_ptr. The one state the core cannot update is a
+ * sleeping task's simulated delayed-dequeue membership: unlike fair.c's
+ * sched_delayed entity, it is not physically left on the runqueue for the
+ * affinity change to dequeue.
+ *
+ * Stop paying that task's debt when the pack it blocked in is excluded. If
+ * the old cid remains allowed, fair leaves the delayed entity there too and
+ * there is nothing to do.
+ */
+void BPF_STRUCT_OPS(cidland_set_cmask, struct task_struct *p,
+		    const struct scx_cmask __arena *cmask)
+{
+	task_ctx_t *tctx;
+	s32 cid;
+
+	TOUCH_ARENA();
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	cid = tctx->delay_cid;
+	if (cid_valid(cid) && !cmask_test(cid, cmask))
+		delay_settle(tctx, scx_bpf_now());
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -9247,6 +9275,7 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	.update_idle		= (void *)cidland_update_idle,		\
 	.enable			= (void *)cidland_enable,		\
 	.set_weight		= (void *)cidland_set_weight,		\
+	.set_cmask		= (void *)cidland_set_cmask,		\
 	.init_task		= (void *)cidland_init_task,		\
 	.exit_task		= (void *)cidland_exit_task,		\
 	.__cg##_init		= (void *)cidland_cpuctl_init,		\
