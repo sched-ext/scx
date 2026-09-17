@@ -3144,7 +3144,8 @@ static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	s32 best = -EBUSY;
 	u32 cid;
 
-	if (!asym_capacity || !cid_valid(src_cid) || is_pcpu_task(p))
+	if (!asym_capacity || !cid_valid(src_cid) || is_pcpu_task(p) ||
+	    cmask_empty(idle_cids))
 		return -EBUSY;
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -7132,6 +7133,7 @@ static void update_avg_idle(struct cid_ctx __arena *cctx, u64 now)
 void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 {
 	struct cid_topo __arena *topo;
+	bool queued;
 	s32 cid = scx_bpf_this_cid(), peer;
 	struct task_struct *head;
 	u64 now, tid;
@@ -7205,7 +7207,25 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	if (busy_balance_domain(cid, topo->llc_base, topo->llc_nr,
 				BUSY_BALANCE_LLC, now))
 		return;
-	if (!cid_queue_nr(cid)) {
+	queued = cid_queue_nr(cid);
+
+	/*
+	 * update_misfit_status() records the running task even when other work is
+	 * queued, and nohz_balancer_kick() asks an idle CPU to run the
+	 * group_misfit_task balance when nr_running >= 2. Do the equivalent from
+	 * the source tick while @p is exact: a queued, pinned head must not hide a
+	 * current task which needs a larger CPU. The destination still consumes
+	 * and revalidates the request through active_balance_target(), preserving
+	 * the deferred detach used by the other active-balance cases.
+	 */
+	if (asym_capacity && queued) {
+		peer = idle_misfit_cid(p, cid, now);
+		if (peer >= 0 && peer != cid && active_balance_reserve(peer, now)) {
+			scx_bpf_kick_cid(peer, SCX_KICK_IDLE);
+			return;
+		}
+	}
+	if (!queued) {
 		/*
 		 * nohz_balancer_kick() also wakes an idle balancer when the sole
 		 * runnable task is on a lower-priority or undersized CPU. Serialize
