@@ -195,17 +195,6 @@ pub fn read_governor_with_profile(cpu: u32, platform: Option<&str>) -> String {
 }
 
 /*
- * Governor of one CPU with diagnostic suffix only. Reads the scaling governor
- * file. Missing files yield unknown with no trap. Appends the EPP and platform
- * suffix when present, so powersave with performance EPP stays visible. The
- * suffix is display only and never feeds the unanimity check, see base.
- */
-#[allow(dead_code)]
-pub fn read_governor(cpu: u32) -> String {
-    read_governor_with_profile(cpu, read_platform_profile().as_deref())
-}
-
-/*
  * Governors for one tick with one platform read.
  * Calls the provider exactly once per collection, then
  * threads the value into each per CPU read. Empty stays
@@ -639,8 +628,8 @@ pub fn filter_allowed(
 
 /*
  * Synthetic card for tests. Builds one display only card with the given id,
- * frequency, LLC, and thread role. Slice stays fixed at 1ms. Group stays light
- * with zero.
+ * frequency, LLC, and thread role. Slice stays fixed at 1ms. Group stays
+ * light with zero.
  */
 #[cfg(test)]
 pub fn synthetic_card(

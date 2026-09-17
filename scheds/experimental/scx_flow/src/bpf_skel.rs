@@ -2,8 +2,8 @@
 /*
  * Generated BPF skeleton
  *
- * Holds the generated skeleton for the BPF object. The file only includes the generated
- * skeleton from the build directory.
+ * Holds the generated skeleton for the BPF object. The file
+ * only includes the generated skeleton from the build directory.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

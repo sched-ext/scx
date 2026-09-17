@@ -2,8 +2,8 @@
 /*
  * Flow scheduler front end
  *
- * Loads the BPF object, wires stats and the dashboard, and drives the run loop until
- * shutdown or exit. Snapshot reads live in snapshot.
+ * Loads the BPF object, wires stats and the dashboard, and drives the run loop
+ * until shutdown or exit. Snapshot reads live in snapshot.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -23,6 +23,8 @@ mod flow_slot;
 mod flow_tests_edf;
 #[cfg(test)]
 mod flow_tests_group;
+#[cfg(test)]
+mod flow_tests_lifo;
 #[cfg(test)]
 mod flow_tests_preempt;
 #[cfg(test)]
@@ -136,10 +138,8 @@ pub(crate) struct Scheduler<'a> {
     governor_read_at: Option<std::time::Instant>,
     /* Package energy reader. None parks the probe. */
     rapl: Option<crate::rapl::RaplReader>,
-    /* A/B probe over package joules on the 1s tick. */
+    /* Strict only probe over package joules on the 1s tick. */
     probe: crate::snapshot::EnergyProbe,
-    /* Last forced perf written to BSS. */
-    probe_force: u8,
     /* Latest energy view for the dashboard. */
     energy: crate::stats::EnergyMetrics,
     /* Last RAPL sample for the 1s tick cadence. */
@@ -260,7 +260,6 @@ impl<'a> Scheduler<'a> {
             governor_read_at: None,
             rapl,
             probe: crate::snapshot::EnergyProbe::new(),
-            probe_force: 0,
             energy: crate::stats::EnergyMetrics::default(),
             rapl_read_at: None,
         })
@@ -298,9 +297,9 @@ impl<'a> Scheduler<'a> {
             demote={} promote={} wpromote={} pinfl={} gskip={} \
             pkick={} pskip={} kcoal={} \
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
-            wskips={} wover={} tboost={} \
-            whead={} wfine={} wcoarse={} wempty={} \
+            wover={} tboost={} \
             skicks={} tcas={} smoves={} sdefer={} stealx={} \
+            lheads={} lbound={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -325,18 +324,15 @@ impl<'a> Scheduler<'a> {
             m.preempt_skipped_group,
             m.preempt_skipped_mask,
             m.preempt_skipped_rate,
-            m.wheel_skips,
             m.wheel_overflow,
             m.token_boosts,
-            m.wheel_head_hits,
-            m.wheel_fine_hits,
-            m.wheel_coarse_hits,
-            m.wheel_empty,
             m.slot_kicks,
             m.token_cas_fails,
             m.slot_moves,
             m.slot_defer,
             m.steal_xmoves,
+            m.lifo_heads,
+            m.lifo_bound_hits,
             runtime,
             oncpu,
         );
@@ -511,10 +507,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_296() {
+    fn sched_stats_size_is_272() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            296
+            272
         );
     }
 

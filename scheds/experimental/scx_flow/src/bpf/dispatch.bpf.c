@@ -12,7 +12,7 @@
  * move. Pinned tasks
  * rest in overflow, so trips visit them every pass. All trips share one
  * drain body with mask wins and move to local, so per queue order stays
- * FIFO.
+ * bounded LIFO at K 8 with FIFO fallback on old kernels.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -137,7 +137,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* tail smooth with no burst theft, so one peer task per pass is enough */
 	/* with local trips owning the window. Cursor steps by 8 */
 
-	/* with a bounded compare and swap in 4 tries that keeps rate plus stand */
+	/* with a bounded compare and swap in 4 tries that keeps stand */
 	/* and drops on race, so contended owners skip the step with no stall. */
 	/* When host size divides 8, step 8 is identity with no advance, */
 	/* harmless as the bound 8 scan covers all peers while donor priority */
@@ -245,8 +245,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				    (u32)nr_cpu_ids;
 				nxt = (nxt_peer &
 				    (u32)FLOW_CURSOR_MASK) |
-				    (cur & ((u32)FLOW_CURSOR_RATE_BIT |
-				    (u32)FLOW_CURSOR_STAND_BIT));
+				    (cur & (u32)FLOW_CURSOR_STAND_BIT);
 				got = __sync_val_compare_and_swap(
 				    &st->cursor, cur, nxt);
 				if (got == cur)
