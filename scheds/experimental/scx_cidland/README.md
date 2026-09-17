@@ -248,18 +248,17 @@ be turned off on the command line to compare the two rules against each other.
    makes that CPU the affine target, `wake_affine_idle()`: idle alternatives
    around it still win, and only when the scan fails is the wakee stacked on
    the waker that is about to sleep. When the waking CPU and the previous one
-   are both busy the wakee stays on its previous CPU by default; `--wa-weight`
-   sends it to whichever the loads say ends up lighter, `wake_affine_weight()`:
-   the load of a CPU is the weight of what is runnable on it averaged over
-   time, `cpu_load()`, and a task's is its weight scaled by the fraction of
-   the time it is runnable, `task_h_load()`, with the previous CPU favoured by
-   half the domain's `imbalance_pct`. A waker that runs a little and sleeps a
-   lot weighs little, so its wakee lands on its CPU and runs when it sleeps,
-   instead of behind a fresh slice on the CPU it came from; on a saturated
-   machine that is a third of the wakeups, and the one case where the rule
-   has been measured to matter. Everywhere else it is within noise and costs
-   a few percent on wakeup-heavy runs, in `fair.c` as much as here, hence
-   off by default. The
+   are both busy `wake_affine_weight()` sends a wakee to whichever of its
+   previous CPU and the waking CPU the loads say ends up lighter. The load of
+   a CPU is the tick-sampled averaged weight of what is runnable on it. A
+   task's load approximates `task_h_load()` with its
+   already-maintained execution-utilization estimate, decayed over sleep, so
+   the comparison needs no separate runnable average or event accounting. A
+   waker that runs a little and sleeps a lot weighs little, so its wakee can
+   land on its CPU and run when it sleeps instead of waiting behind a fresh
+   slice on the CPU it came from. `--no-wa-weight` disables the comparison for
+   systems where those placement decisions perform worse, such as large
+   asymmetric-SMT machines. The
    `record_wakee()`/`wake_wide()` flip heuristic disables affinity for wide
    M:N wakeup patterns. Forks do not use this wakeup-only idle-sibling path:
    they descend the kernel's live `SD_BALANCE_FORK` span through its NUMA,

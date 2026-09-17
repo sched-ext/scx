@@ -356,17 +356,16 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
-    /// Weigh the waking CPU against the previous one when both are busy.
+    /// Do not weigh the waking CPU against the previous one when both are busy.
     ///
-    /// By default a wakee whose previous CPU and waking CPU are both busy
-    /// stays where it last ran. With this, it goes to the one the two loads
-    /// say is lighter, the time-averaged weight of what is runnable on each,
-    /// so that a waker that runs a little and sleeps a lot takes its wakee
-    /// onto its own CPU: wake_affine_weight(). It matters on a saturated
-    /// machine with many short wakeups; elsewhere it costs a few percent of
-    /// wakeup throughput for no measured gain, as it does in fair.c.
+    /// By default, send the wakee to whichever of its previous CPU and the
+    /// waking CPU would be lighter after the move. Cid load is sampled from
+    /// the tick and task load reuses its execution-utilization estimate, so
+    /// the comparison adds no runnable-state accounting. Disable this on
+    /// systems where the resulting placement performs worse, such as large
+    /// asymmetric-SMT systems.
     #[clap(long, action = clap::ArgAction::SetTrue)]
-    wa_weight: bool,
+    no_wa_weight: bool,
 
     /// Periodic busy load balancing runs every domain-weight milliseconds
     /// times this factor, sd->busy_factor (16 in fair.c).
@@ -888,7 +887,7 @@ impl<'a> Scheduler<'a> {
             info!("Idle scan: a whole idle core wins over a busy core's sibling, across LLCs");
         }
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.wa_weight = opts.wa_weight;
+        rodata.wa_weight = !opts.no_wa_weight;
         rodata.busy_balance_factor = opts.busy_balance_factor;
         rodata.capacity_pressure = !opts.no_capacity_pressure;
         if opts.no_capacity_pressure {

@@ -159,8 +159,10 @@ const volatile bool no_wakeup_preempt;
  * Send a wakee to the waking cid when both it and its previous cid are
  * busy and the loads say that leaves the two better balanced, the
  * effective-load comparison of wake_affine_weight(), see
- * wake_affine_weight_cid(). Off by default: a wakee stays on its previous
- * cid, and the load averages behind the comparison are not kept.
+ * wake_affine_weight_cid(). The cid load is sampled from the tick and task
+ * load reuses its execution-utilization estimate, so the comparison adds no
+ * runnable-state accounting. Enabled by default and disabled with
+ * --no-wa-weight on systems where its placement decisions perform worse.
  */
 const volatile bool wa_weight;
 const volatile u32 busy_balance_factor = 16;
@@ -360,8 +362,8 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
-	struct ravg_data runnable_avg;	/* fraction of wall time spent runnable, see task_load() */
 	u64 util_est;		/* what the last activation used */
+	u64 last_sleep_at;	/* last block, used to decay WA_WEIGHT task load */
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */
 	u64 delay_w;		/* its weight without the task */
@@ -795,6 +797,7 @@ struct cid_ctx {
 	u64 busy_balance_load; /* latest domain-scan load sample */
 	u64 busy_balance_cap; /* latest delivered-capacity estimate */
 	u64 busy_balance_scan_cap; /* capacity paired with the load sample */
+	u64 wake_load; /* tick-sampled load for wake_affine_weight() */
 	u64 pressure_lost; /* cumulative higher-class displacement time */
 	u64 pressure_lost_at; /* displacement time at the window start */
 	u64 pressure_blocked_at; /* task clock when a higher class displaced it */
@@ -1842,14 +1845,16 @@ static bool cid_capacity_reduced(s32 cid)
  * of the runnable tasks averaged over time, and what wake_affine_weight()
  * compares. The weight is the pack's, @vsum_w, the sum over the running
  * task and the queued ones, and it is sampled into the average from the
- * cid's own CPU. ops.tick() always maintains it for periodic balancing, and
- * ops.update_idle() records the empty pack when the tick stops with the CPU;
- * WA_WEIGHT additionally updates it in ops.running() and ops.stopping(),
- * where wake-affine needs the finer-grained signal. A join or a leave from
+ * cid's own CPU. ops.tick() maintains it and ops.update_idle() records the
+ * empty pack when the tick stops with the CPU. Updating it at every context
+ * switch would be finer grained, but unlike fair's PELT that means entering a
+ * BPF running-average state machine twice per switch. A join or a leave from
  * another CPU changes @vsum_w atomically but cannot update a running average
- * that is not owned there, and the sample is at most an event behind. A read
+ * that is not owned there, so the sample is at most one tick behind. A read
  * from another CPU is the same unlocked read cid_util() makes.
  */
+static __always_inline u64 ravg_read_fast(struct ravg_data __arena *rd, u64 now);
+
 static void cid_load_accumulate(s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx;
@@ -1859,19 +1864,60 @@ static void cid_load_accumulate(s32 cid, u64 now)
 	cctx = cid_ctx(cid);
 
 	ravg_accumulate_arena(&cctx->load_avg, cctx->pack.vsum_w, now);
-}
-
-static void cid_load_update(s32 cid, u64 now)
-{
-	if (wa_weight)
-		cid_load_accumulate(cid, now);
+	cctx->wake_load = ravg_read_fast(&cctx->load_avg, now) >> RAVG_FRAC_BITS;
 }
 
 static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now);
 
+/* ((@a * @b) >> RAVG_FRAC_BITS) without overflowing the intermediate. */
+static __always_inline u64 ravg_scale_fast(u64 a, u32 b)
+{
+	u64 lo = (a & 0xffffffffULL) * b;
+	u64 hi = (a >> 32) * b;
+
+	return (lo >> RAVG_FRAC_BITS) + (hi << (32 - RAVG_FRAC_BITS));
+}
+
+/*
+ * The common ravg_read() case when the last update and this read are in the
+ * same 32 ms period. Avoid copying the arena value and running the general
+ * period-crossing state machine. Fall back at a boundary, where the general
+ * path is needed to fold and decay periods.
+ */
+static __always_inline u64 ravg_read_fast(struct ravg_data __arena *rd, u64 now)
+{
+	u64 val, val_at, old, cur, add;
+	u32 elapsed, progress;
+
+	/* Match ravg_from_arena()'s snapshot order for concurrent remote reads. */
+	val = READ_ONCE(rd->val);
+	val_at = READ_ONCE(rd->val_at);
+	old = READ_ONCE(rd->old);
+	cur = READ_ONCE(rd->cur);
+	if (now < val_at || now / UTIL_HALF_LIFE_NS != val_at / UTIL_HALF_LIFE_NS)
+		return ravg_read_arena(rd, now);
+	elapsed = now % UTIL_HALF_LIFE_NS;
+	if (!elapsed)
+		return old;
+
+	progress = ravg_normalize_dur(elapsed, UTIL_HALF_LIFE_NS);
+	old = ravg_scale_fast(old, (1U << RAVG_FRAC_BITS) - progress / 2);
+	if (val && now > val_at) {
+		add = val * ravg_normalize_dur(now - val_at,
+					       UTIL_HALF_LIFE_NS);
+		ravg_add(&cur, add);
+	}
+	return old + cur / 2;
+}
+
 static u64 cid_load(s32 cid, u64 now)
 {
-	return ravg_read_arena(&cid_ctx(cid)->load_avg, now) >> RAVG_FRAC_BITS;
+	return ravg_read_fast(&cid_ctx(cid)->load_avg, now) >> RAVG_FRAC_BITS;
+}
+
+static u64 cid_wake_load(s32 cid)
+{
+	return READ_ONCE(cid_ctx(cid)->wake_load);
 }
 
 /*
@@ -3766,7 +3812,7 @@ static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
  * Pick the target around which the idle search should run.
  *
  * This is the WA_IDLE half of fair.c's wake_affine(). The effective-load
- * half, wake_affine_weight(), is there but opt-in, --wa-weight, see
+ * half, wake_affine_weight(), is enabled by default, see
  * wake_affine_weight_cid(). As in fair.c, affinity is considered for a
  * wakeup when the waking cid is allowed and wake_wide() does not reject the
  * waker/wakee relationship. The sched domain carrying SD_WAKE_AFFINE may be
@@ -3806,22 +3852,14 @@ static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
  *		prev_eff_load += 1;
  *	return this_eff_load < prev_eff_load ? this_cpu : nr_cpumask_bits;
  *
- * The loads are the time-averaged runnable weights, see cid_load() and
- * task_load(), which is what makes this different from counting queued
- * tasks: a waker that runs a little and sleeps a lot weighs little on its
- * cid, so a wakee it has just woken lands there, where it is next in line
- * behind a task about to sleep, rather than behind a full slice on the
- * cid it came from. This is where a waker hands a CPU to its wakee under
- * load, and without it a wakee on a saturated machine waited a slice on
- * its previous cid for one wakeup in five, where fair.c waits on one in
- * fourteen. The bias is the half of the domain's imbalance_pct fair.c
- * uses, 117 within an LLC and 110 within a core.
- *
- * It is off by default and --wa-weight turns it on: that saturated
- * wakeup pattern is the one place it has been measured to matter, and
- * across the rest of the benchmark set it is within noise at a cost of a
- * few percent on the wakeup-heavy runs, which fair.c pays for WA_WEIGHT
- * too.
+ * The cid loads are tick-sampled averaged runnable weights. task_load()
+ * approximates task_h_load() from the task's already-maintained execution
+ * utilization, decayed cheaply over sleep. A waker that runs a little and
+ * sleeps a lot therefore weighs little on its cid, so its wakee lands behind
+ * a task about to sleep instead of behind a fresh slice on the previous cid.
+ * This approximation avoids a second per-task running average and leaves the
+ * wakeup path with scalar snapshot reads. The bias is half the domain's
+ * imbalance_pct, 117 within an LLC and 110 within a core.
  */
 static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 				  task_ctx_t *tctx,
@@ -3833,7 +3871,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	u64 load;
 	u32 pct;
 
-	this_eff = cid_load(this_cid, now);
+	this_eff = cid_wake_load(this_cid);
 	if (sync) {
 		u64 current_load = wctx ? task_load(waker, wctx, now) : 0;
 
@@ -3849,7 +3887,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 
 	pct = smt_enabled && cid_topo(prev_cid)->core_base == cid_topo(this_cid)->core_base ?
 	      100 + (110 - 100) / 2 : 100 + (117 - 100) / 2;
-	prev_eff = (s64)cid_load(prev_cid, now) - (s64)load;
+	prev_eff = (s64)cid_wake_load(prev_cid) - (s64)load;
 	prev_eff *= pct;
 	prev_eff *= cid_topo(this_cid)->cap;
 	if (sync)
@@ -4916,18 +4954,23 @@ static u64 task_weight(const struct task_struct *p, const task_ctx_t *tctx)
 }
 
 /*
- * The load of a task, task_h_load(): its weight scaled by the fraction of
- * the time it has been runnable, se->avg.load_avg, so that a task that
- * sleeps most of the time weighs less on a queue than one that never
- * does. The runnable average is kept from ops.runnable() to
- * ops.quiescent(), where util_avg is kept from ops.running() to
- * ops.stopping().
+ * Approximate task_h_load() with the execution-utilization average cidland
+ * already maintains for capacity placement. A task that sleeps most of the
+ * time still weighs less than a CPU-bound task, while WA_WEIGHT adds no second
+ * running average to every runnable/quiescent transition. Unlike fair's
+ * runnable PELT, execution utilization can understate a task delayed by
+ * contention; WA_BIAS and the cid load comparison keep the previous cid
+ * preferred in the close cases where that distinction matters.
  */
 static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now)
 {
-	u64 runnable = ravg_read_arena(&tctx->runnable_avg, now) >> UTIL_SHIFT;
+	u64 util = READ_ONCE(tctx->util_est);
 
-	return task_weight(p, tctx) * MIN(runnable, 1024) / 1024;
+	/* Approximate PELT decay while a sleeping task receives no callbacks. */
+	if (!scx_bpf_task_running(p) && time_after(now, tctx->last_sleep_at))
+		util >>= MIN((now - tctx->last_sleep_at) / UTIL_HALF_LIFE_NS, 63ULL);
+
+	return task_weight(p, tctx) * MIN(util, 1024) / 1024;
 }
 
 /*
@@ -8549,8 +8592,8 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 
 	now = scx_bpf_now();
 	util_est_update(tctx, now);
-	if (wa_weight)
-		ravg_accumulate_arena(&tctx->runnable_avg, 0, now);
+	if (deq_flags & SCX_DEQ_SLEEP)
+		tctx->last_sleep_at = now;
 
 	/*
 	 * Remember how far the task is from the reference as it stops being
@@ -8623,8 +8666,6 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 	direct_placed = tctx->direct_placed;
 	tctx->direct_placed = false;
-	if (wa_weight)
-		ravg_accumulate_arena(&tctx->runnable_avg, 1, scx_bpf_now());
 
 	/*
 	 * Drop out of the pack the task was last a member of. The lag it
@@ -8665,7 +8706,6 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	util_set_running(tctx, true, now);
 	cid_util_set_running(cid, true, now);
 	cid_demand_set(cid, true, now);
-	cid_load_update(cid, now);
 
 	/*
 	 * A task that was moved here from another cid's queue, by the
@@ -8766,7 +8806,6 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	cid_demand_set(cid, runnable ||
 			       (cid_valid(cid) && cid_queue_nr(cid) > 0),
 		       tctx->last_stop_at);
-	cid_load_update(cid, tctx->last_stop_at);
 	if (runnable && p->scx.slice)
 		cid_pressure_displaced(cid, tnow);
 
