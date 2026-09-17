@@ -546,6 +546,18 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
         info!("🍰 attached");
+        // ops.init chose the task-age clock; say which, every start.
+        if let Some(bss) = skel.maps.bss_data.as_ref() {
+            if bss.cake_tick_ns > 0 {
+                info!(
+                    "   age     tick clock ({} ns per tick, offset to monotonic {} ms)",
+                    bss.cake_tick_ns,
+                    bss.cake_jiffies_offset as i64 / 1_000_000
+                );
+            } else {
+                info!("   age     precise clock (kernel HZ unavailable; tick clock off)");
+            }
+        }
 
         // The file capabilities (cap_bpf,cap_perfmon,cap_sys_nice) are only
         // needed to load and attach; detach and map access use already-open
@@ -587,7 +599,7 @@ impl<'a> Scheduler<'a> {
                     bss.cake_irq_live
                         .iter()
                         .take(*NR_CPU_IDS)
-                        .map(|s| s.depth)
+                        .flat_map(|s| s.depth)
                         .collect()
                 };
                 let first = self.skel.maps.bss_data.as_ref().map(|b| depths(b));
@@ -599,7 +611,7 @@ impl<'a> Scheduler<'a> {
                         .zip(&b)
                         .enumerate()
                         .filter(|(_, (x, y))| **x != 0 && **y != 0)
-                        .map(|(cpu, (x, y))| format!("cpu{cpu}:{x}/{y}"))
+                        .map(|(i, (x, y))| format!("slot{}.{}:{x}/{y}", i / 2, i % 2))
                         .collect();
                     info!(
                         "   irq     in-handler depth stuck on {} CPU(s) at {polls} s {}",
@@ -826,14 +838,38 @@ impl<'a> Scheduler<'a> {
     /// Wide hosts may observe different publication epochs across words;
     /// these are placement preferences, never CPU admission or reservations.
     fn publish_sinks(&mut self, set: &[bool]) {
+        const N: usize = bpf_intf::consts_QMASK_WORDS as usize;
+        let words = sink_words::<N>(set);
+        // The whole-core expansion, computed here once per publication
+        // instead of on every claim walk in BPF: a sink's SMT sibling
+        // shares its core.
+        let siblings: Vec<i32> = self
+            .skel
+            .maps
+            .rodata_data
+            .as_ref()
+            .map(|ro| ro.cpu_sibling.to_vec())
+            .unwrap_or_default();
+        let mut cores = words;
+        for (cpu, hot) in set.iter().take(N * 64).enumerate() {
+            if let (true, Some(&sib)) = (*hot, siblings.get(cpu))
+                && sib >= 0
+                && (sib as usize) < N * 64
+            {
+                cores[sib as usize / 64] |= 1u64 << (sib as usize % 64);
+            }
+        }
         let Some(bss) = self.skel.maps.bss_data.as_mut() else {
             return;
         };
-        let words = sink_words::<{ bpf_intf::consts_QMASK_WORDS as usize }>(set);
         for (published, word) in bss.cpu_irq_hot_words.iter_mut().zip(words) {
             // SAFETY: the skeleton maps writable, u64-aligned BSS that BPF
             // reads concurrently; the atomic view lives no longer than the
             // &mut it is built from. No cross-word atomicity assumed.
+            unsafe { AtomicU64::from_ptr(published) }.store(word, Ordering::Relaxed);
+        }
+        for (published, word) in bss.cpu_irq_hot_cores.iter_mut().zip(cores) {
+            // SAFETY: as above.
             unsafe { AtomicU64::from_ptr(published) }.store(word, Ordering::Relaxed);
         }
 

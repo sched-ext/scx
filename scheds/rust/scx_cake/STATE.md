@@ -36,6 +36,60 @@ the day's three commits squashed to one; origin force-pushed.
 
 ## RESUME HERE
 
+**2026-09-17 — HOT-PATH EFFICIENCY: select_cpu 118–130 → 87–90 ns PER WAKE, SCHEDULING
+UNCHANGED (one squashed commit; pushed to nightly for testing).**
+Deep dive into duplicate work and poor pathing in the hot path, measured per
+program with `cake-bpfstats` and per class with the probe census (which had
+failed to load since `ba1a8912e`; repaired here, hot path unchanged when the
+probe folds). Every step was gated on scheduling being the same before the
+next: per-thread migrations and preemptions from `/proc` for every WoW, kwin,
+pipewire and wineserver thread, WoW-process IPC and L1d miss rate from
+`perf stat`, verifier accepted, zero stalls, native restored. Twelve valid
+live-WoW Cake slots (login screen, ~45k selects/s, Battle.net launcher up as
+the noise source, recorded as a covariate). No MangoHud, so no frame claim.
+
+| step | select_cpu ns/wake (2 slots) | WoW main migr/switch | verdict |
+|---|---|---|---|
+| HEAD `d438af21c` | 118.4, 122.9 | 0.046, 0.049 | baseline |
+| dedup: no kernel idle scan on an empty word; kthread pool wake searches once; the §G38 sibling block (dead: the walk already tried it) leaves notify; SYNC test before the whole-core snapshot; one occupant read and one clock per notify; one-word affinity as a load | −1 to −5; enqueue −20 to −26% per run | level | keep |
+| A: `last_win` groove preference removed | 111.6, 110.9 | **0.088, 0.080** (kwin 1.5x) | superseded: the appsim census undercounted its steering (4.7%) because appsim has few whole-idle cores; WoW has many |
+| B: the task's own core first when whole-idle, unseated and clean, from a register; no storage lookup | 101.7, 110.8 | 0.040, 0.053 | keep |
+| layout: seat identity out of the per-switch run slot into `cake_seat[64]`; `irq_live` core-indexed (one line per SMT pair) | 99 to 111 | level | keep |
+| read-once: task age from jiffies × tick (HZ from kconfig, offset to the precise clock measured once in ops.init; `bpf_ktime_get_coarse_ns` is refused for struct_ops); loader publishes `cpu_irq_hot_cores` beside the sink words | 89.8, 87.4 | 0.125, 0.140 vs layout 0.131, 0.139 (same rotation) | keep |
+
+The tick clock is a lifetime quantity only (the slice cap's cycle term, age
+over switches): never a deadline, never a cross-stamp delta; one tick of
+staleness on a lifetime, floored at one slice for a task younger than a tick.
+Every per-frame decision keeps its nanosecond clock. Startup prints which age
+clock is live (`age tick clock (...)` or `age precise clock`).
+
+Census on the dedup candidate (appsim, 9.28M selects; ns per select after the
+empty-pair calibration): idle claim atomic 31.5, groove storage 28.7 (now gone),
+two DSQ counts in dispatch 30.2, ktime in task_slice ~20 (now ~4), whole-core
+snapshot ~6. Rejected on analysis: the own-queue qmask bit in place of the
+dispatch count (a clearer between mark and insert strands the task; closing it
+costs the atomic §G25 removed); a switch-synced cached clock (saves ≤3 ns more
+than jiffies for a per-CPU offset). Rejected on measurement: the 9/15 recovered
+stash `cake_core_irq_bad_once` (select_cpu 4/5 → 18/10 spills for two loads).
+
+Evidence: session scratchpad `bpfcost.sh`, `census.sh`, `wowab.sh`,
+`procthreads.py` and the `ab/`, `wow/`, `wow2/`, `wow3/`, `wow4/`, `census_cand/`
+run dirs (disposable). Receipts under `target/cake_receipt_builds/20260917T*`.
+`cakebench try` no longer refuses on a running game: it records the game as a
+covariate and blocks only on a leaked scheduler (`scx_cake_try.py`).
+
+Still owed before a scoring claim: per-thread wait time (`sched_schedstats=1`),
+the mouse-IRQ → game-thread chain (tracefs), and a frame capture.
+
+**2026-09-15 — FOUR SHAPE COMMITS + THE OPERATION COST AUDIT (unmeasured until
+2026-09-17; see the baseline row above).** `08763176e` Relaxed atomic store for
+the sink words; `ba1a8912e` dispatch peeks a head only when it competes with
+another; `9722bfcdd` rq clock for the stamp family (§G34 H1); `a2a8532a4`
+running reads task storage only while a seat is held; `ca4b7218b` a lone
+continuation kicks no idle CPU (`kick_alone`). Audit:
+`docs/AUDIT_OPERATION_COST_2026-09-15.md`. Its targets 1–4 stay open. The 17:58
+WIP stash from that day (`cake_core_irq_bad_once`) is rejected above.
+
 **2026-09-08 — REBASED NIGHTLY AND LAUNCHER ARGUMENT COMPATIBILITY.**
 Nightly is based on upstream/main `7cec98c51`. Range-diff against the
 published nightly confirms all 17 commits were replayed without source
@@ -798,8 +852,10 @@ resume waits with KWin interruptions. This is a queue-access fix, not inferred
 game dependency or permission to preempt realtime work.
 
 Cosmos 1.1.6 now has a strict release receipt route. Its BPF policy is unchanged;
-loader-only changes share Cake's post-attach capability drop/inspection and
-reexec helpers in `scx_utils::misc`. The helper clears the calling thread's
+loader-only changes shared Cake's post-attach capability drop/inspection and
+reexec helpers, then in `scx_utils::misc`, since `5af8b267f` private to Cake's
+`main.rs` (the Cosmos patch was never committed; its stashes were dropped
+2026-09-17). The helper clears the calling thread's
 capabilities, not capabilities retained by other threads. A child-process test
 checks `/proc/thread-self/status` and dumpability. Initial Cosmos closure,
 overlong stats socket and retained-capability inspection failures were rejected
