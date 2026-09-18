@@ -71,7 +71,8 @@ const volatile bool smt_whole_core;
 /*
  * Schedule the cpu controller's cgroups as groups, each weighing its
  * cpu.weight against its siblings, the way fair.c's group scheduling does.
- * See struct grp_q. Off unless user space asks for it, --enable-cgroups.
+ * See struct grp_q. On by default; user space turns it off with
+ * --disable-cgroups.
  */
 const volatile bool cgroup_enabled;
 
@@ -124,6 +125,13 @@ const volatile u32 cache_nice_tries = 1;
 const volatile bool no_newidle_cost;
 
 /*
+ * Sample new-idle scans from their observed success and call rates, fair.c's
+ * NI_RANDOM and NI_RATE. On by default; user space clears it for
+ * --no-newidle-sampling.
+ */
+const volatile bool newidle_sampling = true;
+
+/*
  * Bound the ordinary LLC idle scan by its averaged utilization, the way
  * fair.c's SIS_UTIL feature uses sched_domain_shared::nr_idle_scan. The
  * hint is refreshed by periodic load balance, never on the wakeup path.
@@ -151,11 +159,16 @@ const volatile bool no_wakeup_preempt;
  * Send a wakee to the waking cid when both it and its previous cid are
  * busy and the loads say that leaves the two better balanced, the
  * effective-load comparison of wake_affine_weight(), see
- * wake_affine_weight_cid(). Off by default: a wakee stays on its previous
- * cid, and the load averages behind the comparison are not kept.
+ * wake_affine_weight_cid(). The cid load is sampled from the tick and task
+ * load reuses its execution-utilization estimate, so the comparison adds no
+ * runnable-state accounting. Enabled by default and disabled with
+ * --no-wa-weight on systems where its placement decisions perform worse.
  */
 const volatile bool wa_weight;
 const volatile u32 busy_balance_factor = 16;
+#define BUSY_BALANCE_IMBALANCE_PCT	117U
+/* Account for capacity unavailable to sched_ext in periodic busy balance. */
+const volatile bool capacity_pressure;
 const volatile bool no_task_clock;
 
 /*
@@ -250,32 +263,12 @@ const volatile bool no_hrtick;
 #define __hot_written	__attribute__((aligned(64)))
 
 /*
- * Scheduler statistics.
- */
-volatile u64 nr_steals __hot_written;
-volatile u64 nr_busy_balances __hot_written;
-volatile u64 nr_active_balances __hot_written;
-volatile u64 nr_preempts __hot_written;
-volatile u64 nr_delay_requeues __hot_written;
-volatile u64 nr_hrticks __hot_written;
-volatile u64 nr_newidle_skips __hot_written;
-/*
  * Not __hot_written: these are touched once per periodic LLC balance, a couple
  * of dozen times a second for the whole machine, so they have no business
  * taking a cache line each the way the per-wakeup counters above do.
  */
 volatile u64 nr_sis_updates;
 volatile u64 sis_scan_sum;
-
-/*
- * How often a bounded budget ended the search and left the task on its target.
- * This one is written from the wakeup path, but only where --sis-util is on and
- * the scan it bounded has already failed, so a machine that does not ask for
- * the feature never reaches it. It is what says the budget decides anything:
- * without it, a scan that stops short and is then repeated unbounded looks
- * exactly like a scan that was never bounded at all.
- */
-volatile u64 nr_sis_cutoffs __hot_written;
 
 volatile u64 user_util_sum __hot_written;
 volatile u64 user_util_snapshot_at __hot_written;
@@ -284,6 +277,53 @@ volatile u64 user_util_snapshot_at __hot_written;
  * Scheduler's exit status.
  */
 UEI_DEFINE(uei);
+
+/*
+ * Arena pages in use, counted where they are handed out. Every allocator
+ * the BPF side uses, the tables carved at init, the library's static and
+ * task context pools, ends in bpf_arena_alloc_pages(), and the kernel only
+ * started to account arena pages in the map's memlock in 7.3. Loaded and
+ * attached only when the usage is reported, --stats: user space turns
+ * them on before load, sets @arena_map_id before the first allocation and
+ * reads the two counters. Not a hot path: a page is allocated once and
+ * then carved for thousands of objects.
+ */
+u32 arena_map_id;
+u64 arena_pages_allocated;
+u64 arena_pages_freed;
+
+/*
+ * Cids whose current task counts as SCHED_IDLE work, kept by ops.running()
+ * and ops.stopping(). A wakeup asks this before it looks at any cid for
+ * cid_sched_idle_target(): the answer is almost always none, and it comes
+ * from one word that is only written when such a task starts or stops,
+ * where the per-cid test costs reads of two bitmap words and a pack line
+ * that every CPU keeps changing.
+ */
+u32 nr_sched_idle_curr;
+
+static bool arena_is_ours(void *map)
+{
+	return arena_map_id &&
+	       BPF_CORE_READ((struct bpf_map *)map, id) == arena_map_id;
+}
+
+SEC("?fexit/bpf_arena_alloc_pages")
+int BPF_PROG(cidland_arena_alloc_pages, void *map, void *addr, u32 page_cnt,
+	     int node_id, u64 flags, void *ret)
+{
+	if (ret && arena_is_ours(map))
+		__sync_fetch_and_add(&arena_pages_allocated, page_cnt);
+	return 0;
+}
+
+SEC("?fentry/bpf_arena_free_pages")
+int BPF_PROG(cidland_arena_free_pages, void *map, void *ptr, u32 page_cnt)
+{
+	if (arena_is_ours(map))
+		__sync_fetch_and_add(&arena_pages_freed, page_cnt);
+	return 0;
+}
 
 /*
  * Size of the cid space this scheduler schedules on, [0, nr_cids), the
@@ -369,8 +409,10 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
-	struct ravg_data runnable_avg;	/* fraction of wall time spent runnable, see task_load() */
 	u64 util_est;		/* what the last activation used */
+	u64 runnable_at;	/* when the last wakeup made the task runnable */
+	u64 runnable_est;	/* fraction of wall time runnable, see task_runnable_update() */
+	u64 last_sleep_at;	/* last block, used to decay WA_WEIGHT task load */
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */
 	u64 delay_w;		/* its weight without the task */
@@ -384,10 +426,11 @@ struct task_ctx {
 	s32 last_wakee_pid;
 	s32 recent_used_cid;
 	s32 dispatch_migrate_cid; /* preferred destination chosen for running @p */
+	bool pressure_migrate; /* requeue this detached task on a less loaded cid */
 
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
-	bool direct_placed;	/* select_cid() already placed and joined it */
+	bool place_pending;	/* a direct dispatch left its placement to ops.running() */
 };
 
 typedef struct task_ctx __arena task_ctx_t;
@@ -450,8 +493,6 @@ static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct 
 struct grp_hdr {
 	u64 weight;		/* cpu.weight as a load weight, tg->shares */
 	u64 pages;		/* arena pages of this block */
-	u64 load_avg;		/* sum of the queues' averaged loads, tg->load_avg */
-	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
 	u64 idle;		/* cpu.idle, see cidland_cpuctl_set_idle() */
 	u64 slot;		/* its index in @grp_hdrs */
 	u64 next_free;		/* next block to free, see grp_free_defer() */
@@ -470,6 +511,16 @@ struct grp_hdr {
 	u64 bw_slot;		/* its index in @bw_hdrs, BW_MAX_LIMITED for none */
 	u64 nr_parked;		/* tasks waiting in @bq */
 	struct scx_edq bq;	/* them, see cid_park() */
+
+	/*
+	 * Moved by every cid as its queue's averages drift, see
+	 * grp_update_shares() and grp_live_update(). On a line of their own:
+	 * ops.running() reads @idle and the wakeup path reads the cpu.max
+	 * state on every switch, and a line that is also written from every
+	 * CPU is one those reads miss.
+	 */
+	u64 load_avg __attribute__((aligned(64)));	/* sum of the queues' averaged loads, tg->load_avg */
+	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
 };
 
 struct grp_q {
@@ -562,6 +613,10 @@ enum fork_child_level {
 	FORK_CHILD_CORE,
 };
 
+/* fair.c's usual MC and wider-domain imbalance_pct values. */
+#define FORK_MC_IMBALANCE_PCT 117
+#define FORK_WIDE_IMBALANCE_PCT 125
+
 /*
  * Scratch for fair.c-style SD_BALANCE_FORK group descent. Keep the loop
  * accumulators in per-CPU map memory rather than on the caller's stack so the
@@ -571,11 +626,16 @@ enum fork_child_level {
 struct fork_pick_env {
 	u64 now;
 	u64 load;
+	u64 util;
 	u64 cap;
 	u64 best_load;
+	u64 best_util;
 	u64 best_cap;
 	u64 group_recent;
 	u64 best_recent;
+	u32 runnable;
+	u32 best_runnable;
+	u32 best_allowed;
 	u32 base;
 	u32 nr;
 	u32 anchor;
@@ -583,6 +643,8 @@ struct fork_pick_env {
 	u32 group_base;
 	u32 group_nr;
 	u32 group_end;
+	u32 group_allowed;
+	u32 restricted;
 	u32 idle;
 	u32 best_idle;
 	u32 best_base;
@@ -723,16 +785,23 @@ struct busy_balance_env {
 	u64 group_cap;
 	u64 source_excess;
 	u64 move_budget;
+	u64 scan_deadline;
+	u64 scan_seq;
+	u64 alternate_deadline;
+	u64 alternate_seq;
 	u64 local_norm;
 	u32 local_base;
 	u32 local_nr;
 	u32 group_base;
 	u32 group_nr;
 	s32 move_dst_cid;
+	s32 alternate_dst_cid;
 	u32 level;
 	u32 dst_overloaded;
 	u32 local_overloaded;
 	u32 group_queued;
+	u32 scan_valid;
+	u32 detach_failed;
 };
 
 enum newidle_level {
@@ -740,6 +809,13 @@ enum newidle_level {
 	NEWIDLE_NODE,
 	NEWIDLE_SYSTEM,
 	NEWIDLE_LEVELS,
+};
+
+struct newidle_stats {
+	u64 stamp[NEWIDLE_LEVELS];
+	u32 call[NEWIDLE_LEVELS];
+	u32 success[NEWIDLE_LEVELS];
+	u32 ratio[NEWIDLE_LEVELS];
 };
 
 /*
@@ -758,8 +834,14 @@ struct pack {
 	u64 curr_run_at;	/* when its service was last charged */
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
+	u64 curr_vprot;		/* protected vruntime, see set_protect_slice() */
 	s32 cid;		/* the cid whose task clock the pack runs in */
 	struct scx_edq edq;
+};
+
+struct core_sched_state {
+	u64 vzero;	/* virtual-time origin for core scheduling */
+	u64 gen;	/* pack empty generation plus one; zero is invalid */
 };
 
 struct cid_ctx {
@@ -778,11 +860,31 @@ struct cid_ctx {
 	u64 busy_balance_next[BUSY_BALANCE_LEVELS]; /* next balance per domain */
 	u32 busy_balance_interval_ms[BUSY_BALANCE_LEVELS]; /* domain backoff */
 	u32 busy_balance_cursor[BUSY_BALANCE_LEVELS]; /* source-cid tie-break cursor */
+	u32 busy_balance_failed[BUSY_BALANCE_LEVELS]; /* failed periodic detach passes */
 	struct busy_balance_env busy_balance_env; /* tick scan scratch space */
 	u64 busy_balance_load; /* latest domain-scan load sample */
+	u64 busy_balance_cap; /* latest delivered-capacity estimate */
+	u64 busy_balance_scan_cap; /* capacity paired with the load sample */
+	u64 wake_load; /* tick-sampled load for wake_affine_weight() */
+	u64 pressure_lost; /* cumulative higher-class displacement time */
+	u64 pressure_lost_at; /* displacement time at the window start */
+	u64 pressure_blocked_at; /* task clock when a higher class displaced it */
+	u64 pressure_clock_off_at; /* IRQ/steal clock offset at window start */
+	u64 pressure_at; /* wall-clock start of the pressure window */
+	u64 pressure_idle_at; /* demand disappeared; stale estimates expire */
+	u64 pressure_migrate_next; /* pace higher-class displacement handoffs */
+	u32 pressure_migrate_failed; /* detach passes rejected by move guards */
+	u32 pressure_avail; /* delivered capacity, 1024 = no pressure */
+	u32 pressure_demand; /* sched_ext has runnable work on this cid */
+	u32 pressure_valid; /* a current demand window has been sampled */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
 	u32 curr_sched_idle;	/* that, or it is in an idle cgroup, see cid_sched_idle_target() */
 	u32 steal_cursor;
+	/* Persistent scans of this cid as a source. */
+	struct scx_edq_cursor detach_cursor;
+	struct scx_edq_cursor busy_scan_cursor;
+	/* Candidate handed from a periodic scan to destination dispatch. */
+	struct scx_edq_cursor busy_dispatch_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
 	u64 idle_stamp;		/* when the last idle pull began, see newidle_cost() */
 	u64 avg_idle;		/* how long the cid stays idle after one, rq->avg_idle */
@@ -791,6 +893,8 @@ struct cid_ctx {
 	u64 newidle_decay_at[NEWIDLE_LEVELS]; /* sd->last_decay_max_lb_cost */
 	u32 force_steal;	/* an enqueue saw this cid idle beside one waiter */
 	s32 busy_balance_cid; /* queued cid selected by periodic busy balance */
+	s32 busy_balance_owner; /* cid which owns the selected domain pass */
+	u32 busy_balance_level; /* domain whose failure count the pass updates */
 	u64 busy_balance_expire; /* when an unconsumed selection is dropped */
 	u64 busy_balance_budget; /* load left in this deferred balance pass */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
@@ -810,6 +914,8 @@ struct cid_ctx {
  */
 static struct cid_topo __arena *topos;
 static struct cid_ctx __arena *cctxs;
+static struct core_sched_state __arena *core_sched_states;
+static struct newidle_stats __arena *newidle_stats;
 static struct scx_cmask __arena *idle_cids;	/* one bit per idle cid */
 static struct scx_cmask __arena *idle_core_llcs; /* LLCs known to have an idle core */
 static struct scx_cmask __arena *queued_cids;	/* one bit per cid with a queued task */
@@ -1678,19 +1784,145 @@ static u64 cid_util(s32 cid, u64 now)
 	return ravg_read_arena(&cid_ctx(cid)->run_avg, now) >> UTIL_SHIFT;
 }
 
+static u64 cid_clock_task_owned(s32 cid, u64 now);
+
+/*
+ * Record whether @cid has sched_ext work which could consume the CPU. A new
+ * demand period starts a fresh sample: an old reduced-capacity estimate must
+ * not affect placement until current demand has observed the pressure again.
+ */
+static void cid_demand_set(s32 cid, bool demand, u64 now)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!capacity_pressure || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	if (demand == cctx->pressure_demand)
+		return;
+	cctx->pressure_demand = demand;
+	if (demand) {
+		/*
+		 * Unlike fair's RT PELT, cidland has no clock source while no
+		 * sched_ext task wants the cid. Retain short gaps so pressure
+		 * cannot attract work straight back, but do not let an old event
+		 * suppress this cid forever.
+		 */
+		if (cctx->pressure_idle_at &&
+		    now - cctx->pressure_idle_at >= NSEC_PER_SEC) {
+			cctx->pressure_avail = 1024;
+			cctx->pressure_migrate_next = 0;
+			cctx->pressure_migrate_failed = 0;
+			WRITE_ONCE(cctx->busy_balance_cap, cid_topo(cid)->cap);
+		}
+		cctx->pressure_idle_at = 0;
+		cctx->pressure_at = now;
+		cctx->pressure_lost_at = cctx->pressure_lost;
+		cctx->pressure_clock_off_at = cctx->clock_off;
+		cctx->pressure_valid = 0;
+	} else {
+		cctx->pressure_idle_at = now;
+		cctx->pressure_blocked_at = 0;
+		cctx->pressure_migrate_next = 0;
+		cctx->pressure_migrate_failed = 0;
+		cctx->pressure_valid = 0;
+		WRITE_ONCE(cctx->busy_balance_cap, cid_topo(cid)->cap);
+	}
+}
+
+/*
+ * A runnable task stopped with slice remaining was displaced by a higher
+ * scheduling class or core scheduling. Measure the interval until sched_ext
+ * next runs on this cid. Unlike service/wall accounting, this does not count
+ * ordinary dispatch and context-switch overhead as unavailable capacity.
+ */
+static void cid_pressure_displaced(s32 cid, u64 tnow)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!capacity_pressure || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	if (cctx->pressure_demand && !cctx->pressure_blocked_at)
+		cctx->pressure_blocked_at = tnow;
+}
+
+static void cid_pressure_resumed(s32 cid, u64 tnow)
+{
+	struct cid_ctx __arena *cctx;
+
+	if (!capacity_pressure || !cid_valid(cid))
+		return;
+	cctx = cid_ctx(cid);
+	if (cctx->pressure_blocked_at) {
+		cctx->pressure_lost += tnow - cctx->pressure_blocked_at;
+		cctx->pressure_blocked_at = 0;
+	}
+}
+
+#define PRESSURE_EVAL_NS	(32ULL * NSEC_PER_MSEC)
+
+static void update_balance_cap(s32 cid, u64 now)
+{
+	struct cid_ctx __arena *cctx = cid_ctx(cid);
+	u64 cap = cid_topo(cid)->cap;
+	u64 elapsed, lost, off, available;
+
+	if (!capacity_pressure)
+		return;
+	if (!cctx->pressure_demand)
+		return;
+	elapsed = now - cctx->pressure_at;
+	if (elapsed < PRESSURE_EVAL_NS)
+		return;
+	/* Refresh rq_clock - rq_clock_task; its delta is IRQ plus steal time. */
+	cid_clock_task_owned(cid, now);
+	off = cctx->clock_off;
+	lost = cctx->pressure_lost - cctx->pressure_lost_at;
+	if (off > cctx->pressure_clock_off_at)
+		lost += off - cctx->pressure_clock_off_at;
+	available = 1024 - MIN(lost * 1024 / elapsed, 1024ULL);
+	if (cctx->pressure_valid)
+		cctx->pressure_avail = (3 * cctx->pressure_avail + available) / 4;
+	else
+		cctx->pressure_avail = available;
+	cctx->pressure_at = now;
+	cctx->pressure_lost_at = cctx->pressure_lost;
+	cctx->pressure_clock_off_at = off;
+	cctx->pressure_valid = 1;
+	WRITE_ONCE(cctx->busy_balance_cap,
+		   MAX(cap * cctx->pressure_avail / 1024, 1ULL));
+}
+
+/* fair.c's check_cpu_capacity(), using the domain's imbalance threshold. */
+static bool cid_capacity_reduced(s32 cid)
+{
+	u64 cap;
+
+	if (!capacity_pressure || !cid_valid(cid) ||
+	    !READ_ONCE(cid_ctx(cid)->pressure_demand) ||
+	    !READ_ONCE(cid_ctx(cid)->pressure_valid))
+		return false;
+	cap = READ_ONCE(cid_ctx(cid)->busy_balance_cap);
+	return cap && cap * BUSY_BALANCE_IMBALANCE_PCT <
+		cid_topo(cid)->cap * 100;
+}
+
 /*
  * The load of a cid, cpu_load(): what cfs_rq->avg.load_avg is, the weight
  * of the runnable tasks averaged over time, and what wake_affine_weight()
  * compares. The weight is the pack's, @vsum_w, the sum over the running
  * task and the queued ones, and it is sampled into the average from the
- * cid's own CPU. ops.tick() always maintains it for periodic balancing, and
- * ops.update_idle() records the empty pack when the tick stops with the CPU;
- * WA_WEIGHT additionally updates it in ops.running() and ops.stopping(),
- * where wake-affine needs the finer-grained signal. A join or a leave from
+ * cid's own CPU. ops.tick() maintains it and ops.update_idle() records the
+ * empty pack when the tick stops with the CPU. Updating it at every context
+ * switch would be finer grained, but unlike fair's PELT that means entering a
+ * BPF running-average state machine twice per switch. A join or a leave from
  * another CPU changes @vsum_w atomically but cannot update a running average
- * that is not owned there, and the sample is at most an event behind. A read
+ * that is not owned there, so the sample is at most one tick behind. A read
  * from another CPU is the same unlocked read cid_util() makes.
  */
+static __always_inline u64 ravg_read_fast(struct ravg_data __arena *rd, u64 now);
+
 static void cid_load_accumulate(s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx;
@@ -1700,19 +1932,60 @@ static void cid_load_accumulate(s32 cid, u64 now)
 	cctx = cid_ctx(cid);
 
 	ravg_accumulate_arena(&cctx->load_avg, cctx->pack.vsum_w, now);
-}
-
-static void cid_load_update(s32 cid, u64 now)
-{
-	if (wa_weight)
-		cid_load_accumulate(cid, now);
+	cctx->wake_load = ravg_read_fast(&cctx->load_avg, now) >> RAVG_FRAC_BITS;
 }
 
 static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now);
 
+/* ((@a * @b) >> RAVG_FRAC_BITS) without overflowing the intermediate. */
+static __always_inline u64 ravg_scale_fast(u64 a, u32 b)
+{
+	u64 lo = (a & 0xffffffffULL) * b;
+	u64 hi = (a >> 32) * b;
+
+	return (lo >> RAVG_FRAC_BITS) + (hi << (32 - RAVG_FRAC_BITS));
+}
+
+/*
+ * The common ravg_read() case when the last update and this read are in the
+ * same 32 ms period. Avoid copying the arena value and running the general
+ * period-crossing state machine. Fall back at a boundary, where the general
+ * path is needed to fold and decay periods.
+ */
+static __always_inline u64 ravg_read_fast(struct ravg_data __arena *rd, u64 now)
+{
+	u64 val, val_at, old, cur, add;
+	u32 elapsed, progress;
+
+	/* Match ravg_from_arena()'s snapshot order for concurrent remote reads. */
+	val = READ_ONCE(rd->val);
+	val_at = READ_ONCE(rd->val_at);
+	old = READ_ONCE(rd->old);
+	cur = READ_ONCE(rd->cur);
+	if (now < val_at || now / UTIL_HALF_LIFE_NS != val_at / UTIL_HALF_LIFE_NS)
+		return ravg_read_arena(rd, now);
+	elapsed = now % UTIL_HALF_LIFE_NS;
+	if (!elapsed)
+		return old;
+
+	progress = ravg_normalize_dur(elapsed, UTIL_HALF_LIFE_NS);
+	old = ravg_scale_fast(old, (1U << RAVG_FRAC_BITS) - progress / 2);
+	if (val && now > val_at) {
+		add = val * ravg_normalize_dur(now - val_at,
+					       UTIL_HALF_LIFE_NS);
+		ravg_add(&cur, add);
+	}
+	return old + cur / 2;
+}
+
 static u64 cid_load(s32 cid, u64 now)
 {
-	return ravg_read_arena(&cid_ctx(cid)->load_avg, now) >> RAVG_FRAC_BITS;
+	return ravg_read_fast(&cid_ctx(cid)->load_avg, now) >> RAVG_FRAC_BITS;
+}
+
+static u64 cid_wake_load(s32 cid)
+{
+	return READ_ONCE(cid_ctx(cid)->wake_load);
 }
 
 /*
@@ -1825,34 +2098,18 @@ static cid_edq_task_t *cid_edq_task(task_ctx_t *tctx)
  * preemption decision or a remote steal scan; the queue owner will make
  * progress and a later dispatch can try again.
  */
-static int cid_edq_try_peek(s32 cid, cid_edq_task_t **atp)
+static int cid_edq_try_peek_next(s32 cid, scx_edq_cursor_t *cursor,
+				 cid_edq_task_t **atp)
 {
 	u64 task;
 	int ret;
 
 	*atp = NULL;
-	ret = scx_edq_try_peek_hold(&cid_pack(cid)->edq, &task);
+	ret = scx_edq_try_peek_next_hold(&cid_pack(cid)->edq, cursor, &task);
 	if (ret) {
 		if (ret != -EBUSY)
-			scx_bpf_error("EDQ peek failed for cid %d: %d", cid, ret);
-		return ret;
-	}
-	*atp = (cid_edq_task_t *)task;
-	return 0;
-}
-
-static int cid_edq_try_peek_nth(s32 cid, u32 nth, cid_edq_task_t **atp)
-{
-	u64 task;
-	int ret;
-
-	if (!nth)
-		return cid_edq_try_peek(cid, atp);
-	*atp = NULL;
-	ret = scx_edq_try_peek_nth_hold(&cid_pack(cid)->edq, nth, &task);
-	if (ret) {
-		if (ret != -EBUSY)
-			scx_bpf_error("EDQ nth peek failed for cid %d: %d", cid, ret);
+			scx_bpf_error("EDQ cursor peek failed for cid %d: %d",
+				      cid, ret);
 		return ret;
 	}
 	*atp = (cid_edq_task_t *)task;
@@ -2048,7 +2305,7 @@ static __always_inline bool cid_queue_insert(struct task_struct *p, task_ctx_t *
 	/* Publish custody before the node becomes visible to another CPU's pop. */
 	WRITE_ONCE(at->state, CID_EDQ_ENQUEUED);
 	ret = scx_edq_insert(&cid_pack(cid)->edq, &at->common, deadline,
-			      vruntime);
+			      vruntime, tctx->se.request);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_ENQUEUED,
 					CID_EDQ_NONE);
@@ -2261,8 +2518,8 @@ static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
 {
 	struct cid_ctx __arena *cctx;
 
-	if (p->policy == SCHED_IDLE || !cid_valid(cid) || cid_idle_test(cid) ||
-	    cid_queued_test(cid))
+	if (!READ_ONCE(nr_sched_idle_curr) || p->policy == SCHED_IDLE ||
+	    !cid_valid(cid) || cid_idle_test(cid) || cid_queued_test(cid))
 		return false;
 	cctx = cid_ctx(cid);
 
@@ -2913,7 +3170,6 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		 */
 		if (sis_util &&
 		    sis_idle_scan_nr(target) < cid_topo(target)->llc_nr) {
-			__sync_fetch_and_add(&nr_sis_cutoffs, 1);
 			return -EBUSY;
 		}
 
@@ -3151,7 +3407,8 @@ static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	s32 best = -EBUSY;
 	u32 cid;
 
-	if (!asym_capacity || !cid_valid(src_cid) || is_pcpu_task(p))
+	if (!asym_capacity || !cid_valid(src_cid) || is_pcpu_task(p) ||
+	    cmask_empty(idle_cids))
 		return -EBUSY;
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -3292,6 +3549,26 @@ static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
 
 #define BALANCE_TASK_SCAN	8U
 
+static __always_inline void
+edq_scan_reset(scx_edq_cursor_t *cursor)
+{
+	scx_edq_cursor_reset(cursor);
+}
+
+/*
+ * Fetch the next task in deadline order and advance @cursor past it. A queue
+ * mutation cannot invalidate the cursor because it contains the ordering key,
+ * not a node pointer. Reaching the end resets the scan so its next bounded
+ * pass wraps to the head and tasks inserted before the cursor are eventually
+ * considered too.
+ */
+static __always_inline int
+edq_scan_next(s32 src_cid, scx_edq_cursor_t *cursor,
+	      cid_edq_task_t **atp)
+{
+	return cid_edq_try_peek_next(src_cid, cursor, atp);
+}
+
 /*
  * Validate and remove the first usable task in a bounded deadline-ordered EDQ
  * prefix. Holding each node across the affinity and hotness checks and
@@ -3303,6 +3580,7 @@ static __noinline enum cid_edq_move_result
 cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 				  bool check_hot)
 {
+	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->detach_cursor;
 	u32 nth;
 
 	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
@@ -3311,7 +3589,7 @@ cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 		enum cid_edq_move_result move;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret)
 			return ret == -EBUSY ? CID_EDQ_MOVE_BUSY :
 					      CID_EDQ_MOVE_MISS;
@@ -3347,6 +3625,7 @@ cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 					     u64 now)
 {
+	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->detach_cursor;
 	bool pinned = false;
 	u32 nth;
 
@@ -3358,7 +3637,7 @@ static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 		bool movable;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret == -EBUSY)
 			break;
 		if (ret || !at) {
@@ -3384,7 +3663,6 @@ static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 		}
 		move = cid_edq_remove_held_to_local(src_cid, dst_cid, at, p);
 		if (move == CID_EDQ_MOVE_MOVED) {
-			__sync_fetch_and_add(&nr_steals, 1);
 			cid_queued_check(src_cid);
 			return ACTIVE_BALANCE_MOVED;
 		}
@@ -3602,7 +3880,7 @@ static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
  * Pick the target around which the idle search should run.
  *
  * This is the WA_IDLE half of fair.c's wake_affine(). The effective-load
- * half, wake_affine_weight(), is there but opt-in, --wa-weight, see
+ * half, wake_affine_weight(), is enabled by default, see
  * wake_affine_weight_cid(). As in fair.c, affinity is considered for a
  * wakeup when the waking cid is allowed and wake_wide() does not reject the
  * waker/wakee relationship. The sched domain carrying SD_WAKE_AFFINE may be
@@ -3642,22 +3920,14 @@ static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
  *		prev_eff_load += 1;
  *	return this_eff_load < prev_eff_load ? this_cpu : nr_cpumask_bits;
  *
- * The loads are the time-averaged runnable weights, see cid_load() and
- * task_load(), which is what makes this different from counting queued
- * tasks: a waker that runs a little and sleeps a lot weighs little on its
- * cid, so a wakee it has just woken lands there, where it is next in line
- * behind a task about to sleep, rather than behind a full slice on the
- * cid it came from. This is where a waker hands a CPU to its wakee under
- * load, and without it a wakee on a saturated machine waited a slice on
- * its previous cid for one wakeup in five, where fair.c waits on one in
- * fourteen. The bias is the half of the domain's imbalance_pct fair.c
- * uses, 117 within an LLC and 110 within a core.
- *
- * It is off by default and --wa-weight turns it on: that saturated
- * wakeup pattern is the one place it has been measured to matter, and
- * across the rest of the benchmark set it is within noise at a cost of a
- * few percent on the wakeup-heavy runs, which fair.c pays for WA_WEIGHT
- * too.
+ * The cid loads are tick-sampled averaged runnable weights. task_load()
+ * approximates task_h_load() from the task's already-maintained execution
+ * utilization, decayed cheaply over sleep. A waker that runs a little and
+ * sleeps a lot therefore weighs little on its cid, so its wakee lands behind
+ * a task about to sleep instead of behind a fresh slice on the previous cid.
+ * This approximation avoids a second per-task running average and leaves the
+ * wakeup path with scalar snapshot reads. The bias is half the domain's
+ * imbalance_pct, 117 within an LLC and 110 within a core.
  */
 static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 				  task_ctx_t *tctx,
@@ -3669,7 +3939,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	u64 load;
 	u32 pct;
 
-	this_eff = cid_load(this_cid, now);
+	this_eff = cid_wake_load(this_cid);
 	if (sync) {
 		u64 current_load = wctx ? task_load(waker, wctx, now) : 0;
 
@@ -3685,7 +3955,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 
 	pct = smt_enabled && cid_topo(prev_cid)->core_base == cid_topo(this_cid)->core_base ?
 	      100 + (110 - 100) / 2 : 100 + (117 - 100) / 2;
-	prev_eff = (s64)cid_load(prev_cid, now) - (s64)load;
+	prev_eff = (s64)cid_wake_load(prev_cid) - (s64)load;
 	prev_eff *= pct;
 	prev_eff *= cid_topo(this_cid)->cap;
 	if (sync)
@@ -3819,30 +4089,74 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 
 static __always_inline void fork_pick_commit(struct fork_pick_env *env)
 {
+	u64 imbalance_pct = env->level == FORK_CHILD_CORE ?
+		FORK_MC_IMBALANCE_PCT : FORK_WIDE_IMBALANCE_PCT;
+	bool best_spare;
 	bool local;
+	bool spare;
 
-	if (!env->group_nr)
+	/* fair.c skips a sched group whose span has no CPU allowed to @p. */
+	if (!env->group_nr || !env->group_allowed)
 		return;
 	local = cid_in_range(env->anchor, env->group_base, env->group_nr);
+	/* A disallowed SMT sibling is not spare capacity for this task. */
+	spare = env->restricted && env->runnable < env->group_allowed;
 	if (env->best_nr) {
+		best_spare = env->restricted &&
+			env->best_runnable < env->best_allowed;
+		if (spare != best_spare) {
+			if (!spare)
+				return;
+			goto commit;
+		}
 		if (env->idle < env->best_idle)
 			return;
 		if (env->idle == env->best_idle) {
-			/* Fully busy groups are ordered by load per capacity. */
-			if (!env->idle) {
+			if (spare) {
+				/* Keep fair.c's local-group preference on an idle tie. */
+				if (env->best_local)
+					return;
+				if (local)
+					goto commit;
+				/* group_has_spare ties are ordered by group utilization. */
+				if (env->util > env->best_util)
+					return;
+				if (env->util < env->best_util)
+					goto commit;
+			} else {
+				/* Fully busy groups are ordered by load per capacity. */
+				if (env->restricted && env->best_local != local) {
+					/*
+					 * sched_balance_find_dst_group() keeps the
+					 * local group unless the remote group is
+					 * better by the domain's imbalance margin.
+					 */
+					if (env->best_local) {
+						if (env->best_load * env->cap * 100 <=
+						    env->load * env->best_cap *
+							    imbalance_pct)
+							return;
+						goto commit;
+					}
+					if (env->load * env->best_cap * 100 <=
+					    env->best_load * env->cap *
+						    imbalance_pct)
+						goto commit;
+					return;
+				}
 				if (env->load * env->best_cap >
 				    env->best_load * env->cap)
 					return;
 				if (env->load * env->best_cap <
 				    env->best_load * env->cap)
 					goto commit;
+				if (env->best_local)
+					return;
+				if (local)
+					goto commit;
 			}
-			/* Keep fair.c's local-group preference on an idle tie. */
-			if (env->best_local)
-				return;
-			if (!local &&
-			    (env->level != FORK_CHILD_CORE ||
-			     env->group_recent >= env->best_recent))
+			if (env->level != FORK_CHILD_CORE ||
+			    env->group_recent >= env->best_recent)
 				return;
 		}
 	}
@@ -3852,16 +4166,21 @@ commit:
 	env->best_nr = env->group_nr;
 	env->best_idle = env->idle;
 	env->best_load = env->load;
+	env->best_util = env->util;
 	env->best_cap = env->cap;
 	env->best_recent = env->group_recent;
+	env->best_runnable = env->runnable;
+	env->best_allowed = env->group_allowed;
 	env->best_local = local;
 }
 
 /* Pick the idlest immediate child group of @range, as fair.c does. */
 static __noinline u64
-fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
+fork_pick_child(const struct task_struct *p, u64 range, s32 anchor, u32 level,
+		u64 now)
 {
 	struct fork_pick_env *env;
+	bool restricted = is_restricted(p);
 	u32 zero = 0;
 	u32 nr = range >> 32;
 	u32 i;
@@ -3877,14 +4196,21 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 	env->group_base = 0;
 	env->group_nr = 0;
 	env->group_end = 0;
+	env->group_allowed = 0;
+	env->restricted = restricted;
 	env->idle = 0;
 	env->load = 0;
+	env->util = 0;
 	env->cap = 0;
 	env->group_recent = 0;
+	env->runnable = 0;
 	env->best_idle = 0;
 	env->best_load = 0;
+	env->best_util = 0;
 	env->best_cap = 1;
 	env->best_recent = 0;
+	env->best_runnable = 0;
+	env->best_allowed = 0;
 	env->best_base = 0;
 	env->best_nr = 0;
 	env->best_local = 0;
@@ -3906,19 +4232,56 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 				env->group_nr = cid_topo(i)->core_nr;
 			}
 			env->group_end = env->group_base + env->group_nr;
+			env->group_allowed = !restricted;
 			env->idle = 0;
 			env->load = 0;
+			env->util = 0;
 			env->cap = 0;
+			env->runnable = 0;
 			env->group_recent = env->level == FORK_CHILD_CORE ?
 				READ_ONCE(cid_ctx(env->group_base)->fork_place_at) : 0;
 			if (env->group_recent &&
 			    (s64)(env->now - env->group_recent) >= UTIL_HALF_LIFE_NS)
 				env->group_recent = 0;
 		}
+		/*
+		 * update_sg_wakeup_stats() accumulates load and idleness over
+		 * sched_group_span(group) intersected with p->cpus_ptr, while
+		 * group_capacity remains the capacity of the whole group.
+		 */
+		env->cap += MAX(cid_topo(i)->cap, 1ULL);
+		if (restricted && !cid_allowed(p, i))
+			continue;
+		if (restricted) {
+			struct pack __arena *pk = cid_pack(i);
+			u32 running = READ_ONCE(pk->curr_w) != 0;
+			u32 edq_nr = cid_queue_nr(i);
+			u32 local_nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | i);
+			u32 nr = edq_nr + local_nr + running;
+
+			env->group_allowed++;
+			/*
+			 * DELAY_DEQUEUE can leave the running task represented in a
+			 * queue too. The pack has only that task when its total weight
+			 * equals the running weight, so do not count the two
+			 * representations as two runnable tasks.
+			 */
+			if (running && (edq_nr || local_nr) &&
+			    READ_ONCE(pk->vsum_w) == READ_ONCE(pk->curr_w))
+				nr--;
+			/* Cover a task between EDQ dispatch and ops.running(). */
+			if (!nr && READ_ONCE(pk->vsum_w))
+				nr = 1;
+			env->runnable += nr;
+		}
 		if (cid_idle_test(i) && !cid_queued_test(i))
 			env->idle++;
-		env->load += READ_ONCE(cid_pack(i)->vsum_w);
-		env->cap += MAX(cid_topo(i)->cap, 1ULL);
+		if (restricted) {
+			env->load += cid_load(i, now);
+			env->util += cid_util(i, now);
+		} else {
+			env->load += READ_ONCE(cid_pack(i)->vsum_w);
+		}
 	}
 	fork_pick_commit(env);
 	return env->best_nr ? (u64)env->best_nr << 32 | env->best_base : range;
@@ -3975,7 +4338,8 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 			}
 			continue;
 		}
-		load = READ_ONCE(cid_pack(cid)->vsum_w);
+		load = restricted ? cid_load(cid, now) :
+			READ_ONCE(cid_pack(cid)->vsum_w);
 		if (best < 0 || load * best_cap < best_load * cap) {
 			best = cid;
 			best_load = load;
@@ -3995,12 +4359,8 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 	u64 child;
 	s32 cid;
 
-	/* Affinity needs per-group cpumask intersections; keep the safe path. */
-	if (is_restricted(p))
-		return fork_pick_cid(p, range, now);
-
 	if (topo->fork_nr > topo->node_nr) {
-		child = fork_pick_child(range, anchor, FORK_CHILD_NODE, now);
+		child = fork_pick_child(p, range, anchor, FORK_CHILD_NODE, now);
 		if (child >> 32)
 			range = child;
 	}
@@ -4008,7 +4368,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 		anchor = (u32)range;
 	topo = cid_topo(anchor);
 	if ((range >> 32) > topo->llc_nr) {
-		child = fork_pick_child(range, anchor, FORK_CHILD_LLC, now);
+		child = fork_pick_child(p, range, anchor, FORK_CHILD_LLC, now);
 		if (child >> 32)
 			range = child;
 	}
@@ -4016,7 +4376,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 		anchor = (u32)range;
 	topo = cid_topo(anchor);
 	if ((range >> 32) > topo->core_nr) {
-		child = fork_pick_child(range, anchor, FORK_CHILD_CORE, now);
+		child = fork_pick_child(p, range, anchor, FORK_CHILD_CORE, now);
 		if (child >> 32)
 			range = child;
 	}
@@ -4116,7 +4476,6 @@ static const u32 prio_to_weight[40] = {
  * on the owner, can_migrate_task()'s new_dst_cpu rule redirects the reservation
  * to another allowed cid in the same local group.
  */
-#define BUSY_BALANCE_IMBALANCE_PCT	117U
 /*
  * The capacity-normalized load of the whole range, sds->avg_load, one read
  * per cid like update_sd_lb_stats().
@@ -4130,15 +4489,23 @@ __noinline u64 busy_balance_avg_load(u32 base, u32 nr, u64 now,
 	TOUCH_ARENA();
 	bpf_arena_for(i, base, base + nr) {
 		s32 cid = i;
-		u64 sample;
+		u64 sample, sample_cap;
 
 		if (!cid_valid(cid))
 			break;
 		sample = cid_load(cid, now);
+		sample_cap = capacity_pressure &&
+			READ_ONCE(cid_ctx(cid)->pressure_demand) &&
+			READ_ONCE(cid_ctx(cid)->pressure_valid) ?
+			READ_ONCE(cid_ctx(cid)->busy_balance_cap) :
+			cid_topo(cid)->cap;
+		if (!sample_cap)
+			sample_cap = cid_topo(cid)->cap;
 		/* Group totals below reuse the samples collected by this pass. */
 		WRITE_ONCE(cid_ctx(cid)->busy_balance_load, sample);
+		WRITE_ONCE(cid_ctx(cid)->busy_balance_scan_cap, sample_cap);
 		load += sample;
-		cap += cid_topo(cid)->cap;
+		cap += sample_cap;
 		/* What SIS_UTIL wants, off the walk that is happening anyway. */
 		if (sis_util)
 			util += cid_util(cid, now);
@@ -4192,7 +4559,7 @@ busy_balance_group_delta(s32 dst_cid, u64 group, u64 avg_norm, bool excess)
 		if (!cid_valid(i))
 			break;
 		load += READ_ONCE(cid_ctx(i)->busy_balance_load);
-		cap += cid_topo(i)->cap;
+		cap += READ_ONCE(cid_ctx(i)->busy_balance_scan_cap);
 		if (cid_queued_test(i))
 			env->group_queued = 1;
 	}
@@ -4295,7 +4662,7 @@ __noinline s32 busy_balance_find_src_cid(s32 dst_cid, u32 start)
 		if (!cid_valid(cid) || cid_idle_test(cid) || !cid_queued_test(cid))
 			continue;
 		load = READ_ONCE(cid_ctx(cid)->busy_balance_load);
-		cap = MAX(cid_topo(cid)->cap, 1ULL);
+		cap = MAX(READ_ONCE(cid_ctx(cid)->busy_balance_scan_cap), 1ULL);
 		norm = load * 1024 / cap;
 		if (norm <= env->avg_norm)
 			continue;
@@ -4351,17 +4718,21 @@ static __noinline bool
 busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 {
 	struct busy_balance_env __arena *env = &cid_ctx(dst_cid)->busy_balance_env;
+	scx_edq_cursor_t *cursor = &cid_ctx(src_cid)->busy_scan_cursor;
 	u64 budget = MIN(env->local_room, env->source_excess);
+	u32 failed = READ_ONCE(cid_ctx(dst_cid)->busy_balance_failed[env->level]);
 	u32 nth;
 
+	env->alternate_dst_cid = -1;
 	TOUCH_ARENA();
 	bpf_for(nth, 0, BALANCE_TASK_SCAN) {
 		cid_edq_task_t *at;
 		struct task_struct *p;
+		u64 candidate_deadline, candidate_seq, candidate_weight;
 		s32 move_dst;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret)
 			return false;
 		if (!at) {
@@ -4369,19 +4740,50 @@ busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
 				cid_queued_check(src_cid);
 			break;
 		}
+		candidate_weight = ((task_ctx_t *)at)->se.vjoin_w;
 		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-		    ((task_ctx_t *)at)->se.vjoin_w > budget ||
-		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
+		    (candidate_weight >> MIN(failed, 63U)) > budget ||
+		    (task_hot((task_ctx_t *)at, src_cid, dst_cid, now) &&
+		     failed <= cache_nice_tries)) {
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
+		candidate_deadline = at->common.node.deadline;
+		candidate_seq = at->common.node.seq;
 		p = scx_bpf_tid_to_task(at->tid);
 		move_dst = p ? busy_balance_dst_cid(p, dst_cid) : -1;
 		scx_edq_task_drop(&at->common);
 		if (move_dst < 0)
 			continue;
+		/*
+		 * can_migrate_task() first drains tasks which can use the
+		 * elected destination. LBF_DST_PINNED only revisits an alternate
+		 * CPU in the local group if imbalance remains after that scan.
+		 * Remember the first such candidate, but keep looking for work
+		 * that does not need the redirect.
+		 */
+		if (move_dst != dst_cid) {
+			if (env->alternate_dst_cid < 0) {
+				env->alternate_dst_cid = move_dst;
+				env->alternate_deadline = candidate_deadline;
+				env->alternate_seq = candidate_seq;
+			}
+			continue;
+		}
 		env->move_budget = budget;
 		env->move_dst_cid = move_dst;
+		/* Dispatch must begin at, rather than after, this candidate. */
+		env->scan_deadline = candidate_deadline;
+		env->scan_seq = candidate_seq;
+		env->scan_valid = SCX_EDQ_CURSOR_AT;
+		return true;
+	}
+	if (env->alternate_dst_cid >= 0) {
+		env->move_budget = budget;
+		env->move_dst_cid = env->alternate_dst_cid;
+		env->scan_deadline = env->alternate_deadline;
+		env->scan_seq = env->alternate_seq;
+		env->scan_valid = SCX_EDQ_CURSOR_AT;
 		return true;
 	}
 
@@ -4396,13 +4798,14 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	u64 sum_util = 0;
 	s32 cid;
 
+	env->detach_failed = 0;
 	if (!nr)
 		return -1;
 	env->avg_norm = busy_balance_avg_load(base, nr, now, &sum_util);
 	if (level == BUSY_BALANCE_LLC)
 		update_sis_idle_scan(base, nr, sum_util);
 	env->dst_norm = cid_load(dst_cid, now) * 1024 /
-			MAX(cid_topo(dst_cid)->cap, 1ULL);
+			MAX(READ_ONCE(cid_ctx(dst_cid)->busy_balance_scan_cap), 1ULL);
 	if (env->dst_norm >= env->avg_norm)
 		return -1;
 	env->dst_overloaded = cid_queue_nr(dst_cid) > 0;
@@ -4430,8 +4833,20 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	cid = busy_balance_find_src_cid(dst_cid, start);
 	if (cid < 0)
 		return -1;
-	if (!busy_balance_has_movable_task(dst_cid, cid, now))
+	if (!busy_balance_has_movable_task(dst_cid, cid, now)) {
+		u32 failed = READ_ONCE(cid_ctx(dst_cid)->busy_balance_failed[level]);
+
+		/*
+		 * detach_tasks() progressively relaxes both its migration-size
+		 * bound and cache-hotness after a periodic pass found imbalance
+		 * but could not detach anything. Without that relaxation, an
+		 * imbalance smaller than one task can never be repaired.
+		 */
+		env->detach_failed = 1;
+		WRITE_ONCE(cid_ctx(dst_cid)->busy_balance_failed[level],
+			   MIN(failed + 1, 63U));
 		return -1;
+	}
 	return cid;
 }
 
@@ -4465,6 +4880,13 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	if (READ_ONCE(dst->busy_balance_cid) != -1)
 		return true;
 	min_ms = MAX(nr * busy_balance_factor, 1U);
+	/*
+	 * get_sd_balance_interval() subtracts one tick from a busy interval so
+	 * adjacent domains, and periodic activity such as RT runtime, cannot
+	 * remain phase-locked to the balance pass.
+	 */
+	if (min_ms > 1)
+		min_ms--;
 	max_ms = 2 * min_ms;
 	interval = READ_ONCE(dst->busy_balance_interval_ms[level]);
 	if (!interval) {
@@ -4483,6 +4905,9 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 		start = base;
 	src = busy_balance_from_range(dst_cid, base, nr, start, now,
 				      level);
+	/* fair resets nr_balance_failed once the domain is balanced again. */
+	if (src < 0 && !dst->busy_balance_env.detach_failed)
+		WRITE_ONCE(dst->busy_balance_failed[level], 0);
 	if (src >= 0) {
 		move_dst = dst->busy_balance_env.move_dst_cid;
 		if (!cid_valid(move_dst))
@@ -4497,10 +4922,18 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 			src = -1;
 	}
 	if (src >= 0) {
+		scx_edq_cursor_t *cursor =
+			&move->busy_dispatch_cursor;
+
+		cursor->deadline = dst->busy_balance_env.scan_deadline;
+		cursor->seq = dst->busy_balance_env.scan_seq;
+		cursor->valid = dst->busy_balance_env.scan_valid;
 		WRITE_ONCE(move->busy_balance_expire,
 			   now + (u64)min_ms * NSEC_PER_MSEC);
 		WRITE_ONCE(move->busy_balance_budget,
 			   dst->busy_balance_env.move_budget);
+		WRITE_ONCE(move->busy_balance_owner, dst_cid);
+		WRITE_ONCE(move->busy_balance_level, level);
 		WRITE_ONCE(move->busy_balance_cid, src);
 		if (move_dst != dst_cid)
 			scx_bpf_kick_cid(move_dst, SCX_KICK_IDLE);
@@ -4513,6 +4946,102 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 		   now + (u64)interval * NSEC_PER_MSEC);
 
 	return src >= 0;
+}
+
+/*
+ * A higher scheduling class just displaced @p from @src_cid. Once the
+ * measured capacity is materially reduced, choose a less-loaded allowed cid
+ * for the now-detached task. ops.enqueue() puts it into that cid's EDQ, where
+ * it competes by the ordinary EEVDF rules. This is the sched_ext equivalent
+ * of fair's detach_tasks() followed by attach_tasks(), not a forced dispatch.
+ */
+static __noinline s32
+capacity_pressure_target(const struct task_struct *p, s32 src_cid, u64 now)
+{
+	task_ctx_t *tctx = try_lookup_task_ctx(p);
+	u64 src_load, src_cap, src_norm;
+	u64 best_load = 0, best_cap = 1;
+	u64 move_budget, weight;
+	u32 best_smt_rank = 0;
+	u32 failed;
+	u32 interval_ms;
+	s32 best = -1;
+	u32 i;
+
+	if (!tctx || !capacity_pressure || !cid_valid(src_cid) ||
+	    time_before(now, READ_ONCE(cid_ctx(src_cid)->pressure_migrate_next)) ||
+	    !cid_capacity_reduced(src_cid))
+		return -1;
+	src_cap = READ_ONCE(cid_ctx(src_cid)->busy_balance_cap);
+	/* Pace the scan, including misses, at the LLC busy-balance interval. */
+	interval_ms = MAX(cid_topo(src_cid)->llc_nr * busy_balance_factor, 1U);
+	if (interval_ms > 1)
+		interval_ms--;
+	WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_next,
+		   now + (u64)interval_ms * NSEC_PER_MSEC);
+	src_load = READ_ONCE(cid_pack(src_cid)->vsum_w);
+	if (!src_load)
+		return -1;
+
+	TOUCH_ARENA();
+	bpf_arena_for(i, 0, nr_cids) {
+		u64 load, cap;
+		u32 smt_rank = 0;
+		s32 cid = i;
+
+		if (cid == src_cid || !cid_valid(cid) || !cid_allowed(p, cid))
+			continue;
+		if (smt_whole_core && smt_enabled) {
+			if (core_is_idle(cid))
+				smt_rank = 0;
+			else if (!cid_idle_test(cid))
+				smt_rank = 1;
+			else
+				smt_rank = 2;
+		}
+		load = READ_ONCE(cid_pack(cid)->vsum_w);
+		cap = READ_ONCE(cid_ctx(cid)->pressure_demand) &&
+		      READ_ONCE(cid_ctx(cid)->pressure_valid) ?
+			READ_ONCE(cid_ctx(cid)->busy_balance_cap) :
+			cid_topo(cid)->cap;
+		if (!cap)
+			cap = cid_topo(cid)->cap;
+		if (best < 0 || smt_rank < best_smt_rank ||
+		    (smt_rank == best_smt_rank &&
+		     (load * best_cap < best_load * cap ||
+		      (load * best_cap == best_load * cap &&
+		       smt_prefer(cid, best))))) {
+			best = cid;
+			best_load = load;
+			best_cap = cap;
+			best_smt_rank = smt_rank;
+		}
+	}
+	if (best < 0)
+		return -1;
+	src_norm = src_load * 1024 / src_cap;
+	if (src_norm * 100 <= best_load * 1024 / best_cap *
+				 BUSY_BALANCE_IMBALANCE_PCT)
+		return -1;
+
+	/*
+	 * detach_tasks() does not move more load than calculate_imbalance()
+	 * requested, and relaxes that bound together with cache hotness after
+	 * failed passes. Do the same for this single detached current task.
+	 */
+	move_budget = (src_load * best_cap - best_load * src_cap) /
+		      (src_cap + best_cap);
+	weight = tctx->se.vjoin_w;
+	failed = READ_ONCE(cid_ctx(src_cid)->pressure_migrate_failed);
+	if ((weight >> MIN(failed, 63U)) > move_budget ||
+	    (task_hot(tctx, src_cid, best, now) &&
+	     failed <= cache_nice_tries)) {
+		WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_failed,
+			   MIN(failed + 1, 255U));
+		return -1;
+	}
+	WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_failed, 0);
+	return best;
 }
 
 /*
@@ -4583,18 +5112,48 @@ static u64 task_weight(const struct task_struct *p, const task_ctx_t *tctx)
 }
 
 /*
- * The load of a task, task_h_load(): its weight scaled by the fraction of
- * the time it has been runnable, se->avg.load_avg, so that a task that
- * sleeps most of the time weighs less on a queue than one that never
- * does. The runnable average is kept from ops.runnable() to
- * ops.quiescent(), where util_avg is kept from ops.running() to
- * ops.stopping().
+ * The fraction of wall time the task spends runnable, folded in once per
+ * sleep from the last wakeup-to-sleep span over the whole cycle since the
+ * previous sleep, with the weight of eight cycles. This is what fair.c's
+ * runnable PELT measures for task_h_load(), and it is what makes the load
+ * comparison of wake_affine_weight() hold up under contention: a task kept
+ * waiting behind a CPU-bound one still counts what it asks for, not what
+ * it was given. Once per sleep is a store at the wakeup and a division at
+ * the block, where a running average on every transition was the machinery
+ * WA_WEIGHT was not allowed to add.
+ */
+static void task_runnable_update(task_ctx_t *tctx, u64 now)
+{
+	u64 cycle = now - tctx->last_sleep_at;
+	u64 runnable = now - tctx->runnable_at;
+	u64 frac;
+
+	if (!tctx->last_sleep_at || !tctx->runnable_at || !cycle)
+		return;
+	frac = runnable >= cycle ? 1024 : runnable * 1024 / cycle;
+	tctx->runnable_est = (tctx->runnable_est * 7 + frac) / 8;
+}
+
+/*
+ * Approximate task_h_load() from the averages cidland already keeps: the
+ * execution utilization maintained for capacity placement and the runnable
+ * fraction above. The larger of the two stands for the load; they agree for
+ * a task that runs as soon as it wakes, and only the runnable fraction sees
+ * a task that is delayed by contention. Measured by execution alone, a
+ * pipeline thread starved beside a CPU-bound task weighed ever less, its
+ * previous cid looked ever heavier without it, and wake_affine_weight()
+ * pulled it onto its waker's cid, where the two shared one CPU with the
+ * CPU-bound task there and each got a third; fair.c leaves it where it was.
  */
 static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now)
 {
-	u64 runnable = ravg_read_arena(&tctx->runnable_avg, now) >> UTIL_SHIFT;
+	u64 util = MAX(READ_ONCE(tctx->util_est), READ_ONCE(tctx->runnable_est));
 
-	return task_weight(p, tctx) * MIN(runnable, 1024) / 1024;
+	/* Approximate PELT decay while a sleeping task receives no callbacks. */
+	if (!scx_bpf_task_running(p) && time_after(now, tctx->last_sleep_at))
+		util >>= MIN((now - tctx->last_sleep_at) / UTIL_HALF_LIFE_NS, 63ULL);
+
+	return task_weight(p, tctx) * MIN(util, 1024) / 1024;
 }
 
 /*
@@ -4991,6 +5550,148 @@ static bool curr_owed_service(pack_t *pk, u64 now)
 	return !time_after(pk->curr_v + dv, pack_vref_at(pk, now));
 }
 
+/* Project the running entity's vruntime to @now. */
+static u64 curr_vruntime_at(pack_t *pk, u64 now)
+{
+	u64 run_at = pk->curr_run_at;
+
+	if (time_before(now, run_at))
+		now = run_at;
+
+	return pk->curr_v + (now - run_at) * NICE_0_WEIGHT / pk->curr_w;
+}
+
+/*
+ * Return @p's virtual service in the coordinate shared by contenders on an
+ * SMT core. Core scheduling compares tasks selected independently by two cid
+ * runqueues, so their absolute vruntimes are meaningful only relative to the
+ * epoch in which their pack has stayed non-empty. Snapshot a new origin after
+ * the pack empties; continuous contenders then accumulate service from
+ * comparable zeroes, while a task entering a reused cid does not inherit the
+ * old pack's coordinate.
+ *
+ * Unlike fair.c's zero_vruntime_fi, sched_ext is not told when forced idle
+ * starts or ends. This is therefore an ABI-free approximation: the empty
+ * generation supplies a stable epoch, and the running task is projected to
+ * @now because ops.stopping() has not charged its latest service yet.
+ */
+static u64 core_vruntime(const struct task_struct *p, task_ctx_t *tctx, u64 now)
+{
+	pack_t *pk = tctx->se.vpack;
+	struct core_sched_state __arena *state;
+	u64 gen, zero, v = tctx->se.vruntime;
+
+	if (!pk)
+		return v;
+	state = &core_sched_states[pk->cid];
+
+	gen = READ_ONCE(pk->empty_gen) + 1;
+	if (READ_ONCE(state->gen) != gen) {
+		WRITE_ONCE(state->vzero, READ_ONCE(pk->vref));
+		WRITE_ONCE(state->gen, gen);
+	}
+	zero = READ_ONCE(state->vzero);
+
+	if (scx_bpf_task_running(p) && READ_ONCE(pk->curr_w))
+		v = curr_vruntime_at(pk, cid_clock_task_at(pk->cid, now));
+
+	return v - zero;
+}
+
+bool BPF_STRUCT_OPS(cidland_core_sched_before, struct task_struct *a,
+			   struct task_struct *b)
+{
+	task_ctx_t *at, *bt;
+	u64 av, bv, now;
+	bool ar, br;
+
+	TOUCH_ARENA();
+	at = try_lookup_task_ctx(a);
+	bt = try_lookup_task_ctx(b);
+	if (!at || !bt || !at->se.vpack || !bt->se.vpack) {
+		ar = scx_bpf_task_running(a);
+		br = scx_bpf_task_running(b);
+		if (ar != br)
+			return !ar;
+		return time_before(a->scx.runnable_at, b->scx.runnable_at);
+	}
+
+	now = scx_bpf_now();
+	av = core_vruntime(a, at, now);
+	bv = core_vruntime(b, bt, now);
+
+	return time_before(av, bv);
+}
+
+/*
+ * Give the entity just picked the protection set_protect_slice() gives
+ * fair.c's current entity. The EDQ augmentation supplies the shortest
+ * queued request, so protection is bounded by the smallest competitor
+ * instead of always extending to the current entity's deadline.
+ */
+static void set_protect_slice(pack_t *pk, u64 weight)
+{
+	u64 slice = pk->curr_request, min_slice;
+	u64 vprot = pk->curr_dl;
+
+	if (no_run_to_parity) {
+		pk->curr_vprot = pk->curr_v;
+		return;
+	}
+
+	if (!scx_edq_min_slice(&pk->edq, &min_slice) && min_slice < slice)
+		slice = min_slice;
+	if (slice != pk->curr_request) {
+		u64 limit = pk->curr_v +
+			slice * NICE_0_WEIGHT / weight;
+
+		if (time_before(limit, vprot))
+			vprot = limit;
+	}
+	pk->curr_vprot = vprot;
+}
+
+/* Never let concurrent wakeups move the protection endpoint forward. */
+static void shorten_protect_slice(pack_t *pk, u64 vprot)
+{
+	u64 old = READ_ONCE(pk->curr_vprot);
+
+	while (time_before(vprot, old) && can_loop) {
+		u64 prev = cmpxchg(&pk->curr_vprot, old, vprot);
+
+		if (prev == old)
+			return;
+		old = prev;
+	}
+}
+
+/*
+ * A wakeup which does not win the pick can still shorten the current
+ * entity's protection. fair.c does this after pick_next_entity() returns a
+ * different entity: vprot never moves forward, and is clipped to one minimum
+ * competing request beyond the current vruntime.
+ */
+static void update_protect_slice(pack_t *pk, u64 now, u64 wakee_slice,
+				 u64 queued_min_slice)
+{
+	u64 slice = MIN(pk->curr_request, wakee_slice);
+	u64 vprot;
+
+	if (no_run_to_parity || no_eligibility || !pk->curr_w)
+		return;
+	if (queued_min_slice && queued_min_slice < slice)
+		slice = queued_min_slice;
+	vprot = curr_vruntime_at(pk, now) +
+		slice * NICE_0_WEIGHT / pk->curr_w;
+	shorten_protect_slice(pk, vprot);
+}
+
+static void cancel_protect_slice(pack_t *pk, u64 now)
+{
+	if (pk->curr_w)
+		shorten_protect_slice(pk, curr_vruntime_at(pk, now));
+}
+
 /*
  * Shortest an hrtick is armed for, the floor hrtick_start() in core.c
  * applies to its own:
@@ -5175,8 +5876,6 @@ static int hrtick_fire(void *map, int *key, struct hrtick *ht)
 	}
 
 	scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT);
-	__sync_fetch_and_add(&nr_hrticks, 1);
-
 	return 0;
 }
 
@@ -5282,21 +5981,30 @@ static bool curr_pick_dl(pack_t *pk, u64 now, u64 *dlp)
  *		break;
  *	}
  *
- * or false when nothing queued is eligible. A queue contended by a remote
- * scan is read off its head instead, which is what selection without an
- * eligibility scan picks too.
+ * or false when nothing queued is eligible. Take the exact eligible pick and
+ * minimum slice when the EDQ lock is immediately available. A remote balance
+ * operation can hold the independent EDQ lock while this callback owns the
+ * runqueue; do not spin behind it. Fall back to the lockless queue head and
+ * cached minimum instead. The head can be ineligible, which conservatively
+ * suppresses a preemption rather than letting a wakee bypass queued work.
  */
-static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp)
+static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp,
+			      u64 *min_slice)
 {
 	int ret;
 
-	if (no_eligible_scan || no_eligibility)
+	if (no_eligible_scan || no_eligibility) {
+		*min_slice = 0;
 		return !scx_edq_first_deadline(&pk->edq, dlp);
+	}
 
 	ret = scx_edq_try_first_eligible_deadline(&pk->edq,
-						  pack_vref_place(pk, now), dlp);
-	if (ret == -EBUSY)
+						pack_vref_place(pk, now), dlp,
+						min_slice);
+	if (ret == -EBUSY) {
+		scx_edq_min_slice(&pk->edq, min_slice);
 		return !scx_edq_first_deadline(&pk->edq, dlp);
+	}
 
 	return !ret;
 }
@@ -5331,7 +6039,7 @@ static bool pack_pick_head_dl(pack_t *pk, u64 now, u64 *dlp)
 static bool keep_running(s32 cid, u64 now)
 {
 	pack_t *pk = cid_pack(cid);
-	u64 dl, head_dl;
+	u64 dl, head_dl, min_slice;
 
 	if (!curr_pick_dl(pk, now, &dl))
 		return false;
@@ -5348,7 +6056,7 @@ static bool keep_running(s32 cid, u64 now)
 	if (!cid_queued_test(cid))
 		return false;
 	/* Nothing queued is eligible: pick_eevdf() returns curr. */
-	if (!pack_pick_head_dl(pk, now, &head_dl))
+	if (!pack_pick_head_dl(pk, now, &head_dl, &min_slice))
 		return true;
 
 	/* A tie is kept: giving the CPU up costs a switch. */
@@ -5643,22 +6351,26 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
+	u64 delta, weight;
 	pack_t *pk;
 
 	if (!tctx)
 		return;
 	pk = task_pack(tctx, cid);
 
-	task_bw_charge(tctx, cid, now - tctx->last_run_at);
-	tctx->se.vruntime += calc_delta_fair(p, tctx, now - tctx->last_run_at);
+	delta = now - tctx->last_run_at;
+	task_bw_charge(tctx, cid, delta);
+	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
 	tctx->last_run_at = now;
 	vref_charge(&tctx->se);
 
 	pk->curr_dl = task_dl(p, tctx);
 	pk->curr_v = tctx->se.vruntime;
-	pk->curr_w = task_weight(p, tctx);
 	pk->curr_run_at = now;
 	pk->curr_request = task_request(p);
+	weight = task_weight(p, tctx);
+	set_protect_slice(pk, weight);
+	pk->curr_w = weight;
 	cctx->curr_idle = p->policy == SCHED_IDLE;
 }
 
@@ -5990,8 +6702,22 @@ static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 static void direct_dispatch_local(struct task_struct *p, task_ctx_t *tctx, s32 cid,
 				  u64 now)
 {
-	place_task(cid, p, tctx, now, true);
-	tctx->direct_placed = true;
+	/*
+	 * @cid is idle, and its pack is empty more often than not: nothing
+	 * runs there and nothing is waiting. A placement against an empty
+	 * pack does not depend on what the task weighs, so the walk of its
+	 * groups that finds the weight and the join that publishes it are
+	 * left to ops.running() on @cid, where the pack and the group queues
+	 * are lines of the CPU's own. Done from here they were read and
+	 * written across CPUs on the waker's path, and for a task in a
+	 * cgroup that walk and its atomics were the largest item of the
+	 * wakeup. A pack with a member, queued there a moment ago, gives the
+	 * placement an offset and is placed against here as before.
+	 */
+	if (READ_ONCE(task_pack(tctx, cid)->vsum_w))
+		place_task(cid, p, tctx, now, true);
+	else
+		tctx->place_pending = true;
 	cid_edq_mark_dispatched(tctx);
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
@@ -6064,6 +6790,8 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	}
 
 	now = scx_bpf_now();
+	if (wake_flags & SCX_WAKE_TTWU)
+		tctx->runnable_at = now;
 
 	/*
 	 * A task whose cgroup is out of bandwidth waits for its next period,
@@ -6081,10 +6809,8 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	 * task on its runqueue before select_task_rq() is ever asked.
 	 */
 	cid = delay_requeue_cid(p, tctx, now);
-	if (cid >= 0) {
-		__sync_fetch_and_add(&nr_delay_requeues, 1);
+	if (cid >= 0)
 		return cid;
-	}
 
 	/*
 	 * Follow select_task_rq_fair()'s SD_BALANCE_FORK slow path before its
@@ -6126,9 +6852,15 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * Prepare to queue the task of @tctx on @cid with deadline @dl, and return
  * whether it should be inserted on the local DSQ as a preempting task.
  *
- * An idle cid only has to be told that there is work: the kick makes it
- * dispatch. A busy one is running a task of its own, and what this has to
- * decide is whether that task should be interrupted.
+ * An idle cid needs nothing from here. The task is being enqueued on that
+ * very cid, and once ops.enqueue() returns the kernel asks wakeup_preempt()
+ * for it, which reschedules an idle CPU for any class above the idle one
+ * before it looks at what the class itself would do. A kick from here made
+ * the same request again through an irq_work of the waker, which took the
+ * target's rq lock a second time; with many wakers filling the same CPUs
+ * that lock was the busiest line of the wakeup path. A busy cid is running
+ * a task of its own, and what this has to decide is whether that task
+ * should be interrupted.
  *
  * This is EEVDF's wakeup preemption. wakeup_preempt_fair() asks what the
  * runqueue would pick now and reschedules when the answer is the task
@@ -6141,18 +6873,18 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  *		return curr;
  *
  * plus the queued task being eligible itself and holding the earlier
- * deadline, which is what makes it the pick. set_protect_slice() protects
- * the running task up to its own deadline, so for its whole request, but
- * that protection is dropped before it is ever tested once the task is no
- * longer eligible: served past the average of its pack, it keeps the CPU
- * only until something that is owed service asks for it.
+ * deadline, which is what makes it the pick. set_protect_slice() gives the
+ * running task an explicit virtual-time protection bounded by the shortest
+ * request in the queue. A normal wakeup that does not win the pick clips the
+ * endpoint again through update_protect_slice(), including the new wakee's
+ * request even though it has not entered the EDQ yet. The EDQ's augmented
+ * minimum makes both operations constant time.
  *
- * So the protection needs no window of its own. A task just picked is
- * owed service and holds the CPU; it becomes interruptible exactly when
- * it has had the share the pack owes it, which under load is a fraction
- * of the slice, and the woken task waits for that instead of for the
- * slice to end. What the running task gives up is the rest of a slice it
- * is still owed and takes up again, not its place in the order: it keeps
+ * Eligibility still comes first: once the current entity has been served
+ * past the average of its pack, pick_eevdf() drops it before testing its
+ * protection. PREEMPT_SHORT does the inverse for an eligible shorter wakee:
+ * it cancels the endpoint before requesting preemption. What the running
+ * task gives up is protected service, not its place in the order; it keeps
  * the deadline it was picked with, see task_dl().
  *
  * Nothing here reads a reference that is behind: the service the running
@@ -6188,25 +6920,27 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * waiting for the tick to find it.
  *
  * The @curr_ fields describe the last task of ours to run there and say
- * nothing about a cid running something else. The idle test covers the
- * idle task; for a higher scheduling class the kick costs an IPI and
- * leaves the CPU with the class that owns it, which is where not kicking
- * would have left it too.
+ * nothing about a cid running something else. A zero @curr_w covers both
+ * the idle task and a higher class: nothing of ours is running, so there
+ * is nothing to interrupt and nothing to protect. It is read from the pack
+ * line this needs anyway, not from the idle bitmap, a word that every CPU
+ * writes on each of its idle transitions and that a remote reader misses
+ * on nearly every time.
  */
 static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 				      const task_ctx_t *tctx, u64 dl,
-				      u64 now)
+				      u64 now, bool *cancel_protect)
 {
 	struct cid_ctx __arena *cctx;
 	bool owed, p_idle, has_head;
-	u64 head_dl;
+	u64 head_dl, min_slice = 0;
 	pack_t *pk;
 
-	if (cid_idle_test(cid))
-		goto idle;
-
+	*cancel_protect = false;
 	cctx = cid_ctx(cid);
 	pk = task_pack(tctx, cid);
+	if (!pk->curr_w)
+		goto idle;
 
 	if (no_wakeup_preempt)
 		goto queued;
@@ -6219,10 +6953,19 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * away between them is any wakee that is not of a normal policy.
 	 */
 	p_idle = p->policy == SCHED_IDLE;
-	if (cctx->curr_idle && !p_idle)
+	if (cctx->curr_idle && !p_idle) {
+		*cancel_protect = true;
 		goto preempt;
+	}
 	if (p_idle || p->policy == SCHED_BATCH)
 		goto queued;
+
+	/*
+	 * Take the eligible head and the queue's shortest request under the
+	 * same EDQ lock. Even when the current entity keeps the CPU, the latter
+	 * is needed to apply update_protect_slice().
+	 */
+	has_head = pack_pick_head_dl(pk, now, &head_dl, &min_slice);
 
 	/*
 	 * The queued task has to be owed service to be a candidate at all:
@@ -6230,7 +6973,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 */
 	if (!no_eligibility &&
 	    time_after(tctx->se.vruntime, pack_vref_place(pk, now)))
-		goto queued;
+		goto update;
 
 	/*
 	 * PREEMPT_SHORT lets an eligible task with a shorter request override
@@ -6249,8 +6992,10 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * to the existing wakeup path.
 	 */
 	if (!no_preempt_short && tctx->se.request < pk->curr_request &&
-	    pk->curr_w)
+	    pk->curr_w) {
+		*cancel_protect = true;
 		goto preempt;
+	}
 
 	/*
 	 * Is the running task still owed service? Once it has run for a
@@ -6259,8 +7004,9 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * RUN_TO_PARITY governed, and --no-run-to-parity drops it alone.
 	 */
 	owed = !no_eligibility && curr_owed_service(pk, now);
-	if (owed && !no_run_to_parity)
-		goto queued;
+	if (owed && !no_run_to_parity &&
+	    time_before(curr_vruntime_at(pk, now), pk->curr_vprot))
+		goto update;
 
 	/*
 	 * Only a curr that is still owed service is in the running at all:
@@ -6273,7 +7019,7 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * say. --no-eligibility keeps deciding on the deadlines alone.
 	 */
 	if ((owed || no_eligibility) && !time_before(dl, pk->curr_dl))
-		goto queued;
+		goto update;
 
 	/*
 	 * The task is only worth interrupting the CPU for if it is what the
@@ -6297,16 +7043,17 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	 * CPU that was one context switch in three, and perf bench sched
 	 * messaging ran at half its speed.
 	 */
-	has_head = pack_pick_head_dl(pk, now, &head_dl);
 	if (has_head) {
 		bool loses = !time_before(dl, head_dl);
 
 		if (loses)
-			goto queued;
+			goto update;
 	}
 
 preempt:
 	return true;
+update:
+	update_protect_slice(pk, now, tctx->se.request, min_slice);
 queued:
 	/*
 	 * The task waits behind the running one. See that the running one
@@ -6317,9 +7064,6 @@ queued:
 	 */
 	hrtick_start(cid, now);
 idle:
-	/* An op executing on @cid is itself proof that @cid is not idle. */
-	if (cid != scx_bpf_this_cid())
-		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 	return false;
 }
 
@@ -6487,7 +7231,7 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 	at->cid = cid;
 	WRITE_ONCE(at->state, CID_EDQ_PARKED);
 	ret = scx_edq_insert(&hdr->bq, &at->common, tctx->se.vruntime,
-			      tctx->se.vruntime);
+			      tctx->se.vruntime, at->slice);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_PARKED,
 					    CID_EDQ_NONE);
@@ -6643,7 +7387,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct grp_hdr __arena *hdr;
 	task_ctx_t *tctx;
-	bool displaced;
+	bool displaced, pressure_migrate;
 	u64 dl, now, tnow;
 
 	TOUCH_ARENA();
@@ -6653,7 +7397,17 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	now = scx_bpf_now();
+	if (enq_flags & SCX_ENQ_WAKEUP)
+		tctx->runnable_at = now;
 	displaced = !(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p);
+	/*
+	 * A direct dispatch that left its placement to ops.running() and was
+	 * bounced back here is placed like the wakeup it is.
+	 */
+	if (tctx->place_pending) {
+		tctx->place_pending = false;
+		enq_flags |= SCX_ENQ_WAKEUP;
+	}
 	if (displaced)
 		WRITE_ONCE(cid_ctx(prev_cid)->requeue_pending, 0);
 
@@ -6665,6 +7419,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	hdr = task_bw_throttled(tctx, prev_cid, now);
 	if (hdr && cid_park(p, tctx, hdr, prev_cid)) {
 		tctx->dispatch_migrate_cid = -1;
+		tctx->pressure_migrate = false;
 		if (displaced)
 			cid_queued_check(prev_cid);
 		return;
@@ -6678,6 +7433,26 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	cid = tctx->dispatch_migrate_cid;
 	tctx->dispatch_migrate_cid = -1;
+	pressure_migrate = tctx->pressure_migrate;
+	tctx->pressure_migrate = false;
+	if (!(enq_flags & SCX_ENQ_WAKEUP) && pressure_migrate &&
+	    cid_valid(cid) && cid != prev_cid && cid_allowed(p, cid)) {
+		place_task(cid, p, tctx, now, false);
+		dl = task_dl(p, tctx);
+		if (cid_queue_insert(p, tctx, cid, task_request(p), dl,
+				     tctx->se.vruntime, enq_flags)) {
+			cid_queued_set(cid);
+			if (cid_idle_test(cid))
+				scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+		}
+		if (displaced) {
+			cid_queued_check(prev_cid);
+			cid_pressure_resumed(prev_cid,
+				cid_clock_task_owned(prev_cid, now));
+			cid_demand_set(prev_cid, cid_queue_nr(prev_cid) > 0, now);
+		}
+		return;
+	}
 	if (!(enq_flags & SCX_ENQ_WAKEUP) && cid_valid(cid) && cid != prev_cid &&
 	    cid_idle_test(cid) && cid_allowed(p, cid)) {
 		cid = claim_idle_cid(p, cid);
@@ -6686,7 +7461,6 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid,
 					   task_request(p), enq_flags | SCX_ENQ_IMMED);
-			__sync_fetch_and_add(&nr_active_balances, 1);
 			/* The requeue ops.dispatch() expected went elsewhere. */
 			if (displaced)
 				cid_queued_check(prev_cid);
@@ -6727,7 +7501,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * point; absent that request, preserve the local EEVDF placement.
 	 */
 	if ((task_should_migrate(p, enq_flags) && !reenq_immed(p, enq_flags)) ||
-	    (reenq_preempted(p, enq_flags) && p->scx.slice && !cid_idle_test(prev_cid))) {
+	    (reenq_preempted(p, enq_flags) && p->scx.slice &&
+	     !cid_idle_test(prev_cid))) {
 		cid = pick_idle_cid(p, prev_cid, prev_cid);
 		if (cid >= 0) {
 			place_task(cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
@@ -6813,15 +7588,21 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * local task has already requested rescheduling; later wakees retain
 	 * their deadline order on the per-cid EDQ.
 	 */
-	if (!displaced &&
-	    queued_cid_should_preempt(prev_cid, p, tctx, dl, tnow) &&
-	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
-		cid_edq_mark_dispatched(tctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
-				   task_request(p),
-				   enq_flags | SCX_ENQ_PREEMPT);
-		__sync_fetch_and_add(&nr_preempts, 1);
-		return;
+	if (!displaced) {
+		bool cancel_protect = false;
+
+		if (queued_cid_should_preempt(prev_cid, p, tctx, dl, tnow,
+					      &cancel_protect) &&
+		    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cid)) {
+			if (cancel_protect)
+				cancel_protect_slice(task_pack(tctx, prev_cid),
+						     tnow);
+			cid_edq_mark_dispatched(tctx);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
+					   task_request(p),
+					   enq_flags | SCX_ENQ_PREEMPT);
+			return;
+		}
 	}
 
 	if (!cid_queue_insert(p, tctx, prev_cid, task_request(p), dl,
@@ -6898,6 +7679,55 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
  * something is never read.
  */
 #define NEWIDLE_DECAY_NS	1000000000ULL
+
+/*
+ * Feed one scan result into fair.c's newidle success and call-rate
+ * estimator. @success is one for an ordinary scan and its inverse sampling
+ * weight for a scan admitted by newidle_should_scan().
+ */
+static void update_newidle_stats(s32 cid, u32 level, u32 success, u64 now)
+{
+	struct newidle_stats __arena *stats = &newidle_stats[cid];
+	u64 delta, ratio;
+
+	stats->call[level]++;
+	stats->success[level] += success;
+	if (stats->call[level] < 1024)
+		return;
+
+	delta = time_before(now, stats->stamp[level]) ? 0 :
+		now - stats->stamp[level];
+	stats->stamp[level] = now;
+
+	/* NI_RATE: 4.194 ms between calls contributes one ratio point. */
+	ratio = (delta >> 22) + stats->success[level];
+	stats->ratio[level] = MIN(1024, ratio);
+	stats->call[level] /= 2;
+	stats->success[level] /= 2;
+}
+
+/*
+ * NI_RANDOM: admit a scan in proportion to the success and call-rate ratio.
+ * Return the inverse sampling weight used to account a successful scan.
+ */
+static bool newidle_should_scan(s32 cid, u32 level, u64 now, u32 *weight)
+{
+	struct newidle_stats __arena *stats = &newidle_stats[cid];
+	u32 ratio = stats->ratio[level], sample;
+
+	*weight = 1;
+	if (ratio >= 1024)
+		return true;
+
+	sample = 1 + ratio;
+	if ((bpf_get_prandom_u32() & 1023) > sample) {
+		update_newidle_stats(cid, level, 0, now);
+		return false;
+	}
+
+	*weight = (1024 + sample / 2) / sample;
+	return true;
+}
 
 /*
  * Decay the level costs of @cctx that have not been raised for a second,
@@ -6990,6 +7820,7 @@ static void update_avg_idle(struct cid_ctx __arena *cctx, u64 now)
 void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 {
 	struct cid_topo __arena *topo;
+	bool queued;
 	s32 cid = scx_bpf_this_cid(), peer;
 	struct task_struct *head;
 	u64 now, tid;
@@ -7047,6 +7878,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	if (!no_newidle_cost)
 		newidle_decay(cid_ctx(cid), now);
 	cid_load_accumulate(cid, now);
+	update_balance_cap(cid, now);
 
 	/*
 	 * Run wider, less frequent domains first when two happen to be due on
@@ -7063,7 +7895,25 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 	if (busy_balance_domain(cid, topo->llc_base, topo->llc_nr,
 				BUSY_BALANCE_LLC, now))
 		return;
-	if (!cid_queue_nr(cid)) {
+	queued = cid_queue_nr(cid);
+
+	/*
+	 * update_misfit_status() records the running task even when other work is
+	 * queued, and nohz_balancer_kick() asks an idle CPU to run the
+	 * group_misfit_task balance when nr_running >= 2. Do the equivalent from
+	 * the source tick while @p is exact: a queued, pinned head must not hide a
+	 * current task which needs a larger CPU. The destination still consumes
+	 * and revalidates the request through active_balance_target(), preserving
+	 * the deferred detach used by the other active-balance cases.
+	 */
+	if (asym_capacity && queued) {
+		peer = idle_misfit_cid(p, cid, now);
+		if (peer >= 0 && peer != cid && active_balance_reserve(peer, now)) {
+			scx_bpf_kick_cid(peer, SCX_KICK_IDLE);
+			return;
+		}
+	}
+	if (!queued) {
 		/*
 		 * nohz_balancer_kick() also wakes an idle balancer when the sole
 		 * runnable task is on a lower-priority or undersized CPU. Serialize
@@ -7401,8 +8251,11 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	u32 node_base = numa_enabled ? topo->node_base : 0;
 	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
+	bool sample_newidle = newidle_sampling && !force_steal && !kicked;
 	bool budget = false, node_skipped = false, system_skipped = false;
+	bool scanned = false, admitted;
 	u64 curr_cost = 0, t0 = 0;
+	u32 weight;
 	u32 start;
 	s32 src = -1;
 
@@ -7455,26 +8308,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	if (budget)
 		t0 = bpf_ktime_get_ns();
 	if (budget && cctx->avg_idle < cctx->newidle_cost[NEWIDLE_LLC]) {
-		__sync_fetch_and_add(&nr_newidle_skips, 1);
 		return false;
-	}
-
-	if (nr_place_tiers > 1 &&
-	    (!smt_enabled || core_is_idle(dst_cid))) {
-		u32 t;
-
-		/* Less-preferred tiers first, from the last, leaving hot tasks alone. */
-		bpf_arena_for(t, 0, nr_place_tiers - topo->place_tier - 1) {
-			src = steal_from_range(dst_cid, nr_place_tiers - 1 - t, node_base,
-					       node_nr, node_base, now,
-					       !force_steal &&
-					       failed <= cache_nice_tries,
-					       0xff);
-			if (src >= 0) {
-				cctx->nr_balance_failed = 0;
-				goto pick;
-			}
-		}
 	}
 
 	/*
@@ -7483,32 +8317,70 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	 * stop. With NUMA disabled the node level covers the whole machine.
 	 * A domain that is the whole of the next one is not walked twice.
 	 */
-	src = steal_from_range(dst_cid, -1, topo->llc_base, topo->llc_nr,
-			       start + 1, now,
-			       !force_steal && failed <= cache_nice_tries,
-			       0xff);
-	if (budget) {
-		u64 t1 = bpf_ktime_get_ns();
+	admitted = !sample_newidle ||
+		newidle_should_scan(dst_cid, NEWIDLE_LLC, now, &weight);
+	if (admitted) {
+		u64 t1;
 
-		curr_cost = t1 - t0;
-		update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
-		t0 = t1;
-		if (node_nr > topo->llc_nr)
-			node_skipped = cctx->avg_idle <
-				       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
-	}
-	if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
-		src = steal_from_range(dst_cid, -1, node_base, node_nr,
-				       start + 1, now,
-				       !force_steal &&
-				       failed <= cache_nice_tries + 1,
-				       0xff);
+		scanned = true;
+		if (nr_place_tiers > 1 &&
+		    (!smt_enabled || core_is_idle(dst_cid))) {
+			u32 t;
+
+			/* Less-preferred tiers first, leaving hot tasks alone. */
+			bpf_arena_for(t, 0, nr_place_tiers - topo->place_tier - 1) {
+				src = steal_from_range(dst_cid,
+						nr_place_tiers - 1 - t,
+						node_base, node_nr, node_base,
+						now, !force_steal &&
+						failed <= cache_nice_tries,
+						0xff);
+				if (src >= 0)
+					break;
+			}
+		}
+		if (src < 0)
+			src = steal_from_range(dst_cid, -1, topo->llc_base,
+					       topo->llc_nr, start + 1, now,
+					       !force_steal &&
+					       failed <= cache_nice_tries,
+					       0xff);
+
+		t1 = (budget || sample_newidle) ? bpf_ktime_get_ns() : now;
 		if (budget) {
-			u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
-
-			curr_cost += cost;
-			update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
+			curr_cost = t1 - t0;
+			update_newidle_cost(cctx, NEWIDLE_LLC, curr_cost, t1);
 			t0 = t1;
+		}
+		if (sample_newidle)
+			update_newidle_stats(dst_cid, NEWIDLE_LLC,
+					     src >= 0 ? weight : 0, t1);
+	}
+	if (budget && node_nr > topo->llc_nr)
+		node_skipped = cctx->avg_idle <
+			       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
+	if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
+		admitted = !sample_newidle ||
+			newidle_should_scan(dst_cid, NEWIDLE_NODE, now, &weight);
+		if (admitted) {
+			u64 t1, cost;
+
+			scanned = true;
+			src = steal_from_range(dst_cid, -1, node_base, node_nr,
+					       start + 1, now,
+					       !force_steal &&
+					       failed <= cache_nice_tries + 1,
+					       0xff);
+			t1 = (budget || sample_newidle) ? bpf_ktime_get_ns() : now;
+			if (budget) {
+				cost = t1 - t0;
+				curr_cost += cost;
+				update_newidle_cost(cctx, NEWIDLE_NODE, cost, t1);
+				t0 = t1;
+			}
+			if (sample_newidle)
+				update_newidle_stats(dst_cid, NEWIDLE_NODE,
+						     src >= 0 ? weight : 0, t1);
 		}
 	}
 	if (budget && nr_cids > node_nr)
@@ -7516,33 +8388,44 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			cctx->avg_idle <
 			curr_cost + cctx->newidle_cost[NEWIDLE_SYSTEM];
 	if (src < 0 && nr_cids > node_nr && !system_skipped) {
-		src = steal_from_range(dst_cid, -1, 0, nr_cids,
-				       start + 1, now,
-				       !force_steal &&
-				       failed <= cache_nice_tries + 2,
-				       0xff);
-		if (budget) {
-			u64 t1 = bpf_ktime_get_ns(), cost = t1 - t0;
+		admitted = !sample_newidle ||
+			newidle_should_scan(dst_cid, NEWIDLE_SYSTEM, now, &weight);
+		if (admitted) {
+			u64 t1, cost;
 
-			curr_cost += cost;
-			update_newidle_cost(cctx, NEWIDLE_SYSTEM, cost, t1);
+			scanned = true;
+			src = steal_from_range(dst_cid, -1, 0, nr_cids,
+					       start + 1, now,
+					       !force_steal &&
+					       failed <= cache_nice_tries + 2,
+					       0xff);
+			t1 = (budget || sample_newidle) ? bpf_ktime_get_ns() : now;
+			if (budget) {
+				cost = t1 - t0;
+				curr_cost += cost;
+				update_newidle_cost(cctx, NEWIDLE_SYSTEM, cost, t1);
+			}
+			if (sample_newidle)
+				update_newidle_stats(dst_cid, NEWIDLE_SYSTEM,
+						     src >= 0 ? weight : 0, t1);
 		}
 	}
 	if (curr_cost > cctx->max_idle_balance_cost)
 		cctx->max_idle_balance_cost = curr_cost;
 
-	/* Nothing queued anywhere is a balanced system, not a failure. */
-	if (src >= 0 || cmask_empty(queued_cids))
-		cctx->nr_balance_failed = 0;
-	else
-		cctx->nr_balance_failed = failed + 1;
-	cctx->steal_cursor = src >= 0 ? src : start + 1;
+	if (scanned) {
+		/* Nothing queued anywhere is a balanced system, not a failure. */
+		if (src >= 0 || cmask_empty(queued_cids))
+			cctx->nr_balance_failed = 0;
+		else
+			cctx->nr_balance_failed = failed + 1;
+		cctx->steal_cursor = src >= 0 ? src : start + 1;
+	}
 
 own:
 	if (src < 0 && own)
 		src = dst_cid;
 
-pick:
 	if (src < 0)
 		return false;
 
@@ -7556,9 +8439,6 @@ pick:
 		}
 	}
 	cid_queued_check(src);
-
-	if (src != dst_cid)
-		__sync_fetch_and_add(&nr_steals, 1);
 
 	return true;
 }
@@ -7605,7 +8485,12 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			   u64 now, u64 tnow)
 {
 	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
-	u64 rival_dl = 0, head_dl = 0;
+	scx_edq_cursor_t *cursor = &dst->busy_dispatch_cursor;
+	u64 rival_dl = 0, head_dl = 0, min_slice;
+	s32 owner = READ_ONCE(dst->busy_balance_owner);
+	u32 level = READ_ONCE(dst->busy_balance_level);
+	u32 failed = cid_valid(owner) && level < BUSY_BALANCE_LEVELS ?
+		READ_ONCE(cid_ctx(owner)->busy_balance_failed[level]) : 0;
 	bool rival = false;
 	bool retry = false;
 	u32 nth;
@@ -7613,7 +8498,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 	if (has_prev && curr_pick_dl(cid_pack(dst_cid), tnow, &rival_dl))
 		rival = true;
 	if (cid_queued_test(dst_cid) &&
-	    pack_pick_head_dl(&dst->pack, tnow, &head_dl) &&
+	    pack_pick_head_dl(&dst->pack, tnow, &head_dl, &min_slice) &&
 	    (!rival || time_before(head_dl, rival_dl))) {
 		rival_dl = head_dl;
 		rival = true;
@@ -7625,7 +8510,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		u64 dl, v, weight;
 		int ret;
 
-		ret = cid_edq_try_peek_nth(src_cid, nth, &at);
+		ret = edq_scan_next(src_cid, cursor, &at);
 		if (ret)
 			return ret == -EBUSY ? -EAGAIN : 0;
 		if (!at) {
@@ -7635,8 +8520,10 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		}
 		weight = ((task_ctx_t *)at)->se.vjoin_w;
 		if (READ_ONCE(at->state) != CID_EDQ_ENQUEUED ||
-		    weight > READ_ONCE(dst->busy_balance_budget) ||
-		    task_hot((task_ctx_t *)at, src_cid, dst_cid, now)) {
+		    (weight >> MIN(failed, 63U)) >
+			    READ_ONCE(dst->busy_balance_budget) ||
+		    (task_hot((task_ctx_t *)at, src_cid, dst_cid, now) &&
+		     failed <= cache_nice_tries)) {
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
@@ -7650,8 +8537,8 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 		v = pack_vref_place(task_pack((task_ctx_t *)at, dst_cid), tnow) - lag;
 		dl = v + (at->common.node.deadline -
 			  at->common.node.eligibility);
-		if (rival && ((!no_eligibility && lag < 0) ||
-			      !time_before(dl, rival_dl))) {
+		if (rival &&
+		    ((!no_eligibility && lag < 0) || !time_before(dl, rival_dl))) {
 			retry = true;
 			scx_edq_task_drop(&at->common);
 			continue;
@@ -7661,7 +8548,9 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			return -EAGAIN;
 		if (ret != CID_EDQ_MOVE_MOVED)
 			continue;
-		dst->busy_balance_budget -= weight;
+		edq_scan_reset(cursor);
+		dst->busy_balance_budget = weight >= dst->busy_balance_budget ? 0 :
+					   dst->busy_balance_budget - weight;
 		return 1;
 	}
 
@@ -7763,6 +8652,11 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		moved = busy_balance_move_to_local(cid, busy_cid, has_prev,
 						   now, tnow);
 		if (moved > 0) {
+			s32 owner = READ_ONCE(cid_ctx(cid)->busy_balance_owner);
+			u32 level = READ_ONCE(cid_ctx(cid)->busy_balance_level);
+
+			if (cid_valid(owner) && level < BUSY_BALANCE_LEVELS)
+				WRITE_ONCE(cid_ctx(owner)->busy_balance_failed[level], 0);
 			cid_queued_check(busy_cid);
 			/* Drain no more than the imbalance calculated by the tick. */
 			if (READ_ONCE(cid_ctx(cid)->busy_balance_budget) &&
@@ -7772,8 +8666,6 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 				__sync_val_compare_and_swap(
 					&cid_ctx(cid)->busy_balance_cid,
 					-1, busy_cid);
-			__sync_fetch_and_add(&nr_steals, 1);
-			__sync_fetch_and_add(&nr_busy_balances, 1);
 			/*
 			 * The destination found work before asking for a
 			 * running task, as the pulls below would have.
@@ -7872,12 +8764,15 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 	TOUCH_ARENA();
 
 	if (idle) {
+		u64 now = scx_bpf_now();
+
+		cid_demand_set(cid, false, now);
 		cid_idle_set(cid);
 		/*
 		 * The tick stops with the CPU: record the empty pack now, or the
 		 * idle period is averaged in at the weight of the last tick.
 		 */
-		cid_load_accumulate(cid, scx_bpf_now());
+		cid_load_accumulate(cid, now);
 	} else if (cid_valid(cid)) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
 
@@ -7912,8 +8807,11 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 
 	now = scx_bpf_now();
 	util_est_update(tctx, now);
-	if (wa_weight)
-		ravg_accumulate_arena(&tctx->runnable_avg, 0, now);
+	if (deq_flags & SCX_DEQ_SLEEP) {
+		task_runnable_update(tctx, now);
+		tctx->last_sleep_at = now;
+	}
+	tctx->place_pending = false;
 
 	/*
 	 * Remember how far the task is from the reference as it stops being
@@ -7973,41 +8871,11 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
-{
-	task_ctx_t *tctx;
-	bool direct_placed;
-
-	TOUCH_ARENA();
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	direct_placed = tctx->direct_placed;
-	tctx->direct_placed = false;
-	if (wa_weight)
-		ravg_accumulate_arena(&tctx->runnable_avg, 1, scx_bpf_now());
-
-	/*
-	 * Drop out of the pack the task was last a member of. The lag it
-	 * carries is what survives the sleep, and place_task() spends it
-	 * against the cid the task is about to be queued on, the way
-	 * place_entity() does:
-	 *
-	 *	se->vruntime = vruntime - lag;
-	 *
-	 * A task that had consumed its share before sleeping comes back
-	 * with no credit, while one that was still owed service keeps it.
-	 */
-	if (!direct_placed)
-		task_vref_leave(tctx);
-}
-
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
 	task_ctx_t *tctx;
-	u64 now;
+	u64 now, weight;
+	bool placed = false;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -8023,10 +8891,25 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * and follow the rq clock, which a task carries across CPUs.
 	 */
 	now = scx_bpf_now();
+
+	/*
+	 * The placement a direct dispatch left to this op, see
+	 * direct_dispatch_local(). This is a switch to @p, which is not the
+	 * current task yet, so place_task() places it as it would have on
+	 * the wakeup, against the pack as it is now.
+	 */
+	if (tctx->place_pending) {
+		tctx->place_pending = false;
+		if (cid_valid(cid)) {
+			place_task(cid, p, tctx, now, true);
+			placed = true;
+		}
+	}
 	tctx->last_run_at = cid_valid(cid) ? cid_clock_task_owned(cid, now) : now;
+	cid_pressure_resumed(cid, tctx->last_run_at);
 	util_set_running(tctx, true, now);
 	cid_util_set_running(cid, true, now);
-	cid_load_update(cid, now);
+	cid_demand_set(cid, true, now);
 
 	/*
 	 * A task that was moved here from another cid's queue, by the
@@ -8055,9 +8938,10 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 
 	/*
 	 * A task in a group is picked at the share of the hierarchy it has now,
-	 * set_next_task_fair() running reweight_eevdf().
+	 * set_next_task_fair() running reweight_eevdf(). One placed just above
+	 * joined at that share.
 	 */
-	if (tctx->gq)
+	if (tctx->gq && !placed)
 		task_h_refresh(tctx, now);
 
 	/*
@@ -8074,10 +8958,17 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		pk->curr_run_at = tctx->last_run_at;
 		pk->curr_since = tctx->last_run_at;
 		pk->curr_request = task_request(p);
-		pk->curr_w = task_weight(p, tctx);
+		weight = task_weight(p, tctx);
+		set_protect_slice(pk, weight);
+		/* Publish a complete current-task snapshot to remote wakeups. */
+		pk->curr_w = weight;
 		cctx->curr_idle = p->policy == SCHED_IDLE;
-		cctx->curr_sched_idle = cctx->curr_idle ||
-					(tctx->grp && task_in_idle_cgroup(tctx));
+		if ((cctx->curr_idle ||
+		     (tctx->grp && task_in_idle_cgroup(tctx))) &&
+		    !cctx->curr_sched_idle) {
+			cctx->curr_sched_idle = 1;
+			__sync_fetch_and_add(&nr_sched_idle_curr, 1);
+		}
 
 		/*
 		 * A pick with company is given an hrtick, set_next_task_fair():
@@ -8121,7 +9012,11 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	slice = tnow - tctx->last_run_at;
 	util_set_running(tctx, false, tctx->last_stop_at);
 	cid_util_set_running(cid, false, tctx->last_stop_at);
-	cid_load_update(cid, tctx->last_stop_at);
+	cid_demand_set(cid, runnable ||
+			       (cid_valid(cid) && cid_queue_nr(cid) > 0),
+		       tctx->last_stop_at);
+	if (runnable && p->scx.slice)
+		cid_pressure_displaced(cid, tnow);
 
 	/*
 	 * The runtime is charged as wall-clock time whatever the CPU it was
@@ -8146,16 +9041,35 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	task_bw_charge(tctx, cid, slice);
 
 	/*
+	 * A runnable task stopped with slice left was displaced rather than
+	 * yielding at a cidland boundary. Once the measured capacity is reduced,
+	 * detach it for requeueing on a less-loaded cid. The enqueue path inserts
+	 * it into that cid's EDQ, so this migration does not bypass EEVDF order.
+	 */
+	if (capacity_pressure && runnable && p->scx.slice && cid_valid(cid)) {
+		s32 target = capacity_pressure_target(p, cid, tctx->last_stop_at);
+
+		if (target >= 0) {
+			tctx->dispatch_migrate_cid = target;
+			tctx->pressure_migrate = true;
+			scx_bpf_task_set_slice(p, 0);
+		}
+	}
+
+	/*
 	 * The service just charged is in the reference for real now, so
 	 * there is nothing left for pack_vref_at() to project on this cid
 	 * until ops.running() picks the next task.
 	 */
-	if (cid_valid(cid))
-		task_pack(tctx, cid)->curr_w = 0;
+	if (cid_valid(cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
 
-	/*
-	 * Update per-cid statistics.
-	 */
+		task_pack(tctx, cid)->curr_w = 0;
+		if (cctx->curr_sched_idle) {
+			cctx->curr_sched_idle = 0;
+			__sync_fetch_and_sub(&nr_sched_idle_curr, 1);
+		}
+	}
 }
 
 /*
@@ -8207,7 +9121,8 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->delay_cid = -1;
 		tctx->recent_used_cid = -1;
 		tctx->dispatch_migrate_cid = -1;
-		tctx->direct_placed = false;
+		tctx->pressure_migrate = false;
+		tctx->place_pending = false;
 	}
 }
 
@@ -8238,6 +9153,34 @@ void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
 		return;
 
 	reweight_task(p, tctx, p->on_rq);
+}
+
+/*
+ * The core affinity path already moves a queued or running task whose current
+ * CPU is no longer allowed, and every cidland placement and balance handoff
+ * reads or revalidates p->cpus_ptr. The one state the core cannot update is a
+ * sleeping task's simulated delayed-dequeue membership: unlike fair.c's
+ * sched_delayed entity, it is not physically left on the runqueue for the
+ * affinity change to dequeue.
+ *
+ * Stop paying that task's debt when the pack it blocked in is excluded. If
+ * the old cid remains allowed, fair leaves the delayed entity there too and
+ * there is nothing to do.
+ */
+void BPF_STRUCT_OPS(cidland_set_cmask, struct task_struct *p,
+		    const struct scx_cmask __arena *cmask)
+{
+	task_ctx_t *tctx;
+	s32 cid;
+
+	TOUCH_ARENA();
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	cid = tctx->delay_cid;
+	if (cid_valid(cid) && !cmask_test(cid, cmask))
+		delay_settle(tctx, scx_bpf_now());
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
@@ -8675,6 +9618,7 @@ static void init_topology(void)
 		s32 cpu = scx_bpf_cid_to_cpu(cid);
 
 		cid_ctx(cid)->busy_balance_cid = -1;
+		cid_ctx(cid)->busy_balance_owner = -1;
 		cid_pack(cid)->cid = cid;
 		cid_ctx(cid)->active_balance_cid = -1;
 
@@ -8767,7 +9711,8 @@ static void init_topology(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 {
 	struct hrtick *ht;
-	u32 cid;
+	u64 now;
+	u32 cid, level;
 	int err;
 
 	TOUCH_ARENA();
@@ -8816,13 +9761,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	nr_words = cmask_nr_words(idle_cids);
 
 	init_topology();
+	now = bpf_ktime_get_ns();
 
 	/* sched_init(): the idle pull budget starts open by a migration cost. */
 	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
+		struct newidle_stats __arena *stats = &newidle_stats[cid];
 
 		cctx->avg_idle = 2 * migration_cost_ns;
 		cctx->max_idle_balance_cost = migration_cost_ns;
+		cctx->busy_balance_cap = cid_topo(cid)->cap;
+		cctx->busy_balance_scan_cap = cid_topo(cid)->cap;
+		cctx->pressure_avail = 1024;
+		bpf_arena_for(level, 0, NEWIDLE_LEVELS) {
+			stats->call[level] = 512;
+			stats->success[level] = 256;
+			stats->ratio[level] = 512;
+			stats->stamp[level] = now;
+		}
 		if (cid == (s32)cid_topo(cid)->llc_base)
 			cctx->sis_idle_scan = cid_topo(cid)->llc_nr;
 	}
@@ -8946,7 +9902,9 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	mask = (sizeof(struct scx_cmask) + (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = nr * sizeof(struct cid_topo) + nr * sizeof(struct cid_ctx) +
 		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
-		nr * (sizeof(u64) + 6 * sizeof(u32)) + 12 * 64;
+		nr * (sizeof(struct core_sched_state) + sizeof(struct newidle_stats) +
+		      sizeof(u64) +
+		      6 * sizeof(u32)) + 13 * 64;
 	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
 	arena_base = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
@@ -8957,6 +9915,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 
 	topos = arena_carve(nr * sizeof(struct cid_topo), 64);
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
+	core_sched_states = arena_carve(nr * sizeof(struct core_sched_state), 64);
+	newidle_stats = arena_carve(nr * sizeof(struct newidle_stats), 64);
 	idle_cids = arena_carve(mask, 64);
 	idle_core_llcs = arena_carve(mask, 64);
 	queued_cids = arena_carve(mask, 64);
@@ -8971,7 +9931,8 @@ int cidland_arena_init(struct cidland_arena_args *args)
 	cpu_fork_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_wake_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_asym_span_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !idle_cids || !idle_core_llcs || !queued_cids ||
+	if (!topos || !cctxs || !core_sched_states || !newidle_stats || !idle_cids ||
+	    !idle_core_llcs || !queued_cids ||
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)
@@ -9071,15 +10032,16 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	.enqueue		= (void *)cidland_enqueue,		\
 	.dequeue		= (void *)cidland_dequeue,		\
 	.tick			= (void *)cidland_tick,			\
+	.core_sched_before	= (void *)cidland_core_sched_before,	\
 	.yield			= (void *)cidland_yield,		\
 	.dispatch		= (void *)cidland_dispatch,		\
-	.runnable		= (void *)cidland_runnable,		\
 	.quiescent		= (void *)cidland_quiescent,		\
 	.running		= (void *)cidland_running,		\
 	.stopping		= (void *)cidland_stopping,		\
 	.update_idle		= (void *)cidland_update_idle,		\
 	.enable			= (void *)cidland_enable,		\
 	.set_weight		= (void *)cidland_set_weight,		\
+	.set_cmask		= (void *)cidland_set_cmask,		\
 	.init_task		= (void *)cidland_init_task,		\
 	.exit_task		= (void *)cidland_exit_task,		\
 	.__cg##_init		= (void *)cidland_cpuctl_init,		\

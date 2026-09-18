@@ -50,6 +50,7 @@ static __always_inline void node_update(scx_edq_node_t *node)
 {
 	u32 lh = node_height(node->left), rh = node_height(node->right);
 	u64 min_eligibility = node->eligibility;
+	u64 min_slice = node->slice;
 
 	node->height = (lh > rh ? lh : rh) + 1;
 	if (node->left && time_before(node->left->min_eligibility, min_eligibility))
@@ -57,6 +58,11 @@ static __always_inline void node_update(scx_edq_node_t *node)
 	if (node->right && time_before(node->right->min_eligibility, min_eligibility))
 		min_eligibility = node->right->min_eligibility;
 	node->min_eligibility = min_eligibility;
+	if (node->left && node->left->min_slice < min_slice)
+		min_slice = node->left->min_slice;
+	if (node->right && node->right->min_slice < min_slice)
+		min_slice = node->right->min_slice;
+	node->min_slice = min_slice;
 }
 
 static __always_inline s32 node_balance(scx_edq_node_t *node)
@@ -128,6 +134,7 @@ static __noinline int rebalance_from(scx_edq_t __arg_arena *edq,
 	while (node && can_loop) {
 		scx_edq_node_t *root = node;
 		u64 old_min_eligibility = node->min_eligibility;
+		u64 old_min_slice = node->min_slice;
 		u32 old_height = node->height;
 		s32 balance;
 		bool rotated = false;
@@ -146,7 +153,8 @@ static __noinline int rebalance_from(scx_edq_t __arg_arena *edq,
 			rotated = true;
 		}
 		if (may_exit && !rotated && node->height == old_height &&
-		    node->min_eligibility == old_min_eligibility)
+		    node->min_eligibility == old_min_eligibility &&
+		    node->min_slice == old_min_slice)
 			return 0;
 		node = root->parent;
 	}
@@ -237,8 +245,11 @@ static __noinline int remove_locked(scx_edq_t __arg_arena *edq,
 	node_clear_links(node);
 	node->height = 1;
 	node->min_eligibility = node->eligibility;
+	node->min_slice = node->slice;
 
 	ret = rebalance_from(edq, rebalance, may_exit);
+	WRITE_ONCE(edq->min_slice,
+		   edq->root ? edq->root->min_slice : 0);
 	/*
 	 * Publish reusable membership last. Insertions into another EDQ take the
 	 * destination lock, not this one, and can claim a NULL membership
@@ -253,7 +264,7 @@ static __noinline int remove_locked(scx_edq_t __arg_arena *edq,
 __weak
 int scx_edq_insert(scx_edq_t __arg_arena *edq,
 		    scx_edq_task_t __arg_arena *task,
-		    u64 deadline, u64 eligibility)
+		    u64 deadline, u64 eligibility, u64 slice)
 {
 	scx_edq_node_t *node = &task->node;
 	scx_edq_node_t *parent = NULL;
@@ -274,6 +285,8 @@ int scx_edq_insert(scx_edq_t __arg_arena *edq,
 	node->deadline = deadline;
 	node->eligibility = eligibility;
 	node->min_eligibility = eligibility;
+	node->slice = slice;
+	node->min_slice = slice;
 	node->seq = edq->seq++;
 	node->height = 1;
 
@@ -302,6 +315,8 @@ int scx_edq_insert(scx_edq_t __arg_arena *edq,
 	edq->nr++;
 
 	ret = rebalance_from(edq, parent, true);
+	WRITE_ONCE(edq->min_slice,
+		   edq->root ? edq->root->min_slice : 0);
 	scx_edq_unlock(edq);
 	return ret;
 }
@@ -447,22 +462,26 @@ u64 scx_edq_pop_first_eligible_or_first(scx_edq_t __arg_arena *edq,
 }
 
 /*
- * Return in @deadline the deadline of the earliest-deadline task whose
- * eligibility is at or before @cutoff, without removing it. -ENOENT when no
- * queued task is eligible, -EBUSY when the queue is contended: the caller
- * decides without it.
+ * Return the deadline of the earliest-deadline task whose eligibility is at
+ * or before @cutoff and the shortest slice in the queue, without removing
+ * anything. -ENOENT when no queued task is eligible, -EBUSY when the queue is
+ * contended: the caller decides without it.
  */
 __weak
 int scx_edq_try_first_eligible_deadline(scx_edq_t __arg_arena *edq, u64 cutoff,
-					 u64 *deadline __arg_nonnull)
+					 u64 *deadline __arg_nonnull,
+					 u64 *min_slice __arg_nonnull)
 {
 	scx_edq_node_t *node;
 	int ret;
 
 	*deadline = 0;
+	*min_slice = 0;
 	ret = scx_edq_trylock(edq);
 	if (ret)
 		return ret;
+	if (edq->root)
+		*min_slice = edq->root->min_slice;
 	node = first_eligible(edq, cutoff);
 	if (node)
 		*deadline = node->deadline;
@@ -541,6 +560,62 @@ int scx_edq_try_peek_nth_hold(scx_edq_t __arg_arena *edq, u32 nth,
 	return ret;
 }
 
+/*
+ * Return and hold the next task in deadline order and advance @cursor. This
+ * lets a caller resume a bounded scan even when the nodes it inspected have
+ * since left the tree. Updating the cursor under the queue lock serializes
+ * multiple destinations scanning the same source.
+ */
+__weak
+int scx_edq_try_peek_next_hold(scx_edq_t __arg_arena *edq,
+			       scx_edq_cursor_t __arg_arena *cursor,
+			       u64 *taskp __arg_nonnull)
+{
+	scx_edq_node_t *node, *next = NULL;
+	scx_edq_task_t *task = NULL;
+	int ret;
+
+	*taskp = 0;
+	ret = scx_edq_trylock(edq);
+	if (ret)
+		return ret;
+	if (!cursor->valid) {
+		next = edq->first;
+	} else {
+		bool include = cursor->valid == SCX_EDQ_CURSOR_AT;
+
+		node = edq->root;
+		while (node && can_loop) {
+			bool key_before;
+
+			key_before = cursor->deadline != node->deadline ?
+				time_before(cursor->deadline, node->deadline) :
+				cursor->seq < node->seq ||
+				(include && cursor->seq == node->seq);
+			if (key_before) {
+				next = node;
+				node = node->left;
+			} else {
+				node = node->right;
+			}
+		}
+		if (node)
+			ret = -E2BIG;
+	}
+	if (!ret && next) {
+		task = node_task(next);
+		scx_edq_task_hold(task);
+		cursor->deadline = next->deadline;
+		cursor->seq = next->seq;
+		cursor->valid = SCX_EDQ_CURSOR_AFTER;
+	} else if (!ret) {
+		cursor->valid = 0;
+	}
+	scx_edq_unlock(edq);
+	*taskp = (u64)task;
+	return ret;
+}
+
 __weak
 u64 scx_edq_nr_queued(scx_edq_t __arg_arena *edq)
 {
@@ -561,6 +636,8 @@ int scx_edq_task_init(scx_edq_task_t __arg_arena *task)
 	WRITE_ONCE(task->node.deadline, 0);
 	WRITE_ONCE(task->node.eligibility, 0);
 	WRITE_ONCE(task->node.min_eligibility, 0);
+	WRITE_ONCE(task->node.slice, 0);
+	WRITE_ONCE(task->node.min_slice, 0);
 	WRITE_ONCE(task->node.seq, 0);
 	WRITE_ONCE(task->node.height, 0);
 	WRITE_ONCE(task->holdcnt, 0);

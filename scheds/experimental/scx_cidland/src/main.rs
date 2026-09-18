@@ -10,31 +10,40 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod console;
 mod stats;
 
+use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
+use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::MapCore;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::ProgramType;
 use libbpf_rs::skel::Skel;
 use log::debug;
-use log::info;
 use log::warn;
 use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::SchedDomainSource;
+use scx_utils::ScxExitKind;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::build_id;
@@ -45,8 +54,9 @@ use scx_utils::scx_ops_cid_load;
 use scx_utils::scx_ops_cid_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
-use scx_utils::uei_report;
+use scx_utils::uei_read;
 use stats::Metrics;
+use stats::OpStats;
 
 const SCHEDULER_NAME: &str = "scx_cidland";
 
@@ -164,10 +174,25 @@ struct Opts {
     /// the most a scan at each level has cost, and does not start a scan its
     /// idle time would not pay for, since a CPU its own wakeups keep bringing
     /// back is about to have work of its own: sched_balance_newidle()'s
-    /// avg_idle against sd->max_newidle_lb_cost. This drops the budget and
-    /// scans every time.
+    /// avg_idle against sd->max_newidle_lb_cost. This drops only the cost
+    /// budget; --no-newidle-sampling separately disables success-rate
+    /// sampling.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_newidle_cost: bool,
+
+    /// Do not sample new-idle scans from their observed success rate.
+    ///
+    /// fair.c's NI_RANDOM and NI_RATE features avoid repeatedly scanning a
+    /// domain that rarely supplies work. Each cid and topology level tracks
+    /// successful pulls and call frequency, then probabilistically admits
+    /// scans in proportion to that estimate. The estimator compensates a
+    /// successful sampled scan by its inverse sampling probability.
+    ///
+    /// Sampling is enabled by default, as both fair.c features are. This
+    /// option makes every new-idle level eligible to scan, subject only to
+    /// the separate avg-idle cost budget controlled by --no-newidle-cost.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_newidle_sampling: bool,
 
     /// Do not bound wakeup idle scans by the target LLC's utilization.
     ///
@@ -214,21 +239,30 @@ struct Opts {
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// Schedule the cpu controller's cgroups as groups.
+    /// Do not schedule the cpu controller's cgroups as groups.
     ///
-    /// A cgroup then competes with its siblings at its cpu.weight and its
+    /// By default, a cgroup competes with its siblings at its cpu.weight and its
     /// tasks share what it gets, the way fair.c's group scheduling does, with
     /// cpu.weight meaning the weight per active CPU (fair.c's default
     /// cgroup_mode, "concur").
     ///
-    /// Off by default: tasks are scheduled on their nice levels alone and
-    /// cpu.weight is ignored. Keeping the group loads and effective weights
-    /// up to date costs every wakeup of a task in a nested cgroup a walk of
-    /// its hierarchy, which on a systemd machine is every task, and shows up
-    /// as wakeup latency and throughput.
+    /// This schedules tasks on their nice levels alone and ignores cpu.weight.
+    /// It avoids walking a nested cgroup hierarchy as tasks wake and sleep,
+    /// trading the cpu controller's isolation semantics for some throughput.
     ///
-    /// Needs a kernel built with CONFIG_EXT_GROUP_SCHED.
-    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    /// Group scheduling needs a kernel built with CONFIG_EXT_GROUP_SCHED. If
+    /// the running kernel lacks it, cidland falls back to this behavior.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_cgroups: bool,
+
+    /// Deprecated compatibility alias; cgroup scheduling is already enabled.
+    #[clap(
+        short = 'g',
+        long,
+        hide = true,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "disable_cgroups"
+    )]
     enable_cgroups: bool,
 
     /// Ignore cpu.max while scheduling cgroups as groups.
@@ -239,7 +273,7 @@ struct Opts {
     /// and cpu.idle in place, which is what the comparison against a kernel
     /// with no bandwidth control needs.
     ///
-    /// Has no effect without --enable-cgroups.
+    /// Has no further effect with --disable-cgroups.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_cpu_max: bool,
 
@@ -332,22 +366,33 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
-    /// Weigh the waking CPU against the previous one when both are busy.
+    /// Do not weigh the waking CPU against the previous one when both are busy.
     ///
-    /// By default a wakee whose previous CPU and waking CPU are both busy
-    /// stays where it last ran. With this, it goes to the one the two loads
-    /// say is lighter, the time-averaged weight of what is runnable on each,
-    /// so that a waker that runs a little and sleeps a lot takes its wakee
-    /// onto its own CPU: wake_affine_weight(). It matters on a saturated
-    /// machine with many short wakeups; elsewhere it costs a few percent of
-    /// wakeup throughput for no measured gain, as it does in fair.c.
+    /// By default, send the wakee to whichever of its previous CPU and the
+    /// waking CPU would be lighter after the move. Cid load is sampled from
+    /// the tick and task load reuses its execution-utilization estimate, so
+    /// the comparison adds no runnable-state accounting. Disable this on
+    /// systems where the resulting placement performs worse, such as large
+    /// asymmetric-SMT systems.
     #[clap(long, action = clap::ArgAction::SetTrue)]
-    wa_weight: bool,
+    no_wa_weight: bool,
 
     /// Periodic busy load balancing runs every domain-weight milliseconds
     /// times this factor, sd->busy_factor (16 in fair.c).
     #[clap(long, default_value = "16", value_parser = clap::value_parser!(u32).range(1..=64))]
     busy_balance_factor: u32,
+
+    /// Do not account for CPU capacity unavailable to sched_ext.
+    ///
+    /// By default, measure higher-class displacement from stopping/running
+    /// events and IRQ/steal time from rq_clock - rq_clock_task. Periodic
+    /// balance normalizes load by the resulting effective capacity, while
+    /// retaining its normal imbalance, affinity, hotness, and EEVDF gates.
+    /// A task displaced by a higher class may be requeued into a less-loaded
+    /// cid's EDQ, where it still competes in EEVDF order. Hardware capacity
+    /// and wakeup placement remain unchanged.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_capacity_pressure: bool,
 
     /// Service is charged in rq_clock_task(), the clock update_curr() uses:
     /// wall time less the interrupt time and the hypervisor steal time the
@@ -504,15 +549,148 @@ struct Opts {
     pub libbpf: LibbpfOpts,
 }
 
+/// Kernel run-time accounting of the sched_ext callbacks, BPF_ENABLE_STATS.
+///
+/// Each callback is its own BPF program and the kernel keeps a run count and
+/// a run time per program once the accounting is switched on. That costs two
+/// clock reads around every callback, so it is on only while a stats client
+/// is polling and goes away by itself once nobody has asked for a while.
+struct OpsProfiler {
+    /// Holding the descriptor keeps the accounting enabled.
+    enabled: Option<OwnedFd>,
+    last_read: Instant,
+    warned: bool,
+}
+
+impl OpsProfiler {
+    /// How long without a stats request before the accounting is dropped.
+    const IDLE: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            enabled: None,
+            last_read: Instant::now(),
+            warned: false,
+        }
+    }
+
+    fn enable(&mut self) {
+        if self.enabled.is_some() {
+            return;
+        }
+        let fd = unsafe {
+            libbpf_rs::libbpf_sys::bpf_enable_stats(libbpf_rs::libbpf_sys::BPF_STATS_RUN_TIME)
+        };
+        if fd < 0 {
+            if !self.warned {
+                warn!(
+                    "BPF run-time stats unavailable: {}",
+                    std::io::Error::last_os_error()
+                );
+                self.warned = true;
+            }
+            return;
+        }
+        debug!("BPF run-time stats enabled");
+        self.enabled = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+    }
+
+    /// Drop the accounting once no client has polled for a while.
+    fn expire(&mut self) {
+        if self.enabled.is_some() && self.last_read.elapsed() > Self::IDLE {
+            debug!("BPF run-time stats disabled");
+            self.enabled = None;
+        }
+    }
+
+    /// Cumulative counts and times of every struct_ops program, keyed by the
+    /// callback name. The kernel truncates program names, so the names come
+    /// from the skeleton.
+    fn sample(&mut self, skel: &BpfSkel<'_>) -> BTreeMap<String, OpStats> {
+        self.last_read = Instant::now();
+        self.enable();
+
+        let mut ops = BTreeMap::new();
+        if self.enabled.is_none() {
+            return ops;
+        }
+        for prog in skel.object().progs() {
+            if prog.prog_type() != ProgramType::StructOps {
+                continue;
+            }
+            let mut info: libbpf_rs::libbpf_sys::bpf_prog_info = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of_val(&info) as u32;
+            let rc = unsafe {
+                libbpf_rs::libbpf_sys::bpf_prog_get_info_by_fd(
+                    prog.as_fd().as_raw_fd(),
+                    &mut info,
+                    &mut len,
+                )
+            };
+            if rc != 0 {
+                continue;
+            }
+            let name = prog.name().to_string_lossy();
+            let name = name.strip_prefix("cidland_").unwrap_or(&name).to_string();
+            ops.insert(
+                name,
+                OpStats {
+                    calls: info.run_cnt,
+                    ns: info.run_time_ns,
+                    misses: info.recursion_misses,
+                },
+            );
+        }
+        ops
+    }
+}
+
+/// What the arena holds, in bytes, and the size of the map. Kernels from
+/// 7.3 account the allocated pages in the map's memlock; before that the
+/// figure is the one kept at the allocator by cidland_arena_alloc_pages(),
+/// when @counted says those programs are attached, and None otherwise.
+fn arena_usage(skel: &BpfSkel, counted: bool) -> (Option<u64>, u64) {
+    let map = &skel.maps.arena;
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    let max = map.max_entries() as u64 * page;
+    let fd = map.as_fd().as_raw_fd();
+    let memlock: u64 = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+        .ok()
+        .and_then(|info| {
+            info.lines()
+                .find_map(|line| line.strip_prefix("memlock:"))
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(0);
+    let used = if memlock > 0 {
+        Some(memlock)
+    } else if counted {
+        let bss = skel.maps.bss_data.as_ref().unwrap();
+        Some(
+            bss.arena_pages_allocated
+                .saturating_sub(bss.arena_pages_freed)
+                * page,
+        )
+    } else {
+        None
+    };
+    (used, max)
+}
+
 struct Scheduler<'a> {
     /// The arena's user-space services. Nothing here needs reclaiming, the
     /// arena is carved once at start, but the stream watcher turns an arena
     /// fault in a BPF program, which the kernel would otherwise fix up
     /// silently by dropping the access, into a report and an abort.
     _arenalib: ArenaLib,
+    /// The page counters of cidland_arena_alloc_pages(), attached to the
+    /// kernel's arena allocator for the life of the scheduler.
+    _arena_links: Vec<libbpf_rs::Link>,
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
+    ops_profiler: OpsProfiler,
+    started: Instant,
 }
 
 /// Return TICK_NSEC, the kernel's timing granularity.
@@ -609,8 +787,8 @@ fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
         });
         if count > 0 {
             warn!(
-                "{} cgroup(s) set cpu.max, e.g. {}, which is ignored: the bandwidth \
-                 of a cgroup is held to only with --enable-cgroups and without \
+                "{} cgroup(s) set cpu.max, e.g. {}, which is ignored: cgroup \
+                 bandwidth control is disabled by --disable-cgroups or \
                  --disable-cpu-max",
                 count,
                 example.unwrap_or_default()
@@ -621,12 +799,12 @@ fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
     if requested {
         if !kernel_support {
             warn!(
-                "--enable-cgroups: the kernel has no sched_ext cgroup support \
+                "the kernel has no sched_ext cgroup support \
                  (CONFIG_EXT_GROUP_SCHED), cgroups are not scheduled as groups"
             );
         } else if !cpu_controller {
             warn!(
-                "--enable-cgroups: the cpu controller is not enabled in {}, \
+                "the cpu controller is not enabled in {}, \
                  every task is scheduled as part of the root cgroup",
                 root.join("cgroup.subtree_control").display()
             );
@@ -643,8 +821,8 @@ fn check_cgroup_support(requested: bool, kernel_support: bool, cpu_max: bool) {
     });
     if count > 0 {
         warn!(
-            "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored without \
-             --enable-cgroups",
+            "{} cgroup(s) set cpu.weight, e.g. {}, which is ignored with \
+             --disable-cgroups",
             count,
             example.unwrap_or_default()
         );
@@ -705,46 +883,51 @@ impl<'a> Scheduler<'a> {
             .values()
             .filter(|node| !node.all_cpus.is_empty())
             .count();
-        info!("NUMA nodes: {}", nr_nodes);
-
         // Automatically disable NUMA optimizations when running on non-NUMA systems.
         let numa_enabled = !opts.disable_numa && nr_nodes > 1;
-        if !numa_enabled {
-            info!("Disabling NUMA optimizations");
-        }
 
-        info!(
-            "{} {} {}",
-            SCHEDULER_NAME,
-            build_id::full_version(env!("CARGO_PKG_VERSION")),
-            if smt_enabled { "SMT on" } else { "SMT off" }
-        );
-        info!(
-            "tick: {} us (HZ={})",
-            tick_ns() / 1000,
-            1_000_000_000 / tick_ns()
+        // The startup report, one block in the style of the stats blocks,
+        // printed once everything below has settled.
+        let mut report = console::Report::new();
+        report.field(format!("{} CPUs", topo.all_cpus.len()));
+        report.field(format!(
+            "{} NUMA node{}{}",
+            nr_nodes,
+            if nr_nodes == 1 { "" } else { "s" },
+            if nr_nodes > 1 && !numa_enabled {
+                " (--disable-numa)"
+            } else {
+                ""
+            }
+        ));
+        report.field(if smt_enabled { "SMT on" } else { "SMT off" });
+        report.row("build", build_id::full_version(env!("CARGO_PKG_VERSION")));
+        report.row("kernel", console::kernel_release());
+        report.row(
+            "tick",
+            format!("{} us (HZ={})", tick_ns() / 1000, 1_000_000_000 / tick_ns()),
         );
 
         let slice_ns = match opts.slice_us {
             Some(us) => {
                 let ns = us * 1000;
-                info!("slice: {} us (--slice-us)", us);
+                report.row("slice", format!("{us} us (--slice-us)"));
                 ns
             }
             None => {
                 let ns = base_slice_ns(topo.all_cpus.len());
-                info!(
-                    "slice: {} us (700 us scaled as update_sysctl() does)",
-                    ns / 1000
+                report.row(
+                    "slice",
+                    format!("{} us (700 us scaled as update_sysctl() does)", ns / 1000),
                 );
                 ns
             }
         };
 
         // Print command line.
-        info!(
-            "scheduler options: {}",
-            std::env::args().collect::<Vec<_>>().join(" ")
+        report.row(
+            "options",
+            std::env::args().skip(1).collect::<Vec<_>>().join(" "),
         );
 
         // Initialize BPF connector.
@@ -771,16 +954,27 @@ impl<'a> Scheduler<'a> {
         } else {
             skel.maps.cidland_ops_cgroup.set_autocreate(false)?;
         }
+        // The arena page counters are loaded only with --stats, and then
+        // attached by hand after load, before the first allocation, not
+        // with the rest at attach.
+        for prog in [
+            &mut skel.progs.cidland_arena_alloc_pages,
+            &mut skel.progs.cidland_arena_free_pages,
+        ] {
+            prog.set_autoload(opts.stats.is_some());
+            prog.set_autoattach(false);
+        }
 
         skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
         skel.struct_ops.cidland_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
 
-        // Schedule cgroups as groups only when asked to and when the kernel
+        // Schedule cgroups as groups by default when the kernel
         // has cpu controller support for sched_ext to hook into. Detaching
         // the callbacks from the struct_ops keeps the kernel from delivering
         // them at all, and lets the scheduler load on a kernel whose
         // sched_ext_ops_cid has no cgroup members to bind them to.
-        let cgroup_enabled = opts.enable_cgroups && (cpuctl_names || cgroup_names);
+        let cgroup_requested = opts.enable_cgroups || !opts.disable_cgroups;
+        let cgroup_enabled = cgroup_requested && (cpuctl_names || cgroup_names);
 
         // cpu.max arrived after the rest of the cpu controller's callbacks, so
         // it is probed on its own: a kernel that delivers cpu.weight may still
@@ -793,7 +987,7 @@ impl<'a> Scheduler<'a> {
         let bw_support = compat::struct_has_field("sched_ext_ops_cid", bw_field).unwrap_or(false);
         let cpu_max_enabled = cgroup_enabled && !opts.disable_cpu_max && bw_support;
         check_cgroup_support(
-            opts.enable_cgroups,
+            cgroup_requested,
             cpuctl_names || cgroup_names,
             cpu_max_enabled,
         );
@@ -810,13 +1004,16 @@ impl<'a> Scheduler<'a> {
             ops.cgroup_set_weight = std::ptr::null_mut();
             ops.cgroup_set_idle = std::ptr::null_mut();
             ops.cgroup_move = std::ptr::null_mut();
-            info!("cgroup scheduling: off");
+            report.row("cgroup scheduling", "off");
         } else {
-            info!(
-                "cgroup scheduling: on ({}_* callbacks)",
-                if cgroup_names { "cgroup" } else { "cpuctl" }
+            report.row(
+                "cgroup scheduling",
+                format!(
+                    "on ({}_* callbacks)",
+                    if cgroup_names { "cgroup" } else { "cpuctl" }
+                ),
             );
-            if opts.enable_cgroups && !opts.disable_cpu_max && !bw_support {
+            if cgroup_requested && !opts.disable_cpu_max && !bw_support {
                 warn!("the kernel has no ops.{bw_field}(), cpu.max is ignored");
             }
         }
@@ -834,6 +1031,7 @@ impl<'a> Scheduler<'a> {
         rodata.migration_cost_ns = opts.migration_cost_us * 1000;
         rodata.cache_nice_tries = opts.cache_nice_tries;
         rodata.no_newidle_cost = opts.no_newidle_cost;
+        rodata.newidle_sampling = !opts.no_newidle_sampling;
         rodata.sis_util = !opts.no_sis_util;
         rodata.llc_extend = opts.llc_extend;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
@@ -843,23 +1041,36 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.force_smt_asym_packing = opts.smt_asym_packing;
         if opts.smt_asym_packing {
-            info!("SMT sibling priority: lower CPU IDs first (--smt-asym-packing)");
+            report.row(
+                "SMT sibling priority",
+                "lower CPU IDs first (--smt-asym-packing)",
+            );
         }
         rodata.smt_whole_core = opts.smt_whole_core && smt_enabled;
         if opts.smt_whole_core && smt_enabled {
-            info!("Idle scan: a whole idle core wins over a busy core's sibling, across LLCs");
+            report.row(
+                "idle scan",
+                "a whole idle core wins over a busy core's sibling, across LLCs",
+            );
         }
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.wa_weight = opts.wa_weight;
+        rodata.wa_weight = !opts.no_wa_weight;
         rodata.busy_balance_factor = opts.busy_balance_factor;
+        rodata.capacity_pressure = !opts.no_capacity_pressure;
+        if opts.no_capacity_pressure {
+            report.row(
+                "RT/IRQ capacity pressure",
+                "disabled (--no-capacity-pressure)",
+            );
+        }
         rodata.no_task_clock = opts.no_task_clock;
-        info!(
-            "service clock: {}",
+        report.row(
+            "service clock",
             if opts.no_task_clock {
                 "ktime"
             } else {
                 "rq_clock_task"
-            }
+            },
         );
         rodata.no_wakeup_preempt = opts.no_wakeup_preempt;
         rodata.no_eligibility = opts.no_eligibility;
@@ -961,14 +1172,20 @@ impl<'a> Scheduler<'a> {
                 domains.asym_capacity_span as u64,
             ));
         }
-        info!(
-            "CPU capacity mode: {capacity_mode} ({nr_capacity_tiers} tier{}, tolerance {tolerance}%)",
-            if nr_capacity_tiers == 1 { "" } else { "s" }
+        report.row(
+            "CPU capacity",
+            format!(
+                "{capacity_mode} ({nr_capacity_tiers} tier{}, tolerance {tolerance}%)",
+                if nr_capacity_tiers == 1 { "" } else { "s" }
+            ),
         );
         if has_capacity_tiers {
-            info!(
-                "CPUs by capacity: {:?}",
-                cpus.iter().map(|(cpu, _)| cpu.id).collect::<Vec<_>>()
+            report.row(
+                "CPUs by capacity",
+                format!(
+                    "{:?}",
+                    cpus.iter().map(|(cpu, _)| cpu.id).collect::<Vec<_>>()
+                ),
             );
         }
 
@@ -984,7 +1201,7 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cidland_ops_mut().flags = flags;
         skel.struct_ops.cidland_ops_cgroup_mut().flags = flags;
 
-        info!("scheduler flags: {:#x}", flags);
+        report.row("scheduler flags", format!("{flags:#x}"));
 
         // One hrtick per cid, over the same cid space the arena is sized
         // for below. A map is sized before the program is loaded.
@@ -1000,6 +1217,27 @@ impl<'a> Scheduler<'a> {
         } else {
             scx_ops_cid_load!(skel, cidland_ops, uei)
         }?;
+
+        // Count arena pages at the allocator, see cidland_arena_alloc_pages():
+        // attached before the first allocation, which is cidland_arena_init()
+        // below, so the count is exact. Without --stats the programs are not
+        // even loaded and the allocator pays nothing.
+        let mut arena_links = Vec::new();
+        if opts.stats.is_some() {
+            skel.maps.bss_data.as_mut().unwrap().arena_map_id = skel.maps.arena.info()?.info.id;
+            for (prog, name) in [
+                (
+                    &skel.progs.cidland_arena_alloc_pages,
+                    "bpf_arena_alloc_pages",
+                ),
+                (&skel.progs.cidland_arena_free_pages, "bpf_arena_free_pages"),
+            ] {
+                match prog.attach() {
+                    Ok(link) => arena_links.push(link),
+                    Err(e) => warn!("arena memory will not be counted: attaching to {name}: {e}"),
+                }
+            }
+        }
 
         // Capacity and asymmetric packing are separate kernel policies.
         // Topology reconstructs the portable domain spans, but neither
@@ -1029,20 +1267,26 @@ impl<'a> Scheduler<'a> {
             .collect::<Vec<_>>();
         domain_spans.sort_unstable();
         domain_spans.dedup();
-        info!(
-            "scheduler domain spans (fork, wake-affine, asym-capacity, source={}): {:?}",
-            match sched_domain_source {
-                Some(SchedDomainSource::Schedstat) => "schedstat",
-                Some(SchedDomainSource::Topology) | None => "topology",
-            },
-            domain_spans
+        report.row(
+            "domain spans",
+            format!(
+                "(fork, wake-affine, asym-capacity, source={}): {:?}",
+                match sched_domain_source {
+                    Some(SchedDomainSource::Schedstat) => "schedstat",
+                    Some(SchedDomainSource::Topology) | None => "topology",
+                },
+                domain_spans
+            ),
         );
 
         let sched_asym_capacity =
             !opts.uniform_capacity && cpu_tiers.iter().any(|entry| entry.7 != 0);
         let asym_capacity = has_capacity_tiers && (sched_asym_capacity || opts.asym_capacity);
         if has_capacity_tiers && !asym_capacity {
-            info!("CPU capacity placement: off (no kernel SD_ASYM_CPUCAPACITY domain)");
+            report.row(
+                "CPU capacity placement",
+                "off (no kernel SD_ASYM_CPUCAPACITY domain)",
+            );
         }
 
         priorities.sort_by_key(|(_, priority)| std::cmp::Reverse(*priority));
@@ -1063,28 +1307,34 @@ impl<'a> Scheduler<'a> {
                 entry.3 = tier;
             }
             nr_place_tiers = tier + 1;
-            info!(
-                "CPU asymmetric packing: kernel ({} priority tiers, CPUs {:?})",
-                nr_place_tiers,
-                priorities.iter().map(|(cpu, _)| cpu).collect::<Vec<_>>()
+            report.row(
+                "asymmetric packing",
+                format!(
+                    "kernel ({} priority tiers, CPUs {:?})",
+                    nr_place_tiers,
+                    priorities.iter().map(|(cpu, _)| cpu).collect::<Vec<_>>()
+                ),
             );
         } else {
             for (_, _, capacity_tier, place_tier, smt_asym_packing, _, _, _) in &mut cpu_tiers {
                 *place_tier = if asym_capacity { *capacity_tier } else { 0 };
                 *smt_asym_packing = false;
             }
-            info!(
-                "CPU asymmetric packing: {}; placement follows {}",
-                if opts.disable_asym_packing {
-                    "disabled"
-                } else {
-                    "off"
-                },
-                if asym_capacity {
-                    format!("{capacity_mode} capacity tiers")
-                } else {
-                    "uniform capacity".to_string()
-                },
+            report.row(
+                "asymmetric packing",
+                format!(
+                    "{}; placement follows {}",
+                    if opts.disable_asym_packing {
+                        "disabled"
+                    } else {
+                        "off"
+                    },
+                    if asym_capacity {
+                        format!("{capacity_mode} capacity tiers")
+                    } else {
+                        "uniform capacity".to_string()
+                    },
+                ),
             );
         }
 
@@ -1142,28 +1392,50 @@ impl<'a> Scheduler<'a> {
         }?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        // Only when the usage is known: counted with --stats, or by the kernel.
+        let (arena_bytes, arena_max_bytes) = arena_usage(&skel, !arena_links.is_empty());
+        if let Some(bytes) = arena_bytes {
+            report.row(
+                "BPF arena memory",
+                format!(
+                    "{} of {} allocated",
+                    stats::human_bytes(bytes),
+                    stats::human_bytes(arena_max_bytes)
+                ),
+            );
+        }
+        report.print();
+        console::status("scheduler attached and running");
+
         Ok(Self {
             _arenalib: arenalib,
+            _arena_links: arena_links,
             skel,
             struct_ops,
             stats_server,
+            ops_profiler: OpsProfiler::new(),
+            started: Instant::now(),
         })
     }
 
-    fn get_metrics(&self) -> Metrics {
+    fn get_metrics(&mut self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
-        Metrics {
-            nr_steals: bss_data.nr_steals,
-            nr_busy_balances: bss_data.nr_busy_balances,
-            nr_active_balances: bss_data.nr_active_balances,
-            nr_preempts: bss_data.nr_preempts,
-            nr_delay_requeues: bss_data.nr_delay_requeues,
-            nr_hrticks: bss_data.nr_hrticks,
-            nr_newidle_skips: bss_data.nr_newidle_skips,
+        let (arena_bytes, arena_max_bytes) = arena_usage(&self.skel, !self._arena_links.is_empty());
+        let mut m = Metrics {
+            elapsed_ns: self.started.elapsed().as_nanos() as u64,
+            nr_cpus: *NR_CPU_IDS as u64,
             nr_sis_updates: bss_data.nr_sis_updates,
             sis_scan_sum: bss_data.sis_scan_sum,
-            nr_sis_cutoffs: bss_data.nr_sis_cutoffs,
-        }
+            arena_bytes: arena_bytes.unwrap_or(0),
+            arena_max_bytes,
+            arena_counted: arena_bytes.is_some() as u64,
+            arena_active_allocs: bss_data.alloc_stats.active_allocs,
+            arena_alloc_failures: bss_data.alloc_stats.alloc_nomem,
+            ..Default::default()
+        };
+        m.ops = self.ops_profiler.sample(&self.skel);
+        m.ops_profiled = self.ops_profiler.enabled.is_some() as u64;
+        m
     }
 
     pub fn exited(&mut self) -> bool {
@@ -1180,16 +1452,47 @@ impl<'a> Scheduler<'a> {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,
             }
+            self.ops_profiler.expire();
         }
 
         let _ = self.struct_ops.take();
-        uei_report!(&self.skel, uei)
-    }
-}
 
-impl Drop for Scheduler<'_> {
-    fn drop(&mut self) {
-        info!("Unregister {SCHEDULER_NAME} scheduler");
+        // A graceful unregister is reported in the console style; an error
+        // exit keeps the standard report, with the debug dump on stderr.
+        let uei = uei_read!(&self.skel, uei);
+        if let Some(why) = self.exit_summary() {
+            console::status(&format!("scheduler stopped: {why}"));
+            return Ok(uei);
+        }
+        uei.report().map(|_| uei)
+    }
+
+    /// A graceful unregister as one line, "reason" or "reason (msg)", read
+    /// off the BPF-side exit info. None when the scheduler was kicked out
+    /// by an error, which keeps the standard report and its debug dump.
+    fn exit_summary(&self) -> Option<String> {
+        let uei = &self.skel.maps.data_data.as_ref().unwrap().uei;
+        if uei.kind == ScxExitKind::None as i32 || uei.kind > ScxExitKind::UnregKern as i32 {
+            return None;
+        }
+        // The skeleton types the arrays after the BPF target, where char is
+        // signed, while c_char is u8 on aarch64: take i8 and cast.
+        let text = |chars: &[i8]| {
+            // NUL-terminated by the BPF side, and the array is never full.
+            unsafe { CStr::from_ptr(chars.as_ptr().cast()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let reason = text(&uei.reason);
+        let msg = text(&uei.msg);
+        if reason.is_empty() {
+            return Some("unknown reason".to_string());
+        }
+        Some(if msg.is_empty() {
+            reason
+        } else {
+            format!("{reason} ({msg})")
+        })
     }
 }
 
@@ -1233,9 +1536,13 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    if let Some(intv) = opts.monitor.or(opts.stats) {
+    // The stats client, in its own thread: alone in --monitor mode, or
+    // beside the scheduler in --stats mode, where it starts only once the
+    // scheduler is attached and its stats server is up, so it never has to
+    // retry a connection.
+    let spawn_monitor = |intv: f64| {
         let shutdown_copy = shutdown.clone();
-        let jh = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             match stats::monitor(Duration::from_secs_f64(intv), shutdown_copy) {
                 Ok(_) => {
                     debug!("stats monitor thread finished successfully")
@@ -1247,18 +1554,23 @@ fn main() -> Result<()> {
                     )
                 }
             }
-        });
-        if opts.monitor.is_some() {
-            let _ = jh.join();
-            return Ok(());
-        }
+        })
+    };
+
+    if let Some(intv) = opts.monitor {
+        let _ = spawn_monitor(intv).join();
+        return Ok(());
     }
 
     warn_on_old_kernel();
 
     let mut open_object = MaybeUninit::uninit();
+    let mut monitor = None;
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        if let (Some(intv), None) = (opts.stats, &monitor) {
+            monitor = Some(spawn_monitor(intv));
+        }
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
