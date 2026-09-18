@@ -114,11 +114,8 @@ fn window_consts_match_spec() {
         HETERO_SPREAD_PCT,
         crate::bpf_intf::flow_consts_FLOW_HETERO_SPREAD_PCT as u64
     );
-    assert_eq!(PERF_HOG, crate::bpf_intf::flow_consts_FLOW_PERF_HOG as u32);
-    assert_eq!(
-        PERF_LIGHT,
-        crate::bpf_intf::flow_consts_FLOW_PERF_LIGHT as u32
-    );
+    assert_eq!(PERF_HOG, crate::bpf_intf::flow_consts_FLOW_PERF_HOG);
+    assert_eq!(PERF_LIGHT, crate::bpf_intf::flow_consts_FLOW_PERF_LIGHT);
 }
 
 #[test]
@@ -1898,12 +1895,9 @@ fn running_sets_cpuperf_level() {
     assert_eq!(perf_for_group(GROUP_HOG), CPUPERF_LEVEL);
     assert_eq!(
         CPUPERF_LEVEL,
-        crate::bpf_intf::flow_consts_FLOW_CPUPERF_LEVEL as u32
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_LEVEL
     );
-    assert_eq!(
-        CPUPERF_IDLE,
-        crate::bpf_intf::flow_consts_FLOW_CPUPERF_IDLE as u32
-    );
+    assert_eq!(CPUPERF_IDLE, crate::bpf_intf::flow_consts_FLOW_CPUPERF_IDLE);
 }
 
 /*

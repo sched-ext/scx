@@ -42,16 +42,13 @@ fn delay_consts_match_header() {
     );
     assert_eq!(
         CURSOR_RATE_BIT,
-        crate::bpf_intf::flow_consts_FLOW_CURSOR_RATE_BIT as u32
+        crate::bpf_intf::flow_consts_FLOW_CURSOR_RATE_BIT
     );
     assert_eq!(
         crate::flow_preempt::CURSOR_STAND_BIT,
-        crate::bpf_intf::flow_consts_FLOW_CURSOR_STAND_BIT as u32
+        crate::bpf_intf::flow_consts_FLOW_CURSOR_STAND_BIT
     );
-    assert_eq!(
-        CURSOR_MASK,
-        crate::bpf_intf::flow_consts_FLOW_CURSOR_MASK as u32
-    );
+    assert_eq!(CURSOR_MASK, crate::bpf_intf::flow_consts_FLOW_CURSOR_MASK);
     assert_eq!(DELAY_UNIT_NS, 32_000);
     assert_eq!(DELAY_MAX, 250);
     assert_eq!(DELAY_ARM, 16);
