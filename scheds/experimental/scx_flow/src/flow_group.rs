@@ -1712,7 +1712,7 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) ->
         if group_of_cpu(cpu as u32, nr) != group {
             continue;
         }
-        if allowed.get(cpu).copied().unwrap_or(false) != true {
+        if !allowed.get(cpu).copied().unwrap_or(false) {
             continue;
         }
         let q = queued.get(cpu).copied().unwrap_or(0);
@@ -1759,7 +1759,7 @@ pub fn least_in_group_live(
         if group_live(cpu as u32, nr, table, ready) != group {
             continue;
         }
-        if allowed.get(cpu).copied().unwrap_or(false) != true {
+        if !allowed.get(cpu).copied().unwrap_or(false) {
             continue;
         }
         let q = queued.get(cpu).copied().unwrap_or(0);
