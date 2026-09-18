@@ -410,6 +410,8 @@ struct task_ctx {
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	u64 util_est;		/* what the last activation used */
+	u64 runnable_at;	/* when the last wakeup made the task runnable */
+	u64 runnable_est;	/* fraction of wall time runnable, see task_runnable_update() */
 	u64 last_sleep_at;	/* last block, used to decay WA_WEIGHT task load */
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */
@@ -5110,17 +5112,42 @@ static u64 task_weight(const struct task_struct *p, const task_ctx_t *tctx)
 }
 
 /*
- * Approximate task_h_load() with the execution-utilization average cidland
- * already maintains for capacity placement. A task that sleeps most of the
- * time still weighs less than a CPU-bound task, while WA_WEIGHT adds no second
- * running average to every runnable/quiescent transition. Unlike fair's
- * runnable PELT, execution utilization can understate a task delayed by
- * contention; WA_BIAS and the cid load comparison keep the previous cid
- * preferred in the close cases where that distinction matters.
+ * The fraction of wall time the task spends runnable, folded in once per
+ * sleep from the last wakeup-to-sleep span over the whole cycle since the
+ * previous sleep, with the weight of eight cycles. This is what fair.c's
+ * runnable PELT measures for task_h_load(), and it is what makes the load
+ * comparison of wake_affine_weight() hold up under contention: a task kept
+ * waiting behind a CPU-bound one still counts what it asks for, not what
+ * it was given. Once per sleep is a store at the wakeup and a division at
+ * the block, where a running average on every transition was the machinery
+ * WA_WEIGHT was not allowed to add.
+ */
+static void task_runnable_update(task_ctx_t *tctx, u64 now)
+{
+	u64 cycle = now - tctx->last_sleep_at;
+	u64 runnable = now - tctx->runnable_at;
+	u64 frac;
+
+	if (!tctx->last_sleep_at || !tctx->runnable_at || !cycle)
+		return;
+	frac = runnable >= cycle ? 1024 : runnable * 1024 / cycle;
+	tctx->runnable_est = (tctx->runnable_est * 7 + frac) / 8;
+}
+
+/*
+ * Approximate task_h_load() from the averages cidland already keeps: the
+ * execution utilization maintained for capacity placement and the runnable
+ * fraction above. The larger of the two stands for the load; they agree for
+ * a task that runs as soon as it wakes, and only the runnable fraction sees
+ * a task that is delayed by contention. Measured by execution alone, a
+ * pipeline thread starved beside a CPU-bound task weighed ever less, its
+ * previous cid looked ever heavier without it, and wake_affine_weight()
+ * pulled it onto its waker's cid, where the two shared one CPU with the
+ * CPU-bound task there and each got a third; fair.c leaves it where it was.
  */
 static u64 task_load(const struct task_struct *p, task_ctx_t *tctx, u64 now)
 {
-	u64 util = READ_ONCE(tctx->util_est);
+	u64 util = MAX(READ_ONCE(tctx->util_est), READ_ONCE(tctx->runnable_est));
 
 	/* Approximate PELT decay while a sleeping task receives no callbacks. */
 	if (!scx_bpf_task_running(p) && time_after(now, tctx->last_sleep_at))
@@ -6763,6 +6790,8 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	}
 
 	now = scx_bpf_now();
+	if (wake_flags & SCX_WAKE_TTWU)
+		tctx->runnable_at = now;
 
 	/*
 	 * A task whose cgroup is out of bandwidth waits for its next period,
@@ -7368,6 +7397,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	now = scx_bpf_now();
+	if (enq_flags & SCX_ENQ_WAKEUP)
+		tctx->runnable_at = now;
 	displaced = !(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p);
 	/*
 	 * A direct dispatch that left its placement to ops.running() and was
@@ -8776,8 +8807,10 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 
 	now = scx_bpf_now();
 	util_est_update(tctx, now);
-	if (deq_flags & SCX_DEQ_SLEEP)
+	if (deq_flags & SCX_DEQ_SLEEP) {
+		task_runnable_update(tctx, now);
 		tctx->last_sleep_at = now;
+	}
 	tctx->place_pending = false;
 
 	/*
