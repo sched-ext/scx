@@ -58,7 +58,7 @@ use scx_utils::uei_read;
 use stats::Metrics;
 use stats::OpStats;
 
-const SCHEDULER_NAME: &str = "scx_cidland";
+const SCHEDULER_NAME: &str = "scx_eevdf";
 
 fn kernel_major_minor(release: &str) -> Option<(u32, u32)> {
     let mut fields = release.split('.');
@@ -86,7 +86,7 @@ fn warn_on_old_kernel() {
 
     if kernel_major_minor(&release).is_some_and(|version| version < (7, 2)) {
         warn!(
-            "kernel {release} is older than v7.2; scx_cidland requires the sched_ext cid/tid support introduced in v7.2 and may fail to load (a kernel with the support backported may still work)"
+            "kernel {release} is older than v7.2; scx_eevdf requires the sched_ext cid/tid support introduced in v7.2 and may fail to load (a kernel with the support backported may still work)"
         );
     }
 }
@@ -117,7 +117,7 @@ fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result
 
 #[derive(Debug, clap::Parser)]
 #[command(
-    name = "scx_cidland",
+    name = "scx_eevdf",
     version,
     disable_version_flag = true,
     about = "Topology-aware scheduler that preserves task-to-CPU locality, built on EEVDF concepts."
@@ -200,7 +200,7 @@ struct Opts {
     /// busy enough to make the search unlikely to pay, SIS_UTIL: periodic load
     /// balance leaves a scan budget behind, computed from the LLC's average
     /// utilization, which falls quadratically and reaches zero at about 85%.
-    /// cidland does the same, over a window that starts at the target and
+    /// scx_eevdf does the same, over a window that starts at the target and
     /// wraps inside the LLC so a bounded scan still reaches every CPU across
     /// successive wakeups, and gives up where select_idle_cpu() returns -1
     /// rather than carrying the search on to the node and the machine.
@@ -251,7 +251,7 @@ struct Opts {
     /// trading the cpu controller's isolation semantics for some throughput.
     ///
     /// Group scheduling needs a kernel built with CONFIG_EXT_GROUP_SCHED. If
-    /// the running kernel lacks it, cidland falls back to this behavior.
+    /// the running kernel lacks it, scx_eevdf falls back to this behavior.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_cgroups: bool,
 
@@ -279,7 +279,7 @@ struct Opts {
 
     /// Force every CPU to have the same capacity.
     ///
-    /// By default cidland uses the kernel-exported cpu_capacity values when the
+    /// By default scx_eevdf uses the kernel-exported cpu_capacity values when the
     /// kernel has an active SD_ASYM_CPUCAPACITY domain.
     #[clap(
         short = 'u',
@@ -448,7 +448,7 @@ struct Opts {
 
     /// Do not compensate placement lag for joining a virtual-time pack.
     ///
-    /// Normally cidland inflates a task's placement offset before adding its
+    /// Normally scx_eevdf inflates a task's placement offset before adding its
     /// weight to the destination pack, so the movement of the weighted-average
     /// reference does not dilute the requested lag. This disables that
     /// PLACE_LAG compensation and restores the older behavior where lag can
@@ -631,7 +631,7 @@ impl OpsProfiler {
                 continue;
             }
             let name = prog.name().to_string_lossy();
-            let name = name.strip_prefix("cidland_").unwrap_or(&name).to_string();
+            let name = name.strip_prefix("eevdf_").unwrap_or(&name).to_string();
             ops.insert(
                 name,
                 OpStats {
@@ -647,7 +647,7 @@ impl OpsProfiler {
 
 /// What the arena holds, in bytes, and the size of the map. Kernels from
 /// 7.3 account the allocated pages in the map's memlock; before that the
-/// figure is the one kept at the allocator by cidland_arena_alloc_pages(),
+/// figure is the one kept at the allocator by eevdf_arena_alloc_pages(),
 /// when @counted says those programs are attached, and None otherwise.
 fn arena_usage(skel: &BpfSkel, counted: bool) -> (Option<u64>, u64) {
     let map = &skel.maps.arena;
@@ -683,7 +683,7 @@ struct Scheduler<'a> {
     /// fault in a BPF program, which the kernel would otherwise fix up
     /// silently by dropping the access, into a report and an abort.
     _arenalib: ArenaLib,
-    /// The page counters of cidland_arena_alloc_pages(), attached to the
+    /// The page counters of eevdf_arena_alloc_pages(), attached to the
     /// kernel's arena allocator for the life of the scheduler.
     _arena_links: Vec<libbpf_rs::Link>,
     skel: BpfSkel<'a>,
@@ -944,29 +944,29 @@ impl<'a> Scheduler<'a> {
         let cgroup_names = !cpuctl_names
             && compat::struct_has_field("sched_ext_ops_cid", "cgroup_set_weight").unwrap_or(false);
         let mut skel = if cgroup_names {
-            scx_ops_cid_open!(skel_builder, open_object, cidland_ops_cgroup, open_opts)
+            scx_ops_cid_open!(skel_builder, open_object, eevdf_ops_cgroup, open_opts)
         } else {
-            scx_ops_cid_open!(skel_builder, open_object, cidland_ops, open_opts)
+            scx_ops_cid_open!(skel_builder, open_object, eevdf_ops, open_opts)
         }
         .context("opening BPF skeleton (does this kernel support cid-form sched_ext?)")?;
         if cgroup_names {
-            skel.maps.cidland_ops.set_autocreate(false)?;
+            skel.maps.eevdf_ops.set_autocreate(false)?;
         } else {
-            skel.maps.cidland_ops_cgroup.set_autocreate(false)?;
+            skel.maps.eevdf_ops_cgroup.set_autocreate(false)?;
         }
         // The arena page counters are loaded only with --stats, and then
         // attached by hand after load, before the first allocation, not
         // with the rest at attach.
         for prog in [
-            &mut skel.progs.cidland_arena_alloc_pages,
-            &mut skel.progs.cidland_arena_free_pages,
+            &mut skel.progs.eevdf_arena_alloc_pages,
+            &mut skel.progs.eevdf_arena_free_pages,
         ] {
             prog.set_autoload(opts.stats.is_some());
             prog.set_autoattach(false);
         }
 
-        skel.struct_ops.cidland_ops_mut().exit_dump_len = opts.exit_dump_len;
-        skel.struct_ops.cidland_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
+        skel.struct_ops.eevdf_ops_mut().exit_dump_len = opts.exit_dump_len;
+        skel.struct_ops.eevdf_ops_cgroup_mut().exit_dump_len = opts.exit_dump_len;
 
         // Schedule cgroups as groups by default when the kernel
         // has cpu controller support for sched_ext to hook into. Detaching
@@ -992,13 +992,13 @@ impl<'a> Scheduler<'a> {
             cpu_max_enabled,
         );
         if !cgroup_enabled {
-            let ops = skel.struct_ops.cidland_ops_mut();
+            let ops = skel.struct_ops.eevdf_ops_mut();
             ops.cpuctl_init = std::ptr::null_mut();
             ops.cpuctl_exit = std::ptr::null_mut();
             ops.cpuctl_set_weight = std::ptr::null_mut();
             ops.cpuctl_set_idle = std::ptr::null_mut();
             ops.cpuctl_move = std::ptr::null_mut();
-            let ops = skel.struct_ops.cidland_ops_cgroup_mut();
+            let ops = skel.struct_ops.eevdf_ops_cgroup_mut();
             ops.cgroup_init = std::ptr::null_mut();
             ops.cgroup_exit = std::ptr::null_mut();
             ops.cgroup_set_weight = std::ptr::null_mut();
@@ -1018,10 +1018,8 @@ impl<'a> Scheduler<'a> {
             }
         }
         if !cpu_max_enabled {
-            skel.struct_ops.cidland_ops_mut().cpuctl_set_bandwidth = std::ptr::null_mut();
-            skel.struct_ops
-                .cidland_ops_cgroup_mut()
-                .cgroup_set_bandwidth = std::ptr::null_mut();
+            skel.struct_ops.eevdf_ops_mut().cpuctl_set_bandwidth = std::ptr::null_mut();
+            skel.struct_ops.eevdf_ops_cgroup_mut().cgroup_set_bandwidth = std::ptr::null_mut();
         }
 
         // Override default BPF scheduling parameters.
@@ -1198,8 +1196,8 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
             | *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_TID_TO_TASK;
-        skel.struct_ops.cidland_ops_mut().flags = flags;
-        skel.struct_ops.cidland_ops_cgroup_mut().flags = flags;
+        skel.struct_ops.eevdf_ops_mut().flags = flags;
+        skel.struct_ops.eevdf_ops_cgroup_mut().flags = flags;
 
         report.row("scheduler flags", format!("{flags:#x}"));
 
@@ -1213,24 +1211,21 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program for validation.
         let mut skel = if cgroup_names {
-            scx_ops_cid_load!(skel, cidland_ops_cgroup, uei)
+            scx_ops_cid_load!(skel, eevdf_ops_cgroup, uei)
         } else {
-            scx_ops_cid_load!(skel, cidland_ops, uei)
+            scx_ops_cid_load!(skel, eevdf_ops, uei)
         }?;
 
-        // Count arena pages at the allocator, see cidland_arena_alloc_pages():
-        // attached before the first allocation, which is cidland_arena_init()
+        // Count arena pages at the allocator, see eevdf_arena_alloc_pages():
+        // attached before the first allocation, which is eevdf_arena_init()
         // below, so the count is exact. Without --stats the programs are not
         // even loaded and the allocator pays nothing.
         let mut arena_links = Vec::new();
         if opts.stats.is_some() {
             skel.maps.bss_data.as_mut().unwrap().arena_map_id = skel.maps.arena.info()?.info.id;
             for (prog, name) in [
-                (
-                    &skel.progs.cidland_arena_alloc_pages,
-                    "bpf_arena_alloc_pages",
-                ),
-                (&skel.progs.cidland_arena_free_pages, "bpf_arena_free_pages"),
+                (&skel.progs.eevdf_arena_alloc_pages, "bpf_arena_alloc_pages"),
+                (&skel.progs.eevdf_arena_free_pages, "bpf_arena_free_pages"),
             ] {
                 match prog.attach() {
                     Ok(link) => arena_links.push(link),
@@ -1246,13 +1241,13 @@ impl<'a> Scheduler<'a> {
         let mut priorities = Vec::with_capacity(cpu_tiers.len());
         let mut all_asym_packing = !opts.disable_asym_packing;
         for (cpu, _, _, _, smt_asym_packing, _, _, _) in &mut cpu_tiers {
-            let mut args = types::cidland_cpu_priority_args {
+            let mut args = types::eevdf_cpu_priority_args {
                 cpu: *cpu,
                 priority: 0,
                 asym_packing: 0,
                 smt_asym_packing: 0,
             };
-            run_syscall_prog(&skel.progs.cidland_get_cpu_priority, &mut args)
+            run_syscall_prog(&skel.progs.eevdf_get_cpu_priority, &mut args)
                 .context("querying CPU asymmetric-packing policy")?;
             if !opts.disable_asym_packing {
                 all_asym_packing &= args.asym_packing != 0;
@@ -1343,7 +1338,7 @@ impl<'a> Scheduler<'a> {
         // only known once the kernel has built it, at attach, so this is in
         // cpu space and ops.init() translates. It has to happen between
         // load and attach: the tables must be in place before ops.init().
-        let mut args = types::cidland_arena_args {
+        let mut args = types::eevdf_arena_args {
             nr_cpus: nr_cpus as u64,
             nr_place_tiers,
             nr_capacity_tiers,
@@ -1352,8 +1347,8 @@ impl<'a> Scheduler<'a> {
             force_asym_capacity: opts.asym_capacity as u64,
             asym_packing: asym_packing as u64,
         };
-        run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
-            .context("running cidland_arena_init")?;
+        run_syscall_prog(&skel.progs.eevdf_arena_init, &mut args)
+            .context("running eevdf_arena_init")?;
         for (
             cpu,
             capacity,
@@ -1365,7 +1360,7 @@ impl<'a> Scheduler<'a> {
             asym_capacity_span,
         ) in cpu_tiers
         {
-            let mut args = types::cidland_cpu_args {
+            let mut args = types::eevdf_cpu_args {
                 cpu,
                 capacity,
                 place_tier,
@@ -1375,8 +1370,8 @@ impl<'a> Scheduler<'a> {
                 wake_affine_span,
                 asym_capacity_span,
             };
-            run_syscall_prog(&skel.progs.cidland_set_cpu, &mut args)
-                .context("running cidland_set_cpu")?;
+            run_syscall_prog(&skel.progs.eevdf_set_cpu, &mut args)
+                .context("running eevdf_set_cpu")?;
         }
 
         // Watch the BPF streams: an arena fault is reported and fatal rather
@@ -1386,9 +1381,9 @@ impl<'a> Scheduler<'a> {
 
         // Attach the scheduler.
         let struct_ops = Some(if cgroup_names {
-            scx_ops_attach!(skel, cidland_ops_cgroup)
+            scx_ops_attach!(skel, eevdf_ops_cgroup)
         } else {
-            scx_ops_attach!(skel, cidland_ops)
+            scx_ops_attach!(skel, eevdf_ops)
         }?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

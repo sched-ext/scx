@@ -22,7 +22,7 @@
 #include "intf.h"
 
 #ifndef __BPF_FEATURE_ADDR_SPACE_CAST
-#error "scx_cidland requires a compiler with bpf_addr_space_cast support"
+#error "scx_eevdf requires a compiler with bpf_addr_space_cast support"
 #endif
 
 char _license[] SEC("license") = "GPL";
@@ -211,7 +211,7 @@ const volatile bool no_preempt_short;
 
 /*
  * Do not inflate a placement offset to preserve it across the task joining
- * the weighted-average virtual-time reference. This restores cidland's
+ * the weighted-average virtual-time reference. This restores scx_eevdf's
  * placement before its fair.c PLACE_LAG compensation was added.
  */
 const volatile bool no_place_lag;
@@ -309,7 +309,7 @@ static bool arena_is_ours(void *map)
 }
 
 SEC("?fexit/bpf_arena_alloc_pages")
-int BPF_PROG(cidland_arena_alloc_pages, void *map, void *addr, u32 page_cnt,
+int BPF_PROG(eevdf_arena_alloc_pages, void *map, void *addr, u32 page_cnt,
 	     int node_id, u64 flags, void *ret)
 {
 	if (ret && arena_is_ours(map))
@@ -318,7 +318,7 @@ int BPF_PROG(cidland_arena_alloc_pages, void *map, void *addr, u32 page_cnt,
 }
 
 SEC("?fentry/bpf_arena_free_pages")
-int BPF_PROG(cidland_arena_free_pages, void *map, void *ptr, u32 page_cnt)
+int BPF_PROG(eevdf_arena_free_pages, void *map, void *ptr, u32 page_cnt)
 {
 	if (arena_is_ours(map))
 		__sync_fetch_and_add(&arena_pages_freed, page_cnt);
@@ -329,7 +329,7 @@ int BPF_PROG(cidland_arena_free_pages, void *map, void *ptr, u32 page_cnt)
  * Size of the cid space this scheduler schedules on, [0, nr_cids), the
  * number of u64 words one bit per cid takes, and the size of the cid
  * space the arena was allocated for, which is what the kernel says it can
- * ever be. Set by cidland_arena_init() and ops.init().
+ * ever be. Set by eevdf_arena_init() and ops.init().
  */
 static u32 nr_cids;
 static u32 nr_words;
@@ -451,7 +451,7 @@ struct {
 /*
  * Return a local task context from a generic task.
  *
- * PROTOTYPE: cidland never orders a DSQ by vtime, so @p->scx.dsq_vtime is
+ * PROTOTYPE: scx_eevdf never orders a DSQ by vtime, so @p->scx.dsq_vtime is
  * free to carry the context pointer, set in ops.enable(), and a lookup is a
  * load instead of a task-storage helper call. The kernel zeroes the field
  * when @p leaves the scheduler, so fall back to task storage while it is
@@ -493,11 +493,11 @@ static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct 
 struct grp_hdr {
 	u64 weight;		/* cpu.weight as a load weight, tg->shares */
 	u64 pages;		/* arena pages of this block */
-	u64 idle;		/* cpu.idle, see cidland_cpuctl_set_idle() */
+	u64 idle;		/* cpu.idle, see eevdf_cpuctl_set_idle() */
 	u64 slot;		/* its index in @grp_hdrs */
 	u64 next_free;		/* next block to free, see grp_free_defer() */
 
-	/* cpu.max, see cidland_cpuctl_set_bandwidth() */
+	/* cpu.max, see eevdf_cpuctl_set_bandwidth() */
 	u64 quota;		/* what the group may run for in a period, 0 for no limit */
 	u64 period;		/* the period, cfs_bandwidth->period */
 	u64 burst;		/* what it may carry into one, cfs_bandwidth->burst */
@@ -908,7 +908,7 @@ struct cid_ctx {
 
 /*
  * Arena resident tables, indexed by cid unless noted, carved out of the
- * pages cidland_arena_init() takes. Arena pointers are not range tracked
+ * pages eevdf_arena_init() takes. Arena pointers are not range tracked
  * by the verifier, so a cid that is known to be in range indexes them
  * directly.
  */
@@ -960,7 +960,7 @@ static struct scx_cid_topo init_topo;
 
 /*
  * Translate a kernel sched-domain weight into the smallest enclosing topology
- * range cidland represents. The cid topology has core, LLC, node and system
+ * range scx_eevdf represents. The cid topology has core, LLC, node and system
  * levels; an intermediate kernel level (for example, a cluster) is therefore
  * conservatively represented by its containing LLC.
  */
@@ -1803,7 +1803,7 @@ static void cid_demand_set(s32 cid, bool demand, u64 now)
 	cctx->pressure_demand = demand;
 	if (demand) {
 		/*
-		 * Unlike fair's RT PELT, cidland has no clock source while no
+		 * Unlike fair's RT PELT, scx_eevdf has no clock source while no
 		 * sched_ext task wants the cid. Retain short gaps so pressure
 		 * cannot attract work straight back, but do not let an old event
 		 * suppress this cid forever.
@@ -2506,12 +2506,12 @@ static bool cid_queued_test(s32 cid)
 /*
  * fair.c's choose_sched_idle_rq(): a normal task may share a CPU whose
  * runqueue contains only SCHED_IDLE work instead of waiting on a normal
- * task elsewhere. Cidland does not count policy classes in a remote EDQ, so
+ * task elsewhere. scx_eevdf does not count policy classes in a remote EDQ, so
  * recognize the exact cheap case: a SCHED_IDLE current with no waiter.
  *
  * Work in an idle cgroup counts as SCHED_IDLE work here, the way a task
  * under a cfs_rq_is_idle() group counts in rq->cfs.h_nr_idle, see
- * cidland_cpuctl_set_idle(). What @p itself is follows its policy alone, as
+ * eevdf_cpuctl_set_idle(). What @p itself is follows its policy alone, as
  * in choose_sched_idle_rq().
  */
 static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
@@ -3207,7 +3207,7 @@ enum active_balance_outcome {
 
 /*
  * fair.c keeps the balance interval on the idle CPU which runs the balance,
- * not on the busy CPU which asks for one. Cidland has one active-balance
+ * not on the busy CPU which asks for one. scx_eevdf has one active-balance
  * level covering the placement domain, so its minimum interval is the
  * domain weight in milliseconds. Ordinary misses back off only to twice
  * that interval; affinity failures may use the longer migration backoff.
@@ -3348,7 +3348,7 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 	}
 
 	/*
-	 * cidland has no fair-style group load attached to the running task.
+	 * scx_eevdf has no fair-style group load attached to the running task.
 	 * Do not actively chase a bursty current task through transient idle
 	 * gaps; queued work is handled independently by the detach scan.
 	 */
@@ -4446,7 +4446,7 @@ static const u32 prio_to_weight[40] = {
 /*
  * Periodic busy load balancing, corresponding to fair.c's rebalance_domains().
  *
- * There is one interval for each sched-domain-like range cidland represents:
+ * There is one interval for each sched-domain-like range scx_eevdf represents:
  * LLC, NUMA node and machine. Equal adjacent ranges are skipped by the caller.
  * The range weight times @busy_balance_factor is its initial interval in
  * milliseconds, fair's sd->min_interval scaled by sd->busy_factor for a busy
@@ -4712,7 +4712,7 @@ busy_balance_dst_cid(const struct task_struct *p, s32 owner_cid)
  * Like detach_tasks(), walk a bounded prefix of the selected source queue
  * instead of letting one pinned, hot, or oversized head hide movable work.
  * EDQ order is deadline order, so the first task accepted here is the one
- * cidland would prefer among the inspected candidates.
+ * scx_eevdf would prefer among the inspected candidates.
  */
 static __noinline bool
 busy_balance_has_movable_task(s32 dst_cid, s32 src_cid, u64 now)
@@ -4863,7 +4863,7 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	/*
 	 * fair.c's should_we_balance() lets one CPU in each local group run a
 	 * periodic balance pass, falling back to group_balance_cpu() when the
-	 * group is busy. Cidland's periodic pass runs from ops.tick(), so an
+	 * group is busy. scx_eevdf's periodic pass runs from ops.tick(), so an
 	 * idle cid cannot be its owner; newly-idle balance handles that case.
 	 * Use the fixed group leader here, which is the fair.c choice once all
 	 * CPUs in the group are busy, and let it drain the calculated imbalance
@@ -5135,7 +5135,7 @@ static void task_runnable_update(task_ctx_t *tctx, u64 now)
 }
 
 /*
- * Approximate task_h_load() from the averages cidland already keeps: the
+ * Approximate task_h_load() from the averages scx_eevdf already keeps: the
  * execution utilization maintained for capacity placement and the runnable
  * fraction above. The larger of the two stands for the load; they agree for
  * a task that runs as soon as it wakes, and only the runnable fraction sees
@@ -5223,7 +5223,7 @@ static u64 lag_limit(const struct task_struct *p, const task_ctx_t *tctx)
 
 /*
  * Return the task's effective request. sched_runtime is the request hint for
- * fair policies, including SCHED_EXT; zero leaves cidland's default in force.
+ * fair policies, including SCHED_EXT; zero leaves scx_eevdf's default in force.
  */
 static u64 task_request(const struct task_struct *p)
 {
@@ -5439,7 +5439,7 @@ static u64 pack_vref(pack_t *pk)
  * cid with nothing of ours on it projects nothing, and past a whole
  * request there is nothing worth projecting either: the task is due to
  * be rescheduled, and if it is kept it is charged for real at that
- * point, see cidland_dispatch(), so the estimate would be running past
+ * point, see eevdf_dispatch(), so the estimate would be running past
  * what it can know.
  */
 static u64 pack_vref_at(pack_t *pk, u64 now)
@@ -5598,7 +5598,7 @@ static u64 core_vruntime(const struct task_struct *p, task_ctx_t *tctx, u64 now)
 	return v - zero;
 }
 
-bool BPF_STRUCT_OPS(cidland_core_sched_before, struct task_struct *a,
+bool BPF_STRUCT_OPS(eevdf_core_sched_before, struct task_struct *a,
 			   struct task_struct *b)
 {
 	task_ctx_t *at, *bt;
@@ -6638,7 +6638,7 @@ static void place_task(s32 cid, const struct task_struct *p,
  * is about to be put back, which is how set_user_nice() and
  * __setscheduler_params() do it: ops.quiescent() has just taken its lag,
  * fresh, and the vruntime is placed from it here, since a running task's
- * enqueue never reaches ops.enqueue(), see cidland_set_weight(). A queued
+ * enqueue never reaches ops.enqueue(), see eevdf_set_weight(). A queued
  * task is placed once more by place_task() on the enqueue that follows,
  * against the cid it lands on. A sleeping task is only rescaled, what it
  * carries is spent when it wakes.
@@ -6763,7 +6763,7 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 	return -ENOENT;
 }
 
-s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 wake_flags)
+s32 BPF_STRUCT_OPS(eevdf_select_cid, struct task_struct *p, s32 prev_cid, u64 wake_flags)
 {
 	bool direct = false;
 	s32 cid, target, this_cid = scx_bpf_this_cid();
@@ -7213,7 +7213,7 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 		return false;
 
 	/*
-	 * A task on its way out is not held to a limit. cidland asks for
+	 * A task on its way out is not held to a limit. scx_eevdf asks for
 	 * exiting tasks with SCX_OPS_ENQ_EXITING so that it can get them off
 	 * the machine, and making one wait a period for a cgroup it is leaving
 	 * anyway works against that. fair.c has nothing to hold back either:
@@ -7382,7 +7382,7 @@ __noinline int bw_unpark(u64 now)
 	return 0;
 }
 
-void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct grp_hdr __arena *hdr;
@@ -7817,7 +7817,7 @@ static void update_avg_idle(struct cid_ctx __arena *cctx, u64 now)
  * idle CPU they are meant to recover, and pulls a wakee off the cid that
  * wake_affine_cid() has just stacked it on.
  */
-void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
+void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 {
 	struct cid_topo __arena *topo;
 	bool queued;
@@ -7865,7 +7865,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
 		 * end its slice if they have run out, entity_tick() asking
 		 * check_cfs_rq_runtime(). The dispatch that follows the ended
 		 * slice is where the task is actually given up, see
-		 * cidland_dispatch(); doing it here only means a task is not
+		 * eevdf_dispatch(); doing it here only means a task is not
 		 * left running a whole slice past a limit it has reached.
 		 */
 		if (bw_enabled() && tctx) {
@@ -8011,7 +8011,7 @@ void BPF_STRUCT_OPS(cidland_tick, struct task_struct *p)
  * false as "not implemented" and skips even the schedule() it would
  * otherwise make, leaving the caller free to try another target.
  */
-bool BPF_STRUCT_OPS(cidland_yield, struct task_struct *from,
+bool BPF_STRUCT_OPS(eevdf_yield, struct task_struct *from,
 		    struct task_struct *to)
 {
 	s32 cid = scx_bpf_this_cid();
@@ -8557,7 +8557,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 	return retry ? -EAGAIN : 0;
 }
 
-void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
+void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 {
 	bool has_prev, keep = false, active_balance = false, prev_throttled = false;
 	s32 migrate_cid = -EBUSY, busy_cid;
@@ -8759,7 +8759,7 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 		return;
 }
 
-void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
+void BPF_STRUCT_OPS(eevdf_update_idle, s32 cid, bool idle)
 {
 	TOUCH_ARENA();
 
@@ -8787,7 +8787,7 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 	}
 }
 
-void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
+void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	cid_edq_task_t *at;
 	task_ctx_t *tctx;
@@ -8871,7 +8871,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
+void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 {
 	task_ctx_t *tctx;
 	u64 now, weight;
@@ -8986,7 +8986,7 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	update_cpufreq(cid, now);
 }
 
-void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
+void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 {
 	task_ctx_t *tctx;
 	u64 slice, tnow;
@@ -9042,7 +9042,7 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * A runnable task stopped with slice left was displaced rather than
-	 * yielding at a cidland boundary. Once the measured capacity is reduced,
+	 * yielding at a scx_eevdf boundary. Once the measured capacity is reduced,
 	 * detach it for requeueing on a less-loaded cid. The enqueue path inserts
 	 * it into that cid's EDQ, so this migration does not bypass EEVDF order.
 	 */
@@ -9096,7 +9096,7 @@ static grp_q_t *task_cgrp_ents(struct task_struct *p)
 	return ents;
 }
 
-void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
+void BPF_STRUCT_OPS(eevdf_enable, struct task_struct *p)
 {
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
 	s32 cid = scx_bpf_task_cid(p);
@@ -9142,7 +9142,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
  * dequeue and ops.running() that sees the change at all. A sleeping task
  * was not dequeued and is only rescaled.
  */
-void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
+void BPF_STRUCT_OPS(eevdf_set_weight, struct task_struct *p, u32 weight)
 {
 	task_ctx_t *tctx;
 
@@ -9157,7 +9157,7 @@ void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
 
 /*
  * The core affinity path already moves a queued or running task whose current
- * CPU is no longer allowed, and every cidland placement and balance handoff
+ * CPU is no longer allowed, and every scx_eevdf placement and balance handoff
  * reads or revalidates p->cpus_ptr. The one state the core cannot update is a
  * sleeping task's simulated delayed-dequeue membership: unlike fair.c's
  * sched_delayed entity, it is not physically left on the runqueue for the
@@ -9167,7 +9167,7 @@ void BPF_STRUCT_OPS(cidland_set_weight, struct task_struct *p, u32 weight)
  * the old cid remains allowed, fair leaves the delayed entity there too and
  * there is nothing to do.
  */
-void BPF_STRUCT_OPS(cidland_set_cmask, struct task_struct *p,
+void BPF_STRUCT_OPS(eevdf_set_cmask, struct task_struct *p,
 		    const struct scx_cmask __arena *cmask)
 {
 	task_ctx_t *tctx;
@@ -9183,7 +9183,7 @@ void BPF_STRUCT_OPS(cidland_set_cmask, struct task_struct *p,
 		delay_settle(tctx, scx_bpf_now());
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx_ref *ref;
@@ -9229,7 +9229,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init_task, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS(cidland_dequeue, struct task_struct *p, u64 deq_flags)
+void BPF_STRUCT_OPS(eevdf_dequeue, struct task_struct *p, u64 deq_flags)
 {
 	cid_edq_task_t *at;
 	task_ctx_t *tctx;
@@ -9275,7 +9275,7 @@ void BPF_STRUCT_OPS(cidland_dequeue, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
+void BPF_STRUCT_OPS(eevdf_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
 	struct task_ctx_ref *ref;
@@ -9325,7 +9325,7 @@ static bool cgrp_is_idle(struct cgroup *cgrp)
  * before their children: give it a queue on every cid, each adding to its
  * parent's queue on that cid, see struct grp_q.
  */
-s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
+s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_cpuctl_init, struct cgroup *cgrp,
 			     struct scx_cgroup_init_args *args)
 {
 	struct cgrp_ctx *cgc, *pcgc = NULL;
@@ -9419,7 +9419,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_cpuctl_init, struct cgroup *cgrp,
  * cgroup is still online then, where cgroup_destroy_locked() takes it
  * offline before its controllers are, and the memory goes with the arena.
  */
-void BPF_STRUCT_OPS(cidland_cpuctl_exit, struct cgroup *cgrp)
+void BPF_STRUCT_OPS(eevdf_cpuctl_exit, struct cgroup *cgrp)
 {
 	struct grp_hdr __arena *hdr;
 	struct cgrp_ctx *cgc;
@@ -9480,7 +9480,7 @@ void BPF_STRUCT_OPS(cidland_cpuctl_exit, struct cgroup *cgrp)
  * Somebody wrote cpu.weight: the shares of the cgroup's groups follow the
  * next time the tick recomputes them, see grp_update_shares().
  */
-void BPF_STRUCT_OPS(cidland_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
+void BPF_STRUCT_OPS(eevdf_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
 {
 	struct cgrp_ctx *cgc;
 
@@ -9505,7 +9505,7 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
  * preempts or is preempted: with a single runqueue, wakeup_preempt_fair()
  * compares the tasks' own policies.
  */
-void BPF_STRUCT_OPS(cidland_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
+void BPF_STRUCT_OPS(eevdf_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
 {
 	struct cgrp_ctx *cgc;
 
@@ -9529,7 +9529,7 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
  * A cgroup nested deeper than GRP_MAX_DEPTH has no block of its own to keep
  * them in, and runs under the limits of the ancestor whose block it shares.
  */
-void BPF_STRUCT_OPS(cidland_cpuctl_set_bandwidth, struct cgroup *cgrp,
+void BPF_STRUCT_OPS(eevdf_cpuctl_set_bandwidth, struct cgroup *cgrp,
 		    u64 period_us, u64 quota_us, u64 burst_us)
 {
 	u64 quota, period, burst, now;
@@ -9583,7 +9583,7 @@ void BPF_STRUCT_OPS(cidland_cpuctl_set_bandwidth, struct cgroup *cgrp,
  * pack and its group's load in ops.quiescent(), and joins the new group's the
  * next time it is placed or runs. A debt it owes the old pack is forgiven.
  */
-void BPF_STRUCT_OPS(cidland_cpuctl_move, struct task_struct *p,
+void BPF_STRUCT_OPS(eevdf_cpuctl_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
@@ -9708,7 +9708,7 @@ static void init_topology(void)
 	}
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 {
 	struct hrtick *ht;
 	u64 now;
@@ -9718,7 +9718,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	TOUCH_ARENA();
 
 	if (!nr_cids_max) {
-		scx_bpf_error("cidland_arena_init() didn't run");
+		scx_bpf_error("eevdf_arena_init() didn't run");
 		return -EINVAL;
 	}
 
@@ -9786,7 +9786,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	/*
 	 * fair.c compares an asymmetric scheduling group by its preferred CPU.
 	 * The LLC is the child group of the package-level packing domain on the
-	 * topologies cidland models, so cache its best tier for parent-domain
+	 * topologies scx_eevdf models, so cache its best tier for parent-domain
 	 * source and destination comparisons.
 	 */
 	bpf_arena_for(cid, 0, nr_cids) {
@@ -9855,7 +9855,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 	return 0;
 }
 
-void BPF_STRUCT_OPS(cidland_exit, struct scx_exit_info *ei)
+void BPF_STRUCT_OPS(eevdf_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
 }
@@ -9887,7 +9887,7 @@ static void __arena *arena_carve(u64 bytes, u64 align)
  * wide, is known before the scheduler is.
  */
 SEC("syscall")
-int cidland_arena_init(struct cidland_arena_args *args)
+int eevdf_arena_init(struct eevdf_arena_args *args)
 {
 	u64 nr = args->nr_cpus, mask, bytes, pages;
 	int ret;
@@ -9959,7 +9959,7 @@ int cidland_arena_init(struct cidland_arena_args *args)
  * ops.init() translates.
  */
 SEC("syscall")
-int cidland_set_cpu(struct cidland_cpu_args *args)
+int eevdf_set_cpu(struct eevdf_cpu_args *args)
 {
 	u64 cpu = args->cpu;
 
@@ -9987,7 +9987,7 @@ int cidland_set_cpu(struct cidland_cpu_args *args)
  * userspace ABI and is deliberately kept separate from CPU capacity.
  */
 SEC("syscall")
-int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
+int eevdf_get_cpu_priority(struct eevdf_cpu_priority_args *args)
 {
 	struct sched_domain *sd;
 	u64 cpu = args->cpu;
@@ -10027,35 +10027,35 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
  * with: cpuctl_*, or cgroup_* on a kernel from before the cid form renamed
  * them.
  */
-#define CIDLAND_OPS(__cg)						\
-	.select_cid		= (void *)cidland_select_cid,		\
-	.enqueue		= (void *)cidland_enqueue,		\
-	.dequeue		= (void *)cidland_dequeue,		\
-	.tick			= (void *)cidland_tick,			\
-	.core_sched_before	= (void *)cidland_core_sched_before,	\
-	.yield			= (void *)cidland_yield,		\
-	.dispatch		= (void *)cidland_dispatch,		\
-	.quiescent		= (void *)cidland_quiescent,		\
-	.running		= (void *)cidland_running,		\
-	.stopping		= (void *)cidland_stopping,		\
-	.update_idle		= (void *)cidland_update_idle,		\
-	.enable			= (void *)cidland_enable,		\
-	.set_weight		= (void *)cidland_set_weight,		\
-	.set_cmask		= (void *)cidland_set_cmask,		\
-	.init_task		= (void *)cidland_init_task,		\
-	.exit_task		= (void *)cidland_exit_task,		\
-	.__cg##_init		= (void *)cidland_cpuctl_init,		\
-	.__cg##_exit		= (void *)cidland_cpuctl_exit,		\
-	.__cg##_set_weight	= (void *)cidland_cpuctl_set_weight,	\
-	.__cg##_set_bandwidth	= (void *)cidland_cpuctl_set_bandwidth,	\
-	.__cg##_set_idle	= (void *)cidland_cpuctl_set_idle,	\
-	.__cg##_move		= (void *)cidland_cpuctl_move,		\
-	.init			= (void *)cidland_init,			\
-	.exit			= (void *)cidland_exit,			\
+#define EEVDF_OPS(__cg)						\
+	.select_cid		= (void *)eevdf_select_cid,		\
+	.enqueue		= (void *)eevdf_enqueue,		\
+	.dequeue		= (void *)eevdf_dequeue,		\
+	.tick			= (void *)eevdf_tick,			\
+	.core_sched_before	= (void *)eevdf_core_sched_before,	\
+	.yield			= (void *)eevdf_yield,		\
+	.dispatch		= (void *)eevdf_dispatch,		\
+	.quiescent		= (void *)eevdf_quiescent,		\
+	.running		= (void *)eevdf_running,		\
+	.stopping		= (void *)eevdf_stopping,		\
+	.update_idle		= (void *)eevdf_update_idle,		\
+	.enable			= (void *)eevdf_enable,		\
+	.set_weight		= (void *)eevdf_set_weight,		\
+	.set_cmask		= (void *)eevdf_set_cmask,		\
+	.init_task		= (void *)eevdf_init_task,		\
+	.exit_task		= (void *)eevdf_exit_task,		\
+	.__cg##_init		= (void *)eevdf_cpuctl_init,		\
+	.__cg##_exit		= (void *)eevdf_cpuctl_exit,		\
+	.__cg##_set_weight	= (void *)eevdf_cpuctl_set_weight,	\
+	.__cg##_set_bandwidth	= (void *)eevdf_cpuctl_set_bandwidth,	\
+	.__cg##_set_idle	= (void *)eevdf_cpuctl_set_idle,	\
+	.__cg##_move		= (void *)eevdf_cpuctl_move,		\
+	.init			= (void *)eevdf_init,			\
+	.exit			= (void *)eevdf_exit,			\
 	.timeout_ms		= 5000,					\
-	.name			= "cidland"
+	.name			= "eevdf"
 
-SCX_OPS_CID_DEFINE(cidland_ops, CIDLAND_OPS(cpuctl));
+SCX_OPS_CID_DEFINE(eevdf_ops, EEVDF_OPS(cpuctl));
 
 /*
  * struct sched_ext_ops_cid as a kernel from before the rename declares it,
@@ -10119,6 +10119,6 @@ struct sched_ext_ops_cid___cgroup {
 };
 
 SEC(".struct_ops.link")
-struct sched_ext_ops_cid___cgroup cidland_ops_cgroup = {
-	CIDLAND_OPS(cgroup),
+struct sched_ext_ops_cid___cgroup eevdf_ops_cgroup = {
+	EEVDF_OPS(cgroup),
 };
