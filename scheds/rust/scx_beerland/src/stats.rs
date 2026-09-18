@@ -41,7 +41,6 @@ impl Metrics {
             nr_local_dispatch: self.nr_local_dispatch - rhs.nr_local_dispatch,
             nr_remote_dispatch: self.nr_remote_dispatch - rhs.nr_remote_dispatch,
             nr_keep_running: self.nr_keep_running - rhs.nr_keep_running,
-            ..self.clone()
         }
     }
 }
