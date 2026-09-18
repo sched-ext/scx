@@ -56,7 +56,6 @@ impl Metrics {
             nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
             nr_primary_dispatches: self.nr_primary_dispatches - rhs.nr_primary_dispatches,
             nr_timer_dispatches: self.nr_timer_dispatches - rhs.nr_timer_dispatches,
-            ..self.clone()
         }
     }
 }

@@ -1011,11 +1011,12 @@ mod derive_tests {
     use crate::tuning::TuningKnobs;
 
     fn base() -> TuningKnobs {
-        let mut k = TuningKnobs::default();
-        k.slice_ns = 1_000_000;
-        k.preempt_thresh_ns = 1_000_000;
-        k.codel_thresh_ns = 5_000_000;
-        k
+        TuningKnobs {
+            slice_ns: 1_000_000,
+            preempt_thresh_ns: 1_000_000,
+            codel_thresh_ns: 5_000_000,
+            ..Default::default()
+        }
     }
 
     fn win(vals: &[f64]) -> RawWindow<CHAOS_WIN> {
@@ -1111,13 +1112,14 @@ mod derivation_tests {
     use crate::tuning::TuningKnobs;
 
     fn base() -> TuningKnobs {
-        let mut k = TuningKnobs::default();
-        k.slice_ns = 1_000_000;
-        k.preempt_thresh_ns = 1_000_000;
-        k.batch_slice_ns = 20_000_000;
-        k.burst_slice_ns = 1_000_000;
-        k.codel_thresh_ns = 5_000_000;
-        k
+        TuningKnobs {
+            slice_ns: 1_000_000,
+            preempt_thresh_ns: 1_000_000,
+            batch_slice_ns: 20_000_000,
+            burst_slice_ns: 1_000_000,
+            codel_thresh_ns: 5_000_000,
+            ..Default::default()
+        }
     }
 
     fn win(vals: &[f64]) -> RawWindow<CHAOS_WIN> {
@@ -1346,8 +1348,10 @@ mod affinity_tests {
             g.edge_summary().1 > 0.9,
             "the pair must still READ as coupled"
         );
-        let mut base = TuningKnobs::default();
-        base.affinity_mode = AFFINITY_WEAK;
+        let base = TuningKnobs {
+            affinity_mode: AFFINITY_WEAK,
+            ..Default::default()
+        };
         for k in g.derive_percpu_knobs(&base) {
             assert_eq!(
                 k.affinity_mode, AFFINITY_WEAK,
