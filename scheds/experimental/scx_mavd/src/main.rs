@@ -516,7 +516,6 @@ impl<'a> Scheduler<'a> {
         // Initialize CPU topology with CLI arguments
         let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();
         Self::init_cpus(&mut skel, &order);
-        Self::init_cpdoms(&mut skel, &order);
 
         // When there are multiple domains, hook the execve() syscall family
         // to enable aggressive cross-domain migration when execve() is called.
@@ -547,6 +546,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let task_size = std::mem::size_of::<types::task_ctx>();
         let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
+        // Programs start observing the arena globals at attach, so seed them first.
+        Self::init_arena_globals(&mut skel, &order, opts)?;
 
         // Attach.
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
@@ -654,38 +655,46 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_pco_tuple(skel: &mut OpenBpfSkel, i: usize, pco: &PerfCpuOrder) {
-        let cpus_perf = pco.cpus_perf.borrow();
-        let cpus_ovflw = pco.cpus_ovflw.borrow();
-        let pco_nr_primary = cpus_perf.len();
+        let pco_nr_primary = pco.cpus_perf.borrow().len();
 
         skel.maps.rodata_data.as_mut().unwrap().pco_bounds[i] = pco.perf_cap as u32;
         skel.maps.rodata_data.as_mut().unwrap().pco_nr_primary[i] = pco_nr_primary as u16;
+    }
+
+    fn write_pco_order(uptrs: &types::mavd_uptrs, i: usize, pco: &PerfCpuOrder) {
+        let cpus_perf = pco.cpus_perf.borrow();
+        let cpus_ovflw = pco.cpus_ovflw.borrow();
+        let pco_nr_primary = cpus_perf.len();
+        let table = uptrs.pco_table as *mut [u16; LAVD_CPU_ID_MAX as usize];
+        let cpu_order = unsafe { &mut *table.add(i) };
 
         for (j, &cpu_adx) in cpus_perf.iter().enumerate() {
-            skel.maps.rodata_data.as_mut().unwrap().pco_table[i][j] = cpu_adx as u16;
+            cpu_order[j] = cpu_adx as u16;
         }
 
         for (j, &cpu_adx) in cpus_ovflw.iter().enumerate() {
-            let k = j + pco_nr_primary;
-            skel.maps.rodata_data.as_mut().unwrap().pco_table[i][k] = cpu_adx as u16;
+            cpu_order[j + pco_nr_primary] = cpu_adx as u16;
         }
     }
 
-    fn init_cpdoms(skel: &mut OpenBpfSkel, order: &CpuOrder) {
+    fn init_cpdoms(uptrs: &types::mavd_uptrs, order: &CpuOrder) {
         // Initialize compute domain contexts
+        let cpdom_ctxs = uptrs.cpdom_ctxs as *mut types::cpdom_ctx;
+        if order.cpdom_map.len() > LAVD_CPDOM_MAX_NR as usize {
+            panic!("The processor topology is too complex to handle in BPF.");
+        }
         for (k, v) in order.cpdom_map.iter() {
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].alt_id =
-                v.cpdom_alt_id.get() as u64;
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].numa_id = k.numa_adx as u8;
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].llc_id = k.llc_adx as u8;
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].is_valid = 1;
+            let cpdomc = unsafe { &mut *cpdom_ctxs.add(v.cpdom_id) };
+            cpdomc.id = v.cpdom_id as u64;
+            cpdomc.alt_id = v.cpdom_alt_id.get() as u64;
+            cpdomc.numa_id = k.numa_adx as u8;
+            cpdomc.llc_id = k.llc_adx as u8;
+            cpdomc.is_big = k.is_big as u8;
+            cpdomc.is_valid = 1;
             for cpu_id in v.cpu_ids.iter() {
                 let i = cpu_id / 64;
                 let j = cpu_id % 64;
-                skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].__cpumask[i] |=
-                    0x01 << j;
+                cpdomc.__cpumask[i] |= 0x01 << j;
             }
 
             if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST as usize {
@@ -697,15 +706,53 @@ impl<'a> Scheduler<'a> {
                 if nr_neighbors > LAVD_CPDOM_MAX_NR as u8 {
                     panic!("The processor topology is too complex to handle in BPF.");
                 }
-                skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
-                    nr_neighbors;
+                cpdomc.nr_neighbors[k] = nr_neighbors;
                 for (i, &id) in neighbors.borrow().iter().enumerate() {
                     let idx = (k * LAVD_CPDOM_MAX_NR as usize) + i;
-                    skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].neighbor_ids[idx] =
-                        id as u8;
+                    cpdomc.neighbor_ids[idx] = id as u8;
                 }
             }
         }
+    }
+
+    fn fetch_uptrs(skel: &mut BpfSkel) -> Result<types::mavd_uptrs> {
+        let ret = skel
+            .progs
+            .mavd_publish_uptrs
+            .test_run(ProgramInput::default())?;
+        if ret.return_value != 0 {
+            anyhow::bail!("fetching arena addresses: {}", ret.return_value as i32);
+        }
+        Ok(skel.maps.bss_data.as_ref().unwrap().mavd_uptrs)
+    }
+
+    // The arena globals only exist once the object is loaded, so they are seeded
+    // between load and attach through the addresses BPF publishes.
+    fn init_arena_globals(skel: &mut BpfSkel, order: &CpuOrder, opts: &Opts) -> Result<()> {
+        let uptrs = Self::fetch_uptrs(skel)?;
+
+        let nr_pco_states = order.perf_cpu_order.len();
+        for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {
+            Self::write_pco_order(&uptrs, i, pco);
+        }
+
+        let (_, last_pco) = order.perf_cpu_order.last_key_value().unwrap();
+        for i in nr_pco_states..LAVD_PCO_STATE_MAX as usize {
+            Self::write_pco_order(&uptrs, i, last_pco);
+        }
+
+        Self::init_cpdoms(&uptrs, order);
+
+        unsafe {
+            std::ptr::write_volatile(uptrs.no_preemption as *mut bool, opts.no_preemption);
+            std::ptr::write_volatile(
+                uptrs.no_core_compaction as *mut bool,
+                opts.no_core_compaction,
+            );
+            std::ptr::write_volatile(uptrs.no_freq_scaling as *mut bool, opts.no_freq_scaling);
+            std::ptr::write_volatile(uptrs.is_powersave_mode as *mut bool, opts.powersave);
+        }
+        Ok(())
     }
 
     fn init_globals(
@@ -714,11 +761,6 @@ impl<'a> Scheduler<'a> {
         order: &CpuOrder,
         debug_level: u8,
     ) -> Result<()> {
-        let bss_data = skel.maps.bss_data.as_mut().unwrap();
-        bss_data.no_preemption = opts.no_preemption;
-        bss_data.no_core_compaction = opts.no_core_compaction;
-        bss_data.no_freq_scaling = opts.no_freq_scaling;
-        bss_data.is_powersave_mode = opts.powersave;
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.nr_llcs = order.nr_llcs as u64;
         rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
@@ -929,8 +971,18 @@ impl<'a> Scheduler<'a> {
                 }
                 self.mseq_id += 1;
 
-                let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
-                let st = bss_data.sys_stat;
+                let uptrs = &self.skel.maps.bss_data.as_ref().unwrap().mavd_uptrs;
+                // BPF updates the arena globals during the copy, so statistics
+                // remain an approximate snapshot.
+                let st =
+                    unsafe { std::ptr::read_volatile(uptrs.sys_stat as *const types::sys_stat) };
+                let mode = unsafe { std::ptr::read_volatile(uptrs.power_mode as *const i32) };
+                let performance_mode_ns =
+                    unsafe { std::ptr::read_volatile(uptrs.performance_mode_ns as *const u64) };
+                let balanced_mode_ns =
+                    unsafe { std::ptr::read_volatile(uptrs.balanced_mode_ns as *const u64) };
+                let powersave_mode_ns =
+                    unsafe { std::ptr::read_volatile(uptrs.powersave_mode_ns as *const u64) };
 
                 let mseq = self.mseq_id;
                 let nr_queued_task = st.nr_queued_task;
@@ -945,13 +997,11 @@ impl<'a> Scheduler<'a> {
                 let pc_big = Self::get_pc(nr_big, nr_sched);
                 let pc_pc_on_big = Self::get_pc(st.nr_pc_on_big, nr_big);
                 let pc_lc_on_big = Self::get_pc(st.nr_lc_on_big, nr_big);
-                let power_mode = Self::get_power_mode(bss_data.power_mode);
-                let total_time = bss_data.performance_mode_ns
-                    + bss_data.balanced_mode_ns
-                    + bss_data.powersave_mode_ns;
-                let pc_performance = Self::get_pc(bss_data.performance_mode_ns, total_time);
-                let pc_balanced = Self::get_pc(bss_data.balanced_mode_ns, total_time);
-                let pc_powersave = Self::get_pc(bss_data.powersave_mode_ns, total_time);
+                let power_mode = Self::get_power_mode(mode);
+                let total_time = performance_mode_ns + balanced_mode_ns + powersave_mode_ns;
+                let pc_performance = Self::get_pc(performance_mode_ns, total_time);
+                let pc_balanced = Self::get_pc(balanced_mode_ns, total_time);
+                let pc_powersave = Self::get_pc(powersave_mode_ns, total_time);
 
                 StatsRes::SysStats(SysStats {
                     mseq,

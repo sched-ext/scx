@@ -326,7 +326,7 @@ struct cpdom_ctx {
  * are recomputed from scratch each LB round. Hopefully, transient negativity is
  * harmless.
  */
-static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
+static __always_inline void decrement_stealee_budget(struct cpdom_ctx __arena *cpdomc,
 						     u64 amount)
 {
 	__sync_fetch_and_sub(&cpdomc->stealee_budget_invr, amount);
@@ -339,7 +339,7 @@ static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
  * Atomically subtract @amount from the stealer's ingress budget.
  * Same rationale as decrement_stealee_budget().
  */
-static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
+static __always_inline void decrement_stealer_budget(struct cpdom_ctx __arena *cpdomc,
 						     u64 amount)
 {
 	__sync_fetch_and_sub(&cpdomc->stealer_budget_invr, amount);
@@ -348,9 +348,17 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
 		WRITE_ONCE(cpdomc->is_stealer, false);
 }
 
-extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+extern struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
-extern int			nr_cpdoms;
+extern int __arena_global		nr_cpdoms;
+
+/* queued_in_cpdom_id uses LAVD_CPDOM_MAX_NR for no domain and must get NULL */
+static __always_inline struct cpdom_ctx __arena *get_cpdom_ctx(s64 id)
+{
+	if (id < 0 || id >= LAVD_CPDOM_MAX_NR)
+		return NULL;
+	return &cpdom_ctxs[id];
+}
 
 typedef struct task_ctx __arena task_ctx;
 
@@ -567,7 +575,7 @@ struct cpu_ctx {
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
 const extern volatile u32	nr_cpu_ids;
-extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
+extern volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 
 extern const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
 extern const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
@@ -636,23 +644,23 @@ static __always_inline int cpumask_next_set_bit(u64 *cpumask)
 }
 
 /* System statistics module .*/
-extern struct sys_stat		sys_stat;
+extern struct sys_stat __arena_global	sys_stat;
 
 s32 init_sys_stat(u64 now);
 int update_sys_stat(void);
 
-extern volatile u64		performance_mode_ns;
-extern volatile u64		balanced_mode_ns;
-extern volatile u64		powersave_mode_ns;
+extern volatile u64 __arena_global	performance_mode_ns;
+extern volatile u64 __arena_global	balanced_mode_ns;
+extern volatile u64 __arena_global	powersave_mode_ns;
 
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 extern const volatile u64	pinned_slice_ns;
 
-extern volatile bool		reinit_cpumask_for_performance;
-extern volatile bool		no_preemption;
-extern volatile bool		no_core_compaction;
-extern volatile bool		no_freq_scaling;
+extern volatile bool __arena_global	reinit_cpumask_for_performance;
+extern volatile bool __arena_global	no_preemption;
+extern volatile bool __arena_global	no_core_compaction;
+extern volatile bool __arena_global	no_freq_scaling;
 
 bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
 void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
@@ -867,7 +875,7 @@ s32  pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle);
 
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
 
-extern u64 cur_logical_clk;
+extern u64 __arena_global cur_logical_clk;
 u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
 
 #endif /* __LAVD_H */
