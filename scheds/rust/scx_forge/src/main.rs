@@ -788,7 +788,7 @@ impl<'a> Scheduler<'a> {
         };
         let out = prog.test_run(input).unwrap();
         if out.return_value != 0 {
-            return Err(out.return_value as u32);
+            return Err(out.return_value);
         }
         Ok(())
     }
