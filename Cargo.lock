@@ -6140,6 +6140,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_mavd"
+version = "1.1.3"
+dependencies = [
+ "anyhow",
+ "bitvec",
+ "clap",
+ "clap-num",
+ "clap_main",
+ "crossbeam",
+ "ctrlc",
+ "gpoint",
+ "hex",
+ "itertools 0.14.0",
+ "libbpf-rs 0.27.1",
+ "libc",
+ "nix 0.31.3",
+ "ordered-float 5.5.0",
+ "plain",
+ "rlimit",
+ "scx_arena",
+ "scx_cargo",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "static_assertions",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "scx_mitosis"
 version = "1.1.3"
 dependencies = [
