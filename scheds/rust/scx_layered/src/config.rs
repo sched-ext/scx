@@ -119,6 +119,16 @@ pub struct LayerCommon {
     pub preempt_first: bool,
     #[serde(default)]
     pub exclusive: bool,
+    /// When true, rewrite `/proc/irq/*/smp_affinity` so that CPUs owned
+    /// by this layer are cleared from every IRQ's affinity mask. An IRQ
+    /// whose home affinity is fully covered by the protected layers is
+    /// either spilled to the unprotected set (default) or, depending on
+    /// `--irq-protect-fallback`, spread round-robin / given the full
+    /// unprotected mask. Kernel-managed IRQs that reject affinity writes
+    /// are recorded after the first failure and never retried. Original
+    /// masks are restored when the scheduler exits.
+    #[serde(default)]
+    pub irq_protect: bool,
     #[serde(default, skip_serializing)]
     pub allow_node_aligned: Option<bool>,
     #[serde(default)]
