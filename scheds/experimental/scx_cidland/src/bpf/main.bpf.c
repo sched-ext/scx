@@ -593,6 +593,10 @@ enum fork_child_level {
 	FORK_CHILD_CORE,
 };
 
+/* fair.c's usual MC and wider-domain imbalance_pct values. */
+#define FORK_MC_IMBALANCE_PCT 117
+#define FORK_WIDE_IMBALANCE_PCT 125
+
 /*
  * Scratch for fair.c-style SD_BALANCE_FORK group descent. Keep the loop
  * accumulators in per-CPU map memory rather than on the caller's stack so the
@@ -602,11 +606,16 @@ enum fork_child_level {
 struct fork_pick_env {
 	u64 now;
 	u64 load;
+	u64 util;
 	u64 cap;
 	u64 best_load;
+	u64 best_util;
 	u64 best_cap;
 	u64 group_recent;
 	u64 best_recent;
+	u32 runnable;
+	u32 best_runnable;
+	u32 best_allowed;
 	u32 base;
 	u32 nr;
 	u32 anchor;
@@ -614,6 +623,8 @@ struct fork_pick_env {
 	u32 group_base;
 	u32 group_nr;
 	u32 group_end;
+	u32 group_allowed;
+	u32 restricted;
 	u32 idle;
 	u32 best_idle;
 	u32 best_base;
@@ -4058,30 +4069,74 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 
 static __always_inline void fork_pick_commit(struct fork_pick_env *env)
 {
+	u64 imbalance_pct = env->level == FORK_CHILD_CORE ?
+		FORK_MC_IMBALANCE_PCT : FORK_WIDE_IMBALANCE_PCT;
+	bool best_spare;
 	bool local;
+	bool spare;
 
-	if (!env->group_nr)
+	/* fair.c skips a sched group whose span has no CPU allowed to @p. */
+	if (!env->group_nr || !env->group_allowed)
 		return;
 	local = cid_in_range(env->anchor, env->group_base, env->group_nr);
+	/* A disallowed SMT sibling is not spare capacity for this task. */
+	spare = env->restricted && env->runnable < env->group_allowed;
 	if (env->best_nr) {
+		best_spare = env->restricted &&
+			env->best_runnable < env->best_allowed;
+		if (spare != best_spare) {
+			if (!spare)
+				return;
+			goto commit;
+		}
 		if (env->idle < env->best_idle)
 			return;
 		if (env->idle == env->best_idle) {
-			/* Fully busy groups are ordered by load per capacity. */
-			if (!env->idle) {
+			if (spare) {
+				/* Keep fair.c's local-group preference on an idle tie. */
+				if (env->best_local)
+					return;
+				if (local)
+					goto commit;
+				/* group_has_spare ties are ordered by group utilization. */
+				if (env->util > env->best_util)
+					return;
+				if (env->util < env->best_util)
+					goto commit;
+			} else {
+				/* Fully busy groups are ordered by load per capacity. */
+				if (env->restricted && env->best_local != local) {
+					/*
+					 * sched_balance_find_dst_group() keeps the
+					 * local group unless the remote group is
+					 * better by the domain's imbalance margin.
+					 */
+					if (env->best_local) {
+						if (env->best_load * env->cap * 100 <=
+						    env->load * env->best_cap *
+							    imbalance_pct)
+							return;
+						goto commit;
+					}
+					if (env->load * env->best_cap * 100 <=
+					    env->best_load * env->cap *
+						    imbalance_pct)
+						goto commit;
+					return;
+				}
 				if (env->load * env->best_cap >
 				    env->best_load * env->cap)
 					return;
 				if (env->load * env->best_cap <
 				    env->best_load * env->cap)
 					goto commit;
+				if (env->best_local)
+					return;
+				if (local)
+					goto commit;
 			}
-			/* Keep fair.c's local-group preference on an idle tie. */
-			if (env->best_local)
-				return;
-			if (!local &&
-			    (env->level != FORK_CHILD_CORE ||
-			     env->group_recent >= env->best_recent))
+			if (env->level != FORK_CHILD_CORE ||
+			    env->group_recent >= env->best_recent)
 				return;
 		}
 	}
@@ -4091,16 +4146,21 @@ commit:
 	env->best_nr = env->group_nr;
 	env->best_idle = env->idle;
 	env->best_load = env->load;
+	env->best_util = env->util;
 	env->best_cap = env->cap;
 	env->best_recent = env->group_recent;
+	env->best_runnable = env->runnable;
+	env->best_allowed = env->group_allowed;
 	env->best_local = local;
 }
 
 /* Pick the idlest immediate child group of @range, as fair.c does. */
 static __noinline u64
-fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
+fork_pick_child(const struct task_struct *p, u64 range, s32 anchor, u32 level,
+		u64 now)
 {
 	struct fork_pick_env *env;
+	bool restricted = is_restricted(p);
 	u32 zero = 0;
 	u32 nr = range >> 32;
 	u32 i;
@@ -4116,14 +4176,21 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 	env->group_base = 0;
 	env->group_nr = 0;
 	env->group_end = 0;
+	env->group_allowed = 0;
+	env->restricted = restricted;
 	env->idle = 0;
 	env->load = 0;
+	env->util = 0;
 	env->cap = 0;
 	env->group_recent = 0;
+	env->runnable = 0;
 	env->best_idle = 0;
 	env->best_load = 0;
+	env->best_util = 0;
 	env->best_cap = 1;
 	env->best_recent = 0;
+	env->best_runnable = 0;
+	env->best_allowed = 0;
 	env->best_base = 0;
 	env->best_nr = 0;
 	env->best_local = 0;
@@ -4145,19 +4212,56 @@ fork_pick_child(u64 range, s32 anchor, u32 level, u64 now)
 				env->group_nr = cid_topo(i)->core_nr;
 			}
 			env->group_end = env->group_base + env->group_nr;
+			env->group_allowed = !restricted;
 			env->idle = 0;
 			env->load = 0;
+			env->util = 0;
 			env->cap = 0;
+			env->runnable = 0;
 			env->group_recent = env->level == FORK_CHILD_CORE ?
 				READ_ONCE(cid_ctx(env->group_base)->fork_place_at) : 0;
 			if (env->group_recent &&
 			    (s64)(env->now - env->group_recent) >= UTIL_HALF_LIFE_NS)
 				env->group_recent = 0;
 		}
+		/*
+		 * update_sg_wakeup_stats() accumulates load and idleness over
+		 * sched_group_span(group) intersected with p->cpus_ptr, while
+		 * group_capacity remains the capacity of the whole group.
+		 */
+		env->cap += MAX(cid_topo(i)->cap, 1ULL);
+		if (restricted && !cid_allowed(p, i))
+			continue;
+		if (restricted) {
+			struct pack __arena *pk = cid_pack(i);
+			u32 running = READ_ONCE(pk->curr_w) != 0;
+			u32 edq_nr = cid_queue_nr(i);
+			u32 local_nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | i);
+			u32 nr = edq_nr + local_nr + running;
+
+			env->group_allowed++;
+			/*
+			 * DELAY_DEQUEUE can leave the running task represented in a
+			 * queue too. The pack has only that task when its total weight
+			 * equals the running weight, so do not count the two
+			 * representations as two runnable tasks.
+			 */
+			if (running && (edq_nr || local_nr) &&
+			    READ_ONCE(pk->vsum_w) == READ_ONCE(pk->curr_w))
+				nr--;
+			/* Cover a task between EDQ dispatch and ops.running(). */
+			if (!nr && READ_ONCE(pk->vsum_w))
+				nr = 1;
+			env->runnable += nr;
+		}
 		if (cid_idle_test(i) && !cid_queued_test(i))
 			env->idle++;
-		env->load += READ_ONCE(cid_pack(i)->vsum_w);
-		env->cap += MAX(cid_topo(i)->cap, 1ULL);
+		if (restricted) {
+			env->load += cid_load(i, now);
+			env->util += cid_util(i, now);
+		} else {
+			env->load += READ_ONCE(cid_pack(i)->vsum_w);
+		}
 	}
 	fork_pick_commit(env);
 	return env->best_nr ? (u64)env->best_nr << 32 | env->best_base : range;
@@ -4214,7 +4318,8 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 			}
 			continue;
 		}
-		load = READ_ONCE(cid_pack(cid)->vsum_w);
+		load = restricted ? cid_load(cid, now) :
+			READ_ONCE(cid_pack(cid)->vsum_w);
 		if (best < 0 || load * best_cap < best_load * cap) {
 			best = cid;
 			best_load = load;
@@ -4234,12 +4339,8 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 	u64 child;
 	s32 cid;
 
-	/* Affinity needs per-group cpumask intersections; keep the safe path. */
-	if (is_restricted(p))
-		return fork_pick_cid(p, range, now);
-
 	if (topo->fork_nr > topo->node_nr) {
-		child = fork_pick_child(range, anchor, FORK_CHILD_NODE, now);
+		child = fork_pick_child(p, range, anchor, FORK_CHILD_NODE, now);
 		if (child >> 32)
 			range = child;
 	}
@@ -4247,7 +4348,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 		anchor = (u32)range;
 	topo = cid_topo(anchor);
 	if ((range >> 32) > topo->llc_nr) {
-		child = fork_pick_child(range, anchor, FORK_CHILD_LLC, now);
+		child = fork_pick_child(p, range, anchor, FORK_CHILD_LLC, now);
 		if (child >> 32)
 			range = child;
 	}
@@ -4255,7 +4356,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 		anchor = (u32)range;
 	topo = cid_topo(anchor);
 	if ((range >> 32) > topo->core_nr) {
-		child = fork_pick_child(range, anchor, FORK_CHILD_CORE, now);
+		child = fork_pick_child(p, range, anchor, FORK_CHILD_CORE, now);
 		if (child >> 32)
 			range = child;
 	}

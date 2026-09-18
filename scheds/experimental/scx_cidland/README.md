@@ -270,9 +270,15 @@ be turned off on the command line to compare the two rules against each other.
    fair.c's recent-use bias without recomputing every CPU's average in the fork
    path.
    The final CPU is selected using averaged, capacity-normalized per-CPU
-   utilization, preferring an idle CPU. Affinity-restricted tasks use the flat
-   domain scan until cidland can represent fair.c's per-group affinity
-   intersections.
+   utilization, preferring an idle CPU. For an affinity-restricted task, every
+   level accumulates runnable load and idle CPUs only over the intersection of
+   the child group and the task's allowed mask, while retaining the capacity
+   and topological span of the whole group. Usable spare capacity is bounded by
+   the allowed intersection, so a disallowed SMT sibling does not make a busy
+   allowed CPU look available. Groups with an empty intersection are skipped,
+   and the final CPU is selected from the allowed intersection. This follows
+   `update_sg_wakeup_stats()` and `sched_balance_find_dst_group_cpu()` without
+   treating capacity the task cannot use as an idle destination.
 
  - **SCHED_IDLE-only CPUs as wake targets.** `choose_idle_cpu()` counts a
    runqueue running nothing but `SCHED_IDLE` work as available to a normal
