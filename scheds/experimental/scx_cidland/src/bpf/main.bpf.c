@@ -292,6 +292,16 @@ u32 arena_map_id;
 u64 arena_pages_allocated;
 u64 arena_pages_freed;
 
+/*
+ * Cids whose current task counts as SCHED_IDLE work, kept by ops.running()
+ * and ops.stopping(). A wakeup asks this before it looks at any cid for
+ * cid_sched_idle_target(): the answer is almost always none, and it comes
+ * from one word that is only written when such a task starts or stops,
+ * where the per-cid test costs reads of two bitmap words and a pack line
+ * that every CPU keeps changing.
+ */
+u32 nr_sched_idle_curr;
+
 static bool arena_is_ours(void *map)
 {
 	return arena_map_id &&
@@ -418,7 +428,7 @@ struct task_ctx {
 
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
-	bool direct_placed;	/* select_cid() already placed and joined it */
+	bool place_pending;	/* a direct dispatch left its placement to ops.running() */
 };
 
 typedef struct task_ctx __arena task_ctx_t;
@@ -481,8 +491,6 @@ static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct 
 struct grp_hdr {
 	u64 weight;		/* cpu.weight as a load weight, tg->shares */
 	u64 pages;		/* arena pages of this block */
-	u64 load_avg;		/* sum of the queues' averaged loads, tg->load_avg */
-	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
 	u64 idle;		/* cpu.idle, see cidland_cpuctl_set_idle() */
 	u64 slot;		/* its index in @grp_hdrs */
 	u64 next_free;		/* next block to free, see grp_free_defer() */
@@ -501,6 +509,16 @@ struct grp_hdr {
 	u64 bw_slot;		/* its index in @bw_hdrs, BW_MAX_LIMITED for none */
 	u64 nr_parked;		/* tasks waiting in @bq */
 	struct scx_edq bq;	/* them, see cid_park() */
+
+	/*
+	 * Moved by every cid as its queue's averages drift, see
+	 * grp_update_shares() and grp_live_update(). On a line of their own:
+	 * ops.running() reads @idle and the wakeup path reads the cpu.max
+	 * state on every switch, and a line that is also written from every
+	 * CPU is one those reads miss.
+	 */
+	u64 load_avg __attribute__((aligned(64)));	/* sum of the queues' averaged loads, tg->load_avg */
+	u64 nr_avg;		/* sum of their averaged task counts, tg->runnable_avg */
 };
 
 struct grp_q {
@@ -2498,8 +2516,8 @@ static bool cid_sched_idle_target(const struct task_struct *p, s32 cid)
 {
 	struct cid_ctx __arena *cctx;
 
-	if (p->policy == SCHED_IDLE || !cid_valid(cid) || cid_idle_test(cid) ||
-	    cid_queued_test(cid))
+	if (!READ_ONCE(nr_sched_idle_curr) || p->policy == SCHED_IDLE ||
+	    !cid_valid(cid) || cid_idle_test(cid) || cid_queued_test(cid))
 		return false;
 	cctx = cid_ctx(cid);
 
@@ -6657,8 +6675,22 @@ static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 static void direct_dispatch_local(struct task_struct *p, task_ctx_t *tctx, s32 cid,
 				  u64 now)
 {
-	place_task(cid, p, tctx, now, true);
-	tctx->direct_placed = true;
+	/*
+	 * @cid is idle, and its pack is empty more often than not: nothing
+	 * runs there and nothing is waiting. A placement against an empty
+	 * pack does not depend on what the task weighs, so the walk of its
+	 * groups that finds the weight and the join that publishes it are
+	 * left to ops.running() on @cid, where the pack and the group queues
+	 * are lines of the CPU's own. Done from here they were read and
+	 * written across CPUs on the waker's path, and for a task in a
+	 * cgroup that walk and its atomics were the largest item of the
+	 * wakeup. A pack with a member, queued there a moment ago, gives the
+	 * placement an offset and is placed against here as before.
+	 */
+	if (READ_ONCE(task_pack(tctx, cid)->vsum_w))
+		place_task(cid, p, tctx, now, true);
+	else
+		tctx->place_pending = true;
 	cid_edq_mark_dispatched(tctx);
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_request(p), SCX_ENQ_IMMED);
 }
@@ -6791,9 +6823,15 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * Prepare to queue the task of @tctx on @cid with deadline @dl, and return
  * whether it should be inserted on the local DSQ as a preempting task.
  *
- * An idle cid only has to be told that there is work: the kick makes it
- * dispatch. A busy one is running a task of its own, and what this has to
- * decide is whether that task should be interrupted.
+ * An idle cid needs nothing from here. The task is being enqueued on that
+ * very cid, and once ops.enqueue() returns the kernel asks wakeup_preempt()
+ * for it, which reschedules an idle CPU for any class above the idle one
+ * before it looks at what the class itself would do. A kick from here made
+ * the same request again through an irq_work of the waker, which took the
+ * target's rq lock a second time; with many wakers filling the same CPUs
+ * that lock was the busiest line of the wakeup path. A busy cid is running
+ * a task of its own, and what this has to decide is whether that task
+ * should be interrupted.
  *
  * This is EEVDF's wakeup preemption. wakeup_preempt_fair() asks what the
  * runqueue would pick now and reschedules when the answer is the task
@@ -6853,10 +6891,12 @@ s32 BPF_STRUCT_OPS(cidland_select_cid, struct task_struct *p, s32 prev_cid, u64 
  * waiting for the tick to find it.
  *
  * The @curr_ fields describe the last task of ours to run there and say
- * nothing about a cid running something else. The idle test covers the
- * idle task; for a higher scheduling class the kick costs an IPI and
- * leaves the CPU with the class that owns it, which is where not kicking
- * would have left it too.
+ * nothing about a cid running something else. A zero @curr_w covers both
+ * the idle task and a higher class: nothing of ours is running, so there
+ * is nothing to interrupt and nothing to protect. It is read from the pack
+ * line this needs anyway, not from the idle bitmap, a word that every CPU
+ * writes on each of its idle transitions and that a remote reader misses
+ * on nearly every time.
  */
 static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 				      const task_ctx_t *tctx, u64 dl,
@@ -6867,12 +6907,11 @@ static bool queued_cid_should_preempt(s32 cid, const struct task_struct *p,
 	u64 head_dl, min_slice = 0;
 	pack_t *pk;
 
-	if (cid_idle_test(cid))
-		goto idle;
 	*cancel_protect = false;
-
 	cctx = cid_ctx(cid);
 	pk = task_pack(tctx, cid);
+	if (!pk->curr_w)
+		goto idle;
 
 	if (no_wakeup_preempt)
 		goto queued;
@@ -6996,9 +7035,6 @@ queued:
 	 */
 	hrtick_start(cid, now);
 idle:
-	/* An op executing on @cid is itself proof that @cid is not idle. */
-	if (cid != scx_bpf_this_cid())
-		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 	return false;
 }
 
@@ -7333,6 +7369,14 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 
 	now = scx_bpf_now();
 	displaced = !(enq_flags & SCX_ENQ_WAKEUP) && scx_bpf_task_running(p);
+	/*
+	 * A direct dispatch that left its placement to ops.running() and was
+	 * bounced back here is placed like the wakeup it is.
+	 */
+	if (tctx->place_pending) {
+		tctx->place_pending = false;
+		enq_flags |= SCX_ENQ_WAKEUP;
+	}
 	if (displaced)
 		WRITE_ONCE(cid_ctx(prev_cid)->requeue_pending, 0);
 
@@ -8689,13 +8733,15 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 	TOUCH_ARENA();
 
 	if (idle) {
-		cid_demand_set(cid, false, scx_bpf_now());
+		u64 now = scx_bpf_now();
+
+		cid_demand_set(cid, false, now);
 		cid_idle_set(cid);
 		/*
 		 * The tick stops with the CPU: record the empty pack now, or the
 		 * idle period is averaged in at the weight of the last tick.
 		 */
-		cid_load_accumulate(cid, scx_bpf_now());
+		cid_load_accumulate(cid, now);
 	} else if (cid_valid(cid)) {
 		struct cid_ctx __arena *cctx = cid_ctx(cid);
 
@@ -8732,6 +8778,7 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	util_est_update(tctx, now);
 	if (deq_flags & SCX_DEQ_SLEEP)
 		tctx->last_sleep_at = now;
+	tctx->place_pending = false;
 
 	/*
 	 * Remember how far the task is from the reference as it stops being
@@ -8791,39 +8838,11 @@ void BPF_STRUCT_OPS(cidland_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
-{
-	task_ctx_t *tctx;
-	bool direct_placed;
-
-	TOUCH_ARENA();
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	direct_placed = tctx->direct_placed;
-	tctx->direct_placed = false;
-
-	/*
-	 * Drop out of the pack the task was last a member of. The lag it
-	 * carries is what survives the sleep, and place_task() spends it
-	 * against the cid the task is about to be queued on, the way
-	 * place_entity() does:
-	 *
-	 *	se->vruntime = vruntime - lag;
-	 *
-	 * A task that had consumed its share before sleeping comes back
-	 * with no credit, while one that was still owed service keeps it.
-	 */
-	if (!direct_placed)
-		task_vref_leave(tctx);
-}
-
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
 	task_ctx_t *tctx;
 	u64 now, weight;
+	bool placed = false;
 	s32 cid;
 
 	TOUCH_ARENA();
@@ -8839,6 +8858,20 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 	 * and follow the rq clock, which a task carries across CPUs.
 	 */
 	now = scx_bpf_now();
+
+	/*
+	 * The placement a direct dispatch left to this op, see
+	 * direct_dispatch_local(). This is a switch to @p, which is not the
+	 * current task yet, so place_task() places it as it would have on
+	 * the wakeup, against the pack as it is now.
+	 */
+	if (tctx->place_pending) {
+		tctx->place_pending = false;
+		if (cid_valid(cid)) {
+			place_task(cid, p, tctx, now, true);
+			placed = true;
+		}
+	}
 	tctx->last_run_at = cid_valid(cid) ? cid_clock_task_owned(cid, now) : now;
 	cid_pressure_resumed(cid, tctx->last_run_at);
 	util_set_running(tctx, true, now);
@@ -8872,9 +8905,10 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 
 	/*
 	 * A task in a group is picked at the share of the hierarchy it has now,
-	 * set_next_task_fair() running reweight_eevdf().
+	 * set_next_task_fair() running reweight_eevdf(). One placed just above
+	 * joined at that share.
 	 */
-	if (tctx->gq)
+	if (tctx->gq && !placed)
 		task_h_refresh(tctx, now);
 
 	/*
@@ -8896,8 +8930,12 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 		/* Publish a complete current-task snapshot to remote wakeups. */
 		pk->curr_w = weight;
 		cctx->curr_idle = p->policy == SCHED_IDLE;
-		cctx->curr_sched_idle = cctx->curr_idle ||
-					(tctx->grp && task_in_idle_cgroup(tctx));
+		if ((cctx->curr_idle ||
+		     (tctx->grp && task_in_idle_cgroup(tctx))) &&
+		    !cctx->curr_sched_idle) {
+			cctx->curr_sched_idle = 1;
+			__sync_fetch_and_add(&nr_sched_idle_curr, 1);
+		}
 
 		/*
 		 * A pick with company is given an hrtick, set_next_task_fair():
@@ -8990,12 +9028,15 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 	 * there is nothing left for pack_vref_at() to project on this cid
 	 * until ops.running() picks the next task.
 	 */
-	if (cid_valid(cid))
-		task_pack(tctx, cid)->curr_w = 0;
+	if (cid_valid(cid)) {
+		struct cid_ctx __arena *cctx = cid_ctx(cid);
 
-	/*
-	 * Update per-cid statistics.
-	 */
+		task_pack(tctx, cid)->curr_w = 0;
+		if (cctx->curr_sched_idle) {
+			cctx->curr_sched_idle = 0;
+			__sync_fetch_and_sub(&nr_sched_idle_curr, 1);
+		}
+	}
 }
 
 /*
@@ -9048,7 +9089,7 @@ void BPF_STRUCT_OPS(cidland_enable, struct task_struct *p)
 		tctx->recent_used_cid = -1;
 		tctx->dispatch_migrate_cid = -1;
 		tctx->pressure_migrate = false;
-		tctx->direct_placed = false;
+		tctx->place_pending = false;
 	}
 }
 
@@ -9961,7 +10002,6 @@ int cidland_get_cpu_priority(struct cidland_cpu_priority_args *args)
 	.core_sched_before	= (void *)cidland_core_sched_before,	\
 	.yield			= (void *)cidland_yield,		\
 	.dispatch		= (void *)cidland_dispatch,		\
-	.runnable		= (void *)cidland_runnable,		\
 	.quiescent		= (void *)cidland_quiescent,		\
 	.running		= (void *)cidland_running,		\
 	.stopping		= (void *)cidland_stopping,		\

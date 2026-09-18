@@ -133,7 +133,6 @@ const OP_ORDER: &[&str] = &[
     "enqueue",
     "dequeue",
     "dispatch",
-    "runnable",
     "running",
     "stopping",
     "quiescent",
