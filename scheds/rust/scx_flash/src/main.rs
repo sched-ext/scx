@@ -450,14 +450,10 @@ impl<'a> Scheduler<'a> {
     }
 
     // Update hint for the cpufreq governor.
-    fn init_cpufreq_perf(
-        skel: &mut BpfSkel<'_>,
-        primary_domain: &String,
-        auto: bool,
-    ) -> Result<()> {
+    fn init_cpufreq_perf(skel: &mut BpfSkel<'_>, primary_domain: &str, auto: bool) -> Result<()> {
         // If we are using the powersave profile always scale the CPU frequency to the minimum,
         // otherwise use the maximum, unless automatic frequency scaling is enabled.
-        let perf_lvl: i64 = match primary_domain.as_str() {
+        let perf_lvl: i64 = match primary_domain {
             "powersave" => 0,
             _ if auto => -1,
             _ => 1024,

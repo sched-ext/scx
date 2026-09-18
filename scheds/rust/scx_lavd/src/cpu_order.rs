@@ -289,7 +289,7 @@ impl CpuOrderCtx {
     }
 
     /// Build a list of compute domains
-    fn build_cpdom(cpu_ids: &Vec<CpuId>) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
+    fn build_cpdom(cpu_ids: &[CpuId]) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
         // Note that building compute domain is independent to CPU order
         // so it is okay to use any cpus_*.
 
@@ -399,9 +399,9 @@ impl CpuOrderCtx {
     }
 
     /// Circular sorting of a list from a starting point
-    fn circular_sort(start: usize, the_rest: &Vec<usize>) -> Vec<usize> {
+    fn circular_sort(start: usize, the_rest: &[usize]) -> Vec<usize> {
         // Create a full list including 'start'
-        let mut list = the_rest.clone();
+        let mut list = the_rest.to_vec();
         list.push(start);
         list.sort();
 
@@ -539,7 +539,7 @@ const LOOKAHEAD_CNT: usize = 10;
 const MAX_EQPD_COMBINATIONS: u128 = 100_000;
 
 impl<'a> EnergyModelOptimizer<'a> {
-    fn new(em: &'a EnergyModel, cpus_pf: &'a Vec<CpuId>) -> EnergyModelOptimizer<'a> {
+    fn new(em: &'a EnergyModel, cpus_pf: &'a [CpuId]) -> EnergyModelOptimizer<'a> {
         let tot_perf = em.perf_total();
 
         let eq_pds = Self::sort_eq_pds(em, cpus_pf);
@@ -591,7 +591,7 @@ impl<'a> EnergyModelOptimizer<'a> {
 
     fn get_perf_cpu_order_table(
         em: &'a EnergyModel,
-        cpus_pf: &'a Vec<CpuId>,
+        cpus_pf: &'a [CpuId],
     ) -> BTreeMap<usize, PerfCpuOrder> {
         let emo = EnergyModelOptimizer::new(em, cpus_pf);
         emo.gen_perf_cpu_order_table();
@@ -600,8 +600,8 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     fn get_fake_perf_cpu_order_table(
-        cpus_pf: &'a Vec<CpuId>,
-        cpus_ps: &'a Vec<CpuId>,
+        cpus_pf: &'a [CpuId],
+        cpus_ps: &'a [CpuId],
     ) -> BTreeMap<usize, PerfCpuOrder> {
         let tot_perf: usize = cpus_pf.iter().map(|cpuid| cpuid.cpu_cap).sum();
 
@@ -615,7 +615,7 @@ impl<'a> EnergyModelOptimizer<'a> {
         perf_cpu_order
     }
 
-    fn fake_pco(tot_perf: usize, cpuids: &'a Vec<CpuId>, powersave: bool) -> PerfCpuOrder {
+    fn fake_pco(tot_perf: usize, cpuids: &'a [CpuId], powersave: bool) -> PerfCpuOrder {
         let perf_cap = if powersave {
             cpuids[0].cpu_cap
         } else {
@@ -737,10 +737,10 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     /// Sort the CPU IDs by topological order (@self.cpus_topological_order).
-    fn sort_cpus_by_topological_order(&'a self, cpus: &Vec<usize>) -> Vec<usize> {
+    fn sort_cpus_by_topological_order(&'a self, cpus: &[usize]) -> Vec<usize> {
         let mut sorted: Vec<usize> = vec![];
         for &cpu_adx in self.cpus_topological_order.iter() {
-            if cpus.iter().find(|&&x| x == cpu_adx).is_some() {
+            if cpus.contains(&cpu_adx) {
                 sorted.push(cpu_adx);
             }
         }
