@@ -81,6 +81,22 @@ covariate and blocks only on a leaked scheduler (`scx_cake_try.py`).
 Still owed before a scoring claim: per-thread wait time (`sched_schedstats=1`),
 the mouse-IRQ → game-thread chain (tracefs), and a frame capture.
 
+**Repair, same day (independent review, `.scx_cake_bench/reviews/20260917/
+idle-notify-race/`).** Two of the dedup edits were wrong and are reverted:
+(1) the kthread pool wake skipped the notify's second idle search on the
+claim that a second walk finds nothing new; time passes between the walks,
+and a CPU that went idle in that window was left unkicked (the task waited
+for the next dispatch anywhere, at most one slice). (2) The empty-word early
+return in `cake_pick_idle_clean` read "every present CPU is in the word"; the
+word is LLC-confined (`cpu_llc_word` is physical, no toggle), so with g89=0
+on a multi-LLC one-word host it skipped the kernel scan that found an idle
+CPU on the other die. Repair: the notify always searches; the empty return
+uses the un-masked word when g89 is off. Cost: the affected path fired 296
+times in 9.28M selects (census), so nothing measurable; folded spills level
+or lower. The parent's later idle-entry race (one look later) is inherent to
+idle picking and is bounded by any CPU's next dispatch; closing it needs an
+idle-side recheck, which one-word hosts omit for cost. Not this change.
+
 **2026-09-15 — FOUR SHAPE COMMITS + THE OPERATION COST AUDIT (unmeasured until
 2026-09-17; see the baseline row above).** `08763176e` Relaxed atomic store for
 the sink words; `ba1a8912e` dispatch peeks a head only when it competes with

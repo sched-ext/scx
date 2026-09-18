@@ -1847,13 +1847,24 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 
 	if (cake_one_word) {
 		u32 prev = (u32)p->thread_info.cpu & (MAX_CPUS - 1);
-		u64 w = cake_idle_word() & p->cpus_ptr->bits[0] & cpu_llc_word[prev];
-		u64 cores = w ? cake_core_word() & w : 0;
-		u64 seats = cake_tog_g85 ? cake_smt_expand(cake_seat_word) : 0;
-		u64 noisy = w ? cpu_irq_hot_cores[0] : 0;
+		u64 all = cake_idle_word() & p->cpus_ptr->bits[0];
+		u64 w = all & cpu_llc_word[prev];
+		u64 cores;
+		u64 seats;
+		u64 noisy;
 		u64 rejected = 0;
-		bool any = w != 0;
 		u32 i;
+
+		/* A global pool can use another die when this die is full. */
+		if (!w && !cake_tog_g89)
+			w = all;
+		/* A fresh empty snapshot ends this search, not the wakeup
+		 * protocol. Do not spend ranking or IRQ reads on it. */
+		if (!w)
+			return -1;
+		cores = cake_core_word() & w;
+		seats = cake_tog_g85 ? cake_smt_expand(cake_seat_word) : 0;
+		noisy = cpu_irq_hot_cores[0];
 
 		for (i = 0; i < CLAIM_TRIES && w; i++) {
 			cpu = cake_pick_cold(w, cores, seats, noisy);
@@ -1874,10 +1885,8 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 				return cpu;
 			w &= ~(1ULL << cpu);
 		}
-		/* An empty word has no kernel rescue: every present CPU is in
-		 * it, and the two scans below could only win a race that the
-		 * going-idle CPU's own dispatch wins anyway (audit 2026-09-17). */
-		if (!any || (cake_tog_g89 && nr_llcs > 1))
+		/* A die-local pool is offered remotely by its caller. */
+		if (cake_tog_g89 && nr_llcs > 1)
 			return -1;
 	}
 
@@ -1923,20 +1932,19 @@ static __noinline bool cake_offer_remote(struct task_struct *p __arg_trusted, s3
 }
 
 /*
- * Post-insert notification: tell somebody the task is runnable. The task is
- * already published, so only p, tcpu and the route cross this boundary — which
- * is what makes the cut cheap (§R.11).
+ * Notify after requesting insertion. On the enqueue path the kernel
+ * commits the DSQ verdict when the callback returns; kick IRQ work
+ * executes after that commit. Keep the route boundary small (§R.11).
  */
 __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
-				u64 slice, bool searched)
+				u64 slice)
 {
 	s32 idle;
 	u64 now;
 
-	/* @searched: the caller's own idle search just failed on this wake;
-	 * a second walk of the same word found nothing it could not have
-	 * found (audit 2026-09-17). */
-	idle = searched ? -1 : cake_pick_idle_clean(p);
+	/* A failed earlier search cannot exclude a CPU that entered
+	 * idle since then. Recheck after the insertion request. */
+	idle = cake_pick_idle_clean(p);
 	if (idle >= 0) {
 		cake_stat_inc(CAKE_SITE_NOTIFY_KICK);
 		if (cake_tog_probe)
@@ -2014,8 +2022,7 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
  * frame; @p is __arg_trusted because the verifier checks it independently
  * (§R.11).
  */
-__noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu,
-				 bool searched)
+__noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 {
 	struct task_struct *curr = cake_cpu_curr(tcpu);
 
@@ -2047,7 +2054,7 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu,
 		u64 slice = cake_task_slice(p);
 
 		cake_pool_insert(p, tcpu, slice, vt, CAKE_ENQ_WAKEUP);
-		cake_wake_notify(p, tcpu, slice, searched);
+		cake_wake_notify(p, tcpu, slice);
 	}
 	return 0;
 }
@@ -2126,7 +2133,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		 * kthreads keep the local queue: no other CPU may serve them. */
 		if (kcpu < 0 && cake_tog_g86 && p->nr_cpus_allowed > 1) {
 			cake_stat_inc(CAKE_SITE_KT_POOL);
-			cake_enqueue_wake(p, tcpu, true);
+			cake_enqueue_wake(p, tcpu);
 			return;
 		}
 
@@ -2159,7 +2166,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1 &&
 	    cake_starved_turn(p)) {
-		cake_enqueue_wake(p, tcpu, false);
+		cake_enqueue_wake(p, tcpu);
 		return;
 	}
 
