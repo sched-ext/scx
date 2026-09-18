@@ -1268,8 +1268,7 @@ impl<'a> PDSetInfo<'_> {
                     v.push(pds.clone());
                 }
                 None => {
-                    let mut v: Vec<PDS<'a>> = Vec::new();
-                    v.push(pds.clone());
+                    let v: Vec<PDS<'a>> = vec![pds.clone()];
                     pds_map.insert(pds.clone(), v.into());
                 }
             }

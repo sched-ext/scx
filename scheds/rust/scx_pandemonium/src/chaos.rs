@@ -390,9 +390,7 @@ pub fn rqa_det<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     }
     let mut emb: [[f64; RQA_EMBED_DIM]; N] = [[0.0; RQA_EMBED_DIM]; N];
     for i in 0..m {
-        for d in 0..RQA_EMBED_DIM {
-            emb[i][d] = s[i + d];
-        }
+        emb[i].copy_from_slice(&s[i..i + RQA_EMBED_DIM]);
     }
 
     // RECURRENCE MATRIX OVER THE m EMBEDDED POINTS.

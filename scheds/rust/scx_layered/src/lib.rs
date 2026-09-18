@@ -2276,7 +2276,7 @@ mod tests {
             ascending: Vec<(usize, usize)>,
         }
 
-        let steps = vec![
+        let steps = [
             // Step 0: L0=8(N0), L1=8(N0), L2=16(N1).
             Step {
                 allocs: vec![
@@ -3123,11 +3123,11 @@ mod tests {
         let mut layers = vec![SdLayerState::new("L0", 4)];
 
         // Staircase up: 1 node at a time.
-        let staircase = vec![
-            vec![2, 0, 0, 0], // 1 LLC on N0
-            vec![2, 2, 0, 0], // + 1 on N1
-            vec![2, 2, 2, 0], // + 1 on N2
-            vec![2, 2, 2, 2], // + 1 on N3
+        let staircase = [
+            [2, 0, 0, 0], // 1 LLC on N0
+            [2, 2, 0, 0], // + 1 on N1
+            [2, 2, 2, 0], // + 1 on N2
+            [2, 2, 2, 2], // + 1 on N3
         ];
         for (i, unpinned) in staircase.iter().enumerate() {
             let allocs = vec![make_sd_alloc(&[0, 0, 0, 0], unpinned)];

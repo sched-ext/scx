@@ -672,12 +672,8 @@ mod tests {
         }
         assert_eq!(cards.len(), 32);
         let mut allowed = vec![false; 32];
-        for cpu in 0..8 {
-            allowed[cpu] = true;
-        }
-        for cpu in 16..24 {
-            allowed[cpu] = true;
-        }
+        allowed[..8].fill(true);
+        allowed[16..24].fill(true);
         let subset = filter_allowed(&cards, &allowed);
         assert_eq!(subset.len(), 16);
         for c in &subset {

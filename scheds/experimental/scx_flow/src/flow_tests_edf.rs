@@ -659,12 +659,8 @@ fn select_prefers_idle_then_prior() {
 #[test]
 fn lestat_pinned_subset_stays_in_mask() {
     let mut allowed = vec![false; 32];
-    for cpu in 0..8 {
-        allowed[cpu] = true;
-    }
-    for cpu in 16..24 {
-        allowed[cpu] = true;
-    }
+    allowed[..8].fill(true);
+    allowed[16..24].fill(true);
     assert_eq!(allowed.iter().filter(|v| **v).count(), 16);
     for sel in [0, 7, 16, 23, -1, 8, 24, 99] {
         let got = pick_target_cpu(sel, &allowed);
