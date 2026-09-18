@@ -29,11 +29,11 @@ typedef int pid_t;
 #endif /* __VMLINUX_H__ */
 
 /*
- * Arguments to cidland_arena_init(), which sizes everything indexed by cid:
+ * Arguments to eevdf_arena_init(), which sizes everything indexed by cid:
  * the width of the cid space, num_possible_cpus(), the number of packing and
  * capacity tiers, and the active asymmetric placement policies.
  */
-struct cidland_arena_args {
+struct eevdf_arena_args {
 	unsigned long long	nr_cpus;
 	unsigned long long	nr_place_tiers;
 	unsigned long long	nr_capacity_tiers;
@@ -44,11 +44,11 @@ struct cidland_arena_args {
 };
 
 /*
- * Arguments to cidland_set_cpu(): the capacity, its independent capacity and
+ * Arguments to eevdf_set_cpu(): the capacity, its independent capacity and
  * packing tiers, and the SMT-domain asymmetric-packing state of one CPU, in
  * cpu space.
  */
-struct cidland_cpu_args {
+struct eevdf_cpu_args {
 	unsigned long long	cpu;
 	unsigned long long	capacity;
 	unsigned long long	place_tier;
@@ -60,11 +60,11 @@ struct cidland_cpu_args {
 };
 
 /*
- * Arguments to cidland_get_cpu_priority(). There is no portable userspace ABI
+ * Arguments to eevdf_get_cpu_priority(). There is no portable userspace ABI
  * for SD_ASYM_PACKING or arch_asym_cpu_priority(), so keep this narrow query
  * until sched_ext provides one.
  */
-struct cidland_cpu_priority_args {
+struct eevdf_cpu_priority_args {
 	unsigned long long	cpu;
 	long long		priority;
 	unsigned long long	asym_packing;
