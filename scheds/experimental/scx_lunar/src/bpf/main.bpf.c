@@ -91,7 +91,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
     if (!dispatch_ctx)
       return -ENOMEM;
 
-    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_GREEDY;
+    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
   }
 
   return 0;
