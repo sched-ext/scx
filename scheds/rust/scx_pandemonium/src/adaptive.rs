@@ -515,9 +515,9 @@ pub fn monitor_loop(
 
         // AGGREGATE P99
         let mut agg = [0u64; HIST_BUCKETS];
-        for t in 0..3 {
+        for tier_hist in &delta_hist {
             for b in 0..HIST_BUCKETS {
-                agg[b] += delta_hist[t][b];
+                agg[b] += tier_hist[b];
             }
         }
         let p99_ns = tuning::compute_p99_from_histogram(&agg);
