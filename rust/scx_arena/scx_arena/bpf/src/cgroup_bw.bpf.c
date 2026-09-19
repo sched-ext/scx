@@ -1040,8 +1040,8 @@ long cbw_del_llc_ctx_with_id(u64 cgrp_id, int llc_id)
  *
  * Returns -EEXIST if a concurrent materialize of @cgrp published first.
  */
-static
-int __cbw_init_llcx_sleepable(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
+static __always_inline int
+__cbw_init_llcx_sleepable(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 {
 	u64 cgrp_id = cgroup_get_id(cgrp);
 	int i, ret;
@@ -1479,12 +1479,33 @@ void cbw_init_cgx(struct cgroup *cgrp, u64 cgx_raw,
  * Tear down a partially or fully built context after a failed build: recycle
  * its LLC contexts and itself onto the free lists and release the managed slot.
  */
-static
+static __always_inline
 void cbw_deinit_cgx(u64 cgx_raw, u64 cgrp_id)
 {
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	cbw_free_llc_ctx(cgrp_id);
+	cbw_free_cgx(cgx);
+	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+}
+
+/*
+ * Discard a context which has not been published yet. Its BTQs cannot contain
+ * tasks, so using the full teardown path would only add an unreachable queue
+ * drain to ops.cgroup_init() and exceed older kernels' BPF call-depth limit.
+ */
+static __always_inline void cbw_discard_new_cgx(scx_cgroup_ctx_t *cgx,
+						u64 cgrp_id)
+{
+	int i;
+
+	bpf_for(i, 0, TOPO_NR(LLC)) {
+		scx_cgroup_llc_ctx_t *llcx = cbw_get_llc_ctx_with_id(cgrp_id, i);
+
+		if (!llcx || cbw_del_llc_ctx_with_id(cgrp_id, i))
+			continue;
+		cbw_free_llcx(llcx);
+	}
 	cbw_free_cgx(cgx);
 	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 }
@@ -1606,7 +1627,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 			return 0;
 		}
 		cbw_err("Failed to init LLC contexts: %llu (%d)", cgrp_id, ret);
-		cbw_deinit_cgx((u64)cgx, cgrp_id);
+		cbw_discard_new_cgx(cgx, cgrp_id);
 		goto out_unreserve;
 	}
 
@@ -1619,7 +1640,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	entry.cgx = (u64)cgx;
 	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
 		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
-		cbw_deinit_cgx((u64)cgx, cgrp_id);
+		cbw_discard_new_cgx(cgx, cgrp_id);
 		ret = -ENOMEM;
 		goto out_unreserve;
 	}
