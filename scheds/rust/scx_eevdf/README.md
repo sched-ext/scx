@@ -1,10 +1,10 @@
-# scx_cidland
+# scx_eevdf
 
 This is a single user-defined scheduler used within [`sched_ext`](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about `sched_ext`](https://github.com/sched-ext/scx/tree/main).
 
 ## Overview
 
-`scx_cidland` is a port of the kernel's own EEVDF scheduler to `sched_ext`.
+`scx_eevdf` is a port of the kernel's own EEVDF scheduler to `sched_ext`.
 
 The placement and the fairness rules are `fair.c`'s: tasks are ordered by the
 virtual deadline `vd_i = ve_i + r_i / w_i`, measured against a per-runqueue
@@ -21,7 +21,7 @@ the edges are simply absent.
 
 ### cid form
 
-`scx_cidland` is a **cid-form** scheduler: instead of raw CPU numbers it
+`scx_eevdf` is a **cid-form** scheduler: instead of raw CPU numbers it
 addresses CPUs by their cid (topological CPU ID), an id from a dense space
 ordered by topology, so that the CPUs of a core, of an LLC and of a NUMA node
 always occupy **contiguous** ranges of that space.
@@ -168,7 +168,7 @@ be turned off on the command line to compare the two rules against each other.
    removal use trylocks and skip a busy queue, keeping idle scans from joining
    contended lock wait queues. Mandatory queue operations use an abort-safe
    test-and-set lock instead of an MCS queue whose timed-out waiter cannot
-   safely unlink itself. Cidland enables `SCX_OPS_TID_TO_TASK` and stores the
+   safely unlink itself. scx_eevdf enables `SCX_OPS_TID_TO_TASK` and stores the
    sched_ext tid assigned to each task. `scx_bpf_tid_to_task()` resolves that identity
    under the callbacks' implicit RCU protection even after an exiting task has
    left the PID map, so `SCX_OPS_ENQ_EXITING` remains enabled.
@@ -240,7 +240,7 @@ be turned off on the command line to compare the two rules against each other.
    before a thread with a busy sibling and stops at the LLC, as
    `select_idle_sibling()` does, leaving spreading across LLCs to load balance,
    where the cost of the migration is weighed. `--llc-extend` restores
-   cidland's wider node and system scan, which can keep work off a busy SMT
+   scx_eevdf's wider node and system scan, which can keep work off a busy SMT
    sibling when another LLC has a whole idle core, at the cost of weaker cache
    locality and more wakeup-path work. It is only observable on a machine with
    more than one LLC. A
@@ -318,7 +318,7 @@ be turned off on the command line to compare the two rules against each other.
    repeatedly paying even an affordable scan at a domain that rarely supplies
    work: each CPU and level combine the weighted success count with the call
    rate every 1024 attempts, then admit scans in proportion to that ratio.
-   Cidland keeps the same estimator and inverse-probability success weighting.
+   scx_eevdf keeps the same estimator and inverse-probability success weighting.
    `--no-newidle-cost` removes the idle-time budget and
    `--no-newidle-sampling` removes the success-rate sampling independently.
    On a 24-CPU SMT machine, sampling cuts saturated schbench's remote steals
@@ -384,7 +384,7 @@ be turned off on the command line to compare the two rules against each other.
    Four hogs in one cgroup over eight seconds, against `fair.c` on the same
    cgroups, in CPUs used:
 
-   | `cpu.max` | cidland | `fair.c` |
+   | `cpu.max` | scx_eevdf | `fair.c` |
    | --- | --- | --- |
    | `20000 100000` | 0.18 | 0.22 |
    | `50000 100000` | 0.50 | 0.54 |
@@ -392,7 +392,7 @@ be turned off on the command line to compare the two rules against each other.
    | `250000 100000` (8 hogs) | 2.46 | 2.60 |
    | `20000 20000` | 0.93 | 1.03 |
 
-   cidland stays under the limit where `fair.c` runs a little over it, and is
+   scx_eevdf stays under the limit where `fair.c` runs a little over it, and is
    up to about a tenth under at a small quota: what a cid holds and does not
    use is stranded until the sweep comes by for it, where `fair.c` gives it
    back as the last task leaves. `--disable-cgroups` turns off all group
@@ -417,13 +417,13 @@ be turned off on the command line to compare the two rules against each other.
 
    `/proc/schedstat` does not expose `SD_ASYM_PACKING` or
    `arch_asym_cpu_priority()`, and there is no other portable ABI for them.
-   Cidland retains a narrow BPF query for that independent policy until
+   scx_eevdf retains a narrow BPF query for that independent policy until
    sched_ext provides a stable query. This matters for x86 ITMT systems, where
    every CPU may export the same capacity while the kernel assigns cores
    distinct packing priorities. `--disable-asym-packing` disables this policy.
    Capacity tiers remain independent and continue to rank placement when
    `SD_ASYM_CPUCAPACITY` is in use. An idle previous CPU is retained.
-   Within its LLC, cidland tracks `has_idle_core` as fair.c does:
+   Within its LLC, scx_eevdf tracks `has_idle_core` as fair.c does:
    it looks for a fully idle core while that hint is set; when none is known,
    it tries an idle sibling of the task's previous CPU before the general idle
    CPU scan. `SD_ASYM_CPUCAPACITY` can move a
@@ -470,7 +470,7 @@ single task.
 
 ## What is missing
 
-What the kernel does here and `scx_cidland` does not, or does differently
+What the kernel does here and `scx_eevdf` does not, or does differently
 enough to name. None of it is a decision against the feature; it is the work
 that has not been done.
 
@@ -502,7 +502,7 @@ that has not been done.
    tasks with incompatible core cookies. `fair.c` can instead snapshot
    `zero_vruntime_fi` at the exact transition into forced idle and reschedule a
    locally lone task after half a slice. sched_ext exposes neither the
-   transition nor the forced-idle state to the BPF callback, so cidland resets
+   transition nor the forced-idle state to the BPF callback, so scx_eevdf resets
    the origin when the pack empties and relies on its ordinary request end for
    the next core-wide pick.
 
@@ -511,7 +511,7 @@ that has not been done.
  - **The idle scan gives up only when asked to.** `select_idle_cpu()` looks for
    an idle CPU under a budget, `SIS_UTIL`, that shrinks as the LLC fills, and
    past it the waking task is left to queue on the target `wake_affine()`
-   chose. cidland computes the same budget, from the same quadratic in the LLC's
+   chose. scx_eevdf computes the same budget, from the same quadratic in the LLC's
    average utilization, and honours it: the window it allows starts at the
    target and wraps inside the LLC, and a search that runs out of it ends there
    rather than carrying on into the node and the machine. `--no-sis-util`
@@ -562,13 +562,13 @@ that has not been done.
 
    `SD_PREFER_SIBLING` needs no separate switch in this model. `fair.c` uses
    `sibling_imbalance()` only from an idle destination to spread runnable tasks
-   over its child groups. Cidland's hierarchical new-idle path already searches
+   over its child groups. scx_eevdf's hierarchical new-idle path already searches
    the local child domain before its parents and pulls queued work, with the
    same cache-hotness backoff. Its periodic busy balancer must not apply that
    rule: `sibling_imbalance()` returns zero when the balancing CPU is not idle.
 
  - **Affinity changes.** The core affinity path immediately moves a queued or
-   running task when its current CPU is excluded; cidland's placement, EDQ
+   running task when its current CPU is excluded; scx_eevdf's placement, EDQ
    detach and active-balance handoff all read or revalidate the live mask.
    `ops.set_cmask()` handles the state the core cannot see: when a sleeping
    delayed-dequeue task can no longer return to the pack it blocked in, its
@@ -592,6 +592,45 @@ that has not been done.
  - **EAS.** No energy model and no `find_energy_efficient_cpu()`. On a machine
    with an energy model the kernel picks the CPU that costs the least energy
    for the work; this picks by capacity and idleness.
+
+## Source layout
+
+The BPF side is split by component. A `*.bpf.h` holds what the rest of the
+scheduler needs from that component inline, on the switch and wakeup paths; the
+`*.bpf.c` beside it holds what only that component and its own callbacks reach.
+
+The components build as a single translation unit: `main.bpf.c` includes the
+component sources, the way `kernel/sched/build_policy.c` includes `fair.c` and
+the rest, so every function stays `static` and the compiler inlines across the
+whole scheduler as it would in one file. Real build units would make each
+callback a global BPF function - a call the verifier cannot inline, with five
+arguments at most, a scalar return and `__arg_trusted` or `__arg_arena` on every
+pointer - and that extra call per callback costs about 1% on the paths that
+cross one on every wakeup: built as separate objects, `perf bench sched
+messaging -p -g 2` is slower in 13 of 18 paired iterations (median +1.4%) and a
+schbench light request p50 pinned to the P-core threads in 5 of 6 (median
++1.1%), while the rows that do not pay a callback per wakeup - pinned rps,
+`--cpu`, `--msg`, `--sock` and the power rows - stay flat. The top of each `.c`
+says what that component implements and how it works.
+
+| File | What is in it |
+|------|---------------|
+| `eevdf.bpf.h` | the types, the globals, the cid space and the two clocks |
+| `main.bpf.c` | the options, `ops.enqueue()`, `ops.dispatch()`, `ops.init()` and the ops tables |
+| `task.bpf.[ch]` | EEVDF itself: weights, vruntimes, deadlines, placement, and the task callbacks |
+| `queue.bpf.[ch]` | the per-cid runnable queue, an EDQ per cid |
+| `idle.bpf.[ch]` | the idle bitmap, and where a task goes when it wakes |
+| `load.bpf.[ch]` | utilization, load, and the capacity a cid actually delivers |
+| `preempt.bpf.[ch]` | the pick, the protection it gives, the hrtick and `ops.yield()` |
+| `balance.bpf.[ch]` | periodic and active balance, and `ops.tick()` |
+| `newidle.bpf.[ch]` | the pull a cid runs when it has nothing left to run |
+| `cgroup.bpf.[ch]` | group scheduling: `cpu.weight`, `cpu.idle` and `cpu.max` |
+| `cpu.bpf.c` | the machine: the arena, the tables, the cid topology and the `SEC("syscall")` programs |
+| `intf.h` | what user space and the BPF side agree on |
+
+The components are included in the order they use each other, so none of them
+needs a forward declaration of another, and each callback lives in the
+component it belongs to rather than in `main.bpf.c`.
 
 ## Requirements
 
