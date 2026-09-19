@@ -37,6 +37,23 @@ members = [
 ]
 resolver = "3"
 
+[workspace.lints.rustdoc]
+bare_urls = "allow"
+
+[workspace.lints.clippy]
+arc_with_non_send_sync = "allow"
+collapsible_if = "allow"
+deref_addrof = "allow"
+manual_range_contains = "allow"
+needless_range_loop = "allow"
+non_canonical_partial_ord_impl = "allow"
+not_unsafe_ptr_arg_deref = "allow"
+tabs_in_doc_comments = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+write_literal = "allow"
+
+
 [profile.release]
 lto = "thin"
 

@@ -23,3 +23,6 @@ scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.4.1
 
 [features]
 enable_backtrace = []
+
+[lints]
+workspace = true

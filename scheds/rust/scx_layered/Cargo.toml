@@ -49,3 +49,6 @@ enable_backtrace = []
 
 [package.metadata.appimage]
 auto_link = true
+
+[lints]
+workspace = true
