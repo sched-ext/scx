@@ -1,4 +1,5 @@
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <lib/sdt_task.h>
 
 #include <lib/btree.h>
@@ -528,9 +529,11 @@ __weak int scx_selftest_btree_add_remove_circular_reverse(btree_t __arg_arena *b
 
 #define SCX_BTREE_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_btree_ ## suffix, btree)
 
-__weak
-int scx_selftest_btree(void)
+SEC("syscall")
+int arena_selftest_btree(void)
 {
+	arena_subprog_init();
+
 	btree_t __arg_arena *btree;
 
 	btree = bt_create();

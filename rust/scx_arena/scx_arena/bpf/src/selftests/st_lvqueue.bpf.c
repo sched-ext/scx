@@ -1,4 +1,5 @@
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <lib/sdt_task.h>
 
 #include <lib/cpumask.h>
@@ -135,9 +136,11 @@ int scx_selftest_lvqueue_steal_many(lv_queue_t *lvq)
 
 #define SCX_LVQUEUE_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_lvqueue_ ## suffix, lvq)
 
-__weak
-int scx_selftest_lvqueue(void)
+SEC("syscall")
+int arena_selftest_lvqueue(void)
 {
+	arena_subprog_init();
+
 	lv_queue_t *lvq = lvq_create();
 
 	if (!lvq)

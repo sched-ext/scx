@@ -8,49 +8,4 @@
 
 #include "selftest.h"
 
-/*
- * Test selector for arena_selftest. SCX_SELFTEST_ID_ALL (0) runs all tests;
- * any other value from enum scx_selftest_id runs only the matching test.
- * Set from userspace via the bss map before invoking arena_selftest.
- */
-u32 selftest_run_id;
-
-#define SELFTEST_RUN(id, fn, name)					\
-	if (!selftest_run_id || selftest_run_id == (id)) {		\
-		ret = fn();						\
-		if (ret) {						\
-			bpf_printk(name " failed with %d", ret);	\
-			return ret;					\
-		}							\
-	}
-
-SEC("syscall")
-int arena_selftest(void)
-{
-	int ret;
-
-	SELFTEST_RUN(SCX_SELFTEST_ID_ATQ,
-		     scx_selftest_atq,
-		     "scx_selftest_atq");
-	SELFTEST_RUN(SCX_SELFTEST_ID_BTREE,
-		     scx_selftest_btree,
-		     "scx_selftest_btree");
-	SELFTEST_RUN(SCX_SELFTEST_ID_LVQUEUE,
-		     scx_selftest_lvqueue,
-		     "scx_selftest_lvqueue");
-	SELFTEST_RUN(SCX_SELFTEST_ID_MINHEAP,
-		     scx_selftest_minheap,
-		     "scx_selftest_minheap");
-	SELFTEST_RUN(SCX_SELFTEST_ID_RBTREE,
-		     scx_selftest_rbtree,
-		     "scx_selftest_rbtree");
-	SELFTEST_RUN(SCX_SELFTEST_ID_TOPOLOGY,
-		     scx_selftest_topology,
-		     "scx_selftest_topology");
-
-	bpf_printk("Selftests successful.");
-
-	return 0;
-}
-
 char _license[] SEC("license") = "GPL";
