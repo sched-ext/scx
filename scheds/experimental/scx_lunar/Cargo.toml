@@ -1,6 +1,6 @@
 [package]
 name = "scx_lunar"
-version = "1.3.0"
+version = "1.3.1"
 authors = ["Timon Stipkovits <timon2201@gmail.com>"]
 edition = "2024"
 rust-version = "1.91"

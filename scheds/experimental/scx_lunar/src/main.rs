@@ -33,25 +33,6 @@ use scx_utils::uei_report;
 
 const SCHEDULER_NAME: &str = "scx_lunar";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum SchedulerMode {
-    /// One DSQ set per last-level cache domain.
-    #[value(name = "dsqs_per_llc")]
-    DsqsPerLLC,
-    /// One DSQ set per CPU, with work stealing.
-    #[value(name = "dsqs_per_cpu")]
-    DsqsPerCpu,
-}
-
-impl SchedulerMode {
-    fn as_u32(self) -> u32 {
-        match self {
-            SchedulerMode::DsqsPerLLC => 0,
-            SchedulerMode::DsqsPerCpu => 1,
-        }
-    }
-}
-
 #[derive(Debug, Parser)]
 #[command(
     name = "scx_lunar",
@@ -60,10 +41,6 @@ impl SchedulerMode {
     about = "Multi-queue latency-focused sched_ext scheduler."
 )]
 struct Opts {
-    /// Dispatch queue layout.
-    #[clap(short = 'm', long, value_enum, default_value = "dsqs_per_cpu")]
-    mode: SchedulerMode,
-
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -103,14 +80,8 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.lunar_ops_mut().exit_dump_len = opts.exit_dump_len;
 
-        // Patch scheduler configuration into .rodata before load.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
-        rodata.schedulerMode = opts.mode.as_u32();
 
-        // CPU -> LLC mapping from scx_utils::Topology (replaces the sysfs
-        // walker): kernel L3 cache ids are not guaranteed dense, so compress
-        // them into 0..nr_llcs, which is what the BPF side's DSQ id layout
-        // (bases spaced 64 apart, bpf_for over 0..nr_llcs) expects.
         let topo = Topology::new().context("failed to detect CPU topology")?;
 
         let max_cpus = rodata.cpu_to_llc.len();
@@ -146,10 +117,9 @@ impl<'a> Scheduler<'a> {
         }
 
         info!(
-            "topology: {} cpus, {} llc domain(s), mode: {:?}",
+            "topology: {} cpus, {} llc domain(s)",
             topo.all_cpus.len(),
-            nr_llcs,
-            opts.mode
+            nr_llcs
         );
         for (cpu_id, cpu) in topo.all_cpus.iter() {
             log::debug!("  cpu{} -> llc{}", cpu_id, llc_dense[&cpu.llc_id]);

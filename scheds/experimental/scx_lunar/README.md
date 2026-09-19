@@ -29,10 +29,9 @@ The Tier are calculated as Percent of the 1024 max duty value.
 
 It has 5 tiers. Which are: 
 
-1. LC with duty <= 5%
-2. INTERACTIVE with duty <= 20%
-3. NORMAL with duty <= 40%
-4. BATCH with duty <= 90%
+1. LC with duty <= 13%
+2. INTERACTIVE with duty <= 25%
+3. NORMAL with duty <= 50%
 5. GREEDY with duty <= 100%
 
 All new tasks get thrown into greedy. And start with duty of 1023.
@@ -42,31 +41,10 @@ Each tier also has a slice time of 500us.
 
 When a lower tier task is running at the moment a higher tier gets enqueued then the current task gets kicked and preempted.
 
-## MODES
-
-This scheduler also has 2 modes.
-
-`--mode dsqs_per_llc` 
-
-
-Where the above explained are available for each LLC. So more than one core pull from the same DSQs.
-
-and:
-
-`--mode dsqs_per_cpu`
-
-DEFAULT MODE!
-Where the above explained dsqs are available for each cpu core. So each core has its own queues.
-This mode is used automatically when starting without start parameters.
-
 ## Dispatch
 
-For mode `dsqs_per_cpu`
 Each core first tries to run its own queued tasks, then from another core from the same llc and then from core of other llcs.
 From which core the core startes stealing is randomized for better load distribution.
-
-for mode `dsqs_per_llc`
-Each core tries to first to run from the dsqs of the llc from the core. Then it tries to steal from other llcs.
 
 ## Testing
 
