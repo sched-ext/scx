@@ -485,7 +485,7 @@ const ARENA_SEC: &str = ".addr_space.1";
 const SHT_SYMTAB: u32 = 2;
 const STT_NOTYPE: u8 = 0;
 const STT_OBJECT: u8 = 1;
-const BTF_MAGIC: u16 = 0xeB9F;
+const BTF_MAGIC: u16 = 0xeb9f;
 const BTF_KIND_VAR: u32 = 14;
 const BTF_KIND_DATASEC: u32 = 15;
 

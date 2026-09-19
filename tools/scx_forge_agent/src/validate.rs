@@ -1400,7 +1400,7 @@ mod tests {
     fn pstdev_matches_population() {
         // pstdev([1,2,3,4,5]) == sqrt(2) == 1.4142...
         let s = pstdev(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-        assert!((s - 1.414_213_562).abs() < 1e-6);
+        assert!((s - std::f64::consts::SQRT_2).abs() < 1e-6);
         assert_eq!(pstdev(&[42.0]), 0.0);
     }
 
