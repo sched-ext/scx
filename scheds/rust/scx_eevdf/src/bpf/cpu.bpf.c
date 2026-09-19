@@ -219,6 +219,14 @@ static void init_topology(void)
 static char __arena *arena_base;
 static u64 arena_off, arena_size;
 
+/*
+ * One 64-byte alignment gap per carve below, the slack eevdf_arena_init()
+ * adds to the sum of the tables. Keep in step with the arena_carve() calls
+ * there: a short budget makes the last carve fail and the init return
+ * -ENOMEM.
+ */
+#define ARENA_CARVES 16
+
 static void __arena *arena_carve(u64 bytes, u64 align)
 {
 	u64 off = (arena_off + align - 1) & ~(align - 1);
@@ -257,7 +265,7 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
 		nr * (sizeof(struct core_sched_state) + sizeof(struct newidle_stats) +
 		      sizeof(u64) +
-		      6 * sizeof(u32)) + 13 * 64;
+		      6 * sizeof(u32)) + ARENA_CARVES * 64;
 	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
 	arena_base = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
