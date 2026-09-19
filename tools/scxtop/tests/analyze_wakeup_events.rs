@@ -116,8 +116,7 @@ fn analyze_wakeup_events() {
         let event = &track_events[i];
         if matches!(event.event_type, TrackEventType::Instant) {
             // Look for SliceBegin events shortly after this instant
-            for j in (i + 1)..std::cmp::min(i + 10, track_events.len()) {
-                let next = &track_events[j];
+            for next in &track_events[(i + 1)..std::cmp::min(i + 10, track_events.len())] {
                 if matches!(next.event_type, TrackEventType::SliceBegin) {
                     let latency_ns = next.timestamp_ns.saturating_sub(event.timestamp_ns);
                     if latency_ns < 100_000 {

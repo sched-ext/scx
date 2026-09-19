@@ -1644,14 +1644,14 @@ fn seed_online_dense_short_holds_4_plus_4() {
     let freqs = vec![4000000; 8];
     let (t, r) = seed_groups_online(&caps, &freqs, &online, 16);
     assert_eq!(r, 1);
-    for cpu in 0..4 {
-        assert_eq!(t[cpu], GROUP_LIGHT);
+    for &group in &t[..4] {
+        assert_eq!(group, GROUP_LIGHT);
     }
-    for cpu in 4..8 {
-        assert_eq!(t[cpu], GROUP_HOG);
+    for &group in &t[4..8] {
+        assert_eq!(group, GROUP_HOG);
     }
-    for cpu in 8..16 {
-        assert_eq!(t[cpu], GROUP_LIGHT);
+    for &group in &t[8..16] {
+        assert_eq!(group, GROUP_LIGHT);
     }
 }
 
