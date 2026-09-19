@@ -724,7 +724,7 @@ mod tests {
             if file_name_str.contains(&clang_info.kernel_target().unwrap()) {
                 found = true;
             }
-            if !pattern.find(&file_name_str).is_some() {
+            if pattern.find(&file_name_str).is_none() {
                 continue;
             }
 
