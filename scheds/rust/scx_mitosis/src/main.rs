@@ -1847,6 +1847,7 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{CpuAssignment, Cpumask, Opts, validate_subcell_assignments};
     use clap::Parser;
