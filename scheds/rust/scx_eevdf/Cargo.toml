@@ -30,7 +30,9 @@ scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.3" }
 [features]
 enable_backtrace = []
 
-# Verifying this scheduler requires a kernel with cid-form sched_ext support
-# (struct sched_ext_ops_cid), which the CI kernels don't provide yet.
+# The checked-in vmlinux.h declares the cpuctl_* members of struct
+# sched_ext_ops_cid, which no released kernel provides yet. The loader nulls
+# the ones the running kernel lacks, veristat cannot, so it reports the six
+# cpuctl_* programs as failures on every kernel the CI covers.
 [package.metadata.veristat]
 disable = true
