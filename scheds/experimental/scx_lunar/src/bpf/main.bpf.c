@@ -5,7 +5,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-#include <include/scx/common.bpf.h>
+#include <scx/common.bpf.h>
 #include <bpf/bpf_helpers.h>
 #include "defines.h"
 #include "helpers.h"
