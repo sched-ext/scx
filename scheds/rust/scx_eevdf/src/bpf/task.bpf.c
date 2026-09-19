@@ -2,9 +2,78 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * The life of a task under EEVDF: the switch to and from it, the sleep
- * that leaves it owed, and the changes of weight, affinity or class that
- * move what it is queued at. The accounting itself is in task.bpf.h.
+ * The life of a task under EEVDF: the callbacks that drive the accounting
+ * in task.bpf.h, and what each of them owes the rest of the scheduler.
+ *
+ *
+ * The model
+ * ---------
+ *
+ * Each cid has a pack, which is its runqueue: the entities queued there
+ * plus the one running, and a reference V that is their weighted-average
+ * virtual time. A task is charged service in virtual time at its own
+ * weight, v += delta * NICE_0 / w, and is eligible while v <= V; its
+ * deadline is v + r/w, and the pick is the earliest deadline among the
+ * eligible. What a task carries across a sleep or a migration is its lag,
+ * V - v, not v itself, because two packs drift apart and a vruntime from
+ * one means nothing in the other.
+ *
+ *
+ * The callbacks
+ * -------------
+ *
+ *   ops.enable()       the task joins the scheduler. Its arena context is
+ *                      attached and its vruntime starts at the reference
+ *                      of the pack it is on rather than at zero, which an
+ *                      old pack may be seconds past.
+ *        |
+ *        v
+ *   ops.running()      it gets a CPU:
+ *                        - placed here if a direct dispatch left that to
+ *                          us, which is what keeps a wakeup onto an empty
+ *                          pack off the waker's CPU
+ *                        - if it comes from another cid, its lag is
+ *                          carried: v = V(new pack) - lag, place_entity()
+ *                        - it joins this pack's reference at the weight
+ *                          its cgroup hierarchy gives it here
+ *                        - the cid publishes what it is running: deadline,
+ *                          vruntime, weight, request, protected endpoint,
+ *                          and when it was last charged, so that a remote
+ *                          wakeup can decide whether to preempt without
+ *                          looking anything up
+ *                        - the hrtick is armed and the cpufreq hint given
+ *        |
+ *        v
+ *   ops.stopping()     it gives the CPU up: the service it took since
+ *                      ops.running() is charged to its vruntime, folded
+ *                      into the pack's reference, and charged to its
+ *                      cgroup's bandwidth; the published view is cleared
+ *                      so nothing projects service onto a cid that is
+ *                      running something else. If a higher class took the
+ *                      CPU, this is also where a better cid is asked for.
+ *        |
+ *        v
+ *   ops.quiescent()    it goes to sleep: its lag against the pack is
+ *                      measured and kept, it leaves the pack and its
+ *                      group's load, and if it blocked while over-served
+ *                      what it owes is remembered with the pack it owes it
+ *                      to - DELAY_DEQUEUE and DELAY_ZERO, so the pack's
+ *                      progress pays the debt off while it sleeps instead
+ *                      of the task waking up owing all of it.
+ *
+ * Between those: set_weight() and cpuctl_move() change what the task
+ * weighs, and reweight_eevdf() is what carries its lag and its deadline
+ * across that change; set_cmask() settles a delayed-dequeue debt when the
+ * pack it owes can no longer be reached, the one piece of state the core
+ * affinity path cannot fix for us. init_task() and exit_task() are the
+ * life of the arena context itself.
+ *
+ * core_sched_before() answers the one question core scheduling asks: of
+ * two tasks picked independently by the two runqueues of one core, which
+ * has had less of its share. Their vruntimes are not comparable across
+ * packs, so each is measured from an origin snapshotted when its pack was
+ * last empty - sched_ext is not told when forced idle begins, so this is
+ * an approximation of fair.c's zero_vruntime_fi.
  */
 #include "eevdf.bpf.h"
 #include "balance.bpf.h"

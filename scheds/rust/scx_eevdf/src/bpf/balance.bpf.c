@@ -2,11 +2,120 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Load balancing from the busy side: the periodic pass each domain runs
- * from ops.tick(), on time-averaged and capacity-normalized loads, and the
- * asymmetric cases fair.c handles with active balance, where an idle cid
- * asks a busy one for the task it is running. ops.tick() is here, since
- * balancing is nearly all it does.
+ * The balancing that does not wait for a cid to run dry, the counterpart of
+ * the idle pull in newidle.bpf.c. Nothing goes idle in either case here, so
+ * nothing else notices. Two parts, both modelled on fair.c:
+ *
+ *   - the periodic pass, what sched_balance_domains() does when the tick
+ *     calls into the balancer: work is queued unevenly while every CPU is
+ *     busy, so walk the domains on averaged loads, find the group above the
+ *     average, and move queued tasks off its busiest cid;
+ *
+ *   - the active balance, for the task a queue walk cannot reach: the one
+ *     currently *running* on the source. Asymmetric packing, SMT and misfit
+ *     balancing are all about that task - it is on the wrong CPU and it is
+ *     in no queue to be pulled out of. fair.c stops the source with a
+ *     stopper thread; here an idle cid kicks the source, which ends the
+ *     task's slice itself and lets it be enqueued again, landing on the
+ *     destination by the ordinary placement rules.
+ *
+ *
+ * Periodic balance
+ * ----------------
+ *
+ * It runs from ops.tick(), on averaged loads, and one cid owns each pass
+ * the way should_we_balance() elects one CPU per group - here the group
+ * leader, since an idle cid cannot be running the tick at all:
+ *
+ *   ops.tick()
+ *     |
+ *     +- system domain: all cids,  its groups are the nodes
+ *     +- node domain:   the node,  its groups are the LLCs
+ *     +- LLC domain:    the LLC,   its groups are the cores
+ *     |     widest first, each at nr * busy_balance_factor ms, dephased by
+ *     |     a tick as get_sd_balance_interval() does, and only one pass
+ *     |     per tick actually reserves anything
+ *     v
+ *   avg_load over the domain, each cid's load divided by the capacity it
+ *   really delivers (load.bpf.c), and the local group's room against it
+ *     |
+ *     v
+ *   local group below the average, busiest group above it by more than
+ *   imbalance_pct, something queued in it?   -- no --> back off, x2 up to
+ *     |                                                2 * the interval
+ *     v
+ *   its busiest queued cid, then a bounded prefix of that cid's EDQ in
+ *   deadline order, for a task that is cold, allowed on the destination,
+ *   and no heavier than the imbalance asks to move - detach_tasks(), with
+ *   the same relaxation of both bounds after a pass that found an
+ *   imbalance but could move nothing
+ *     |
+ *     v
+ *   the destination keeps the selection and the load left to move, and
+ *   drains it from its own ops.dispatch(), one task at a time and only
+ *   while the task it would take wins its own pick. attach_task() does not
+ *   run what it pulls either: it enqueues and lets wakeup_preempt() decide.
+ *
+ *
+ * Active balance
+ * --------------
+ *
+ * The periodic pass detaches tasks that are *waiting* in a cid's EDQ. It
+ * has no answer for a task that is on the wrong CPU while it runs: nothing
+ * of it is in any queue to be walked. That is precisely what asymmetric
+ * packing (a task on a lower-priority cid while a higher-priority one is
+ * idle), SMT (a task on a busy core while a whole core is free) and misfit
+ * (a task too big for the capacity it is on) are about.
+ *
+ * fair.c stops the source CPU with a stopper thread and migrates the task
+ * from under it. There is no stopper here, so the two sides hand it over
+ * across their own callbacks instead:
+ *
+ *     idle destination                        busy source
+ *          |  reserve its own interval             |
+ *          |  (so two sources cannot kick          |
+ *          |   the same idle cid)                  |
+ *          |------------- kick ------------------->|  ops.dispatch()
+ *          |                                       |  consumes the request
+ *          |                                       |  and revalidates it:
+ *          |                                       |  is the destination
+ *          |                                       |  still idle, is this
+ *          |                                       |  still the task that
+ *          |                                       |  should move (packing
+ *          |                                       |  priority, a busy SMT
+ *          |                                       |  sibling, capacity)
+ *          |                                       |
+ *          |<--- ops.stopping() charges it --------|  its slice ends
+ *          |     ops.enqueue() places it here      |
+ *          v                                       v
+ *
+ * so the task is placed and queued on the destination by the ordinary
+ * rules, not forced onto it: the source never migrates it, it only stops
+ * running it.
+ *
+ * The reservation is what keeps two balances from colliding.
+ * active_balance_reserve() claims the destination's own interval with a CAS
+ * on active_balance_pending, and the requester writes itself into the
+ * source's active_balance_cid, so two idle cids cannot aim at the same
+ * source and two sources cannot aim at the same idle cid;
+ * active_balance_target() is where the source reads that back, revalidates
+ * it and drops what went stale. The intervals, the backoff and the failure
+ * counts live on the destination, where fair.c keeps them for the CPU
+ * running the balance.
+ *
+ * Either side can start it, and the destination always runs it: an idle cid
+ * looks for a source from its own ops.dispatch() once the newidle pull has
+ * found nothing queued worth taking (request_active_balance(), which scans
+ * for the source whose running task has the most to gain - packing before
+ * SMT before capacity, then place tier, nr_running and utilization), and a
+ * source tick that sees its own current task belongs on an idle peer
+ * reserves that peer and kicks it awake, the way nohz_balancer_kick() asks
+ * an idle CPU to run the balance.
+ *
+ * capacity_pressure_target() is the same handoff for a different reason: a
+ * task that a higher scheduling class keeps displacing on a constrained
+ * cid is given a less loaded one to be requeued on, paced at the LLC
+ * balance interval and bounded by the same imbalance and hotness rules.
  */
 #include "eevdf.bpf.h"
 #include "balance.bpf.h"

@@ -2,13 +2,94 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * The machine: the arena the tables are carved out of, what user space
- * reports about each CPU, and the topology of the cid space those tables
- * are indexed by. All of it runs once, before the scheduler is attached or
- * from ops.init().
+ * The machine: the arena every table lives in, the per-CPU facts user
+ * space hands in because a BPF program cannot read them itself, and the
+ * cid space those tables are indexed by, which ops.init() derives from the
+ * kernel. User space reports per CPU and never deals in cids.
  *
- * scx/percpu.bpf.h is included here and nowhere else: only the priority
- * query below reads a per-CPU kernel variable.
+ *
+ * What a cid is
+ * -------------
+ *
+ * A cid is a topological CPU id. The kernel's cid form numbers the CPUs so
+ * that the threads of a core, the cores of an LLC and the LLCs of a node
+ * occupy contiguous ranges:
+ *
+ *   cid    0   1   2   3   4   5   6   7   8   9  10  11
+ *        +---+---+---+---+---+---+---+---+---+---+---+---+
+ *        |core 0 |core 1 |core 2 |core 3 |core 4 |core 5 |
+ *        +-------+-------+-------+-------+-------+-------+
+ *        |            LLC 0              |     LLC 1     |
+ *        +-------------------------------+---------------+
+ *        |                    node 0                     |
+ *
+ * so a sched-domain becomes a (base, nr) slice and every question about
+ * topology becomes a range of a bitmap:
+ *
+ *   "is my core fully idle?"   -> are the bits of [core_base, core_nr) set
+ *   "an idle cid in my LLC?"   -> scan the words of [llc_base, llc_nr)
+ *   "anything queued nearby?"  -> the same, over the queued bitmap
+ *
+ * That is the whole reason this scheduler is in cid form: the answers cost
+ * a load and a mask instead of a cpumask allocation and a walk of the
+ * kernel's topology masks, on a path that runs on every wakeup.
+ *
+ *
+ * The arena
+ * ---------
+ *
+ * Everything sized by the machine is carved out of one BPF arena
+ * allocation, so nothing here has a compile-time bound on CPUs, cores,
+ * LLCs, nodes or tiers:
+ *
+ *   topos[]              struct cid_topo per cid: the (base, nr) of its
+ *                        core, LLC and node, its capacity, its packing and
+ *                        capacity tier, and the spans of the kernel
+ *                        domains that govern fork and wakeup placement
+ *   cctxs[]              struct cid_ctx per cid: its pack (the EEVDF
+ *                        runqueue), its averages, and all the balance and
+ *                        idle-pull state
+ *   core_sched_states[]  the virtual-time origin core scheduling compares
+ *   newidle_stats[]      the success and call rates the idle pull samples
+ *   idle_cids            one bit per idle cid
+ *   idle_core_llcs       one bit per LLC known to have a fully idle core
+ *   queued_cids          one bit per cid with something in its EDQ
+ *   place/capacity tiers one mask per tier, for the ordered scans
+ *   cpu_*_in[]           what user space reported, in cpu space
+ *
+ * arena_carve() is a bump allocator over that one block: the tables are
+ * laid out once, 64-byte aligned, and never move. Task contexts come from
+ * a separate pool allocator over the same arena, see ops.init_task().
+ *
+ *
+ * What runs when
+ * --------------
+ *
+ * Three SEC("syscall") programs run from user space after load and before
+ * attach, because the cid space exists before the scheduler does and
+ * because none of this is available to a BPF program at all:
+ *
+ *   eevdf_get_cpu_priority()  per CPU: whether its domains carry
+ *                             SD_ASYM_PACKING, whether that reaches the SMT
+ *                             domain, and arch_asym_cpu_priority()
+ *   eevdf_arena_init()        size the arena from the number of CPUs and
+ *                             the tier counts, allocate it, carve the
+ *                             tables, start the task context allocator
+ *   eevdf_set_cpu()           per CPU: capacity, packing tier, capacity
+ *                             tier, and the widths of its SD_BALANCE_FORK,
+ *                             SD_WAKE_AFFINE and SD_ASYM_CPUCAPACITY_FULL
+ *                             domains
+ *
+ * ops.init() then calls init_topology(), which fills topos[] from
+ * scx_bpf_cid_topo() and the arrays above. It walks the cid space
+ * backwards on purpose: scx_bpf_cid_topo() reports the base cid of each
+ * domain, so seeing the highest cid of a range first is what gives the
+ * length of the range without a second pass. The kernel domain widths are
+ * translated into the smallest topology range that contains them, since
+ * this scheduler only models core, LLC, node and machine; a cluster domain
+ * is rounded up to its LLC.
+ *
+ * Nothing in this file runs again while the scheduler is attached.
  */
 #include "eevdf.bpf.h"
 #include <scx/percpu.bpf.h>

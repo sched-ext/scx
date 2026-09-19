@@ -2,10 +2,88 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Two answers about the task running on a cid: whether a task that has
- * just woken is worth interrupting it for, EEVDF's wakeup preemption, and
- * when it should be asked again, which is what the hrtick is for. The yield
- * that forfeits the rest of a request is here as well.
+ * The pick, from the two sides that are not ops.dispatch() itself:
+ * whether a task that has just woken is worth interrupting the running one
+ * for, and when the running one should be asked again.
+ *
+ *
+ * Wakeup preemption
+ * -----------------
+ *
+ * wakeup_preempt_fair() asks what the runqueue would pick now and
+ * reschedules when the answer is the task that just woke. Everything it
+ * compares has to be available here without a lookup, so each cid
+ * publishes what it is running - deadline, vruntime, weight, request, the
+ * protected endpoint and when it was last charged - and this reads that,
+ * projecting the service taken since the last charge onto both sides of
+ * every comparison, which is the update_curr() fair.c does first:
+ *
+ *   curr is SCHED_IDLE and the wakee is not     -> preempt, and drop the
+ *                                                  protection with it
+ *   the wakee is SCHED_IDLE or SCHED_BATCH      -> queue it: those give up
+ *                                                  latency by definition
+ *   the wakee is over-served, v > V             -> queue it: pick_eevdf()
+ *                                                  only looks at the
+ *                                                  eligible part of the tree
+ *   PREEMPT_SHORT: the wakee asks for less      -> preempt
+ *   curr is owed service and still protected    -> queue it (RUN_TO_PARITY)
+ *   curr is owed service and its deadline is
+ *   not later than the wakee's                  -> queue it
+ *   the queue's first eligible task has an
+ *   earlier deadline than the wakee             -> queue it: the wakee is
+ *                                                  not the pick, and
+ *                                                  preempting for it would
+ *                                                  trade curr for the head
+ *                                                  a slice early, once per
+ *                                                  wakeup
+ *   otherwise                                   -> preempt
+ *
+ * A wakee that loses still clips curr's protection to one shortest
+ * competing request past where curr has reached, update_protect_slice(),
+ * and arms the hrtick.
+ *
+ *
+ * The hrtick
+ * ----------
+ *
+ * Without one, a request that ends between two ticks holds the CPU until
+ * the next tick, and the task that woke behind it waits that long:
+ *
+ *   picked                      deadline            next tick
+ *     |                            |                    |
+ *     v                            v                    v
+ *     [------ protected ----------][- over its share --].
+ *                                  ^                    ^
+ *                                  fair.c reschedules   this scheduler
+ *                                  here, from HRTICK    would wait to here
+ *
+ * Under a saturated schbench that was ~900 us of wakeup latency at the
+ * median against a 700 us request. sched_ext has no hrtick, so this is a
+ * bpf_timer per cid, armed for the deadline of whatever is running, and
+ * only when that task has company - the same condition
+ * hrtick_start_fair() applies. When it fires it kicks the CPU, and the
+ * dispatch that follows asks keep_running(), which is the pick.
+ *
+ * Two details are forced by where this runs. Every callback runs with
+ * interrupts off, so bpf_timer_start() cannot touch the hrtimer directly:
+ * it queues an irq_work, which is a self-IPI per arming, which is why an
+ * already-armed timer that fires early enough is left alone rather than
+ * moved - under perf bench sched messaging that was 1.5 million armings
+ * for 4000 that ever fired. And the timer is not pinned: it queues on
+ * whichever CPU arms it, so a waker arming it for another cid does not
+ * wake an idle CPU for a deadline that is not its own.
+ *
+ *
+ * yield
+ * -----
+ *
+ * ops.yield() is here too. It charges the yielder the rest of the request
+ * it was in the middle of, moving its vruntime to its deadline and
+ * reissuing one from there, which is yield_task_fair(): a task that yields
+ * in a loop falls behind at exactly the rate its forfeits say. Whether the
+ * CPU changes hands is then the pick's decision, not the yield's, so the
+ * slice is only ended when the dispatch that follows would not hand the
+ * CPU straight back.
  */
 #include "eevdf.bpf.h"
 #include "preempt.bpf.h"
