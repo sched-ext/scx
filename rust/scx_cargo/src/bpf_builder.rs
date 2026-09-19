@@ -716,11 +716,13 @@ mod tests {
         let mut found = false;
 
         let pattern = Regex::new(r"arch\/.*\/vmlinux-.*.h").unwrap();
+        let ver_re = Regex::new(r"^([1-9][0-9]*\.[0-9]+[a-z0-9-]*)$").unwrap();
+        let sha1_re = Regex::new(r"^[0-9a-z]{12}$").unwrap();
 
         for entry in ar.entries().unwrap() {
             let entry = entry.unwrap();
             let file_name = entry.header().path().unwrap();
-            let file_name_str = file_name.to_string_lossy().to_owned();
+            let file_name_str = file_name.to_string_lossy().into_owned();
             if file_name_str.contains(&clang_info.kernel_target().unwrap()) {
                 found = true;
             }
@@ -734,16 +736,8 @@ mod tests {
                 sscanf!(file_name_str, "arch/{String}/vmlinux-v{String}-g{String}.h").unwrap();
             println!("vmlinux.h: arch={:?} ver={:?} sha1={:?}", arch, ver, sha1,);
 
-            assert!(
-                regex::Regex::new(r"^([1-9][0-9]*\.[0-9]+[a-z0-9-]*)$")
-                    .unwrap()
-                    .is_match(&ver)
-            );
-            assert!(
-                regex::Regex::new(r"^[0-9a-z]{12}$")
-                    .unwrap()
-                    .is_match(&sha1)
-            );
+            assert!(ver_re.is_match(&ver));
+            assert!(sha1_re.is_match(&sha1));
         }
 
         assert!(found);
