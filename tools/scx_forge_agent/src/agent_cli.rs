@@ -95,7 +95,7 @@ impl StreamPrinter {
 
     /// End the current line if the last chunk did not already. Use after a
     /// whole-block event (claude/codex) so consecutive blocks don't run together;
-    /// also called once at the end via [`finish`].
+    /// also called once at the end via [`Self::finish`].
     fn newline(&mut self) {
         if self.enabled && self.started && !self.last_was_newline {
             println!();

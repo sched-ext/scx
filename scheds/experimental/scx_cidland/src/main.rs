@@ -721,12 +721,12 @@ fn tick_ns() -> u64 {
 /// sysctl_sched_base_slice is not the 700 us the kernel is compiled with.
 /// update_sysctl() scales that at boot, and again on hotplug, by a factor
 /// taken from the number of online CPUs:
-///
-///	unsigned int cpus = min_t(unsigned int, num_online_cpus(), 8);
-///	case SCHED_TUNABLESCALING_LOG:
-///		factor = 1 + ilog2(cpus);
-///	sysctl_sched_base_slice = factor * normalized_sysctl_sched_base_slice;
-///
+/// ```c
+/// unsigned int cpus = min_t(unsigned int, num_online_cpus(), 8);
+/// case SCHED_TUNABLESCALING_LOG:
+///     factor = 1 + ilog2(cpus);
+/// sysctl_sched_base_slice = factor * normalized_sysctl_sched_base_slice;
+/// ```
 /// so a machine with eight CPUs or more runs a 2.8 ms slice. This is the
 /// upstream rule with its default log scaling; a kernel whose distribution
 /// changed the normalized value or an administrator who tuned the sysctl

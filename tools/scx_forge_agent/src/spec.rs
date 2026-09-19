@@ -40,7 +40,7 @@ pub struct Scheduler {
     /// Cargo package name of the scheduler crate to build and run.
     pub package: String,
     /// cargo profile: "release" -> target/release, "dev" -> target/debug,
-    /// named -> target/<profile>.
+    /// named -> `target/<profile>`.
     #[serde(default = "default_profile")]
     pub profile: String,
     /// Time in seconds to let the scheduler settle after it reports "enabled".

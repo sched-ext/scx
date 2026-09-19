@@ -1028,7 +1028,7 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     /// Enumerate how many CPUs to take from each equivalence performance
-    /// domain, taking at most @max_nr_cpus[i] CPUs from the i-th one. See
+    /// domain, taking at most @max_nr_cpus\[i\] CPUs from the i-th one. See
     /// @EnergyModelOptimizer::nr_cpus_combinations.
     fn gen_nr_cpus_combinations(max_nr_cpus: &[usize]) -> Vec<Vec<usize>> {
         // The number of all the possible combinations. An equivalence
@@ -1147,7 +1147,7 @@ impl<'a> EnergyModelOptimizer<'a> {
             .collect()
     }
 
-    /// Build the performance domains and states taking @nr_cpus[i] CPUs from
+    /// Build the performance domains and states taking @nr_cpus\[i\] CPUs from
     /// the i-th equivalence performance domain at the performance state for
     /// @util. The CPUs are taken from the member performance domains in order,
     /// so the CPUs for a count of N are always a subset of the ones for N + 1.
@@ -1361,7 +1361,7 @@ mod tests {
     use std::sync::Arc;
 
     /// Build an energy model whose i-th equivalence performance domain has
-    /// @eq_pd_nr_cpus[i] CPUs, each CPU in a performance domain of its own as
+    /// @eq_pd_nr_cpus\[i\] CPUs, each CPU in a performance domain of its own as
     /// on an Intel hybrid processor.
     fn energy_model(eq_pd_nr_cpus: &[usize]) -> EnergyModel {
         let mut perf_doms = BTreeMap::new();

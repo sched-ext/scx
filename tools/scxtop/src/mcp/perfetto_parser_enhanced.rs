@@ -210,9 +210,9 @@ impl TraceCapabilities {
 /// Generic event type indexing for fast queries
 #[derive(Clone)]
 pub struct EventTypeIndex {
-    /// Event type -> CPU -> Vec<Event>
+    /// Event type -> CPU -> `Vec<Event>`
     by_cpu: HashMap<String, BTreeMap<u32, Vec<FtraceEventWithIndex>>>,
-    /// Event type -> PID -> Vec<Event> (for events that have PIDs)
+    /// Event type -> PID -> `Vec<Event>` (for events that have PIDs)
     by_pid: HashMap<String, HashMap<i32, Vec<FtraceEventWithIndex>>>,
     /// Event type -> count
     event_counts: HashMap<String, usize>,
