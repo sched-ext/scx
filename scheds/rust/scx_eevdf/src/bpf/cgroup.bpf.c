@@ -2,11 +2,103 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Group scheduling and cpu.max, the parts that do not run per context
- * switch: the per-cgroup blocks and the registry of them, the averages and
- * shares each cid keeps of its queues, the sweep that decays the ones a
- * group has left, the bandwidth pool, the backlog of tasks waiting on a
- * period, and the cgroup callbacks that maintain all of it.
+ * Group scheduling - cpu.weight, cpu.idle and cpu.max: what the cgroup of
+ * a task does to the weight it is queued at, and to whether it may run at
+ * all.
+ *
+ *
+ * One runqueue, not a hierarchy of them
+ * -------------------------------------
+ *
+ * fair.c gives every cgroup a cfs_rq per CPU and picks down the nesting,
+ * one level at a time. This scheduler has a single runqueue per cid, the
+ * way commit 85570f10a4c6 ("sched/eevdf: Move to a single runqueue")
+ * takes fair.c, so a cgroup's tasks sit in the cid's own EDQ beside
+ * everything else, at an effective weight that stands for their place in
+ * the hierarchy. What a cgroup keeps per cid is only what that weight is
+ * computed from. One arena block per cgroup holds all of it:
+ *
+ *   +----------+----------+----------+-----+----------+-------------+
+ *   | grp_hdr  | grp_q[0] | grp_q[1] | ... | grp_q[n] | live bitmap |
+ *   +----------+----------+----------+-----+----------+-------------+
+ *    cpu.weight            per cid: the weight of its members there,
+ *    cpu.idle              the shares it has there, how many tasks,
+ *    cpu.max and its pool  and the averages of the two
+ *    the sums over cids
+ *    the backlog
+ *
+ * The weight a task is queued with is its nice weight scaled by
+ * shares / load at every level up to the cid's own, which is
+ * __calc_prop_weight() in enqueue_hierarchy():
+ *
+ *   nice weight -> x shares(/A/B on cid 3)/load(/A/B on cid 3)
+ *               -> x shares(/A   on cid 3)/load(/A   on cid 3)
+ *               -> the weight the pack sees
+ *
+ * and the shares of a queue are update_cfs_group() with fair.c's default
+ * "concur" mode: the group's cpu.weight, scaled by how many CPUs' worth of
+ * tasks it is running, distributed over its cids by their load. Without
+ * that scaling a group spread over N cids would weigh 1/N of its
+ * cpu.weight on each of them, and a nested group 1/N per level, which a
+ * single runqueue cannot afford.
+ *
+ * cpu.idle is the same machinery at a different weight: a group that has
+ * it set carries WEIGHT_IDLEPRIO in place of its cpu.weight, and a task
+ * under one is queued as SCHED_IDLE would queue it, cfs_rq_is_idle() at
+ * every level on the way up.
+ *
+ *
+ * Kept without locks
+ * ------------------
+ *
+ * A task joins and leaves a group's load from whichever cid it happens to
+ * be on, so the loads are moved with atomics and a group's contribution to
+ * its parent is moved by compare and swap to whatever its own load says it
+ * should be, walking up until nothing more changes: whoever writes a load
+ * last also leaves the levels above it consistent, see grp_contrib_sync().
+ *
+ * The averages are different: they are a running average per queue, which
+ * only their own cid can advance, so each is updated from that cid's tick
+ * under a trylock, and what they add to the per-cgroup sums is written at
+ * most once a millisecond and only when it has moved by more than a 64th.
+ * A group that stops running on a cid would otherwise hold that cid's last
+ * contribution for ever, inflating the total its shares are divided by, so
+ * grp_sweep() walks the queues that still count, a few per millisecond
+ * from whichever cid runs it, and decays the quiet ones. That is
+ * update_blocked_averages() for an idle CPU, which has no idle balancer
+ * here to run it.
+ *
+ *
+ * cpu.max
+ * -------
+ *
+ * Each limited cgroup has a pool refilled once a period. A cid takes a
+ * 5 ms slice of it at a time rather than a charge per switch, and gives
+ * back what it does not use when its queue for that group goes quiet. A
+ * group that runs out throttles, and then its tasks may not run:
+ *
+ *   ops.stopping()   charge the service to every level -> pool empty
+ *                    -> the group throttles
+ *   ops.enqueue()    throttled? -> cid_park(): the task leaves its pack
+ *                    and its group's load and waits in the cgroup's own
+ *                    backlog, ordered by vruntime so the least served
+ *                    comes back first
+ *   period ends      grp_bw_refill() -> bw_unpark() from the next
+ *                    ops.dispatch(), a few tasks at a time; and from one
+ *                    bpf_timer for the case where every cid is asleep and
+ *                    nobody would ever look
+ *
+ * The backlog is a queue of its own because the pick descends an AVL tree
+ * by deadline and prunes on eligibility: it has no way to step over a task
+ * that may not run, so a task that may not run has to be somewhere else.
+ *
+ * The registry at the top (grp_hdrs[], bw_hdrs[]) is what makes the sweep
+ * and the unthrottle possible at all: a BPF program cannot walk the cgroup
+ * tree, so every block is registered in a slot when the cgroup is created
+ * and the walks go over those slots.
+ *
+ * What a context switch pays for - the hierarchy weight of the running
+ * task, and charging its cgroup - is inline in cgroup.bpf.h.
  */
 #include "eevdf.bpf.h"
 #include "cgroup.bpf.h"

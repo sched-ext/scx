@@ -2,9 +2,59 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * The capacity a cid actually delivers: what a higher scheduling class,
- * interrupts and steal time take from it, measured over a demand window and
- * published for periodic balance to normalize load against.
+ * The capacity a cid actually delivers, and the load balance normalizes
+ * against.
+ *
+ *
+ * Why it has to be measured
+ * -------------------------
+ *
+ * fair.c scales a runqueue's capacity by what RT, deadline, IRQ and steal
+ * time take from that CPU, each tracked by a PELT signal of its own, so
+ * that balance compares CPUs by what they can still give to fair tasks. A
+ * sched_ext scheduler is told none of that: it sees its own callbacks and
+ * nothing else. Without it, work displaced by a higher class stays where
+ * it is, because the balancer reads that cid's load as normal and its
+ * capacity as full.
+ *
+ * So it is inferred from the events the scheduler does see:
+ *
+ *   demand    |<---------------- 32 ms window ---------------->|
+ *   ours       ====      =========        ====   ===========
+ *   displaced      xxxxxx         xxxxxxxx    xxx
+ *                  ^     ^
+ *                  |     ops.running(): one of ours runs again, the
+ *                  |     interval ends
+ *                  ops.stopping() with slice left: the task did not yield,
+ *                  something above us took the CPU
+ *
+ *   available = 1024 - lost / elapsed        (smoothed, 3:1, over windows)
+ *   busy_balance_cap = capacity * available / 1024
+ *
+ * Two things keep that honest. The window only runs while sched_ext has
+ * runnable work on the cid, so a CPU that is merely idle cannot look
+ * constrained, and an estimate is invalidated when demand disappears -
+ * there is no clock here while nothing of ours wants the CPU, unlike
+ * fair.c's RT PELT which decays on its own. And the interval is measured
+ * between scheduling events in the task clock, so ordinary dispatch and
+ * context-switch overhead is not counted as pressure; IRQ and steal time
+ * come from the drift between the rq clock and the task clock over the
+ * same window.
+ *
+ *
+ * What reads it
+ * -------------
+ *
+ * Periodic balance divides each cid's load by busy_balance_cap instead of
+ * by its nominal capacity, so a cid that only gets half of itself counts
+ * as twice as loaded. cid_capacity_reduced() is fair.c's
+ * check_cpu_capacity(), with the same 117% threshold, and a task displaced
+ * on such a cid gets a paced search for a better one in balance.bpf.c.
+ *
+ * The signals a wakeup or a switch reads - what a task uses, how busy a
+ * cid has been, and the averaged runnable weight that stands for its load
+ * in wake_affine_weight() - are inline in load.bpf.h, where they cost a
+ * few instructions on the hot path.
  */
 #include "eevdf.bpf.h"
 #include "load.bpf.h"

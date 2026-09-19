@@ -3,8 +3,74 @@
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
  * The idle pull, sched_balance_newidle(): a cid that has run out of work
- * looks for some on its neighbours, under the budget its idle periods have
- * paid for and the sampling its success rate asks for.
+ * looks for some on its neighbours before it lets the CPU go idle.
+ *
+ *
+ * The decision
+ * ------------
+ *
+ *   ops.dispatch(), nothing of our own left to run
+ *        |
+ *        v
+ *   has this cid been staying idle longer than an LLC scan costs?
+ *        |                                no --> go idle without scanning
+ *        v yes
+ *   NI_RANDOM: admit the scan in proportion to how often scans at this
+ *   level have been finding anything lately
+ *        |                                no --> go idle
+ *        v yes
+ *   scan, in this order, stopping at the first task taken:
+ *
+ *     slower capacity tiers of the node   carry queued work up the ladder,
+ *                                         and only onto a fully idle core:
+ *                                         a fast thread beside a busy one
+ *                                         is no better than a whole slow
+ *                                         core
+ *     the cid's own LLC                   where its cache is warm
+ *     the rest of the node                charged to its own level
+ *     the rest of the system              and the budget can stop before
+ *                                         either of these
+ *
+ * Each queued cid found in the bitmap is examined by walking a bounded
+ * prefix of its EDQ in deadline order, holding each node while its state,
+ * its affinity and its cache hotness are checked, and removing that exact
+ * node if it passes. Holding is what gives this the same semantics as
+ * fair.c's locked detach: a concurrent enqueue cannot substitute a
+ * different task between the check and the steal.
+ *
+ *
+ * The budget, and why there is one
+ * --------------------------------
+ *
+ * A CPU whose idle periods are shorter than a scan is one its own wakeups
+ * keep bringing back: the task it pulls comes off a queue whose owner was
+ * about to run it, onto a CPU that is about to have work of its own, and
+ * the pull costs more than the idle time it fills. fair.c bounds that with
+ * two numbers and so does this:
+ *
+ *   avg_idle            how long this cid stays idle after a pull, moved
+ *                       an eighth of the way to each sample and capped at
+ *                       twice the worst pull it has seen
+ *   newidle_cost[level] the worst pull at that level, decayed 1% a second
+ *                       so one spike does not close the budget for good
+ *
+ * and a level is skipped once the budget left is smaller than what that
+ * level has cost before. On top of it, NI_RANDOM samples: a level whose
+ * scans keep coming back empty is admitted less and less often, and a
+ * success is counted with the inverse of its sampling weight so the
+ * estimate stays unbiased.
+ *
+ * Cache hotness is honoured until @cache_nice_tries scans in a row have
+ * come back empty with work queued somewhere, after which it is dropped
+ * one level at a time: an idle CPU beside a runnable task is worse than a
+ * cold cache, and a preference that never yields is a barrier. That is
+ * can_migrate_task() against sd->nr_balance_failed.
+ *
+ * A pull that was kicked for a specific waiter, or to answer an active
+ * balance, is neither budgeted nor sampled, and does not stamp the idle
+ * period: that is the idle balancer running for nohz_balancer_kick(),
+ * which fair.c does not gate by avg_idle either, and stamping it would
+ * make the next real idle period look far shorter than it was.
  */
 #include "eevdf.bpf.h"
 #include "balance.bpf.h"

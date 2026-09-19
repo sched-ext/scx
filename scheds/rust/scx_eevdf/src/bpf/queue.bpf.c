@@ -2,9 +2,82 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * The two queue operations that are not inline: the eligible pick a
- * dispatch takes from a cid's own EDQ, and ops.dequeue(), which ends
- * whatever an enqueue workflow had started.
+ * The per-cid runnable queue: what a sched_ext scheduler has to build for
+ * itself in place of the rbtree fair.c picks from.
+ *
+ *
+ * The queue
+ * ---------
+ *
+ * Every cid owns one EDQ (lib/edq.h): an AVL tree ordered by virtual
+ * deadline and augmented, in every subtree, with the least eligible
+ * vruntime and the shortest request under it. That augmentation is what
+ * makes the EEVDF pick one descent instead of a walk:
+ *
+ *                 [ deadline 40 ]        pick = leftmost deadline among
+ *                  min_v 10, min_r 700   the entities with v <= V
+ *                 /              \
+ *      [ dl 20 ]                  [ dl 90 ]
+ *       min_v 30                   min_v 10
+ *         |                          |
+ *     v > V, pruned              contains the answer
+ *
+ * so scx_edq_pop_first_eligible(V) descends past whole subtrees whose
+ * least eligible vruntime is still ahead of the reference, exactly as
+ * pick_eevdf() prunes on min_vruntime. The shortest request is there for
+ * set_protect_slice(), which bounds a task's protection by the smallest
+ * competitor rather than by its own deadline.
+ *
+ * A task carries its node inside its own arena context, so a pop hands
+ * back the address of the context itself: no lookup, no map, and the
+ * scheduler never has to resolve a pid to find what it just picked.
+ *
+ *
+ * Who owns a task, and when
+ * -------------------------
+ *
+ * The kernel can dequeue a task behind the scheduler's back, and another
+ * cid can be halfway through stealing it, so the node carries a state and
+ * only the side that holds it may move it on:
+ *
+ *                 enqueue            pop             insert on the
+ *      NONE ----------------> ENQUEUED ----> DISPATCHING ----> DISPATCHED
+ *        ^                        |               |   local DSQ      |
+ *        |                        |               v                  |
+ *        |                        |        lost the race: the task   |
+ *        +------------------------+------- belongs to somebody else -+
+ *        |        ops.dequeue(), or a property change ending
+ *        |        this enqueue workflow
+ *        |
+ *      PARKED   its cgroup ran out of cpu.max, see cgroup.bpf.c
+ *
+ * A pop that loses the compare-and-swap drops the task and tries the next
+ * one rather than ending the round, since the rest of the queue is still
+ * runnable and the alternative is an idle CPU. A dequeue that arrives
+ * first publishes NONE before unlinking, so the pop in flight fails its
+ * state check instead of dispatching a task the kernel has taken back.
+ * Nodes are held across the unlocked parts of that (scx_edq_task_drop()
+ * releases), which is what keeps an arena object alive while a remote cid
+ * is looking at it.
+ *
+ * Beside the queues is one bit per cid that has something in one, so a cid
+ * looking for work reads a word of a bitmap instead of peeking into every
+ * EDQ of the node. The bit is a hint: whoever finds a queue empty clears
+ * it, and looks again after clearing in case something was queued in
+ * between. It is deliberately left set across a dispatch that is about to
+ * re-enqueue the task it took, because clearing and setting it again is
+ * two writes to a line every CPU shares - that alone ran a pinned pair of
+ * yielding tasks five times slower than fair.c.
+ *
+ *
+ * What is here
+ * ------------
+ *
+ * Only the two operations that are not inline: the eligible pick a
+ * dispatch takes from its own queue, which needs the pack's reference and
+ * so cannot live beside the queue itself in queue.bpf.h, and
+ * ops.dequeue(), which ends whatever workflow the node was in and is where
+ * a task leaves BPF custody for good.
  */
 #include "eevdf.bpf.h"
 #include "cgroup.bpf.h"

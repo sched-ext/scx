@@ -593,6 +593,45 @@ that has not been done.
    with an energy model the kernel picks the CPU that costs the least energy
    for the work; this picks by capacity and idleness.
 
+## Source layout
+
+The BPF side is split by component. A `*.bpf.h` holds what the rest of the
+scheduler needs from that component inline, on the switch and wakeup paths; the
+`*.bpf.c` beside it holds what only that component and its own callbacks reach.
+
+The components build as a single translation unit: `main.bpf.c` includes the
+component sources, the way `kernel/sched/build_policy.c` includes `fair.c` and
+the rest, so every function stays `static` and the compiler inlines across the
+whole scheduler as it would in one file. Real build units would make each
+callback a global BPF function - a call the verifier cannot inline, with five
+arguments at most, a scalar return and `__arg_trusted` or `__arg_arena` on every
+pointer - and that extra call per callback costs about 1% on the paths that
+cross one on every wakeup: built as separate objects, `perf bench sched
+messaging -p -g 2` is slower in 13 of 18 paired iterations (median +1.4%) and a
+schbench light request p50 pinned to the P-core threads in 5 of 6 (median
++1.1%), while the rows that do not pay a callback per wakeup - pinned rps,
+`--cpu`, `--msg`, `--sock` and the power rows - stay flat. The top of each `.c`
+says what that component implements and how it works.
+
+| File | What is in it |
+|------|---------------|
+| `eevdf.bpf.h` | the types, the globals, the cid space and the two clocks |
+| `main.bpf.c` | the options, `ops.enqueue()`, `ops.dispatch()`, `ops.init()` and the ops tables |
+| `task.bpf.[ch]` | EEVDF itself: weights, vruntimes, deadlines, placement, and the task callbacks |
+| `queue.bpf.[ch]` | the per-cid runnable queue, an EDQ per cid |
+| `idle.bpf.[ch]` | the idle bitmap, and where a task goes when it wakes |
+| `load.bpf.[ch]` | utilization, load, and the capacity a cid actually delivers |
+| `preempt.bpf.[ch]` | the pick, the protection it gives, the hrtick and `ops.yield()` |
+| `balance.bpf.[ch]` | periodic and active balance, and `ops.tick()` |
+| `newidle.bpf.[ch]` | the pull a cid runs when it has nothing left to run |
+| `cgroup.bpf.[ch]` | group scheduling: `cpu.weight`, `cpu.idle` and `cpu.max` |
+| `cpu.bpf.c` | the machine: the arena, the tables, the cid topology and the `SEC("syscall")` programs |
+| `intf.h` | what user space and the BPF side agree on |
+
+The components are included in the order they use each other, so none of them
+needs a forward declaration of another, and each callback lives in the
+component it belongs to rather than in `main.bpf.c`.
+
 ## Requirements
 
 A kernel with cid-form `sched_ext` support (Linux v7.2 or newer).
