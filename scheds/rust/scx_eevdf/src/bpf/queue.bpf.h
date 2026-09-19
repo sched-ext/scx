@@ -232,6 +232,8 @@ static __always_inline bool cid_queue_insert(struct task_struct *p, task_ctx_t *
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_ENQUEUED,
 					CID_EDQ_NONE);
+		if (ret == -ECANCELED)
+			return false;
 		scx_bpf_error("EDQ insert failed for pid %d: %d", p->pid, ret);
 		return false;
 	}

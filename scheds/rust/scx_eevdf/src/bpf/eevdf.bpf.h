@@ -218,11 +218,11 @@ struct {
 /*
  * Return a local task context from a generic task.
  *
- * PROTOTYPE: scx_eevdf never orders a DSQ by vtime, so @p->scx.dsq_vtime is
- * free to carry the context pointer, set in ops.enable(), and a lookup is a
- * load instead of a task-storage helper call. The kernel zeroes the field
- * when @p leaves the scheduler, so fall back to task storage while it is
- * zero, from ops.init_task() to ops.enable() and after ops.disable().
+ * The cache is installed by ops.enable() and the kernel clears it before
+ * ops.exit_task(). Task callbacks are serialized against exit by the task's
+ * scheduler locks. EDQ operations which keep a context across that
+ * serialization hold its embedded node until they are done. Task storage
+ * covers the windows before enable and after disable.
  */
 static __always_inline task_ctx_t *try_lookup_task_ctx(const struct task_struct *p)
 {
