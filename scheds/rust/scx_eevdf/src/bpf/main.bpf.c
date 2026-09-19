@@ -2,21 +2,26 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * A cid-form scheduler (struct sched_ext_ops_cid): CPUs are addressed by
- * their cid, a dense id space ordered by topology, so that the CPUs of a
- * core, of an LLC and of a NUMA node occupy contiguous ranges of it. A
- * topology domain is a (base, len) slice of the cid space, and "is this
- * core idle" or "is there an idle CPU in my LLC" is a range of a bitmap.
+ * A cid-form scheduler (struct sched_ext_ops_cid): a port of the kernel's
+ * EEVDF policy to sched_ext, addressing CPUs by their cid - a dense id
+ * space ordered by topology, so that the CPUs of a core, of an LLC and of
+ * a NUMA node occupy contiguous ranges of it, and a topology domain is a
+ * (base, len) slice. Everything sized by the machine lives in a BPF arena
+ * allocated before attach, so nothing here caps the number of CPUs, cores,
+ * LLCs, nodes or tiers.
  *
- * Everything sized by the machine lives in a BPF arena, allocated once by
- * user space before the scheduler is attached, so nothing here caps the
- * number of CPUs, cores, LLCs, nodes or placement tiers.
+ *
+ * How the source is laid out
+ * --------------------------
  *
  * The scheduler is split by component, and this file is the one the BPF
  * skeleton is built from: it includes the components, the way
  * kernel/sched/build_policy.c includes fair.c and the rest, so that all of
- * it is one translation unit and every call between components inlines as
- * it would have in a single file.
+ * it is one translation unit. Every function stays static and the compiler
+ * inlines across the whole scheduler exactly as it would have in a single
+ * file; the split costs nothing at all. Each component's header holds what
+ * its callers need on the hot paths, its .c the rest, and the top of each
+ * .c says what that component implements and why:
  *
  *	eevdf.bpf.h	the types, the globals and the cid space itself
  *	cpu.bpf.c	the machine: the arena, the tables, the topology
@@ -29,9 +34,47 @@
  *	balance.bpf.[ch] periodic and active balance, and ops.tick()
  *	newidle.bpf.[ch] the pull a cid runs when it has nothing left to run
  *
- * What is left here is what belongs to no one component: the options, the
- * globals, ops.enqueue() and ops.dispatch(), which reach into all of them,
- * and the ops tables.
+ * They are included in the order they use each other, so no component
+ * needs a forward declaration of another.
+ *
+ *
+ * What is left here
+ * -----------------
+ *
+ * The options, the globals, and the two callbacks that belong to no single
+ * component because they reach into all of them:
+ *
+ *   ops.enqueue(p)      the task is runnable and has a cid. In order:
+ *                         - its cgroup out of cpu.max?  -> park it
+ *                         - a balance handoff waiting for it?
+ *                           -> place it on the destination that asked
+ *                         - no cid was selected for it (it could not
+ *                           migrate, or this is a re-enqueue), or a higher
+ *                           class just took its cid?
+ *                           -> look for an idle cid now
+ *                         - otherwise place it against this cid's
+ *                           reference, give it a deadline, and either hand
+ *                           the CPU to it (wakeup preemption, through the
+ *                           local DSQ so the kernel can expire the running
+ *                           task's slice under the rq lock) or queue it in
+ *                           the EDQ in deadline order
+ *
+ *   ops.dispatch(cid)   the CPU needs something to run. In order:
+ *                         - let out anything whose cgroup got its
+ *                           bandwidth back
+ *                         - consume an active-balance request, or drain a
+ *                           periodic-balance selection, if either is due
+ *                         - if the CPU has nothing of its own: pull from a
+ *                           neighbour, under the new-idle budget
+ *                         - take the first eligible task of its own EDQ
+ *                         - or keep the task that was already running,
+ *                           which is what pick_next_entity() does when
+ *                           nothing queued has an earlier deadline, and
+ *                           give it a fresh slice and a fresh hrtick
+ *
+ * plus ops.init()/exit() and the two ops tables - one for kernels that
+ * name the cgroup callbacks cpuctl_*, one for those that still call them
+ * cgroup_*.
  */
 #include "eevdf.bpf.h"
 #include "balance.bpf.h"

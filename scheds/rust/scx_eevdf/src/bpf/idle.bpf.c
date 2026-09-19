@@ -2,11 +2,86 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Where a task goes when it wakes: select_task_rq_fair()'s two halves, the
- * SD_BALANCE_FORK descent for a new task and, for a wakeup, wake_affine()
- * followed by the idle search around the target it computes. ops.select_cid()
- * is nothing but those two in order, and ops.update_idle() keeps the bitmap
- * the search reads.
+ * Where a task goes when it wakes: select_task_rq_fair(), in the order
+ * fair.c asks it, and the idle bitmap the search reads.
+ *
+ *
+ * ops.select_cid()
+ * ----------------
+ *
+ *   ops.select_cid(p, prev_cid, wake_flags)
+ *     |
+ *     +- its cgroup is out of cpu.max?
+ *     |     -> leave it where it is; ops.enqueue() will park it, and
+ *     |        waking an idle cid for a task that may not run is wasted
+ *     |
+ *     +- it blocked over-served and still owes that pack?
+ *     |     -> back to that cid, no placement and no idle search, the way
+ *     |        ttwu_runnable() requeues a delayed task before
+ *     |        select_task_rq() is ever reached
+ *     |
+ *     +- a fork? -> find_idlest_fork_cid()
+ *     |     descend the live SD_BALANCE_FORK domain, node -> LLC -> core,
+ *     |     taking the idlest child group at each step by fair.c's rules
+ *     |     (idle CPUs first, then spare capacity, then load per capacity,
+ *     |     with the local group kept unless beaten by imbalance_pct),
+ *     |     then the shallowest or least loaded cid inside it. A fork is
+ *     |     placed by load: fair.c never calls select_idle_sibling() for
+ *     |     one, and running the idle scan first packed every child next
+ *     |     to its parent.
+ *     |
+ *     +- a wakeup:
+ *          wake_affine_cid()               which cid to search around
+ *            wake_wide()?       -> prev_cid: each of the two wakes many
+ *                                  different tasks rather than mostly each
+ *                                  other, so there is no pair here whose
+ *                                  affinity is worth keeping
+ *            waker idle?        -> prev_cid if it is idle too, else here
+ *            sync and the waker is about to sleep with nothing queued?
+ *                               -> here
+ *            WA_WEIGHT          -> the effective-load comparison: which of
+ *                                  the two cids is left better balanced by
+ *                                  taking the wakee, on tick-sampled loads
+ *                 |
+ *                 v
+ *          select_idle_sibling_cid()       the search itself
+ *            the target, the previous cid, the recently used cid - each
+ *            taken only if idle and, on an asymmetric machine, big enough
+ *            a fully idle core in the LLC, if the LLC hint says there is
+ *            one; an idle SMT sibling of prev; then any idle cid, over the
+ *            word-at-a-time scans in idle.bpf.h, bounded by SIS_UTIL's
+ *            nr_idle_scan and walked from the target so successive wakeups
+ *            cover the whole domain
+ *                 |
+ *                 v
+ *            claimed one? -> direct dispatch to its local DSQ with
+ *                            SCX_ENQ_IMMED: the "run now" path. The kernel
+ *                            bounces it back through ops.enqueue() if the
+ *                            cid turns out not to be free after all, so
+ *                            the local DSQ never becomes a queue that
+ *                            outranks the deadline-ordered EDQ.
+ *
+ *
+ * The bitmap
+ * ----------
+ *
+ * Implementing ops.update_idle() turns off the kernel's own idle tracking
+ * and its idle CPU selection, whose walk of the topology masks was the
+ * single most expensive step of a wakeup and knew nothing of the capacity
+ * ordering anyway. What replaces it is one bit per cid, plus one bit per
+ * LLC that is known to hold a fully idle core, and the rule that a cid is
+ * *claimed* out of the bitmap before it is used:
+ *
+ *   wakeup A --\
+ *               >-- cmask_test_and_clear(cid) -- only one of them wins,
+ *   wakeup B --/                                 the loser scans again
+ *
+ * Without the claim, two wakeups pick the same idle cid, one of them waits
+ * behind the other, and whole idle cores sit unused - which is how a burst
+ * of forks ends up with both threads of a core busy and the E-cores idle.
+ * A cid that was claimed and kicked but found nothing to run goes back to
+ * idle without a transition, so ops.dispatch() re-arms the bit on its way
+ * out, and ops.running() clears it again for the opposite race.
  */
 #include "eevdf.bpf.h"
 #include "cgroup.bpf.h"
@@ -451,7 +526,17 @@ static void record_wakee_cid(const struct task_struct *p, task_ctx_t *wctx,
 	}
 }
 
-/* The wake_wide() half; cid LLC width stands in for sd_llc_size. */
+/*
+ * The wake_wide() half; cid LLC width stands in for sd_llc_size.
+ *
+ * record_wakee_cid() bumps wakee_flips whenever the task a waker wakes is
+ * not the one it woke last, so a high count means that waker spreads its
+ * wakeups over many different tasks instead of ping-ponging with one. If
+ * the busier of the two counts is at least an LLC's width times the
+ * quieter one, and the quieter one is already wider than an LLC, the two
+ * are not a producer/consumer pair: waking them onto the same cid buys no
+ * locality and only crowds that cid.
+ */
 static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
 			  s32 this_cid)
 {
