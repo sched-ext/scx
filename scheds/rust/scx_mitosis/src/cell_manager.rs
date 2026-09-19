@@ -3295,7 +3295,7 @@ mod tests {
 
         // Cell 0 gets all, cell 1 gets nothing
         assert_eq!(result.get(&0).unwrap().len(), 6);
-        assert!(result.get(&1).is_none() || result.get(&1).unwrap().is_empty());
+        assert!(!result.contains_key(&1) || result.get(&1).unwrap().is_empty());
     }
 
     #[test]

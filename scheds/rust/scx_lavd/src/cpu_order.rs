@@ -720,7 +720,7 @@ impl<'a> EnergyModelOptimizer<'a> {
 
             let mut cpus_ovflw: Vec<usize> = vec![];
             for &cpu_adx in ovrflw_cpus_all.iter() {
-                if cpu_set.get(&cpu_adx).is_none() {
+                if !cpu_set.contains(&cpu_adx) {
                     cpus_ovflw.push(cpu_adx);
                     cpu_set.insert(cpu_adx);
                 }
