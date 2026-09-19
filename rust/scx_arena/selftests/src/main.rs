@@ -51,38 +51,20 @@ fn colorize(text: &str, color: &str, is_tty: bool) -> String {
     }
 }
 
-// Mirrors enum scx_selftest_id in lib/selftests/selftest.h.
-// SCX_SELFTEST_ID_ALL (0) is reserved for "run all" and is not listed in
-// TEST_CASES; only the named per-test IDs appear there.
-#[repr(u32)]
-#[allow(non_camel_case_types)]
-enum SelfTestId {
-    #[allow(dead_code)]
-    SCX_SELFTEST_ID_ALL = 0,
-    SCX_SELFTEST_ID_ATQ = 1,
-    SCX_SELFTEST_ID_BTREE = 2,
-    SCX_SELFTEST_ID_LVQUEUE = 3,
-    SCX_SELFTEST_ID_MINHEAP = 4,
-    SCX_SELFTEST_ID_RBTREE = 5,
-    SCX_SELFTEST_ID_TOPOLOGY = 6,
-}
-
 fn available_tests() -> String {
-    TEST_CASES
+    SUITES
         .iter()
-        .map(|(name, _)| format!("  {}", name))
+        .map(|name| format!("  {}", name))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-const TEST_CASES: &[(&str, u32)] = &[
-    ("atq", SelfTestId::SCX_SELFTEST_ID_ATQ as u32),
-    ("btree", SelfTestId::SCX_SELFTEST_ID_BTREE as u32),
-    ("lvqueue", SelfTestId::SCX_SELFTEST_ID_LVQUEUE as u32),
-    ("minheap", SelfTestId::SCX_SELFTEST_ID_MINHEAP as u32),
-    ("rbtree", SelfTestId::SCX_SELFTEST_ID_RBTREE as u32),
-    ("topology", SelfTestId::SCX_SELFTEST_ID_TOPOLOGY as u32),
-];
+/*
+ * Names of the per-suite BPF programs. Each suite is its own SEC("syscall")
+ * program, arena_selftest_<name>, so that no call frame is spent on a
+ * dispatcher: the arena allocator leaves very few of the verifier's eight.
+ */
+const SUITES: &[&str] = &["atq", "btree", "lvqueue", "minheap", "rbtree", "topology"];
 
 #[derive(Debug, Parser)]
 #[clap(about = "scx_arena library selftests")]
@@ -292,8 +274,11 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
-fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) {
-    let prog_fd = skel.progs.arena_selftest.as_fd().as_raw_fd();
+fn print_stream(skel: &BpfSkel<'_>, suite: &str, stream_id: u32) {
+    let Ok(prog) = suite_prog(skel, suite) else {
+        return;
+    };
+    let prog_fd = prog.as_fd().as_raw_fd();
     let mut buf = vec![0u8; 4096];
     let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
     let mut started = false;
@@ -328,26 +313,28 @@ fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) {
     println!("\n====END STREAM  {}====", name);
 }
 
-// Run the named test by setting selftest_run_id in the BPF bss and calling
-// arena_selftest. The ID comes from enum scx_selftest_id in selftest.h.
-fn run_test_by_name(skel: &mut BpfSkel<'_>, name: &str) -> Result<i32> {
-    let id = TEST_CASES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, id)| *id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unknown test: '{}'. Use --list to see available tests.",
-                name
-            )
-        })?;
+/* Resolve a suite name to its per-suite BPF program. */
+fn suite_prog<'a, 'obj>(
+    skel: &'a BpfSkel<'obj>,
+    name: &str,
+) -> Result<&'a libbpf_rs::ProgramMut<'obj>> {
+    Ok(match name {
+        "atq" => &skel.progs.arena_selftest_atq,
+        "btree" => &skel.progs.arena_selftest_btree,
+        "lvqueue" => &skel.progs.arena_selftest_lvqueue,
+        "minheap" => &skel.progs.arena_selftest_minheap,
+        "rbtree" => &skel.progs.arena_selftest_rbtree,
+        "topology" => &skel.progs.arena_selftest_topology,
+        _ => bail!(
+            "Unknown test: '{}'. Use --list to see available tests.",
+            name
+        ),
+    })
+}
 
-    skel.maps.bss_data.as_mut().unwrap().selftest_run_id = id;
-
-    let input = ProgramInput {
-        ..Default::default()
-    };
-    let output = skel.progs.arena_selftest.test_run(input)?;
+/* Run one suite by invoking its own program. */
+fn run_test_by_name(skel: &BpfSkel<'_>, name: &str) -> Result<i32> {
+    let output = suite_prog(skel, name)?.test_run(ProgramInput::default())?;
 
     Ok(output.return_value as i32)
 }
@@ -370,7 +357,7 @@ fn main() {
 
     // Validate test names before loading BPF.
     for name in &opts.tests {
-        if !TEST_CASES.iter().any(|(n, _)| *n == name.as_str()) {
+        if !SUITES.contains(&name.as_str()) {
             eprintln!(
                 "Unknown test: '{}'.\nAvailable tests:\n{}",
                 name,
@@ -399,7 +386,7 @@ fn main() {
     setup_topology(&mut skel).unwrap();
 
     let to_run: Vec<&str> = if opts.tests.is_empty() {
-        TEST_CASES.iter().map(|(n, _)| *n).collect()
+        SUITES.to_vec()
     } else {
         opts.tests.iter().map(String::as_str).collect()
     };
@@ -411,7 +398,7 @@ fn main() {
 
     let mut any_failed = false;
     for &name in &to_run {
-        match run_test_by_name(&mut skel, name) {
+        match run_test_by_name(&skel, name) {
             Ok(0) => println!("{} {}", pass_label, name),
             Ok(ret) => {
                 eprintln!("{} {} (returned {})", fail_label, name, ret);
@@ -423,8 +410,8 @@ fn main() {
             }
         }
 
-        print_stream(&mut skel, BPF_STDOUT);
-        print_stream(&mut skel, BPF_STDERR);
+        print_stream(&skel, name, BPF_STDOUT);
+        print_stream(&skel, name, BPF_STDERR);
     }
 
     if any_failed {

@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/sdt_task.h>
 #include <lib/minheap.h>
@@ -235,9 +236,11 @@ int scx_selftest_minheap_read_back(scx_minheap_t *heap)
 }
 #define SCX_MINHEAP_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_minheap_ ## suffix, heap)
 
-__weak
-int scx_selftest_minheap(void)
+SEC("syscall")
+int arena_selftest_minheap(void)
 {
+	arena_subprog_init();
+
 	scx_minheap_t *heap;
 
 	heap = scx_minheap_alloc(HEAP_CAPACITY);
