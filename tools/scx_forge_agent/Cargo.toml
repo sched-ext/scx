@@ -27,3 +27,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+
+[lints]
+workspace = true

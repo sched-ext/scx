@@ -34,3 +34,6 @@ enable_backtrace = []
 # (struct sched_ext_ops_cid), which the CI kernels don't provide yet.
 [package.metadata.veristat]
 disable = true
+
+[lints]
+workspace = true
