@@ -13,6 +13,7 @@ mod bpf_streams;
 pub use bpf_intf::*;
 
 mod cpu_order;
+use scx_utils::Topology;
 use scx_utils::init_libbpf_logging;
 mod stats;
 use std::ffi::CStr;
@@ -161,14 +162,39 @@ struct Opts {
     #[clap(long = "lb-low-util-pct", default_value = "25", value_parser=Opts::lb_low_util_pct_range)]
     lb_low_util_pct: u8,
 
-    /// Low utilization threshold percentage (0-100) for bypassing deadline
-    /// scheduling. When set to a non-zero value, tasks are dispatched directly
-    /// to the local DSQ (FIFO) instead of using deadline-based ordering when
-    /// the per-CPU utilization is below this percentage.
-    /// Default is 10 (bypass deadline scheduling below 10% utilization).
-    /// Set to 0 to disable. Set to 100 to always bypass deadline scheduling.
-    #[clap(long = "lb-local-dsq-util-pct", default_value = "10", value_parser=Opts::lb_local_dsq_util_pct_range)]
-    lb_local_dsq_util_pct: u8,
+    /// Longest wait, in microseconds, that still justifies direct dispatch.
+    /// A task bypasses deadline ordering and goes straight to a CPU's local
+    /// DSQ only if it would start there within this long and finish no later
+    /// than in the queue it would otherwise join.
+    ///
+    /// Default is 350; tail latency stops improving past about this wait on
+    /// the machines measured. Set to 0 to allow direct dispatch only to an
+    /// idle CPU.
+    #[clap(long = "dd-max-wait-us", default_value = "350", value_parser=Opts::dd_max_wait_us_range)]
+    dd_max_wait_us: u64,
+
+    /// Deprecated and ignored; use --dd-max-wait-us. Removed at the end of
+    /// 2026.
+    #[clap(long = "lb-local-dsq-util-pct", hide = true)]
+    lb_local_dsq_util_pct: Option<u8>,
+
+    /// Least completion-time gain, in microseconds, that justifies migrating
+    /// a task across big and LITTLE clusters sharing an L3. When the load
+    /// balancer has classified the sticky cpdom as overloaded and it has no
+    /// idle CPU, a task is migrated to a neighbor cpdom only if its estimated
+    /// completion time there is shorter by more than this much. A smaller
+    /// difference is treated as no difference, and the task stays where its
+    /// cache is warm.
+    ///
+    /// Only meaningful on heterogeneous (big.LITTLE) systems. On a
+    /// homogeneous machine this is forced to 0, since completion-time
+    /// migration would override the cache-locality bias without a capacity
+    /// payoff.
+    ///
+    /// Default is 350, the same tolerance --dd-max-wait-us applies to
+    /// starting a task. Set to 0 to disable.
+    #[clap(long = "xmig-min-gain-us", default_value = "350", value_parser=Opts::xmig_min_gain_us_range)]
+    xmig_min_gain_us: u64,
 
     /// Slice duration in microseconds to use for all tasks when pinned tasks
     /// are running on a CPU. Must be between slice-min-us and slice-max-us.
@@ -208,6 +234,15 @@ struct Opts {
     /// the pre-fast-lb load-balancer behavior.
     #[clap(long = "no-fast-lb", action = clap::ArgAction::SetTrue)]
     no_fast_lb: bool,
+
+    /// Default: --no-ovrflw-extend is deactivated (overflow-set extension
+    /// on wake-up is on). Disable the proactive overflow-set extension in
+    /// ops.select_cpu() that absorbs bursty wake-ups by adding a fresh
+    /// LLC-anchored CPU to the overflow set when active+overflow has no
+    /// idle CPU.
+    /// Implied by --performance, where every CPU is already active.
+    #[clap(long = "no-ovrflw-extend", action = clap::ArgAction::SetTrue)]
+    no_ovrflw_extend: bool,
 
     /// Disable preemption.
     #[clap(long = "no-preemption", action = clap::ArgAction::SetTrue)]
@@ -378,6 +413,9 @@ impl Opts {
             }
             info!("Performance mode is enabled.");
             self.no_core_compaction = true;
+            // Every CPU is active in performance mode, so there is no
+            // overflow set left to extend.
+            self.no_ovrflw_extend = true;
         }
 
         if self.powersave {
@@ -396,6 +434,31 @@ impl Opts {
             }
             info!("Balanced mode is enabled.");
             self.no_core_compaction = false;
+        }
+
+        // Completion-time migration only says anything where cpdoms differ in
+        // capacity. On a homogeneous machine both estimates come out nearly
+        // equal, so the check would migrate on queue-depth noise and override
+        // the cache-locality bias with no capacity payoff. Zero the option
+        // itself, not just what is handed to BPF, so the options logged below
+        // describe what the scheduler will actually do.
+        if self.xmig_min_gain_us > 0 {
+            let topo = match self.topology.as_ref() {
+                Some(args) => Topology::with_args(args),
+                None => Topology::new(),
+            };
+            match topo {
+                Ok(topo) if !topo.has_little_cores() => {
+                    info!("Completion-time migration is disabled on a homogeneous machine.");
+                    self.xmig_min_gain_us = 0;
+                }
+                Ok(_) => {}
+                Err(e) => warn!(
+                    "Could not read the topology to classify the machine; \
+                     leaving --xmig-min-gain-us as set: {}",
+                    e
+                ),
+            }
         }
 
         if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
@@ -449,8 +512,12 @@ impl Opts {
         number_range(s, 0, 100)
     }
 
-    fn lb_local_dsq_util_pct_range(s: &str) -> Result<u8, String> {
-        number_range(s, 0, 100)
+    fn dd_max_wait_us_range(s: &str) -> Result<u64, String> {
+        number_range(s, 0, 100_000)
+    }
+
+    fn xmig_min_gain_us_range(s: &str) -> Result<u64, String> {
+        number_range(s, 0, 100_000)
     }
 }
 
@@ -733,9 +800,12 @@ impl<'a> Scheduler<'a> {
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.warm_cpu_ns = opts.warm_cpu_us * 1000;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
-        rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
+        rodata.dd_max_wait_ns = opts.dd_max_wait_us * 1000;
+        rodata.xmig_min_gain_ns = opts.xmig_min_gain_us * 1000;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
+        rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
+
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
@@ -1166,6 +1236,13 @@ fn main(mut opts: Opts) -> Result<()> {
 
     if opts.verbose > 0 {
         warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
+    }
+
+    if opts.lb_local_dsq_util_pct.is_some() {
+        warn!(
+            "--lb-local-dsq-util-pct is deprecated and ignored; it will be removed \
+             at the end of 2026. Use --dd-max-wait-us instead."
+        );
     }
 
     if let Some(run_id) = opts.run_id {
