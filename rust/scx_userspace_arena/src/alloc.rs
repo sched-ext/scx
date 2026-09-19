@@ -21,7 +21,7 @@ use std::sync::Mutex;
 ///
 /// # Safety
 ///
-/// See https://doc.rust-lang.org/std/alloc/trait.Allocator.html#safety
+/// See <https://doc.rust-lang.org/std/alloc/trait.Allocator.html#safety>
 pub unsafe trait Allocator {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, anyhow::Error>;
 
@@ -35,7 +35,7 @@ pub unsafe trait Allocator {
 
     /// # Safety
     ///
-    /// See https://doc.rust-lang.org/std/alloc/trait.Allocator.html#safety-1
+    /// See <https://doc.rust-lang.org/std/alloc/trait.Allocator.html#safety-1>
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
 }
 

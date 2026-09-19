@@ -54,8 +54,8 @@ use perfetto_protos::{
 use protobuf::{EnumOrUnknown, Message, SpecialFields};
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
-/// https://perfetto.dev/docs/concepts/buffers and
-/// https://perfetto.dev/docs/reference/trace-packet-proto
+/// <https://perfetto.dev/docs/concepts/buffers> and
+/// <https://perfetto.dev/docs/reference/trace-packet-proto>
 pub struct PerfettoTraceManager {
     // proto fields
     trace: Trace,

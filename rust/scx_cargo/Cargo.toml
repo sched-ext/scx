@@ -30,3 +30,6 @@ tempfile = "3"
 [dev-dependencies]
 regex = "1"
 tempfile = "3"
+
+[lints]
+workspace = true

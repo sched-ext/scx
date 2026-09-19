@@ -33,10 +33,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-/// Buddy allocator
-///
-/// The following code is strongly based on <https://github.com/jjyr/buddy-alloc> and imported
-/// directly here to make packaging easier.
+// Buddy allocator
+//
+// The following code is strongly based on <https://github.com/jjyr/buddy-alloc> and imported
+// directly here to make packaging easier.
 
 const OOM_MSG: &str = "requires more memory space to initialize BuddyAlloc";
 const LEAF_ALIGN_ERROR_MSG: &str = "leaf size must be align to 16 bytes";

@@ -289,7 +289,7 @@ impl CpuOrderCtx {
     }
 
     /// Build a list of compute domains
-    fn build_cpdom(cpu_ids: &Vec<CpuId>) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
+    fn build_cpdom(cpu_ids: &[CpuId]) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
         // Note that building compute domain is independent to CPU order
         // so it is okay to use any cpus_*.
 
@@ -399,9 +399,9 @@ impl CpuOrderCtx {
     }
 
     /// Circular sorting of a list from a starting point
-    fn circular_sort(start: usize, the_rest: &Vec<usize>) -> Vec<usize> {
+    fn circular_sort(start: usize, the_rest: &[usize]) -> Vec<usize> {
         // Create a full list including 'start'
-        let mut list = the_rest.clone();
+        let mut list = the_rest.to_vec();
         list.push(start);
         list.sort();
 
@@ -539,7 +539,7 @@ const LOOKAHEAD_CNT: usize = 10;
 const MAX_EQPD_COMBINATIONS: u128 = 100_000;
 
 impl<'a> EnergyModelOptimizer<'a> {
-    fn new(em: &'a EnergyModel, cpus_pf: &'a Vec<CpuId>) -> EnergyModelOptimizer<'a> {
+    fn new(em: &'a EnergyModel, cpus_pf: &'a [CpuId]) -> EnergyModelOptimizer<'a> {
         let tot_perf = em.perf_total();
 
         let eq_pds = Self::sort_eq_pds(em, cpus_pf);
@@ -591,7 +591,7 @@ impl<'a> EnergyModelOptimizer<'a> {
 
     fn get_perf_cpu_order_table(
         em: &'a EnergyModel,
-        cpus_pf: &'a Vec<CpuId>,
+        cpus_pf: &'a [CpuId],
     ) -> BTreeMap<usize, PerfCpuOrder> {
         let emo = EnergyModelOptimizer::new(em, cpus_pf);
         emo.gen_perf_cpu_order_table();
@@ -600,8 +600,8 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     fn get_fake_perf_cpu_order_table(
-        cpus_pf: &'a Vec<CpuId>,
-        cpus_ps: &'a Vec<CpuId>,
+        cpus_pf: &'a [CpuId],
+        cpus_ps: &'a [CpuId],
     ) -> BTreeMap<usize, PerfCpuOrder> {
         let tot_perf: usize = cpus_pf.iter().map(|cpuid| cpuid.cpu_cap).sum();
 
@@ -615,7 +615,7 @@ impl<'a> EnergyModelOptimizer<'a> {
         perf_cpu_order
     }
 
-    fn fake_pco(tot_perf: usize, cpuids: &'a Vec<CpuId>, powersave: bool) -> PerfCpuOrder {
+    fn fake_pco(tot_perf: usize, cpuids: &'a [CpuId], powersave: bool) -> PerfCpuOrder {
         let perf_cap = if powersave {
             cpuids[0].cpu_cap
         } else {
@@ -720,7 +720,7 @@ impl<'a> EnergyModelOptimizer<'a> {
 
             let mut cpus_ovflw: Vec<usize> = vec![];
             for &cpu_adx in ovrflw_cpus_all.iter() {
-                if cpu_set.get(&cpu_adx).is_none() {
+                if !cpu_set.contains(&cpu_adx) {
                     cpus_ovflw.push(cpu_adx);
                     cpu_set.insert(cpu_adx);
                 }
@@ -737,10 +737,10 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     /// Sort the CPU IDs by topological order (@self.cpus_topological_order).
-    fn sort_cpus_by_topological_order(&'a self, cpus: &Vec<usize>) -> Vec<usize> {
+    fn sort_cpus_by_topological_order(&'a self, cpus: &[usize]) -> Vec<usize> {
         let mut sorted: Vec<usize> = vec![];
         for &cpu_adx in self.cpus_topological_order.iter() {
-            if cpus.iter().find(|&&x| x == cpu_adx).is_some() {
+            if cpus.contains(&cpu_adx) {
                 sorted.push(cpu_adx);
             }
         }
@@ -1028,7 +1028,7 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     /// Enumerate how many CPUs to take from each equivalence performance
-    /// domain, taking at most @max_nr_cpus[i] CPUs from the i-th one. See
+    /// domain, taking at most @max_nr_cpus\[i\] CPUs from the i-th one. See
     /// @EnergyModelOptimizer::nr_cpus_combinations.
     fn gen_nr_cpus_combinations(max_nr_cpus: &[usize]) -> Vec<Vec<usize>> {
         // The number of all the possible combinations. An equivalence
@@ -1147,7 +1147,7 @@ impl<'a> EnergyModelOptimizer<'a> {
             .collect()
     }
 
-    /// Build the performance domains and states taking @nr_cpus[i] CPUs from
+    /// Build the performance domains and states taking @nr_cpus\[i\] CPUs from
     /// the i-th equivalence performance domain at the performance state for
     /// @util. The CPUs are taken from the member performance domains in order,
     /// so the CPUs for a count of N are always a subset of the ones for N + 1.
@@ -1268,8 +1268,7 @@ impl<'a> PDSetInfo<'_> {
                     v.push(pds.clone());
                 }
                 None => {
-                    let mut v: Vec<PDS<'a>> = Vec::new();
-                    v.push(pds.clone());
+                    let v: Vec<PDS<'a>> = vec![pds.clone()];
                     pds_map.insert(pds.clone(), v.into());
                 }
             }
@@ -1361,7 +1360,7 @@ mod tests {
     use std::sync::Arc;
 
     /// Build an energy model whose i-th equivalence performance domain has
-    /// @eq_pd_nr_cpus[i] CPUs, each CPU in a performance domain of its own as
+    /// @eq_pd_nr_cpus\[i\] CPUs, each CPU in a performance domain of its own as
     /// on an Intel hybrid processor.
     fn energy_model(eq_pd_nr_cpus: &[usize]) -> EnergyModel {
         let mut perf_doms = BTreeMap::new();

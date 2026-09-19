@@ -482,7 +482,7 @@ enum mlfq_task_flags {
  * Why clamp: wake_lat/queue_wait are bounded via _MAX constants and
  * label clamp, so the fitter's f64 sums stay overflow-free; the var
  * ratio is FP_ONE-scaled and clamped to [0, FP_ONE*2] to bound
- * threshold midpoints; gpu_submit is clamped to [0,4] quant steps.
+ * threshold midpoints; gpu_submit is clamped to [0, 4] quant steps.
  *
  * Strategy helper: classification selects the queue via the tree
  * walk (Strategy) observing this feature state (Observer) without a

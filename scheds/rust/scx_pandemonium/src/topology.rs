@@ -1513,6 +1513,7 @@ mod t2_cut_tests {
     }
 
     #[test]
+    #[allow(clippy::erasing_op)]
     fn cross_phi_matrix_prices_the_boundaries() {
         let t = synth_smt_2domain();
         let tree = t.compute_domain_tree();

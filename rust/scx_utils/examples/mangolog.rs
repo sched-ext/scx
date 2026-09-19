@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     }
 
     // Get the key from the queue
-    let msgid = unsafe { msgget(key.try_into().unwrap(), 0) };
+    let msgid = unsafe { msgget(key, 0) };
     if msgid == -1 {
         bail!("msgget failed: {}", std::io::Error::last_os_error());
     }

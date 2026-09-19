@@ -114,11 +114,8 @@ fn window_consts_match_spec() {
         HETERO_SPREAD_PCT,
         crate::bpf_intf::flow_consts_FLOW_HETERO_SPREAD_PCT as u64
     );
-    assert_eq!(PERF_HOG, crate::bpf_intf::flow_consts_FLOW_PERF_HOG as u32);
-    assert_eq!(
-        PERF_LIGHT,
-        crate::bpf_intf::flow_consts_FLOW_PERF_LIGHT as u32
-    );
+    assert_eq!(PERF_HOG, crate::bpf_intf::flow_consts_FLOW_PERF_HOG);
+    assert_eq!(PERF_LIGHT, crate::bpf_intf::flow_consts_FLOW_PERF_LIGHT);
 }
 
 #[test]
@@ -1644,14 +1641,14 @@ fn seed_online_dense_short_holds_4_plus_4() {
     let freqs = vec![4000000; 8];
     let (t, r) = seed_groups_online(&caps, &freqs, &online, 16);
     assert_eq!(r, 1);
-    for cpu in 0..4 {
-        assert_eq!(t[cpu], GROUP_LIGHT);
+    for &group in &t[..4] {
+        assert_eq!(group, GROUP_LIGHT);
     }
-    for cpu in 4..8 {
-        assert_eq!(t[cpu], GROUP_HOG);
+    for &group in &t[4..8] {
+        assert_eq!(group, GROUP_HOG);
     }
-    for cpu in 8..16 {
-        assert_eq!(t[cpu], GROUP_LIGHT);
+    for &group in &t[8..16] {
+        assert_eq!(group, GROUP_LIGHT);
     }
 }
 
@@ -1898,12 +1895,9 @@ fn running_sets_cpuperf_level() {
     assert_eq!(perf_for_group(GROUP_HOG), CPUPERF_LEVEL);
     assert_eq!(
         CPUPERF_LEVEL,
-        crate::bpf_intf::flow_consts_FLOW_CPUPERF_LEVEL as u32
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_LEVEL
     );
-    assert_eq!(
-        CPUPERF_IDLE,
-        crate::bpf_intf::flow_consts_FLOW_CPUPERF_IDLE as u32
-    );
+    assert_eq!(CPUPERF_IDLE, crate::bpf_intf::flow_consts_FLOW_CPUPERF_IDLE);
 }
 
 /*

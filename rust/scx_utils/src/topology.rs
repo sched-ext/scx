@@ -10,7 +10,7 @@
 //!
 //! A Topology is comprised of one or more Node objects, which themselves are
 //! comprised hierarchically of LLC -> Core -> Cpu objects respectively:
-//!```rust,ignore
+//!```text
 //!                                   Topology
 //!                                       |
 //! o--------------------------------o   ...   o----------------o---------------o

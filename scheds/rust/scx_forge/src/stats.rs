@@ -85,7 +85,6 @@ impl Metrics {
             nr_task_state_errors: self.nr_task_state_errors - rhs.nr_task_state_errors,
             nr_event_dispatches: self.nr_event_dispatches - rhs.nr_event_dispatches,
             nr_ev_sticky_dispatches: self.nr_ev_sticky_dispatches - rhs.nr_ev_sticky_dispatches,
-            ..self.clone()
         }
     }
 }

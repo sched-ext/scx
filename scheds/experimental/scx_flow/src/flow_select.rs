@@ -340,7 +340,7 @@ pub fn pick_idle_in_group(
         if !may_run_on(cpu as i32, allowed) {
             continue;
         }
-        if idle.get(cpu).copied().unwrap_or(false) != true {
+        if !idle.get(cpu).copied().unwrap_or(false) {
             continue;
         }
         if crate::flow_group::group_live(cpu as u32, nr, table, ready) != group {
@@ -549,7 +549,7 @@ pub fn least_any(allowed: &[bool], nr: usize, queued: &[u64]) -> Option<u32> {
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
     for cpu in 0..nr {
-        if allowed.get(cpu).copied().unwrap_or(false) != true {
+        if !allowed.get(cpu).copied().unwrap_or(false) {
             continue;
         }
         if (cpu as u64) >= MAX_CPUS as u64 {

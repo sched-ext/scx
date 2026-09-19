@@ -34,7 +34,7 @@ pub fn sorted_contains_all(entries: &[String], inputs: &[String]) -> bool {
  * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
  * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
  *
- * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
+ * This method will then return a `Vec<String>` with the highest scoring entries at the lowest indices
  */
 pub fn fuzzy_search(entries: &[String], input: &str) -> Vec<String> {
     let input = &input.to_lowercase();

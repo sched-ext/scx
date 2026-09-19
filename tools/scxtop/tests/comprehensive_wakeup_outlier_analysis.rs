@@ -76,8 +76,7 @@ fn comprehensive_wakeup_outlier_analysis() {
 
     for (idx, instant_ts, instant_track) in &instant_events {
         // Look for the next SliceBegin event within reasonable time
-        for j in (idx + 1)..std::cmp::min(idx + 20, track_events.len()) {
-            let next = &track_events[j];
+        for next in &track_events[(idx + 1)..std::cmp::min(idx + 20, track_events.len())] {
             if matches!(next.event_type, TrackEventType::SliceBegin) {
                 let latency_ns = next.timestamp_ns.saturating_sub(*instant_ts);
                 if latency_ns < 1_000_000 {

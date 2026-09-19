@@ -65,5 +65,5 @@ testutils = []
 name = "mangolog"
 crate-type = ["bin"]
 
-[lints.clippy]
-not_unsafe_ptr_arg_deref = "allow"
+[lints]
+workspace = true
