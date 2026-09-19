@@ -41,6 +41,10 @@ const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
+/* Debt a task may carry over its domain clock at enqueue, in slices. */
+#define VTIME_DEBT_CAP_SLICES 16
+/* Longest the per-CPU DSQ may go unserved while non-empty, in slices. */
+#define PINNED_MAX_WAIT_SLICES 8
 const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool reject_multicpu_pinning = false;
@@ -82,8 +86,7 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp, u32 ances
 	struct cgroup *cg;
 
 	if (!(cg = bpf_cgroup_ancestor(cgrp, ancestor))) {
-		scx_bpf_error("Failed to get ancestor level %d for cgid %llu", ancestor,
-			      cgrp->kn->id);
+		scx_bpf_error("Failed to get ancestor level %d for cgid %llu", ancestor, cgrp->kn->id);
 		return NULL;
 	}
 
@@ -166,6 +169,13 @@ struct {
 	__uint(max_entries, 1);
 } cpu_ctxs SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct subcell_account);
+	__uint(max_entries, MAX_CELLS * MAX_SUBCELLS_PER_CELL);
+} subcell_accounts SEC(".maps");
+
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
 	struct cpu_ctx *cctx;
@@ -182,6 +192,43 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cctx;
+}
+
+/* DSQs must be created from struct_ops init, which has scheduler context. */
+static __always_inline int create_subcell_dsqs(u32 cell_id, u32 subcell_id)
+{
+	int ret;
+
+	if (enable_llc_awareness) {
+		u32 llc;
+
+		bpf_for(llc, 0, MAX_LLCS)
+		{
+			dsq_id_t dsq_id;
+
+			if (llc >= nr_llc)
+				break;
+
+			dsq_id = get_subcell_llc_dsq_id(cell_id, subcell_id, llc);
+			if (dsq_is_invalid(dsq_id))
+				return -EINVAL;
+
+			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+			if (ret < 0)
+				return ret;
+		}
+	} else {
+		dsq_id_t dsq_id = get_subcell_llc_dsq_id(cell_id, subcell_id, FAKE_FLAT_SUBCELL_LLC);
+
+		if (dsq_is_invalid(dsq_id))
+			return -EINVAL;
+
+		ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
 }
 
 struct cell_cpumask_map cell_cpumasks SEC(".maps");
@@ -270,11 +317,15 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
 
-		tctx->dsq = get_cpu_dsq_id(cpu);
-		if (dsq_is_invalid(tctx->dsq))
+		dsq_id_t cpu_dsq = get_cpu_dsq_id(cpu);
+
+		if (dsq_is_invalid(cpu_dsq))
 			return -EINVAL;
 
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctx->vtime_now));
+		/* Only re-base when the task actually changes domain. */
+		if (cpu_dsq.raw != tctx->dsq.raw || tctx->all_cell_cpus_allowed)
+			scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctx->vtime_now));
+		tctx->dsq = cpu_dsq;
 		tctx->all_cell_cpus_allowed = false;
 		return 0;
 	}
@@ -288,17 +339,38 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	}
 
 	/* Non-LLC aware version */
-	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, FAKE_FLAT_SUBCELL_LLC);
-	if (dsq_is_invalid(tctx->dsq))
+	dsq_id_t subcell_dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, FAKE_FLAT_SUBCELL_LLC);
+	if (dsq_is_invalid(subcell_dsq))
 		return -EINVAL;
 
 	struct subcell *subcell;
 	if (!(subcell = lookup_subcell(tctx->cell, tctx->subcell)))
 		return -ENOENT;
 
-	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(subcell->llcs[FAKE_FLAT_SUBCELL_LLC].vtime_now));
+	/* Only re-base when the task actually changes domain. */
+	if (subcell_dsq.raw != tctx->dsq.raw || !tctx->all_cell_cpus_allowed)
+		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(subcell->llcs[FAKE_FLAT_SUBCELL_LLC].vtime_now));
+	tctx->dsq = subcell_dsq;
 	tctx->all_cell_cpus_allowed = true;
 
+	return 0;
+}
+
+/*
+ * A pinned task is placed on a per-CPU DSQ and takes its basis from that CPU's
+ * clock, which belongs to whichever subcell owns the CPU. Charge that subcell
+ * rather than the task's own, so stopping() advances the clocks the task is
+ * compared against. Otherwise a task pinned outside its subcell never advances
+ * them and its vtime ratchets ahead until it loses every comparison.
+ */
+static __always_inline int set_vtime_charge_cpu(struct task_ctx *tctx, struct cpu_ctx *cpu_ctx)
+{
+	s32 packed_subcell = pack_subcell_id(cpu_ctx->cell, cpu_ctx->subcell);
+
+	if (packed_subcell < 0)
+		return -EINVAL;
+
+	tctx->vtime_charge_subcell = packed_subcell;
 	return 0;
 }
 
@@ -310,6 +382,94 @@ static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
 		return -EINVAL;
 
 	tctx->vtime_charge_subcell = packed_subcell;
+	return 0;
+}
+
+static __always_inline bool match_comm_prefix(const char *prefix, const char *comm)
+{
+	u32 i;
+
+	bpf_for(i, 0, MAX_COMM)
+	{
+		if (prefix[i] == '\0')
+			return true;
+		if (comm[i] != prefix[i])
+			return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool match_subcell_match(struct subcell_match *match, const char *comm)
+{
+	switch (match->kind) {
+	case SUBCELL_MATCH_COMM_PREFIX:
+		return match_comm_prefix(match->value, comm);
+	default:
+		return false;
+	}
+}
+
+static __always_inline bool task_matches_subcell(struct subcell *subcell, const char *comm)
+{
+	u32 or_idx;
+
+	bpf_for(or_idx, 0, MAX_SUBCELL_MATCH_ORS)
+	{
+		struct subcell_match_and_group *and_group;
+		bool matches = true;
+		u32 and_idx;
+
+		if (or_idx >= subcell->nr_match_ors)
+			break;
+
+		and_group = MEMBER_VPTR(subcell->matches, [or_idx]);
+		if (!and_group)
+			return false;
+
+		if (and_group->nr_matches == 0)
+			return true;
+
+		bpf_for(and_idx, 0, MAX_SUBCELL_MATCH_ANDS)
+		{
+			struct subcell_match *match;
+
+			if (and_idx >= and_group->nr_matches)
+				break;
+
+			match = MEMBER_VPTR(and_group->matches, [and_idx]);
+			if (!match || !match_subcell_match(match, comm)) {
+				matches = false;
+				break;
+			}
+		}
+
+		if (matches)
+			return true;
+	}
+
+	return false;
+}
+
+static __always_inline u32 pick_task_subcell(struct task_struct *p, u32 cell_id)
+{
+	char comm[MAX_COMM];
+	u32 subcell_id;
+
+	__builtin_memcpy(comm, p->comm, MAX_COMM);
+
+	bpf_for(subcell_id, 1, MAX_SUBCELLS_PER_CELL)
+	{
+		struct subcell *subcell = lookup_subcell(cell_id, subcell_id);
+
+		if (!subcell)
+			break;
+		if (!subcell->in_use)
+			continue;
+		if (task_matches_subcell(subcell, comm))
+			return subcell_id;
+	}
+
 	return 0;
 }
 
@@ -350,9 +510,8 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 		}
 
 		if (!cgc) {
-			scx_bpf_error(
-				"cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x, tctx->cgid %llu)",
-				cg->kn->id, p->pid, p->flags, tctx->cgid);
+			scx_bpf_error("cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x, tctx->cgid %llu)",
+				      cg->kn->id, p->pid, p->flags, tctx->cgid);
 			return -ENOENT;
 		}
 	}
@@ -366,7 +525,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
-	tctx->subcell = 0;
+	tctx->subcell = pick_task_subcell(p, tctx->cell);
 	tctx->cgid = cg->kn->id;
 
 	/*
@@ -389,8 +548,8 @@ static __always_inline int refresh_task_cell(struct task_struct *p, struct task_
 }
 
 /* Helper function for picking an idle cpu out of a candidate set */
-static s32 pick_idle_cpu_from(struct task_struct *p, const struct cpumask *cand_cpumask,
-			      s32 prev_cpu, const struct cpumask *idle_smtmask)
+static s32 pick_idle_cpu_from(struct task_struct *p, const struct cpumask *cand_cpumask, s32 prev_cpu,
+			      const struct cpumask *idle_smtmask)
 {
 	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
 	s32 cpu;
@@ -502,8 +661,8 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, st
  *
  * Returns: CPU number >= 0 on success, -1 on error, -EBUSY if no idle CPU found.
  */
-static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
-					     struct cpu_ctx *cctx, struct task_ctx *tctx, bool kick)
+static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu, struct cpu_ctx *cctx,
+					     struct task_ctx *tctx, bool kick)
 {
 	s32 cpu;
 
@@ -529,7 +688,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		return -1; /* error from pick_idle_cpu, propagate */
 
 	/* No idle CPU in the subcell: try sibling subcells, then other cells. */
-	if (enable_borrowing) {
+	{
 		const struct cpumask *idle_smtmask __free(idle_cpumask) = NULL;
 		const struct cpumask *subcell_borrowable;
 
@@ -542,7 +701,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 			return -1;
 		}
 		cpu = pick_idle_cpu_from(p, subcell_borrowable, prev_cpu, idle_smtmask);
-		if (cpu < 0) {
+		if (cpu < 0 && enable_borrowing) {
 			const struct cpumask *cell_borrowable;
 
 			cell_borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
@@ -569,8 +728,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
  * Switch task to a new CPU's per-CPU DSQ with vtime reset.
  * Returns new_cpu on success, -1 on failure (tctx unchanged).
  */
-static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_ctx *tctx,
-					     s32 new_cpu)
+static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_ctx *tctx, s32 new_cpu)
 {
 	s32 current_cpu = get_cpu_from_dsq(tctx->dsq);
 	if (current_cpu < 0)
@@ -588,8 +746,8 @@ static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_
 	return new_cpu;
 }
 
-static __always_inline s32 select_pinned_cpu(struct task_struct *p, s32 prev_cpu,
-					     struct task_ctx *tctx, bool *idle_cpu_cleared)
+static __always_inline s32 select_pinned_cpu(struct task_struct *p, s32 prev_cpu, struct task_ctx *tctx,
+					     bool *idle_cpu_cleared)
 {
 	s32 cpu;
 
@@ -652,7 +810,11 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 			return prev_cpu;
 
 		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			if (set_vtime_charge_subcell(tctx))
+			struct cpu_ctx *target_cctx;
+
+			if (!(target_cctx = lookup_cpu_ctx(cpu)))
+				return prev_cpu;
+			if (set_vtime_charge_cpu(tctx, target_cctx))
 				return prev_cpu;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
@@ -771,8 +933,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			 */
 			barrier_var(tctx);
 			if (tctx->cpumask)
-				cpu = bpf_cpumask_any_distribute(
-					(const struct cpumask *)tctx->cpumask);
+				cpu = bpf_cpumask_any_distribute((const struct cpumask *)tctx->cpumask);
 		}
 	}
 
@@ -812,6 +973,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!(cctx = lookup_cpu_ctx(cpu)))
 			return;
 		/* Task is pinned to specific CPUs, use per-CPU DSQ */
+		if (set_vtime_charge_cpu(tctx, cctx))
+			return;
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
@@ -822,13 +985,14 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 	tctx->basis_vtime = basis_vtime;
 
-	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
-		scx_bpf_error(
-			"vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u subcell=%u",
-			p->pid, p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime,
-			tctx->cell, tctx->subcell);
-		return;
-	}
+	/*
+	 * A task can legitimately owe at most one weighted slice over the clock
+	 * it competes against; anything beyond that is an accounting gap (a
+	 * clock that did not follow the task) and would only starve the task.
+	 * Cap the debt instead of carrying or aborting on it.
+	 */
+	if (time_after(vtime, basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns))
+		vtime = basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns;
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
@@ -837,6 +1001,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = basis_vtime - slice_ns;
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
+	if (!tctx->all_cell_cpus_allowed && !READ_ONCE(cctx->pinned_waiting_since))
+		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 
 	/*
 	 * Account after insertion: subcell reconfiguration can orphan the selected
@@ -860,6 +1026,99 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Kick the CPU if needed */
 	if ((!__COMPAT_is_enq_cpu_selected(enq_flags) || (enq_flags & SCX_ENQ_LAST)) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+/* Time constant of the per-task demand estimate. */
+#define DEMAND_TAU_NS (100ULL * 1000 * 1000)
+/* Bound on one measurement window, keeps the fixed-point products in range. */
+#define DEMAND_MAX_WINDOW_NS (1ULL << 40)
+
+/*
+ * A task's demand is the share of its non-waiting time that it spends
+ * running: run / (run + sleep) over the window since the last measurement.
+ * Waiting for a CPU is left out of the denominator, so contention does not
+ * inflate the estimate. Windows close in stopping and when dispatch extends
+ * a solo task's slice, never on wakeup, so a window spans whole cycles of
+ * sleep, wait, and run.
+ *
+ * The estimate is blended with a time constant: a window much longer than
+ * DEMAND_TAU_NS mostly replaces the old value, a short one nudges it. The
+ * blended value times the window is charged to the subcell, so a task that
+ * stops cycling stops contributing on its own.
+ *
+ * A slice extension only closes a window that has already grown past the
+ * time constant. Closing on every extension would split a run across two
+ * windows and leave the one holding the sleep with only part of the run,
+ * biasing the ratio low; that path exists for long runs that never stop.
+ */
+static __always_inline void update_task_demand(struct task_ctx *tctx, struct subcell_account *account, u64 now,
+					       bool stopping)
+{
+	u64 window, active;
+
+	if (!tctx->demand_window_at) {
+		tctx->demand_window_at = now;
+		tctx->window_run_ns = 0;
+		tctx->window_sleep_ns = 0;
+		return;
+	}
+
+	window = time_delta(now, tctx->demand_window_at);
+	if (!window || (!stopping && window < DEMAND_TAU_NS))
+		return;
+	if (window > DEMAND_MAX_WINDOW_NS)
+		window = DEMAND_MAX_WINDOW_NS;
+
+	active = tctx->window_run_ns + tctx->window_sleep_ns;
+	if (active) {
+		u64 sample = (tctx->window_run_ns << DEMAND_SHIFT) / active;
+		u64 demand = tctx->demand;
+
+		/* BPF has no signed division; move toward the sample by hand. */
+		if (sample >= demand)
+			demand += (sample - demand) * window / (window + DEMAND_TAU_NS);
+		else
+			demand -= (demand - sample) * window / (window + DEMAND_TAU_NS);
+		tctx->demand = demand;
+	}
+
+	account->demand_sum += (u64)tctx->demand * window;
+	tctx->demand_window_at = now;
+	tctx->window_run_ns = 0;
+	tctx->window_sleep_ns = 0;
+}
+
+/*
+ * Charge the running time of the task described by @tctx since it was last
+ * accounted to its cell and subcell demand counters on the current CPU.
+ */
+static __always_inline void account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now, bool stopping)
+{
+	u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
+	struct subcell_account *account;
+	s32 packed;
+	u32 key;
+	u64 used;
+
+	if (!running) {
+		scx_bpf_error("Task cell index too large: %d", tctx->cell);
+		return;
+	}
+	packed = pack_subcell_id(tctx->cell, tctx->subcell);
+	if (packed < 0)
+		return;
+	key = packed;
+	account = bpf_map_lookup_elem(&subcell_accounts, &key);
+	if (!account) {
+		scx_bpf_error("Task cell or subcell index too large: %d, %d", tctx->cell, tctx->subcell);
+		return;
+	}
+	used = time_delta(now, tctx->running_accounted_at);
+	tctx->running_accounted_at = now;
+	*running += used;
+	account->running_ns += used;
+	tctx->window_run_ns += used;
+	update_task_demand(tctx, account, now, stopping);
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
@@ -912,12 +1171,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		found = true;
 	}
 
-	/* Peek at CPU DSQ head, prefer if lower vtime */
+	/*
+	 * Peek at CPU DSQ head, prefer if lower vtime. Under a deep subcell
+	 * backlog the pinned head can lose every comparison for a full round
+	 * of the queue, so also bound how long the per-CPU DSQ goes unserved.
+	 */
 	p = dsq_peek(cpu_dsq.raw);
-	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
-		min_vtime = p->scx.dsq_vtime;
-		min_vtime_dsq = cpu_dsq;
-		found = true;
+	if (p) {
+		u64 since = READ_ONCE(cctx->pinned_waiting_since);
+		bool overdue = since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
+
+		if (!found || overdue || time_before(p->scx.dsq_vtime, min_vtime)) {
+			min_vtime = p->scx.dsq_vtime;
+			min_vtime_dsq = cpu_dsq;
+			found = true;
+		}
+	} else {
+		WRITE_ONCE(cctx->pinned_waiting_since, 0);
 	}
 
 	/* If we failed to find an eligible task, try the sibling LLC DSQs. */
@@ -948,8 +1218,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 					stay = tctx->dsq.raw == cpu_dsq.raw;
 			}
 
-			if (stay)
+			if (stay) {
+				/*
+				 * This is an accounting hook as well as a refill.
+				 * Once prev's slice is extended the core picks it
+				 * again, and put_prev_set_next_task() returns early
+				 * for next == prev, so neither stopping() nor
+				 * running() fires for as long as prev stays alone on
+				 * this cpu. Between its start and its eventual stop
+				 * this is the only place the scheduler sees such a
+				 * task, so charge the running time it has accumulated
+				 * here, at slice granularity, and let stopping()
+				 * charge the remainder.
+				 */
+				account_task_running(cctx, tctx, scx_bpf_now(), false);
 				scx_bpf_task_set_slice(prev, slice_ns);
+			}
 		}
 		return;
 	}
@@ -961,6 +1245,12 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* Try the winner first */
 	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		/*
+		 * Served the per-CPU DSQ: restart its wait clock. If it is now
+		 * empty the next dispatch's peek clears it.
+		 */
+		if (min_vtime_dsq.raw == cpu_dsq.raw)
+			WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 		if (enable_llc_awareness && min_vtime_dsq.raw == subcell_dsq.raw) {
 			struct subcell *subcell = lookup_subcell(cell, subcell_id);
 
@@ -988,11 +1278,68 @@ static inline void advance_subcell_llc_vtime(struct subcell *subcell, u32 llc_id
 		WRITE_ONCE(llc_state->vtime_now, task_vtime);
 }
 
+/*
+ * Charge the time @tctx's task spent runnable but off-CPU since it was last
+ * marked runnable to its subcell, on the current CPU's accounting slot.
+ */
+static __always_inline void account_task_queued(struct task_ctx *tctx, u64 now)
+{
+	struct subcell_account *account;
+	s32 packed;
+	u32 key;
+
+	if (!tctx->runnable_at)
+		return;
+
+	packed = pack_subcell_id(tctx->cell, tctx->subcell);
+	if (packed < 0)
+		return;
+	key = packed;
+	account = bpf_map_lookup_elem(&subcell_accounts, &key);
+	if (!account) {
+		scx_bpf_error("Task cell or subcell index too large: %d, %d", tctx->cell, tctx->subcell);
+		return;
+	}
+	account->queued_ns += time_delta(now, tctx->runnable_at);
+	tctx->runnable_at = 0;
+}
+
+void BPF_STRUCT_OPS(mitosis_runnable, struct task_struct *p, u64 enq_flags)
+{
+	struct task_ctx *tctx;
+	u64 now;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+
+	now = scx_bpf_now();
+	if (tctx->quiescent_at) {
+		tctx->window_sleep_ns += time_delta(now, tctx->quiescent_at);
+		tctx->quiescent_at = 0;
+	}
+	tctx->runnable_at = now;
+}
+
+void BPF_STRUCT_OPS(mitosis_quiescent, struct task_struct *p, u64 deq_flags)
+{
+	struct task_ctx *tctx;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+
+	u64 now = scx_bpf_now();
+
+	/* Dequeued without running again: close the wait it was in, if any. */
+	account_task_queued(tctx, now);
+	tctx->quiescent_at = now;
+}
+
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct subcell *subcell;
+	u64 now;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1008,13 +1355,16 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 			return;
 
 		s32 llc = tctx->llc;
-		if (llc >= 0 && llc < MAX_LLCS &&
-		    (subcell = lookup_subcell(tctx->cell, tctx->subcell)))
+		if (llc >= 0 && llc < MAX_LLCS && (subcell = lookup_subcell(tctx->cell, tctx->subcell)))
 			advance_subcell_llc_vtime(subcell, (u32)llc, p->scx.dsq_vtime);
 	}
 
+	now = scx_bpf_now();
+	/* The task waited from its last runnable mark until now. */
+	account_task_queued(tctx, now);
 	/* Record the running slice start time. */
-	tctx->started_running_at = scx_bpf_now();
+	tctx->started_running_at = now;
+	tctx->running_accounted_at = now;
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
 	if (enable_slice_shrinking) {
@@ -1117,19 +1467,16 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	{
-		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
-		if (!running) {
-			scx_bpf_error("Task cell index too large: %d", tctx->cell);
-			return;
-		}
-		*running += used;
-	}
+	/* Charge whatever the slice extensions since the last flush left over. */
+	account_task_running(cctx, tctx, now, true);
+
+	/* A preempted task is still runnable; its next wait starts now. */
+	tctx->runnable_at = runnable ? now : 0;
 }
 
 SEC("fentry/cpuset_write_resmask")
-int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of, char *buf, size_t nbytes,
-	     loff_t off, ssize_t retval)
+int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of, char *buf, size_t nbytes, loff_t off,
+	     ssize_t retval)
 {
 	/*
 	 * On a write to cpuset.cpus, userspace must re-read cpusets and push a
@@ -1231,8 +1578,7 @@ void BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 	return;
 }
 
-void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p, struct cgroup *from,
-		    struct cgroup *to)
+void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p, struct cgroup *from, struct cgroup *to)
 {
 	// Cell management uses tracepoint cgroup tracking.
 	return;
@@ -1246,9 +1592,8 @@ int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 
 	ret = init_cgrp_ctx_with_ancestors(cgrp);
 	if (ret) {
-		scx_bpf_error(
-			"tp_cgroup_mkdir: init_cgrp_ctx_with_ancestors failed for cgid %llu: %d",
-			cgrp->kn->id, ret);
+		scx_bpf_error("tp_cgroup_mkdir: init_cgrp_ctx_with_ancestors failed for cgid %llu: %d", cgrp->kn->id,
+			      ret);
 	}
 	return 0;
 }
@@ -1273,8 +1618,7 @@ s32 validate_flags()
 {
 	/* Need valid llc */
 	if (enable_llc_awareness && (nr_llc < 1 || nr_llc > MAX_LLCS)) {
-		scx_bpf_error("LLC-aware mode requires nr_llc between 1 and %d inclusive, got %d",
-			      MAX_LLCS, nr_llc);
+		scx_bpf_error("LLC-aware mode requires nr_llc between 1 and %d inclusive, got %d", MAX_LLCS, nr_llc);
 		return -EINVAL;
 	}
 
@@ -1284,8 +1628,7 @@ s32 validate_flags()
 s32 validate_userspace_data()
 {
 	if (nr_possible_cpus > MAX_CPUS) {
-		scx_bpf_error("nr_possible_cpus %d exceeds MAX_CPUS %d", nr_possible_cpus,
-			      MAX_CPUS);
+		scx_bpf_error("nr_possible_cpus %d exceeds MAX_CPUS %d", nr_possible_cpus, MAX_CPUS);
 		return -EINVAL;
 	}
 	return 0;
@@ -1336,8 +1679,7 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 	return update_task_cell(p, tctx, cgrp);
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
-			     struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
 	struct cgroup *cgrp __free(cgroup) = NULL;
 	int ret;
@@ -1433,8 +1775,8 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 			u64 drain_mask = READ_ONCE(subcell->llcs_to_drain);
 			u64 llcs_with_cpus = READ_ONCE(subcell->llcs_with_cpus);
 
-			scx_bpf_dump("SUBCELL[%d:%d] llcs_to_drain=%llx llcs_with_cpus=%llx\n", i,
-				     0, drain_mask, llcs_with_cpus);
+			scx_bpf_dump("SUBCELL[%d:%d] llcs_to_drain=%llx llcs_with_cpus=%llx\n", i, 0, drain_mask,
+				     llcs_with_cpus);
 
 			bpf_for(llc, 0, nr_llc)
 			{
@@ -1456,15 +1798,13 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 				bit = 1LLU << llc;
 				nr_queued = scx_bpf_dsq_nr_queued(dsq_id.raw);
 				tracked_nr_queued = READ_ONCE(llc_state->nr_queued);
-				if (!nr_queued && !tracked_nr_queued && !(drain_mask & bit) &&
-				    !(llcs_with_cpus & bit))
+				if (!nr_queued && !tracked_nr_queued && !(drain_mask & bit) && !(llcs_with_cpus & bit))
 					continue;
 
 				scx_bpf_dump(
 					"SUBCELL[%d:%d] LLC[%d] vtime=%llu nr_queued=%d drain=%d has_cpus=%d tracked_nr_queued=%u\n",
-					i, 0, llc, READ_ONCE(llc_state->vtime_now), nr_queued,
-					!!(drain_mask & bit), !!(llcs_with_cpus & bit),
-					tracked_nr_queued);
+					i, 0, llc, READ_ONCE(llc_state->vtime_now), nr_queued, !!(drain_mask & bit),
+					!!(llcs_with_cpus & bit), tracked_nr_queued);
 			}
 		} else {
 			dsq_id = get_subcell_llc_dsq_id(i, 0, FAKE_FLAT_SUBCELL_LLC);
@@ -1486,13 +1826,12 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		if (dsq_is_invalid(dsq_id))
 			return;
 		if (enable_llc_awareness) {
-			scx_bpf_dump("CPU[%d] cell=%d subcell=%d llc=%d vtime=%llu nr_queued=%d\n",
-				     i, cpu_ctx->cell, cpu_ctx->subcell, cpu_ctx->llc,
-				     READ_ONCE(cpu_ctx->vtime_now),
+			scx_bpf_dump("CPU[%d] cell=%d subcell=%d llc=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
+				     cpu_ctx->subcell, cpu_ctx->llc, READ_ONCE(cpu_ctx->vtime_now),
 				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		} else {
-			scx_bpf_dump("CPU[%d] cell=%d subcell=%d vtime=%llu nr_queued=%d\n", i,
-				     cpu_ctx->cell, cpu_ctx->subcell, READ_ONCE(cpu_ctx->vtime_now),
+			scx_bpf_dump("CPU[%d] cell=%d subcell=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
+				     cpu_ctx->subcell, READ_ONCE(cpu_ctx->vtime_now),
 				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		}
 	}
@@ -1507,8 +1846,8 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_st
 
 	scx_bpf_dump(
 		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u subcell=%u llc=%d dsq=%llx all_cell_cpus_allowed=%d\n",
-		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell, tctx->subcell, tctx->llc,
-		tctx->dsq.raw, tctx->all_cell_cpus_allowed);
+		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell, tctx->subcell, tctx->llc, tctx->dsq.raw,
+		tctx->all_cell_cpus_allowed);
 	scx_bpf_dump("Task[%d] CPUS=", p->pid);
 	dump_cpumask(p->cpus_ptr);
 	scx_bpf_dump("\n");
@@ -1547,15 +1886,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			if (*u8_ptr & (1 << (i % 8))) {
 				dsq_id_t dsq_id = get_cpu_dsq_id(i);
 				if (dsq_is_invalid(dsq_id)) {
-					scx_bpf_error("Invalid dsq_id for cpu %d, dsq_id: %llx", i,
-						      dsq_id.raw);
+					scx_bpf_error("Invalid dsq_id for cpu %d, dsq_id: %llx", i, dsq_id.raw);
 					return -EINVAL;
 				}
 				ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
 				if (ret < 0) {
-					scx_bpf_error(
-						"Failed to create dsq for cpu %d, dsq_id: %llx, ret: %d",
-						i, dsq_id.raw, ret);
+					scx_bpf_error("Failed to create dsq for cpu %d, dsq_id: %llx, ret: %d", i,
+						      dsq_id.raw, ret);
 					return ret;
 				}
 			}
@@ -1624,26 +1961,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		u32 subcell_id;
 		struct cell *cell;
 
-		if (enable_llc_awareness) {
-			u32 llc;
-			bpf_for(llc, 0, nr_llc)
-			{
-				dsq_id_t dsq_id = get_subcell_llc_dsq_id(i, 0, llc);
-				if (dsq_is_invalid(dsq_id))
-					return -EINVAL; // scx_bpf_error called in get_subcell_llc_dsq_id
-
-				ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
-				if (ret < 0)
-					return ret;
-			}
-		} else {
-			dsq_id_t dsq_id = get_subcell_llc_dsq_id(i, 0, FAKE_FLAT_SUBCELL_LLC);
-			if (dsq_is_invalid(dsq_id))
-				return -EINVAL; // scx_bpf_error called in get_subcell_llc_dsq_id
-
-			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
-			if (ret < 0)
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			ret = create_subcell_dsqs(i, subcell_id);
+			if (ret) {
+				scx_bpf_error("failed to create DSQs for cell=%u subcell=%u: %d", i, subcell_id, ret);
 				return ret;
+			}
 		}
 
 		if (!(cpumaskw = lookup_cell_cpumask_wrapper(i)))
@@ -1659,6 +1983,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			cell->subcells[subcell_id].in_use = 0;
 			cell->subcells[subcell_id].llcs_to_drain = 0;
 			cell->subcells[subcell_id].llcs_with_cpus = 0;
+			cell->subcells[subcell_id].nr_match_ors = 0;
 		}
 
 		/*
@@ -1667,8 +1992,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		 */
 		ret = init_cpumask_slot(&cpumaskw->primary, true);
 		if (ret) {
-			scx_bpf_error("failed to init primary cpumask slot for cell %d: %d", i,
-				      ret);
+			scx_bpf_error("failed to init primary cpumask slot for cell %d: %d", i, ret);
 			return ret;
 		}
 
@@ -1676,9 +2000,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			/* Start with empty borrowable masks */
 			ret = init_cpumask_slot(&cpumaskw->borrowable, false);
 			if (ret) {
-				scx_bpf_error(
-					"failed to init borrowable cpumask slot for cell %d: %d", i,
-					ret);
+				scx_bpf_error("failed to init borrowable cpumask slot for cell %d: %d", i, ret);
 				return ret;
 			}
 		}
@@ -1693,20 +2015,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 			ret = init_cpumask_slot(&subcell_cpumaskw->primary, true);
 			if (ret) {
-				scx_bpf_error(
-					"failed to init primary cpumask slot for cell=%u subcell=%u: %d",
-					i, subcell_id, ret);
+				scx_bpf_error("failed to init primary cpumask slot for cell=%u subcell=%u: %d", i,
+					      subcell_id, ret);
 				return ret;
 			}
 
-			if (enable_borrowing) {
-				ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
-				if (ret) {
-					scx_bpf_error(
-						"failed to init borrowable cpumask slot for cell=%u subcell=%u: %d",
-						i, subcell_id, ret);
-					return ret;
-				}
+			ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
+			if (ret) {
+				scx_bpf_error("failed to init borrowable cpumask slot for cell=%u subcell=%u: %d", i,
+					      subcell_id, ret);
+				return ret;
 			}
 		}
 	}
@@ -1806,9 +2124,7 @@ int apply_configured_cell_cpumask(u32 cell_id, struct cell_config *config)
 			subcell = lookup_subcell(cell_id, 0);
 			if (!subcell)
 				return -ENOENT;
-			llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
-					  cctx->llc :
-					  FAKE_FLAT_SUBCELL_LLC;
+			llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ? cctx->llc : FAKE_FLAT_SUBCELL_LLC;
 			llc_state = lookup_subcell_llc(subcell, llc_idx);
 			if (!llc_state)
 				return -EINVAL;
@@ -1848,6 +2164,7 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 	struct subcell_config(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
 	struct cell *cell;
 	u32 subcell_id;
+	u32 cpu;
 
 	if (!config || cell_id >= MAX_CELLS)
 		return -EINVAL;
@@ -1874,47 +2191,79 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 
 		subcell_config = MEMBER_VPTR(*subcell_configs, [subcell_id]);
 		if (!subcell_config) {
-			scx_bpf_error("subcell_id %d out of bounds for cell_id %d", subcell_id,
-				      cell_id);
+			scx_bpf_error("subcell_id %d out of bounds for cell_id %d", subcell_id, cell_id);
 			return -EINVAL;
 		}
 
 		if (set_cpumask_from_data(&subcell_cpumaskw->primary, &subcell_config->primary)) {
-			scx_bpf_error(
-				"failed to set primary subcell cpumask for cell=%u subcell=%u",
-				cell_id, subcell_id);
+			scx_bpf_error("failed to set primary subcell cpumask for cell=%u subcell=%u", cell_id,
+				      subcell_id);
 			return -EINVAL;
 		}
 		scoped_guard(rcu)
 		{
 			if (refresh_subcell_llc_draining(cell_id, subcell_id)) {
-				scx_bpf_error(
-					"failed to refresh LLC draining for cell=%u subcell=%u",
-					cell_id, subcell_id);
+				scx_bpf_error("failed to refresh LLC draining for cell=%u subcell=%u", cell_id,
+					      subcell_id);
 				return -EINVAL;
 			}
 		}
 
-		if (enable_borrowing) {
-			if (set_cpumask_from_data(&subcell_cpumaskw->borrowable,
-						  &subcell_config->borrowable)) {
-				scx_bpf_error(
-					"failed to set borrowable subcell cpumask for cell=%u subcell=%u",
-					cell_id, subcell_id);
-				return -EINVAL;
-			}
+		if (set_cpumask_from_data(&subcell_cpumaskw->borrowable, &subcell_config->borrowable)) {
+			scx_bpf_error("failed to set borrowable subcell cpumask for cell=%u subcell=%u", cell_id,
+				      subcell_id);
+			return -EINVAL;
 		}
 
 		subcell = MEMBER_VPTR(cell->subcells, [subcell_id]);
 		if (!subcell) {
-			scx_bpf_error("subcell_id %d out of bounds for cell_id %d", subcell_id,
-				      cell_id);
+			scx_bpf_error("subcell_id %d out of bounds for cell_id %d", subcell_id, cell_id);
 			return -EINVAL;
 		}
 		subcell->id = subcell_config->id;
 		subcell->in_use = subcell_config->in_use;
+		subcell->nr_match_ors = subcell_config->nr_match_ors;
+		__builtin_memcpy(subcell->matches, subcell_config->matches, sizeof(subcell->matches));
 		subcell->primary = subcell_config->primary;
 		subcell->borrowable = subcell_config->borrowable;
+
+		if (!subcell_config->in_use)
+			continue;
+
+		bpf_for(cpu, 0, nr_possible_cpus)
+		{
+			struct cpu_ctx *cctx;
+			bool cpu_in_subcell;
+
+			if (cell_cpumask_data_test_cpu(&subcell_config->primary, cpu, &cpu_in_subcell)) {
+				scx_bpf_error("failed to decode subcell cpumask for cell=%u subcell=%u", cell_id,
+					      subcell_id);
+				return -EINVAL;
+			}
+
+			if (!cpu_in_subcell)
+				continue;
+
+			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+			if (!cctx)
+				return -ENOENT;
+
+			if (cctx->cell != cell_id || cctx->subcell != subcell_id) {
+				struct subcell_llc *llc_state;
+				u32 llc_idx;
+
+				llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ? cctx->llc :
+											    FAKE_FLAT_SUBCELL_LLC;
+				llc_state = lookup_subcell_llc(subcell, llc_idx);
+				if (!llc_state)
+					return -EINVAL;
+				if (time_before(READ_ONCE(llc_state->vtime_now), cctx->vtime_now))
+					WRITE_ONCE(llc_state->vtime_now, cctx->vtime_now);
+			}
+
+			cctx->cell = cell_id;
+			cctx->subcell = subcell_id;
+		}
 	}
 
 	return 0;
@@ -2128,8 +2477,10 @@ SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
+	       .runnable		= (void *)mitosis_runnable,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
+	       .quiescent		= (void *)mitosis_quiescent,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,

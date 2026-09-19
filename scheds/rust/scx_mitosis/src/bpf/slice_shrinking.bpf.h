@@ -107,8 +107,7 @@ static inline u64 slice_shrink_limit(u64 avg_runtime_ns, enum slice_shrink_resul
 }
 
 /* Shrink p's slice to limit and bump the appropriate stat counter. */
-static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
-				      enum slice_shrink_result result, u32 cell,
+static inline void slice_shrink_apply(struct task_struct *p, u64 limit, enum slice_shrink_result result, u32 cell,
 				      struct cpu_ctx *cctx)
 {
 	if (p->scx.slice > limit) {
@@ -127,8 +126,7 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
  * Shrinks the currently running task's slice based on the waiter's
  * EWMA runtime. Caller must check enable_slice_shrinking and curr.
  */
-static inline void slice_shrink_on_enqueue(struct task_struct *curr,
-					   struct task_ctx *pinned_waiter_tctx, u32 cell,
+static inline void slice_shrink_on_enqueue(struct task_struct *curr, struct task_ctx *pinned_waiter_tctx, u32 cell,
 					   struct cpu_ctx *cctx)
 {
 	enum slice_shrink_result result;
