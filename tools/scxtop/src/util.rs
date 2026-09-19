@@ -107,7 +107,7 @@ pub fn get_clock_value(clock_id: libc::c_int) -> u64 {
     (ts.tv_sec() as u64 * 1_000_000_000) + ts.tv_nsec() as u64
 }
 
-/// Replaces non-breaking spaces with regular spaces. [TEMPORARY]
+/// Replaces non-breaking spaces with regular spaces. \[TEMPORARY\]
 pub fn sanitize_nbsp(s: String) -> String {
     s.replace('\u{202F}', " ")
 }

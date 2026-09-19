@@ -40,7 +40,7 @@
 //!
 //! - **Completion Notification**:
 //!   - `notify_complete(nr_pending: u64)` Give control to the BPF component and report the number
-//!      of tasks that are still pending (this function can sleep)
+//!     of tasks that are still pending (this function can sleep)
 //!
 //! Each task received from dequeue_task() contains the following:
 //!

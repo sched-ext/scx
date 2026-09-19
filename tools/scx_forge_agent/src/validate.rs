@@ -183,7 +183,7 @@ fn cargo_build(
 }
 
 /// cargo maps release/dev to target/{release,debug}; named profiles land in
-/// target/<profile>.
+/// `target/<profile>`.
 pub(crate) fn binary_path(repo_root: &Path, package: &str, profile: &str) -> PathBuf {
     let subdir = match profile {
         "release" => "release",
