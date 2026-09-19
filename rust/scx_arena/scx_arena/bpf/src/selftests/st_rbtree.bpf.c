@@ -770,9 +770,11 @@ __weak int scx_selftest_rbtree_print(struct rbtree __arena *rbtree __arg_arena)
 
 #define SCX_RBTREE_SELFTEST(suffix, rbtree) SCX_SELFTEST(scx_selftest_rbtree_ ## suffix, (rbtree))
 
-__weak
-int scx_selftest_rbtree(void)
+SEC("syscall")
+int arena_selftest_rbtree(void)
 {
+	arena_subprog_init();
+
 	struct rbtree __arena *standard, *update, *duplicate, *noalloc;
 
 	standard = rb_create(RB_ALLOC, RB_DEFAULT);

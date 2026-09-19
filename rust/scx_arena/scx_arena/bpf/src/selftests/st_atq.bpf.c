@@ -120,7 +120,7 @@ int scx_selftest_atq_common(bool isfifo)
 	return 0;
 }
 
-__weak
+static __always_inline
 int scx_selftest_atq_fifo(u64 unused)
 {
 	return scx_selftest_atq_common(true);
@@ -137,7 +137,7 @@ int scx_selftest_atq_fail_fifo_with_weight(u64 unused)
 	return 0;
 }
 
-__weak
+static __always_inline
 int scx_selftest_atq_vtime(u64 unused)
 {
 	return scx_selftest_atq_common(false);
@@ -353,9 +353,11 @@ int scx_selftest_atq_sized(u64 unused)
 	return 0;
 }
 
-__weak
-int scx_selftest_atq(void)
+SEC("syscall")
+int arena_selftest_atq(void)
 {
+	arena_subprog_init();
+
 	int i;
 
 	for (i = 0; i < NTASKS && can_loop; i++) {
