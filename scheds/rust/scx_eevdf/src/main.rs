@@ -483,6 +483,7 @@ struct Opts {
     /// against each other.
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     no_delay_dequeue: bool,
+
     /// Wake a task that blocked over-served through the placement.
     ///
     /// A task that blocks while it is over-served is still on the runqueue it
@@ -505,6 +506,27 @@ struct Opts {
     /// behind it waits that long. For comparing the two against each other.
     #[clap(short = 'H', long, action = clap::ArgAction::SetTrue)]
     no_hrtick: bool,
+
+    /// Let a waking task borrow virtual time when it is placed.
+    ///
+    /// A task is normally placed with the lag it took out of the queue it left,
+    /// so one that ran right up to the moment it slept carries none and comes
+    /// back behind everything already queued. This floors its offset from the
+    /// destination reference at the configured virtual-time credit.
+    ///
+    /// This deliberately departs from ordinary EEVDF placement. The borrowed
+    /// service is charged normally once the task runs.
+    #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
+    latency_credit: bool,
+
+    /// Virtual-time loan for --latency-credit, in microseconds.
+    ///
+    /// The credit is a placement scale expressed as real service before
+    /// deadline-weight scaling. It is neither a response-time guarantee nor a
+    /// bound on total displacement when the task carries more lag.
+    #[clap(short = 'I', long, default_value = "20000")]
+    latency_credit_us: u64,
+
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -1080,6 +1102,8 @@ impl<'a> Scheduler<'a> {
         rodata.no_delay_dequeue = opts.no_delay_dequeue;
         rodata.no_delay_requeue = opts.no_delay_requeue;
         rodata.no_hrtick = opts.no_hrtick;
+        rodata.latency_credit = opts.latency_credit;
+        rodata.latency_credit_ns = opts.latency_credit_us * 1000;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Follow the capacity classes selected by the kernel unless explicitly

@@ -83,6 +83,8 @@ extern const volatile bool no_run_to_parity;
 extern const volatile bool no_preempt_short;
 extern const volatile bool no_place_lag;
 extern const volatile bool no_place_rel_deadline;
+extern const volatile bool latency_credit;
+extern const volatile u64 latency_credit_ns;
 extern const volatile bool no_vref_update;
 extern const volatile bool no_delay_dequeue;
 extern const volatile bool no_delay_requeue;

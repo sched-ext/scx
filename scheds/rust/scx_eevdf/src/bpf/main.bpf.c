@@ -29,6 +29,7 @@
  *	load.bpf.[ch]	utilization, load, and the capacity a cid delivers
  *	queue.bpf.[ch]	the per-cid runnable queue, an EDQ per cid
  *	task.bpf.[ch]	EEVDF: weights, vruntimes, deadlines, placement
+ *	latency.bpf.[ch] virtual-time borrowing
  *	idle.bpf.[ch]	where a task goes when it wakes, and the idle bitmap
  *	preempt.bpf.[ch] the pick, the protection it gives, and the hrtick
  *	balance.bpf.[ch] periodic and active balance, and ops.tick()
@@ -80,6 +81,7 @@
 #include "balance.bpf.h"
 #include "cgroup.bpf.h"
 #include "idle.bpf.h"
+#include "latency.bpf.h"
 #include "load.bpf.h"
 #include "preempt.bpf.h"
 #include "queue.bpf.h"
@@ -272,6 +274,28 @@ const volatile bool no_place_lag;
 const volatile bool no_place_rel_deadline;
 
 /*
+ * Place a waking task ahead of the pack instead of at the lag it carried,
+ * see task_place_offset().
+ *
+ * place_entity() hands a waking task the lag it took out of the pack it
+ * left, and a task that ran right up to the moment it slept carries none:
+ * a render thread that wakes, works for forty microseconds and sleeps
+ * again comes back at the reference, behind everything already queued,
+ * and waits. That is correct EEVDF and it is what costs the frames.
+ *
+ * This is neither fair.c's rule nor EEVDF's, and the displacement is not
+ * bounded by service the task is owed.
+ */
+const volatile bool latency_credit;
+
+/*
+ * Virtual-time placement floor, expressed as real service before deadline
+ * weight is applied. This is a placement scale, not a response-time guarantee
+ * or a bound on total displacement when carried lag is also considered.
+ */
+const volatile u64 latency_credit_ns = 20000000ULL;
+
+/*
  * Place tasks and test them for eligibility against the pack reference as
  * it stands, without the service the task running there has taken since
  * it was picked, see pack_vref_at().
@@ -373,6 +397,7 @@ int BPF_PROG(eevdf_arena_free_pages, void *map, void *ptr, u32 page_cnt)
 #include "cgroup.bpf.c"
 #include "load.bpf.c"
 #include "queue.bpf.c"
+#include "latency.bpf.c"
 #include "newidle.bpf.c"
 #include "idle.bpf.c"
 #include "preempt.bpf.c"

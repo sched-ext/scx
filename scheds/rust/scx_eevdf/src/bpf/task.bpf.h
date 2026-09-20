@@ -10,6 +10,7 @@
 
 #include "eevdf.bpf.h"
 #include "cgroup.bpf.h"
+#include "latency.bpf.h"
 #include "queue.bpf.h"
 
 /*
@@ -914,6 +915,7 @@ static s64 compensate_place_offset(pack_t *pk, const sched_ent_t *se,
 
 	return offset + vdiv(offset * (s64)weight, load);
 }
+
 static void place_task(s32 cid, const struct task_struct *p,
 		       task_ctx_t *tctx, u64 now, bool sleep)
 {
@@ -938,7 +940,8 @@ static void place_task(s32 cid, const struct task_struct *p,
 			tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, now);
 		delay_settle(tctx, now);
 		if (pk->vsum_w) {
-			s64 offset = tctx->se.vlag;
+			s64 offset = sleep ? task_place_offset(p, tctx) :
+					     tctx->se.vlag;
 
 			offset = compensate_place_offset(pk, &tctx->se, w, offset);
 			vruntime -= offset;
