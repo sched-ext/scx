@@ -1695,11 +1695,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	t->nr_cids = nr_cids;
 
-	bpf_for(i, 0, nr_cids) {
+	bpf_arena_for(i, 0, nr_cids) {
 		struct scx_cid_topo ct = {};
+		struct scx_cid_topo __arena *dst = &t->cid[i];
 
 		scx_bpf_cid_topo(i, &ct);
-		t->cid[i] = ct;
+
+		/*
+		 * clang 20 derives an aggregate copy destination before the arena
+		 * address-space cast, causing the BPF verifier to see it as a
+		 * scalar. Open-code the copy so stores go through @dst.
+		 */
+		dst->core_cid = ct.core_cid;
+		dst->core_idx = ct.core_idx;
+		dst->llc_cid = ct.llc_cid;
+		dst->llc_idx = ct.llc_idx;
+		dst->node_cid = ct.node_cid;
+		dst->node_idx = ct.node_idx;
+		dst->shard_cid = ct.shard_cid;
+		dst->shard_idx = ct.shard_idx;
 
 		/*
 		 * Offline-possible cpus get no-topo tail cids with -1
