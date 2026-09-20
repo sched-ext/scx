@@ -84,6 +84,7 @@ struct scx_alloc_stack {
 
 struct sdt_pool {
 	void __arena	*slab;
+	void __arena	*reserve;
 	__u64		elem_size;
 	__u64		max_elems;
 	__u64		idx;

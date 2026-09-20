@@ -229,6 +229,7 @@ void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
 static
 void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 {
+	void __arena * __arena *next;
 	__u64 elem_size = pool->elem_size;
 	__u64 max_elems = pool->max_elems;
 	__u64 nr_pages;
@@ -244,6 +245,16 @@ void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 		bpf_spin_unlock(&alloc_lock);
 		return ptr;
 	}
+	if (pool->reserve) {
+		slab = pool->reserve;
+		next = (void __arena * __arena *)slab;
+		pool->reserve = *next;
+		*next = NULL;
+		pool->slab = slab;
+		pool->idx = 1;
+		bpf_spin_unlock(&alloc_lock);
+		return slab;
+	}
 
 	/* Slab spent: drop the lock for the sleepable page allocation. */
 	bpf_spin_unlock(&alloc_lock);
@@ -258,11 +269,22 @@ void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 	/*
 	 * Re-check: another thread may have installed a fresh slab while we
 	 * slept. If still spent, install ours; otherwise keep the winner's and
-	 * free ours after unlocking.
+	 * cache ours for the next refill.
 	 */
 	if (pool->idx >= max_elems) {
 		pool->slab = slab;
 		pool->idx = 0;
+		slab = NULL;
+	} else {
+		/*
+		 * Keep a refill which lost the race for the next exhausted slab.
+		 * Returning it to the arena here can immediately recycle the same
+		 * virtual address on another CPU while stale BPF arena accesses are
+		 * still in flight.
+		 */
+		next = (void __arena * __arena *)slab;
+		*next = pool->reserve;
+		pool->reserve = slab;
 		slab = NULL;
 	}
 
@@ -270,9 +292,6 @@ void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 	pool->idx += 1;
 
 	bpf_spin_unlock(&alloc_lock);
-
-	if (slab)	/* lost the refill race; release the unused slab */
-		bpf_arena_free_pages(&arena, slab, nr_pages);
 
 	return ptr;
 }
@@ -311,6 +330,7 @@ static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 
 	pool->elem_size = data_size;
 	pool->max_elems = (PAGE_SIZE * nr_pages) / pool->elem_size;
+	pool->reserve = NULL;
 	/* Populate the pool slab on the first allocation. */
 	pool->idx = pool->max_elems;
 
