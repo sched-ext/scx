@@ -329,6 +329,8 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 			cctx->curr_sched_idle = 1;
 			__sync_fetch_and_add(&nr_sched_idle_curr, 1);
 		}
+		cctx->curr_sleeper = latency_credit &&
+				     now - tctx->last_sleep_at < latency_credit_sleep_ns;
 
 		/*
 		 * A pick with company is given an hrtick, set_next_task_fair():

@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Virtual-time borrowing for latency-sensitive wakees: pressure admission
- * and placement credit.
+ * Virtual-time borrowing for latency-sensitive wakees: pressure admission,
+ * placement credit, and asymmetric-capacity packing.
  */
 #pragma once
 
@@ -13,3 +13,5 @@ static void update_cid_user(struct task_struct *p, s32 cid,
 			    task_ctx_t *tctx, u64 now);
 static s64 task_place_offset(s32 cid, const struct task_struct *p,
 			     task_ctx_t *tctx, u64 now);
+static s32 credit_pack_cid(const struct task_struct *p, task_ctx_t *tctx,
+			   s32 target, u64 now);

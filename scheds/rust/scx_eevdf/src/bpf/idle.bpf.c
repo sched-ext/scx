@@ -1296,7 +1296,7 @@ s32 BPF_STRUCT_OPS(eevdf_select_cid, struct task_struct *p, s32 prev_cid, u64 wa
 	}
 
 	/* select_idle_sibling() also returns its target when its scan fails. */
-	return target;
+	return credit_pack_cid(p, tctx, target, now);
 }
 
 void BPF_STRUCT_OPS(eevdf_update_idle, s32 cid, bool idle)

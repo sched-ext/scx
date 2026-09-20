@@ -86,6 +86,8 @@ extern const volatile bool no_place_rel_deadline;
 extern const volatile bool latency_credit;
 extern const volatile u64 latency_credit_ns;
 extern const volatile u64 latency_credit_user_thresh;
+extern const volatile u64 latency_credit_sleep_ns;
+extern const volatile bool no_latency_credit_pack;
 extern const volatile bool no_vref_update;
 extern const volatile bool no_delay_dequeue;
 extern const volatile bool no_delay_requeue;
@@ -183,7 +185,7 @@ struct task_ctx {
 	u64 runnable_at;	/* when the last wakeup made the task runnable */
 	u64 runnable_est;	/* fraction of wall time runnable, see task_runnable_update() */
 	u64 last_utime;
-	u64 last_sleep_at;	/* last block, used to decay WA_WEIGHT task load */
+	u64 last_sleep_at;	/* last block, see task_credit_admitted() and task_load() */
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */
 	u64 delay_w;		/* its weight without the task */
@@ -379,6 +381,7 @@ struct cid_ctx {
 	u32 pressure_demand; /* sched_ext has runnable work on this cid */
 	u32 pressure_valid; /* a current demand window has been sampled */
 	u32 curr_idle;		/* it is a SCHED_IDLE task */
+	u32 curr_sleeper;	/* it slept recently, see credit_pack_cid() */
 	u32 curr_sched_idle;	/* that, or it is in an idle cgroup, see cid_sched_idle_target() */
 	u32 steal_cursor;
 	/* Persistent scans of this cid as a source. */

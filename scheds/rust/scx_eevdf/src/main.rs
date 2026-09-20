@@ -537,6 +537,25 @@ struct Opts {
     #[clap(long, default_value = "80", value_parser = clap::value_parser!(u64).range(0..=100))]
     latency_credit_user_busy_pct: u64,
 
+    /// How recently a task must have slept to count as one that sleeps.
+    ///
+    /// A CPU whose current task slept within this many milliseconds is running
+    /// work of the wakee's own kind, and a credited wakee is not moved onto it
+    /// by the packing below. A hog never sleeps and never qualifies.
+    #[clap(long, default_value = "2000")]
+    latency_credit_sleep_ms: u64,
+
+    /// Do not move a credited wakee up the CPU priority tiers.
+    ///
+    /// With --latency-credit, a wakee that would queue on a busy CPU of a
+    /// lower asymmetric-packing priority is queued instead on a higher-priority
+    /// CPU whose current task never sleeps, where the credit lets it win the
+    /// CPU at once. Nothing is idle under a hog per CPU, so packing alone never
+    /// moves it: the aquarium's render thread sat on an E-core for as long as
+    /// the hogs ran. This keeps the wakeup's own choice.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_latency_credit_pack: bool,
+
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
     /// Every task then runs until its slice ends or it blocks, and a woken task
@@ -1115,6 +1134,8 @@ impl<'a> Scheduler<'a> {
         rodata.latency_credit = opts.latency_credit;
         rodata.latency_credit_ns = opts.latency_credit_us * 1000;
         rodata.latency_credit_user_thresh = opts.latency_credit_user_busy_pct * 1024 / 100;
+        rodata.latency_credit_sleep_ns = opts.latency_credit_sleep_ms * 1000000;
+        rodata.no_latency_credit_pack = opts.no_latency_credit_pack;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Follow the capacity classes selected by the kernel unless explicitly
