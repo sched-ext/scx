@@ -29,7 +29,7 @@
  *	load.bpf.[ch]	utilization, load, and the capacity a cid delivers
  *	queue.bpf.[ch]	the per-cid runnable queue, an EDQ per cid
  *	task.bpf.[ch]	EEVDF: weights, vruntimes, deadlines, placement
- *	latency.bpf.[ch] virtual-time borrowing
+ *	latency.bpf.[ch] virtual-time borrowing and pressure admission
  *	idle.bpf.[ch]	where a task goes when it wakes, and the idle bitmap
  *	preempt.bpf.[ch] the pick, the protection it gives, and the hrtick
  *	balance.bpf.[ch] periodic and active balance, and ops.tick()
@@ -284,7 +284,10 @@ const volatile bool no_place_rel_deadline;
  * and waits. That is correct EEVDF and it is what costs the frames.
  *
  * This is neither fair.c's rule nor EEVDF's, and the displacement is not
- * bounded by service the task is owed.
+ * bounded by service the task is owed. Nothing carried by one task
+ * distinguishes a latency-sensitive sleeper from one member of a sleep
+ * storm, so peer user-time utilization gates the intervention. System time
+ * is excluded to keep syscall-heavy sleepers on ordinary EEVDF placement.
  */
 const volatile bool latency_credit;
 
@@ -294,6 +297,13 @@ const volatile bool latency_credit;
  * or a bound on total displacement when carried lag is also considered.
  */
 const volatile u64 latency_credit_ns = 20000000ULL;
+
+/*
+ * User CPU utilization at which a cid may grant latency credit, normalized
+ * to [0 .. 1024]. System time is deliberately excluded: syscall-heavy sleep
+ * workloads should keep ordinary EEVDF placement. 0 disables the gate.
+ */
+const volatile u64 latency_credit_user_thresh = 819;
 
 /*
  * Place tasks and test them for eligibility against the pack reference as
@@ -330,9 +340,6 @@ const volatile bool no_hrtick;
  */
 volatile u64 nr_sis_updates;
 volatile u64 sis_scan_sum;
-
-volatile u64 user_util_sum __hot_written;
-volatile u64 user_util_snapshot_at __hot_written;
 
 /*
  * Scheduler's exit status.

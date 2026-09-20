@@ -919,7 +919,7 @@ static s64 compensate_place_offset(pack_t *pk, const sched_ent_t *se,
 static void place_task(s32 cid, const struct task_struct *p,
 		       task_ctx_t *tctx, u64 now, bool sleep)
 {
-	/* The pack's progress is in its own task clock. */
+	/* The pack's progress is in its own task clock; the credit is timed. */
 	u64 tnow = cid_valid(cid) ? cid_clock_task_at(cid, now) : now;
 
 	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
@@ -940,7 +940,7 @@ static void place_task(s32 cid, const struct task_struct *p,
 			tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, now);
 		delay_settle(tctx, now);
 		if (pk->vsum_w) {
-			s64 offset = sleep ? task_place_offset(p, tctx) :
+			s64 offset = sleep ? task_place_offset(cid, p, tctx, now) :
 					     tctx->se.vlag;
 
 			offset = compensate_place_offset(pk, &tctx->se, w, offset);

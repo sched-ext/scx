@@ -2,10 +2,14 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Virtual-time borrowing for latency-sensitive wakees.
+ * Virtual-time borrowing for latency-sensitive wakees: pressure admission
+ * and placement credit.
  */
 #pragma once
 
 #include "eevdf.bpf.h"
 
-static s64 task_place_offset(const struct task_struct *p, task_ctx_t *tctx);
+static void update_cid_user(struct task_struct *p, s32 cid,
+			    task_ctx_t *tctx, u64 now);
+static s64 task_place_offset(s32 cid, const struct task_struct *p,
+			     task_ctx_t *tctx, u64 now);

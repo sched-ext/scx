@@ -1389,6 +1389,12 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 
 	TOUCH_ARENA();
 	now = scx_bpf_now();
+	if (latency_credit && latency_credit_user_thresh) {
+		task_ctx_t *tctx = try_lookup_task_ctx(p);
+
+		if (tctx)
+			update_cid_user(p, cid, tctx, now);
+	}
 
 	if (!cid_valid(cid))
 		return;

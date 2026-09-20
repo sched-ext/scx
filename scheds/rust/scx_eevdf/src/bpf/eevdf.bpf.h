@@ -85,6 +85,7 @@ extern const volatile bool no_place_lag;
 extern const volatile bool no_place_rel_deadline;
 extern const volatile bool latency_credit;
 extern const volatile u64 latency_credit_ns;
+extern const volatile u64 latency_credit_user_thresh;
 extern const volatile bool no_vref_update;
 extern const volatile bool no_delay_dequeue;
 extern const volatile bool no_delay_requeue;
@@ -181,6 +182,7 @@ struct task_ctx {
 	u64 util_est;		/* what the last activation used */
 	u64 runnable_at;	/* when the last wakeup made the task runnable */
 	u64 runnable_est;	/* fraction of wall time runnable, see task_runnable_update() */
+	u64 last_utime;
 	u64 last_sleep_at;	/* last block, used to decay WA_WEIGHT task load */
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */

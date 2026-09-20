@@ -265,6 +265,8 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 	}
 	tctx->last_run_at = cid_valid(cid) ? cid_clock_task_owned(cid, now) : now;
 	cid_pressure_resumed(cid, tctx->last_run_at);
+	if (latency_credit && latency_credit_user_thresh)
+		tctx->last_utime = p->utime;
 	util_set_running(tctx, true, now);
 	cid_util_set_running(cid, true, now);
 	cid_demand_set(cid, true, now);
@@ -358,7 +360,9 @@ void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 	cid = scx_bpf_task_cid(p);
 
 	/*
-	 * Evaluate the used time slice.
+	 * Evaluate the used time slice. Reuse the same timestamp and task
+	 * context for user-time and normal EEVDF accounting: ops.stopping() is
+	 * a hot path, so neither needs to be obtained twice.
 	 */
 	/*
 	 * The service is charged in the task clock, update_curr(); the stop
@@ -367,6 +371,7 @@ void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 	tctx->last_stop_at = scx_bpf_now();
 	tnow = cid_valid(cid) ? cid_clock_task_owned(cid, tctx->last_stop_at) :
 			       tctx->last_stop_at;
+	update_cid_user(p, cid, tctx, tctx->last_stop_at);
 	slice = tnow - tctx->last_run_at;
 	util_set_running(tctx, false, tctx->last_stop_at);
 	cid_util_set_running(cid, false, tctx->last_stop_at);

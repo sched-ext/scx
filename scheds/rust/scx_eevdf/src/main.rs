@@ -507,15 +507,17 @@ struct Opts {
     #[clap(short = 'H', long, action = clap::ArgAction::SetTrue)]
     no_hrtick: bool,
 
-    /// Let a waking task borrow virtual time when it is placed.
+    /// Let a waking task borrow virtual time under peer CPU pressure.
     ///
     /// A task is normally placed with the lag it took out of the queue it left,
     /// so one that ran right up to the moment it slept carries none and comes
-    /// back behind everything already queued. This floors its offset from the
-    /// destination reference at the configured virtual-time credit.
+    /// back behind everything already queued. When peer user utilization
+    /// admits the intervention, this floors its offset from the destination
+    /// reference at the configured virtual-time credit.
     ///
     /// This deliberately departs from ordinary EEVDF placement. The borrowed
-    /// service is charged normally once the task runs.
+    /// service is charged normally once the task runs, and admission excludes
+    /// CPUs whose pressure comes from system rather than user time.
     #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
     latency_credit: bool,
 
@@ -526,6 +528,14 @@ struct Opts {
     /// bound on total displacement when the task carries more lag.
     #[clap(short = 'I', long, default_value = "20000")]
     latency_credit_us: u64,
+
+    /// User CPU utilization at which a CPU enables latency credit.
+    ///
+    /// Only user time counts. CPUs busy with syscall-heavy sleep workloads keep
+    /// ordinary EEVDF placement, while CPUs saturated by user-space work enable
+    /// the latency credit for waking tasks. 0 restores unconditional credit.
+    #[clap(long, default_value = "80", value_parser = clap::value_parser!(u64).range(0..=100))]
+    latency_credit_user_busy_pct: u64,
 
     /// Never interrupt a running task for a woken one with an earlier deadline.
     ///
@@ -1104,6 +1114,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_hrtick = opts.no_hrtick;
         rodata.latency_credit = opts.latency_credit;
         rodata.latency_credit_ns = opts.latency_credit_us * 1000;
+        rodata.latency_credit_user_thresh = opts.latency_credit_user_busy_pct * 1024 / 100;
         rodata.no_vref_update = opts.no_vref_update;
 
         // Follow the capacity classes selected by the kernel unless explicitly
