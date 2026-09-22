@@ -1399,6 +1399,7 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 	if (!cid_valid(cid))
 		return;
 	topo = cid_topo(cid);
+	credit_stats_fold(cid);
 
 	/*
 	 * The share a task's groups give it moves with the tasks that come and

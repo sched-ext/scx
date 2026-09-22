@@ -314,6 +314,25 @@ const volatile u64 latency_credit_user_thresh = 819;
 const volatile u64 latency_credit_sleep_ns = 2000000000ULL;
 
 /*
+ * Share of a pack's CPU that credited wakees may take, normalized to
+ * [0 .. 1024], see credit_charge(). Every other bound on the credit is
+ * per-task, and per-task bounds sum: a pack with one hog and sixteen
+ * credited sleepers serves none of the hog however modest each sleeper is.
+ * This is the aggregate, and it is the only bound that does not have to
+ * decide what kind of task it is looking at.
+ *
+ * The share is of the time the cid has had, in its task clock, interrupt and
+ * steal time excluded; not of the service the pack happened to deliver. A
+ * pack earns while its cid is idle, see credit_refill(), so on a cid that is
+ * half idle credited work can take more than this share of what actually ran
+ * there, and never more than this share of the CPU.
+ *
+ * 1024 leaves the credit unbounded, which is what every measurement so far
+ * was taken with.
+ */
+const volatile u64 latency_credit_budget = 1024;
+
+/*
  * Keep an admitted wakee on the cid the wakeup chose even when a
  * higher-priority one runs a task that never sleeps, see credit_pack_cid().
  */
@@ -354,6 +373,16 @@ const volatile bool no_hrtick;
  */
 volatile u64 nr_sis_updates;
 volatile u64 sis_scan_sum;
+
+/*
+ * Latency-credit loans granted, and wakees placed at the lag they earned
+ * because the pack had nothing left to lend. Counted in the pack, on a line
+ * the placement path already owns, and folded out of it once per tick, see
+ * credit_stats_fold(). Both stand still while the budget is unbounded, which
+ * is the default: there is nothing to refuse and nothing to tune.
+ */
+volatile u64 nr_credit_grants;
+volatile u64 nr_credit_denied;
 
 /*
  * Scheduler's exit status.

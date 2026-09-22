@@ -168,6 +168,8 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 	if (deq_flags & SCX_DEQ_SLEEP) {
 		task_runnable_update(tctx, now);
 		tctx->last_sleep_at = now;
+		/* A loan ends with the activation it was granted for. */
+		tctx->credited = false;
 	}
 	tctx->place_pending = false;
 
@@ -284,6 +286,16 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 	    tctx->se.vpack != task_pack(tctx, cid)) {
 		s64 lag = task_lag_at(p, tctx, tctx->se.vpack, now);
 
+		/*
+		 * A move made here, by the balancer or an idle pull, is the
+		 * one arrival in a new pack that does not go through
+		 * place_task(), so it has to end the loan itself: it was
+		 * granted against the budget of the pack the task is
+		 * leaving, and is repaid to no other, see credit_charge().
+		 * What the loan bought the task is carried in its lag like
+		 * any other advantage it had earned.
+		 */
+		tctx->credited = false;
 		set_vruntime(&tctx->se,
 			     pack_vref_place(task_pack(tctx, cid),
 					     tctx->last_run_at) - lag,
@@ -401,6 +413,10 @@ void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 	 */
 	tctx->se.vruntime += calc_delta_fair(p, tctx, slice);
 	vref_charge(&tctx->se);
+
+	/* The same service against the latency-credit budget of its pack. */
+	if (tctx->credited && cid_valid(cid))
+		credit_charge(task_pack(tctx, cid), tctx, slice);
 
 	/* The same service against the bandwidth of the task's cgroup. */
 	task_bw_charge(tctx, cid, slice);

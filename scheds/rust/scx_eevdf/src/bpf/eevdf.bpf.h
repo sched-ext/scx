@@ -87,6 +87,7 @@ extern const volatile bool latency_credit;
 extern const volatile u64 latency_credit_ns;
 extern const volatile u64 latency_credit_user_thresh;
 extern const volatile u64 latency_credit_sleep_ns;
+extern const volatile u64 latency_credit_budget;
 extern const volatile bool no_latency_credit_pack;
 extern const volatile bool no_vref_update;
 extern const volatile bool no_delay_dequeue;
@@ -96,6 +97,8 @@ extern const volatile bool no_hrtick;
 extern u32 nr_sched_idle_curr;
 extern volatile u64 nr_sis_updates;
 extern volatile u64 sis_scan_sum;
+extern volatile u64 nr_credit_grants;
+extern volatile u64 nr_credit_denied;
 
 /*
  * Size of the cid space this scheduler schedules on, [0, nr_cids), the
@@ -204,6 +207,7 @@ struct task_ctx {
 	/* still owed its first, halved request, see task_dl() */
 	bool initial;
 	bool place_pending;	/* a direct dispatch left its placement to ops.running() */
+	bool credited;		/* placed on a loan, see credit_charge() */
 };
 
 typedef struct task_ctx __arena task_ctx_t;
@@ -338,6 +342,10 @@ struct pack {
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u64 curr_vprot;		/* protected vruntime, see set_protect_slice() */
+	s64 credit_tokens;	/* service credited wakees may still take */
+	u64 credit_refill_at;	/* task clock when @credit_tokens last grew */
+	u64 credit_grants;	/* loans granted here since the last tick */
+	u64 credit_denied;	/* wakees refused here for want of budget */
 	s32 cid;		/* the cid whose task clock the pack runs in */
 	struct scx_edq edq;
 };

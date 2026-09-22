@@ -50,6 +50,12 @@ pub struct Metrics {
     #[stat(desc = "Sum of the scan budgets produced by SIS_UTIL updates")]
     pub sis_scan_sum: u64,
 
+    #[stat(desc = "Latency-credit loans granted, counted only while the budget is bounded")]
+    pub nr_credit_grants: u64,
+
+    #[stat(desc = "Wakees refused the latency credit because their CPU was out of budget")]
+    pub nr_credit_denied: u64,
+
     #[stat(desc = "Bytes of arena pages the kernel has allocated")]
     pub arena_bytes: u64,
 
@@ -94,8 +100,21 @@ impl Metrics {
             elapsed_ns: self.elapsed_ns.saturating_sub(rhs.elapsed_ns),
             nr_sis_updates: self.nr_sis_updates.saturating_sub(rhs.nr_sis_updates),
             sis_scan_sum: self.sis_scan_sum.saturating_sub(rhs.sis_scan_sum),
+            nr_credit_grants: self.nr_credit_grants.saturating_sub(rhs.nr_credit_grants),
+            nr_credit_denied: self.nr_credit_denied.saturating_sub(rhs.nr_credit_denied),
             ops,
             ..self.clone()
+        }
+    }
+
+    /// Share of the loans the budget asked for that it could not make. The
+    /// knob is a percentage, so this is what says whether it is binding.
+    fn credit_refused(&self) -> f64 {
+        let asked = self.nr_credit_grants + self.nr_credit_denied;
+        if asked > 0 {
+            self.nr_credit_denied as f64 * 100.0 / asked as f64
+        } else {
+            0.0
         }
     }
 
@@ -339,6 +358,15 @@ impl Dashboard {
             m.nr_sis_updates,
             m.sis_avg_scan(),
         )?;
+        if m.nr_credit_grants + m.nr_credit_denied > 0 {
+            writeln!(
+                w,
+                "latency credit loans {}   refused on budget {} ({:.1}%)",
+                m.nr_credit_grants,
+                m.nr_credit_denied,
+                m.credit_refused(),
+            )?;
+        }
         if m.arena_counted == 1 {
             writeln!(
                 w,

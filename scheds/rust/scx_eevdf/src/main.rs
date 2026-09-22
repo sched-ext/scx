@@ -545,6 +545,22 @@ struct Opts {
     #[clap(long, default_value = "2000")]
     latency_credit_sleep_ms: u64,
 
+    /// Share of a CPU that credited wakees may take, in percent.
+    ///
+    /// Every other bound on the credit is per-task, and per-task bounds sum: a
+    /// CPU with one hog and sixteen credited sleepers serves none of the hog
+    /// however modest each sleeper is. This budget is the aggregate. Service
+    /// taken under a loan is charged to it, so uncredited work keeps at least
+    /// the remaining share whatever the number of sleepers.
+    ///
+    /// A CPU earns the budget back at this share of the time it has, idle time
+    /// included, not of the service it delivers: a CPU that is half idle can
+    /// therefore lend more than this share of what actually runs on it, and
+    /// never more than this share of the CPU. 100, the default, leaves the
+    /// credit unbounded.
+    #[clap(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
+    latency_credit_budget_pct: u64,
+
     /// Do not move a credited wakee up the CPU priority tiers.
     ///
     /// With --latency-credit, a wakee that would queue on a busy CPU of a
@@ -1135,6 +1151,7 @@ impl<'a> Scheduler<'a> {
         rodata.latency_credit_ns = opts.latency_credit_us * 1000;
         rodata.latency_credit_user_thresh = opts.latency_credit_user_busy_pct * 1024 / 100;
         rodata.latency_credit_sleep_ns = opts.latency_credit_sleep_ms * 1000000;
+        rodata.latency_credit_budget = opts.latency_credit_budget_pct * 1024 / 100;
         rodata.no_latency_credit_pack = opts.no_latency_credit_pack;
         rodata.no_vref_update = opts.no_vref_update;
 
@@ -1477,6 +1494,8 @@ impl<'a> Scheduler<'a> {
             nr_cpus: *NR_CPU_IDS as u64,
             nr_sis_updates: bss_data.nr_sis_updates,
             sis_scan_sum: bss_data.sis_scan_sum,
+            nr_credit_grants: bss_data.nr_credit_grants,
+            nr_credit_denied: bss_data.nr_credit_denied,
             arena_bytes: arena_bytes.unwrap_or(0),
             arena_max_bytes,
             arena_counted: arena_bytes.is_some() as u64,

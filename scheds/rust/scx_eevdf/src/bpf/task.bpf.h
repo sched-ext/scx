@@ -699,6 +699,8 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
 	tctx->last_run_at = now;
 	vref_charge(&tctx->se);
+	if (tctx->credited)
+		credit_charge(pk, tctx, delta);
 
 	pk->curr_dl = task_dl(p, tctx);
 	pk->curr_v = tctx->se.vruntime;
@@ -939,8 +941,11 @@ static void place_task(s32 cid, const struct task_struct *p,
 		if (!sleep && tctx->se.vpack)
 			tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, now);
 		delay_settle(tctx, now);
+		/* The loan belongs to the placement that grants it. */
+		tctx->credited = false;
 		if (pk->vsum_w) {
-			s64 offset = sleep ? task_place_offset(cid, p, tctx, now) :
+			s64 offset = sleep ? task_place_offset(cid, pk, p, tctx,
+							      now, tnow) :
 					     tctx->se.vlag;
 
 			offset = compensate_place_offset(pk, &tctx->se, w, offset);

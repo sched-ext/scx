@@ -4,7 +4,8 @@
  *
  * Virtual-time borrowing for latency-sensitive wakees. Admission follows
  * user-space CPU pressure, placement floors a wakee's carried lag at a fixed
- * virtual-time credit, and optional packing sends admitted work to a higher
+ * virtual-time credit, a per-pack budget bounds what credited work may take
+ * in aggregate, and optional packing sends admitted work to a higher
  * asymmetric-packing tier when no CPU is idle.
  */
 #include "latency.bpf.h"
@@ -13,6 +14,9 @@
 #define USER_EVAL_NS		10000000ULL
 #define USER_STALE_EVALS	5
 #define USER_STALE_NS		(USER_EVAL_NS * USER_STALE_EVALS)
+
+/* @latency_credit_budget at which a pack lends without limit. */
+#define CREDIT_UNBOUNDED	1024
 
 static volatile u64 user_util_sum __hot_written;
 static volatile u64 user_util_snapshot_at __hot_written;
@@ -129,6 +133,187 @@ static bool cid_user_busy(s32 cid, u64 now)
 }
 
 /*
+ * The most service a pack lends before it has to earn more, and, negated, the
+ * deepest debt one round of lending may leave it in. The ceiling bounds what
+ * an idle pack saves up, so the first storm to arrive cannot spend a quiet
+ * minute in one round; a credited task's whole burst should fit inside it.
+ * The floor bounds how long a pack that lent to a storm stays out of the
+ * credit afterwards: without it that is decided by whatever the tasks already
+ * admitted go on to consume, which is nothing the budget can name.
+ */
+static __always_inline s64 credit_burst(void)
+{
+	return (s64)(slice_ns * 4);
+}
+
+/*
+ * Move @pk's allowance by @delta, saturating at either end of the burst.
+ * Wakeups refill a pack from other CPUs while the cid charges it, so the
+ * exchange is retried rather than letting a lost race carry the allowance
+ * past a bound it is the whole point of.
+ */
+static void credit_add(pack_t *pk, s64 delta)
+{
+	s64 burst = credit_burst();
+	s64 old, new;
+
+	while (can_loop) {
+		old = READ_ONCE(pk->credit_tokens);
+		new = old + delta;
+		if (new > burst)
+			new = burst;
+		else if (new < -burst)
+			new = -burst;
+		if (new == old || cmpxchg(&pk->credit_tokens, old, new) == old)
+			return;
+	}
+}
+
+/*
+ * Grow @pk's allowance by its share of the time the cid has had since the
+ * last refill, measured in the cid's task clock: the same clock credited
+ * service is charged in, and one that already excludes the interrupt and
+ * steal time the CPU never had to give away.
+ *
+ * That clock does not stand still for idle, so a pack earns while its cid is
+ * idle as well as while it runs, and the budget is a share of the CPU rather
+ * than of the service the pack happened to deliver. This is deliberate: an
+ * idle CPU is where a wakee is cheapest to favour, and a rule that only paid
+ * a busy pack would withhold the credit exactly where it costs nothing.
+ * @credit_burst() is what keeps a long idle from being spendable at once.
+ *
+ * Refills are spaced by a quarter slice. The wakeup path is where this runs,
+ * and under the storms this exists to bound that is every wakeup on the cid;
+ * without the spacing they would serialize on one cacheline to add a few
+ * nanoseconds each. A refill that loses the exchange simply lets the winner's
+ * interval cover it.
+ */
+static void credit_refill(pack_t *pk, u64 tnow)
+{
+	u64 last = READ_ONCE(pk->credit_refill_at);
+	s64 delta, gain, tokens, burst, room;
+	u64 span;
+
+	/*
+	 * Signed: @tnow is an rq clock less an offset another CPU publishes,
+	 * see cid_clock_task_at(), so it can step backwards by the interrupt
+	 * time that offset grew by between two reads. Unsigned, such a step
+	 * reads as an interval of almost 2^64 and buys a full burst.
+	 */
+	delta = (s64)(tnow - last);
+	if (delta < (s64)(slice_ns >> 2))
+		return;
+	if (cmpxchg(&pk->credit_refill_at, last, tnow) != last)
+		return;
+
+	if (!latency_credit_budget)
+		return;
+	burst = credit_burst();
+	tokens = READ_ONCE(pk->credit_tokens);
+	room = burst - tokens;
+	if (room <= 0)
+		return;
+
+	/*
+	 * Nothing beyond @room can be earned in one refill, so bound the
+	 * interval that buys it before it is scaled. That is also what keeps
+	 * the product in range on a pack's first refill, where @last is zero
+	 * and the interval is the machine's whole uptime. Both sides are
+	 * positive here and the arithmetic is unsigned: BPF has no signed
+	 * divide.
+	 */
+	span = (u64)room * CREDIT_UNBOUNDED / latency_credit_budget;
+	if ((u64)delta >= span)
+		gain = room;
+	else
+		gain = (s64)((u64)delta * latency_credit_budget /
+			     CREDIT_UNBOUNDED);
+	if (gain > 0)
+		credit_add(pk, gain);
+}
+
+/*
+ * Whether @pk has anything left to lend, without refilling it. Packing reads
+ * this for every cid it considers, and the placement path refills the cid it
+ * lands on, so the value a scan sees is at most a quarter slice stale.
+ *
+ * A pack that has never refilled holds no tokens yet and is treated as able
+ * to lend: it is the first wakee's placement that fills it, and packing has
+ * to be able to send that wakee there. Without this a cid that never took a
+ * credited wakeup could never be picked to take one.
+ */
+static __always_inline bool credit_available(pack_t *pk)
+{
+	if (latency_credit_budget >= CREDIT_UNBOUNDED)
+		return true;
+	if (!latency_credit_budget)
+		return false;
+
+	return !READ_ONCE(pk->credit_refill_at) ||
+	       READ_ONCE(pk->credit_tokens) > 0;
+}
+
+/*
+ * Hand what @cid's pack has counted since the last tick to the totals user
+ * space reads. The counters live in the pack, on a line the placement path
+ * already owns, so a wakeup pays nothing for them; one exchange per tick is
+ * what turns them into a number. Nothing is counted on a cid without a wakee
+ * being queued there for it, so a pack with something to fold is a pack whose
+ * cid is about to tick.
+ */
+static void credit_stats_fold(s32 cid)
+{
+	pack_t *pk;
+	u64 v;
+
+	if (latency_credit_budget >= CREDIT_UNBOUNDED || !cid_valid(cid))
+		return;
+	pk = cid_pack(cid);
+
+	v = __sync_lock_test_and_set(&pk->credit_grants, 0);
+	if (v)
+		__sync_fetch_and_add(&nr_credit_grants, v);
+	v = __sync_lock_test_and_set(&pk->credit_denied, 0);
+	if (v)
+		__sync_fetch_and_add(&nr_credit_denied, v);
+}
+
+/*
+ * Charge @delta of service to the budget of @pk, the pack @tctx is credited
+ * on. A loan is only ever repaid to the pack that granted it: every arrival
+ * in another pack clears the flag, see place_task() and eevdf_running(), so
+ * a task that still carries it has not moved since it was placed.
+ *
+ * What a loan costs the tasks it displaces is the service the credited task
+ * takes while it sits ahead of them, not the displacement it was granted:
+ * placement is absolute, vruntime = vref - credit on every wakeup and never
+ * cumulative, so a thread waking three thousand times a second is granted
+ * sixty seconds of virtual time per second and costs a hog only the bursts
+ * it actually runs. Charging grants would price that thread out of the
+ * credit it was built for, which is what bounding the loan per task already
+ * did once, see the aquarium numbers behind the flat credit.
+ *
+ * So charge consumption. What the budget then says is that uncredited work
+ * keeps at least 1 - @latency_credit_budget of the pack, whatever the number
+ * of credited sleepers, which is the one thing no per-task rule can promise.
+ */
+static void credit_charge(pack_t *pk, task_ctx_t *tctx, u64 delta)
+{
+	if (latency_credit_budget >= CREDIT_UNBOUNDED)
+		return;
+	if (delta)
+		credit_add(pk, -(s64)delta);
+
+	/*
+	 * The loan is spent once the task has caught the reference. From here
+	 * it is ahead of nobody and what it runs is its own turn, so stop
+	 * charging it for a position it no longer holds.
+	 */
+	if (!time_before(tctx->se.vruntime, pack_vref(pk)))
+		tctx->credited = false;
+}
+
+/*
  * Return whether @tctx may borrow on @cid. The sleep window is always met by
  * a wakeup; it also defines the current tasks that packing leaves alone.
  */
@@ -148,18 +333,44 @@ static __always_inline bool task_credit_admitted(s32 cid,
  * to cross the current deadline frontier. It is scaled by the task's deadline
  * weight and granted only on a cid with sustained user-space utilization. A
  * CPU busy in the kernel keeps the lag the task earned instead.
+ *
+ * A pack out of budget places the wakee at the lag it earned, which is
+ * ordinary EEVDF: the mechanism turns itself off under exactly the load that
+ * exhausts it, rather than letting every wakee conclude on its own that it
+ * has earned another loan.
  */
-static s64 task_place_offset(s32 cid, const struct task_struct *p,
-			     task_ctx_t *tctx, u64 now)
+static s64 task_place_offset(s32 cid, pack_t *pk, const struct task_struct *p,
+			     task_ctx_t *tctx, u64 now, u64 tnow)
 {
+	bool bounded = latency_credit_budget < CREDIT_UNBOUNDED;
 	s64 credit;
 
 	if (!task_credit_admitted(cid, tctx, now))
 		return tctx->se.vlag;
 
+	if (bounded) {
+		credit_refill(pk, tnow);
+		if (READ_ONCE(pk->credit_tokens) <= 0) {
+			__sync_fetch_and_add(&pk->credit_denied, 1);
+			return tctx->se.vlag;
+		}
+	}
+
 	credit = (s64)scale_by_dl_weight(p, tctx, latency_credit_ns);
 
-	return MAX(tctx->se.vlag, credit);
+	/*
+	 * A task whose own lag already carries it further than the credit is
+	 * not borrowing anything: it is being placed where EEVDF would place
+	 * it. Leave it uncredited so the budget is charged for loans only.
+	 */
+	if (credit <= tctx->se.vlag)
+		return tctx->se.vlag;
+
+	tctx->credited = true;
+	if (bounded)
+		__sync_fetch_and_add(&pk->credit_grants, 1);
+
+	return credit;
 }
 
 /*
@@ -180,6 +391,11 @@ static s64 task_place_offset(s32 cid, const struct task_struct *p,
  * of the same kind, and a cursor spreads successive wakees over the tier.
  * A task pinned to one CPU, or one whose target is already in the top
  * tier, is not moved.
+ *
+ * A cid out of credit budget is left alone too. The move is worth making
+ * only because the credit wins the CPU on arrival; without it the wakee is
+ * merely queued behind a hog it did not choose, which is worse than the
+ * target the wakeup picked for itself.
  */
 static s32 credit_pack_cid(const struct task_struct *p, task_ctx_t *tctx,
 			   s32 target, u64 now)
@@ -203,6 +419,8 @@ static s32 credit_pack_cid(const struct task_struct *p, task_ctx_t *tctx,
 			if (cid_topo(cid)->place_tier != t)
 				continue;
 			if (READ_ONCE(cid_ctx(cid)->curr_sleeper))
+				continue;
+			if (!credit_available(cid_pack(cid)))
 				continue;
 			if (restricted && !cid_allowed(p, cid))
 				continue;
