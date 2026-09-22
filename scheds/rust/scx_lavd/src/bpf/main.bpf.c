@@ -392,24 +392,10 @@ static void update_stat_for_running(struct task_struct *p,
 {
 	u64 wait_period, interval;
 	u64 task_clk = 0, pelt_clk = 0;
-	struct ravg_data local_ravg;
 	struct cpu_ctx *prev_cpuc;
 
-	/*
-	 * Mark the task as running in the duty-cycle ravg immediately,
-	 * while the arena pointer is still fresh for the verifier.
-	 * Read fields individually to ensure the compiler goes through
-	 * the arena-cast pointer for each access.
-	 */
-	local_ravg.val = taskc->avg_util_ravg.val;
-	local_ravg.val_at = taskc->avg_util_ravg.val_at;
-	local_ravg.old = taskc->avg_util_ravg.old;
-	local_ravg.cur = taskc->avg_util_ravg.cur;
-	ravg_accumulate(&local_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
-	taskc->avg_util_ravg.val = local_ravg.val;
-	taskc->avg_util_ravg.val_at = local_ravg.val_at;
-	taskc->avg_util_ravg.old = local_ravg.old;
-	taskc->avg_util_ravg.cur = local_ravg.cur;
+	/* mark the task as running in the duty-cycle ravg */
+	ravg_accumulate_arena(&taskc->avg_util_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
@@ -1892,24 +1878,11 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(deq_flags & SCX_DEQ_SLEEP))
 		return;
 
-	/*
-	 * Mark the task as sleeping in the duty-cycle ravg.
-	 * Read fields individually to ensure the compiler goes through
-	 * the arena-cast pointer for each access.
-	 */
+	/* mark the task as sleeping in the duty-cycle ravg */
 	now = scx_bpf_now();
-	struct ravg_data local_ravg;
-	local_ravg.val = taskc->avg_util_ravg.val;
-	local_ravg.val_at = taskc->avg_util_ravg.val_at;
-	local_ravg.old = taskc->avg_util_ravg.old;
-	local_ravg.cur = taskc->avg_util_ravg.cur;
-	ravg_accumulate(&local_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
-	u64 avg_util_fp = ravg_read(&local_ravg, now, LAVD_RAVG_HALFLIFE_NS);
-	taskc->avg_util_ravg.val = local_ravg.val;
-	taskc->avg_util_ravg.val_at = local_ravg.val_at;
-	taskc->avg_util_ravg.old = local_ravg.old;
-	taskc->avg_util_ravg.cur = local_ravg.cur;
-	taskc->util_est = (u32)(avg_util_fp >> RAVG_FRAC_BITS);
+	ravg_accumulate_arena(&taskc->avg_util_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
+	taskc->util_est = (u32)(ravg_read_arena(&taskc->avg_util_ravg, now,
+						LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
