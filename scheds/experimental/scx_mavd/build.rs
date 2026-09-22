@@ -1,0 +1,34 @@
+// Copyright (c) Changwoo Min <changwoo@igalia.com>
+//
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+fn main() {
+    scx_cargo::BpfBuilder::new()
+        .unwrap()
+        .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
+        .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .add_source("src/bpf/balance.bpf.c")
+        .add_source("src/bpf/idle.bpf.c")
+        .add_source("src/bpf/introspec.bpf.c")
+        .add_source("src/bpf/lat_cri.bpf.c")
+        .add_source("src/bpf/lock.bpf.c")
+        .add_source("src/bpf/power.bpf.c")
+        .add_source("src/bpf/preempt.bpf.c")
+        .add_source("src/bpf/sys_stat.bpf.c")
+        .add_source("src/bpf/util.bpf.c")
+        .add_source("../../../lib/arena.bpf.c")
+        .add_source("../../../lib/common.bpf.c")
+        .add_source("../../../lib/atq.bpf.c")
+        .add_source("../../../lib/bitmap.bpf.c")
+        .add_source("../../../lib/cgroup_bw.bpf.c")
+        .add_source("../../../lib/cpumask.bpf.c")
+        .add_source("../../../lib/rbtree.bpf.c")
+        .add_source("../../../lib/minheap.bpf.c")
+        .add_source("../../../lib/sdt_alloc.bpf.c")
+        .add_source("../../../lib/sdt_task.bpf.c")
+        .add_source("../../../lib/topology.bpf.c")
+        .add_source("../../../lib/ravg.bpf.c")
+        .compile_link_gen()
+        .unwrap();
+}
