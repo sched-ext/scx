@@ -28,17 +28,17 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 private(LAVD) struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
 
 const volatile u64	nr_llcs;	/* number of LLC domains */
-volatile u64		nr_cpus_onln;	/* current number of online CPUs */
+volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 
 const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT is active */
 
 /*
  * Options
  */
-volatile bool		reinit_cpumask_for_performance;
-volatile bool		no_preemption;
-volatile bool		no_core_compaction;
-volatile bool		no_freq_scaling;
+volatile bool __arena_global	reinit_cpumask_for_performance;
+volatile bool __arena_global	no_preemption;
+volatile bool __arena_global	no_core_compaction;
+volatile bool __arena_global	no_freq_scaling;
 
 const volatile bool	no_wake_sync;
 const volatile bool	no_slice_boost;
@@ -461,7 +461,7 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
 __hidden
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc)
 {
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 
 	/*
 	 * Route effectively pinned tasks (permanent pinning or
@@ -472,7 +472,7 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 	if (per_cpu_dsq || (pinned_slice_ns && is_effectively_pinned(taskc)))
 		return cpu_to_dsq(cpuc->cpu_id);
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 	if (cpdomc &&
 	    preemption_vulnerability(taskc->normalized_lat_cri,
 				    taskc->util_est) >= cpdomc->vuln_thresh)

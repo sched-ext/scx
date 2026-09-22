@@ -199,12 +199,12 @@ char _license[] SEC("license") = "GPL";
 /*
  * Logical current clock
  */
-u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
+u64 __arena_global	cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
 
 /*
  * Current service time (weighted invariant time)
  */
-static u64		cur_svc_time_iwgt;
+static u64 __arena_global	cur_svc_time_iwgt;
 
 
 /*
@@ -251,12 +251,50 @@ const volatile u64	lb_local_dsq_util_wall = 0;
  */
 const volatile u64	pinned_slice_ns = 0;
 
-static volatile u64	nr_cpus_big;
+static volatile u64 __arena_global	nr_cpus_big;
 
 /*
  * Scheduler's PID
  */
-static pid_t		lavd_pid;
+static pid_t __arena_global	lavd_pid;
+
+/*
+ * The Rust skeleton has no typed view of the arena section, so the addresses of
+ * the arena globals userspace seeds or reads are published here. Arena pointers
+ * are userspace addresses.
+ */
+struct mavd_uptrs {
+	u64	sys_stat;
+	u64	power_mode;
+	u64	performance_mode_ns;
+	u64	balanced_mode_ns;
+	u64	powersave_mode_ns;
+	u64	cpdom_ctxs;
+	u64	pco_table;
+	u64	no_preemption;
+	u64	no_core_compaction;
+	u64	no_freq_scaling;
+	u64	is_powersave_mode;
+};
+
+struct mavd_uptrs mavd_uptrs;
+
+SEC("syscall")
+int mavd_publish_uptrs(void *ctx)
+{
+	mavd_uptrs.sys_stat = (u64)&sys_stat;
+	mavd_uptrs.power_mode = (u64)&power_mode;
+	mavd_uptrs.performance_mode_ns = (u64)&performance_mode_ns;
+	mavd_uptrs.balanced_mode_ns = (u64)&balanced_mode_ns;
+	mavd_uptrs.powersave_mode_ns = (u64)&powersave_mode_ns;
+	mavd_uptrs.cpdom_ctxs = (u64)cpdom_ctxs;
+	mavd_uptrs.pco_table = (u64)pco_table;
+	mavd_uptrs.no_preemption = (u64)&no_preemption;
+	mavd_uptrs.no_core_compaction = (u64)&no_core_compaction;
+	mavd_uptrs.no_freq_scaling = (u64)&no_freq_scaling;
+	mavd_uptrs.is_powersave_mode = (u64)&is_powersave_mode;
+	return 0;
+}
 
 static void advance_cur_logical_clk(struct task_struct *p)
 {
@@ -719,7 +757,7 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 static __always_inline void account_queued_load(task_ctx *taskc,
 						u8 cpdom_id)
 {
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 
 	if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 		return;
@@ -737,7 +775,7 @@ static __always_inline void account_queued_load(task_ctx *taskc,
 	 * changes between enqueue and dequeue.
 	 */
 	u32 load = task_load_metric(taskc);
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	cpdomc = get_cpdom_ctx(cpdom_id);
 	if (cpdomc)
 		__sync_fetch_and_add(&cpdomc->qload_invr, load);
 	taskc->queued_load_snapshot = load;
@@ -746,13 +784,13 @@ static __always_inline void account_queued_load(task_ctx *taskc,
 
 static __always_inline void unaccount_queued_load(task_ctx *taskc)
 {
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	u8 cpdom_id = READ_ONCE(taskc->queued_in_cpdom_id);
 
 	if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 		return;
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	cpdomc = get_cpdom_ctx(cpdom_id);
 	if (cpdomc)
 		__sync_fetch_and_sub(&cpdomc->qload_invr,
 				     taskc->queued_load_snapshot);
@@ -2318,14 +2356,14 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 
 static s32 init_cpdoms(u64 now)
 {
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	int err;
 
 	for (int i = 0; i < LAVD_CPDOM_MAX_NR; i++) {
 		/*
 		 * Fetch a cpdom context.
 		 */
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [i]);
+		cpdomc = get_cpdom_ctx(i);
 		if (!cpdomc) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %d", i);
 			return -ESRCH;
@@ -2432,7 +2470,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *turbo, *big, *active, *ovrflw, *cd_cpumask;
 	const struct cpumask *online_cpumask;
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	int cpu, i, j, k, err = 0;
 	u64 cpdom_id;
 	u32 sum_capacity = 0, big_capacity = 0;
@@ -2553,7 +2591,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpdom_id);
 		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 		if (!cpdomc || !cd_cpumask) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
@@ -2617,7 +2655,7 @@ unlock_out:
 
 static int init_per_cpu_dsqs(void)
 {
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	struct cpu_ctx *cpuc;
 	int cpu, err = 0;
 
@@ -2631,7 +2669,7 @@ static int init_per_cpu_dsqs(void)
 			return -ESRCH;
 		}
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 		if (!cpdomc) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %hhu", cpuc->cpdom_id);
 			return -ESRCH;
@@ -2813,7 +2851,7 @@ static
 int set_aggressive_migration(void)
 {
 	struct task_struct *curr;
-	struct cpdom_ctx *cpdc;
+	struct cpdom_ctx __arena *cpdc;
 	struct cpu_ctx *cpuc;
 	task_ctx *taskc;
 	u32 cpu;
@@ -2836,7 +2874,7 @@ int set_aggressive_migration(void)
 	if (cpuc &&
 	    (curr = bpf_get_current_task_btf()) &&
 	    (taskc = find_task_ctx(curr)) &&
-	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])) &&
+	    (cpdc = get_cpdom_ctx(cpuc->cpdom_id)) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		set_task_flag(taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE);
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);

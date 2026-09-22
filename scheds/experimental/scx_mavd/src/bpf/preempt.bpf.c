@@ -261,7 +261,7 @@ __hidden
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
 	u64 duration_wall, new_slice_wall = 0;
-	u64 target_slice_wall;
+	u64 target_slice_wall, slice_wall;
 
 	/*
 	 * Shrink the time slice of the slice-boosted task into a regular
@@ -274,9 +274,14 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 	/*
 	 * If pinned_slice_ns is enabled and there are pinned tasks
 	 * waiting on this CPU, use pinned slice instead of regular slice.
+	 * Pin the arena read, or clang loads either operand through one
+	 * instruction and the verifier rejects the rodata and arena pointers
+	 * sharing it.
 	 */
+	slice_wall = sys_stat.slice_wall;
+	barrier_var(slice_wall);
 	target_slice_wall = (pinned_slice_ns && cpuc->nr_pinned_tasks) ?
-				pinned_slice_ns : sys_stat.slice_wall;
+				pinned_slice_ns : slice_wall;
 
 	duration_wall = time_delta(now, cpuc->running_clk);
 	if (target_slice_wall > duration_wall)
@@ -351,7 +356,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 {
 	struct preemption_info prm_t, prm_c;
 	struct bpf_cpumask *cd_cpumask, *cpumask;
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	struct cpu_ctx *cpuc_victim;
 	struct cpu_ctx *cpuc_cur = NULL;
 	u64 now, duration_wall, new_slice_wall = 0;
@@ -414,7 +419,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 		return;
 
 	cpumask = cpuc_cur->temp_mask;
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	cpdomc = get_cpdom_ctx(cpdom_id);
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 	if (!cpdomc || !cd_cpumask || !cpumask)
 		return;
