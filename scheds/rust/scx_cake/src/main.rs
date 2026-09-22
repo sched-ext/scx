@@ -6,12 +6,14 @@
 // GNU General Public License version 2.
 
 mod bpf_skel;
+mod build_identity;
 mod core_performance;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -22,6 +24,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
@@ -129,16 +132,25 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().context("failed to read topology")?;
         let physical = topo.all_cores.len();
         let total = topo.all_cpus.len();
-        let smt = total.saturating_sub(physical);
 
         let slice_us = bpf_intf::consts_SLICE_NS as u64 / bpf_intf::consts_NSEC_PER_USEC as u64;
         let queued_wakeup = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP != 0;
         let dsq_peek = compat::ksym_exists("scx_bpf_dsq_peek").unwrap_or(false);
 
         info!(
-            "🍰 {} {}",
+            "{} {}",
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        match build_identity::binary_sha256() {
+            Ok(hash) => info!("Build SHA256 {hash}"),
+            Err(err) => warn!("Build SHA256 unavailable: {err:#}"),
+        }
+        info!("CPU          {physical} cores / {total} hardware threads");
+        info!(
+            "Cache        {} shared last-level cache domain{}",
+            topo.all_llcs.len(),
+            if topo.all_llcs.len() == 1 { "" } else { "s" }
         );
 
         // Open the BPF program.
@@ -150,6 +162,16 @@ impl<'a> Scheduler<'a> {
             scx_utils::init_libbpf_logging(Some(libbpf_rs::PrintLevel::Warn));
         }
         let mut skel = scx_ops_open!(skel_builder, open_object, cake_ops, None)?;
+        // scx_ops_attach! attaches this map explicitly after the accounting hooks.
+        // The generated skeleton has no map link slot for automatic attachment.
+        // SAFETY: cake_ops is a live struct_ops map owned by the open skeleton.
+        let ret = unsafe {
+            libbpf_rs::libbpf_sys::bpf_map__set_autoattach(
+                skel.maps.cake_ops.as_libbpf_object().as_ptr(),
+                false,
+            )
+        };
+        anyhow::ensure!(ret == 0, "Failed to disable cake_ops auto-attach: {ret}");
         // The handler-edge hooks attach by hand, exit first (below); the skeleton's
         // auto-attach ran them in section order and a second time.
         for prog in [
@@ -210,12 +232,12 @@ impl<'a> Scheduler<'a> {
         };
         match &idle_driver {
             Some(d) => info!(
-                "   idle    driver {d}, {} states, deepest exit {} us",
+                "Idle         {d}: {} power-saving states, up to {} us exit latency",
                 idle_states.len(),
-                idle_exit_max_ns / 1000
+                idle_states.iter().copied().max().unwrap_or(0) / 1000
             ),
             None => {
-                info!("   idle    no cpuidle driver (MWAIT/polling idle, exits priced at zero)")
+                info!("Idle         No CPU idle driver; no idle-exit cost applied")
             }
         }
         // Capacity asymmetry inside one cache domain is the hybrid signature;
@@ -228,7 +250,7 @@ impl<'a> Scheduler<'a> {
                 .filter(|c| c.core_type != scx_utils::CoreType::Little)
                 .fold(0u64, |w, c| w | (1u64 << c.id));
             info!(
-                "   cores   hybrid: {} high-capacity CPUs preferred before whole cores",
+                "Hybrid CPU   {} high-capacity logical CPUs preferred",
                 rodata.cake_cap_word.count_ones()
             );
         }
@@ -275,12 +297,6 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Host identity right under the version line; the LLC count is the
-        // same expression the steal and pool setup below uses.
-        info!(
-            "   host    {physical} cores + {smt} SMT = {total} CPUs, {} LLC",
-            topo.all_llcs.len()
-        );
         let core_performance = core_performance::CorePerformanceLayout::discover(&topo);
         let rank_words = core_performance.rank_words();
         if one_word && rank_words.len() > 1 {
@@ -290,15 +306,28 @@ impl<'a> Scheduler<'a> {
                 *slot = word;
             }
         }
-        info!("   cores   {}", core_performance.summary());
+        if rodata.cake_rank_tiers > 1 {
+            info!(
+                "Placement    Platform core preferences enabled ({} levels)",
+                rodata.cake_rank_tiers
+            );
+        } else {
+            info!("Placement    No additional core ranking applied");
+        }
+        if opts.verbose {
+            info!("Core order   {}", core_performance.summary());
+        }
         let pref_die = preferred_die(&topo, &core_performance);
         let x3d_mode = amd_x3d_mode();
         if let Some(die) = &pref_die {
+            info!("Cache bias   Preferred cache domain selected");
             let w = preferred_word(die, x3d_mode.as_deref());
-            info!(
-                "   die     preferred LLC word {w:#x} (x3d mode {})",
-                x3d_mode.as_deref().unwrap_or("n/a")
-            );
+            if opts.verbose {
+                info!(
+                    "Cache mask   {w:#x} (x3d mode {})",
+                    x3d_mode.as_deref().unwrap_or("n/a")
+                );
+            }
         }
         if opts.verbose {
             for core in core_performance.details() {
@@ -340,7 +369,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
-        // Clamped so a probe perturbed by host load cannot mis-tune; always logged.
+        // Clamped so a probe perturbed by host load cannot mis-tune.
         match probe_handoff_hop_ns() {
             Some(probe) => {
                 // The admission threshold IS the tail of a genuine handoff, used directly.
@@ -357,9 +386,11 @@ impl<'a> Scheduler<'a> {
                     warn!("   probe   hop p99 {p99}ns exceeds {hop_max}ns; tick predictor off");
                     0
                 };
-                info!(
-                    "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
-                );
+                if opts.verbose {
+                    info!(
+                        "Handoff      Hop median {med} ns / p99 {p99} ns; handoff limit {hm} ns (diagnostic)"
+                    );
+                }
             }
             None => {
                 log::warn!("   probe   handoff probe failed (diagnostic only)");
@@ -555,7 +586,28 @@ impl<'a> Scheduler<'a> {
         // Begin scheduling only after handler accounting is installed.
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
-        info!("🍰 attached");
+        if let Some(bss) = skel.maps.bss_data.as_ref() {
+            let on_cpu = match bss.cake_compat_on_cpu_size {
+                1 => "u8",
+                4 => "32-bit",
+                _ => "unknown (idle kick retained)",
+            };
+            let cpu_curr = if bss.cake_compat_cpu_curr_kfunc {
+                "kfunc"
+            } else {
+                "rq fallback"
+            };
+            let tracking = match (bss.cake_compat_on_cpu_size, bss.cake_compat_cpu_curr_kfunc) {
+                (1 | 4, true) => "Native kernel support",
+                (1 | 4, false) => "Compatibility fallback for this kernel",
+                _ => "Unknown task-state layout; conservative idle kicks enabled",
+            };
+            info!("Task state   {tracking}");
+            if opts.verbose {
+                info!("Kernel paths on_cpu={on_cpu} / cpu_curr={cpu_curr}");
+            }
+        }
+        info!("🍰 Running");
         // ops.init chose the task-age clock; say which under -v.
         let tick_ns = skel.maps.rodata_data.as_ref().map_or(0, |r| r.cake_tick_ns);
         if opts.verbose {
@@ -933,7 +985,7 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
-        info!("🍰 detached");
+        info!("Stopped");
         uei_report!(&self.skel, uei)
     }
 
@@ -1590,6 +1642,10 @@ fn main() -> Result<()> {
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
+        match build_identity::binary_sha256() {
+            Ok(hash) => println!("Build SHA256: {hash}"),
+            Err(err) => println!("Build SHA256: unavailable ({err:#})"),
+        }
         return Ok(());
     }
     if opts.print_topology {
@@ -1605,6 +1661,11 @@ fn main() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     ctrlc::set_handler(move || {
+        // Terminal Ctrl+C echo has no newline. Finish that line before the
+        // run loop starts logging shutdown; leave redirected logs untouched.
+        if std::io::stderr().is_terminal() {
+            eprintln!();
+        }
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
@@ -1613,7 +1674,7 @@ fn main() -> Result<()> {
     let mut sched = Scheduler::init(&opts, &mut open_object)?;
 
     if sched.run(shutdown.clone())?.should_restart() {
-        info!("🍰 restart requested by the kernel — re-executing");
+        info!("Restart requested by the kernel — re-executing");
         reexec_self()?;
     }
 

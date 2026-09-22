@@ -9,32 +9,36 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
-/* on_cpu changed from signed int to u8. Separate CO-RE flavors keep both
- * reads relocatable; load-time constants prune the unused paths. */
-struct task_struct___cake_on_cpu_u8 {
-	u8 on_cpu;
+/* on_cpu changed from int to u8. An unsigned local int lets CO-RE narrow
+ * the load to u8 without poisoning an unused signed read. On old kernels
+ * the width stays unchanged; signedness does not affect our zero test. */
+struct task_struct___cake_on_cpu {
+	u32 on_cpu;
 } __attribute__((preserve_access_index));
 
-struct task_struct___cake_on_cpu_int {
-	int on_cpu;
-} __attribute__((preserve_access_index));
+static __always_inline u32 cake_on_cpu_size(void)
+{
+	struct task_struct___cake_on_cpu *task = NULL;
+
+	if (bpf_core_field_exists(task->on_cpu))
+		return bpf_core_field_size(task->on_cpu);
+	return 0;
+}
 
 static __always_inline bool cake_task_on_cpu(struct task_struct *p)
 {
-	struct task_struct___cake_on_cpu_u8 *new = (void *)p;
-	struct task_struct___cake_on_cpu_int *old = (void *)p;
+	struct task_struct___cake_on_cpu *task = (void *)p;
+	u32 size = cake_on_cpu_size();
 
-	if (bpf_core_field_exists(new->on_cpu)) {
-		if (bpf_core_field_size(new->on_cpu) == sizeof(new->on_cpu))
-			return new->on_cpu != 0;
-	}
-	if (bpf_core_field_exists(old->on_cpu)) {
-		if (bpf_core_field_size(old->on_cpu) == sizeof(old->on_cpu))
-			return old->on_cpu != 0;
-	}
+	if (size == sizeof(u8) || size == sizeof(u32))
+		return task->on_cpu != 0;
 	/* Unknown layout: retain the idle kick rather than assume continuation. */
 	return false;
 }
+
+/* Startup diagnostics, populated once from the actual CO-RE/kfunc choices. */
+u32 cake_compat_on_cpu_size;
+bool cake_compat_cpu_curr_kfunc;
 
 _Static_assert((MAX_CPUS & (MAX_CPUS - 1)) == 0,
 	       "MAX_CPUS must remain a power of two");
@@ -3230,6 +3234,8 @@ void BPF_STRUCT_OPS(cake_disable, struct task_struct *p)
  * A span narrower than nr_cpu_ids would stop the steal ring short: refuse it. */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 {
+	cake_compat_on_cpu_size = cake_on_cpu_size();
+	cake_compat_cpu_curr_kfunc = bpf_ksym_exists(scx_bpf_cpu_curr);
 	{
 		const struct cpumask *im = scx_bpf_get_idle_cpumask();
 		const struct cpumask *sm = scx_bpf_get_idle_smtmask();
