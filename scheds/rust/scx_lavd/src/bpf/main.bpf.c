@@ -2253,9 +2253,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);
-	/* task_cpu may fall outside cpus_ptr; seed an allowed CPU. */
-	if (!bpf_cpumask_test_cpu(taskc->suggested_cpu_id, p->cpus_ptr))
-		taskc->suggested_cpu_id = bpf_cpumask_first(p->cpus_ptr);
 	bpf_rcu_read_unlock();
 
 	if (is_ksoftirqd(p))
