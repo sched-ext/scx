@@ -95,17 +95,15 @@ static void collect_sys_stat(void)
 {
 	struct sys_stat_ctx __arena *c = &ctx;
 	struct cpdom_ctx __arena *cpdomc;
-	u64 cpdom_id, compute_wall = 1;
+	u64 compute_wall = 1;
+	u32 cpdom_id;
 	int cpu;
 
 	/*
 	 * Collect statistics for each compute domain.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
+		cpdomc = &cpdom_ctxs[cpdom_id];
 		cpdomc->cur_util_wall_sum = 0;
 		cpdomc->avg_util_wall_sum = 0;
 		cpdomc->cur_util_invr_sum = 0;
@@ -544,15 +542,11 @@ static void collect_sys_stat(void)
 		/*
 		 * Update the global steady (non-turbulent) CPU mask.
 		 */
-		bpf_rcu_read_lock();
 		steady = steady_cpumask;
-		if (steady) {
-			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
-				cmask_set(cpu, steady);
-			else
-				cmask_clear(cpu, steady);
-		}
-		bpf_rcu_read_unlock();
+		if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
+			cmask_set(cpu, steady);
+		else
+			cmask_clear(cpu, steady);
 
 		/*
 		 * Collect per-CPU tier stats for preemption vulnerability
@@ -583,7 +577,8 @@ static void calc_sys_stat(void)
 {
 	struct sys_stat_ctx __arena *c = &ctx;
 	static int __arena_global cnt = 0;
-	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr, cpdom_id;
+	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr;
+	u32 cpdom_id;
 
 	/*
 	 * Calculate the CPU utilization that includes everything
@@ -715,16 +710,13 @@ static void calc_sys_stat(void)
 	 * threshold so more tasks qualify for the main DSQ, reducing
 	 * turbulent CPU load. When under the target, raise it so fewer
 	 * tasks qualify, pushing more to the turbulent DSQ.
+	 *
+	 * Both domain scans share the same can_loop budget.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc;
 
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
-		if (!cpdomc)
-			continue;
+		cpdomc = &cpdom_ctxs[cpdom_id];
 
 		if (cpdomc->nr_turb_cpus == 0 || cpdomc->cap_sum_turb == 0) {
 			cpdomc->vuln_thresh = 0;
@@ -832,18 +824,16 @@ s32 init_sys_stat(u64 now)
 {
 	struct cpdom_ctx __arena *cpdomc;
 	struct bpf_timer *timer;
-	u64 cpdom_id;
+	u32 cpdom_id;
 	u32 key = 0;
 	int err;
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
 	sys_stat.slice_wall = slice_max_ns;
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
+	/* this frame's only can_loop site has at most 128 visits */
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
+		cpdomc = &cpdom_ctxs[cpdom_id];
 		if (cpdomc->nr_active_cpus)
 			sys_stat.nr_active_cpdoms++;
 	}

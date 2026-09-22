@@ -21,17 +21,14 @@ extern const volatile u8	mig_delta_pct;
 extern const volatile u8	no_fast_lb;
 extern const volatile u64	lb_low_util_wall;
 
-u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
-					      u64 mig_delta_factor)
+static __always_inline u64 calc_mig_delta(u64 avg_load_invr, int nz_qlen, u64 factor)
 {
 	/*
-	 * Note that added "noinline" to make the verifier happy.
-	 * When mig_delta_factor > 0, the user specified a fixed
-	 * migration delta percentage; otherwise use the dynamic
-	 * shift-based heuristic.
+	 * When factor > 0, the user specified a fixed migration delta
+	 * percentage; otherwise use the dynamic shift-based heuristic.
 	 */
-	if (mig_delta_factor > 0)
-		return avg_load_invr * mig_delta_factor / LAVD_SCALE;
+	if (factor > 0)
+		return avg_load_invr * factor / LAVD_SCALE;
 	if (nz_qlen >= sys_stat.nr_active_cpdoms)
 		return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT_OL;
 	if (nz_qlen == 0)
@@ -143,7 +140,7 @@ __weak
 int plan_x_cpdom_migration(void)
 {
 	struct cpdom_ctx __arena *cpdomc;
-	u64 cpdom_id;
+	u32 cpdom_id;
 	u32 nr_stealee = 0;
 	u64 max_avg_util_wall = 0;
 	u64 util;
@@ -152,14 +149,9 @@ int plan_x_cpdom_migration(void)
 	bool overflow_running = false;
 	int nz_qlen = 0;
 
-	/*
-	 * Calculate load for each active compute domain.
-	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
+	/* load and reset share at most 256 can_loop visits per call */
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
+		cpdomc = &cpdom_ctxs[cpdom_id];
 		if (!cpdomc->nr_active_cpus) {
 			if (cpdomc->cur_util_wall_sum > 0)
 				overflow_running = true;
@@ -210,11 +202,12 @@ int plan_x_cpdom_migration(void)
 	if (mig_delta_pct > 0)
 		mig_delta_factor = (mig_delta_pct << LAVD_SHIFT) / 100;
 
+	/*
+	 * bpf_for() stays: converted to bpf_arena_for(), this scan exceeds the
+	 * verifier's complexity limit.
+	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
+		cpdomc = &cpdom_ctxs[cpdom_id];
 
 		nr_stealee += classify_cpdom(cpdomc, total_load_invr,
 					     total_cap_sum, nz_qlen,
@@ -230,11 +223,8 @@ int plan_x_cpdom_migration(void)
 
 reset_and_skip_lb:
 	if (sys_stat.nr_stealee > 0) {
-		bpf_for(cpdom_id, 0, nr_cpdoms) {
-			if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-				break;
-
-			cpdomc = get_cpdom_ctx(cpdom_id);
+		bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
+			cpdomc = &cpdom_ctxs[cpdom_id];
 			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
@@ -364,8 +354,6 @@ static bool try_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 				break;
 
 			cpdom_id = get_neighbor_id(cpdomc, i, j);
-			if (cpdom_id < 0)
-				continue;
 
 			cpdomc_pick = get_cpdom_ctx(cpdom_id);
 			if (!cpdomc_pick) {
@@ -464,8 +452,6 @@ static bool force_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 				break;
 
 			cpdom_id = get_neighbor_id(cpdomc, i, j);
-			if (cpdom_id < 0)
-				continue;
 
 			cpdomc_pick = get_cpdom_ctx(cpdom_id);
 			if (!cpdomc_pick) {

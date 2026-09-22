@@ -21,6 +21,14 @@ static struct scx_cmask __arena *pool_mask(u8 __arena *pool, u32 mask_sz, u32 sl
 	return (struct scx_cmask __arena *)(pool + slot * mask_sz);
 }
 
+/* only fresh zeroed mask-pool entries may use this initializer */
+static __always_inline
+void init_zeroed_mask(struct scx_cmask __arena *mask, u32 width)
+{
+	mask->nr_cids = width;
+	mask->alloc_words = CMASK_NR_WORDS(width);
+}
+
 __hidden
 int init_cid_masks(void)
 {
@@ -46,8 +54,8 @@ int init_cid_masks(void)
 	pool = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
 	if (!pool)
 		return -ENOMEM;
-	bpf_arena_for(i, 0, NR_GLOBAL_MASKS + nr_cids * NR_CPU_MASKS)
-		cmask_init(pool_mask(pool, mask_sz, i), 0, nr_cids);
+	bpf_arena_for(i, 0, NR_GLOBAL_MASKS)
+		init_zeroed_mask(pool_mask(pool, mask_sz, i), nr_cids);
 
 	turbo_cpumask = pool_mask(pool, mask_sz, 0);
 	big_cpumask = pool_mask(pool, mask_sz, 1);
@@ -59,16 +67,18 @@ int init_cid_masks(void)
 	idle_smt_cmask = pool_mask(pool, mask_sz, 7);
 
 	bpf_arena_for(cid, 0, nr_cids) {
-		cpuc = get_cpu_ctx_id(cid);
-		if (!cpuc)
-			return -ESRCH;
 		cpu = scx_bpf_cid_to_cpu(cid);
-		if (cpu < 0 || cpu >= LAVD_CPU_ID_MAX)
+		if (cpu < 0)
+			return -ESRCH;
+		if (cpu >= LAVD_CPU_ID_MAX)
 			return -EINVAL;
+		cpuc = &cpu_ctxs[cid];
 		cpuc->cpu_id = cid;
 		cpuc->raw_cpu = cpu;
 
 		i = NR_GLOBAL_MASKS + cid * NR_CPU_MASKS;
+		bpf_arena_for(j, 0, NR_CPU_MASKS)
+			init_zeroed_mask(pool_mask(pool, mask_sz, i + j), nr_cids);
 		cpuc->a_mask = pool_mask(pool, mask_sz, i);
 		cpuc->o_mask = pool_mask(pool, mask_sz, i + 1);
 		cpuc->temp_mask = pool_mask(pool, mask_sz, i + 2);
@@ -179,15 +189,17 @@ found:
 	return -EBUSY;
 }
 
-__hidden
-void update_idle_cid(s32 cid, bool idle)
+/*
+ * The caller supplies the validated context for the notified cid. Both sibling
+ * scans stay in this frame: the core range is fixed at init and bounded by the
+ * cid limit, so together they visit at most twice LAVD_CPU_ID_MAX cids.
+ */
+__hidden __noinline
+void update_idle_cid(struct cpu_ctx __arena __arg_arena *cpuc, bool idle)
 {
-	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cid);
-	s32 sibling;
+	s32 cid = cpuc->cpu_id, sibling;
 
 	asm volatile("" :: "r"(&arena));
-	if (!cpuc)
-		return;
 	if (idle)
 		cmask_set(cid, idle_cmask);
 	else

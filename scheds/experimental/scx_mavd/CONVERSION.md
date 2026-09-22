@@ -414,12 +414,13 @@ change.
 
 ## Loops
 
-The conversion's own scans use bpf_arena_for() from lib/arena_loop.h: mask,
-context, preference-table and domain-bitmap initialization, the sibling
-scans in update_idle_cid(), and the per-cid statistics and power-mode scans
-whose bound became nr_cids. Loop counters are u32 or narrower, as the macro
-requires. Scans that lavd wrote over nr_cpdoms, the preference table and its
-retry counts keep bpf_for() at this point.
+Every mavd scan uses bpf_arena_for() from lib/arena_loop.h except six that
+lavd wrote: the neighbor-domain distance scans in migrate_to_neighbor(), the
+preemption victim scan, the two core-compaction scans and the load-balance
+classification scan. Converted, the select program ran past the verifier's
+one-million-instruction limit, and earlier attempts hit its jump limit on
+the enqueue and statistics programs. Loop counters are u32 or narrower, as
+the macro requires.
 
 can_loop in bpf_arena_for() and cmask_for_each() bounds verifier state, not
 valid traversal. Every scan is bounded by the immutable cid, CPU or domain

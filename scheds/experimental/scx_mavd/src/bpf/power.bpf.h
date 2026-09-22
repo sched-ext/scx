@@ -24,7 +24,6 @@ int update_autopilot_high_cap(void);
 
 int calc_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc);
 int update_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc);
-u16 get_cpuperf_cap(s32 cpu);
 
 extern volatile int __arena_global	power_mode;
 extern volatile bool __arena_global	is_powersave_mode;
@@ -74,7 +73,7 @@ static __inline u64 conv_wall_to_invr(u64 duration_wall, struct cpu_ctx __arena 
 	 * Scale the duration by CPU capacity and frequency, so calculate
 	 * capacity-invariant and frequency-invariant time duration.
 	 */
-	cap = get_cpuperf_cap(cpuc->raw_cpu);
+	cap = cpuc->max_capacity;
 	freq = scx_bpf_cidperf_cur(cpu);
 	duration_invr = (duration_wall * cap * freq) >> (LAVD_SHIFT * 2);
 

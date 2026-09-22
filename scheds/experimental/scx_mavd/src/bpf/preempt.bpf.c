@@ -136,6 +136,9 @@ static struct cpu_ctx __arena *find_victim_cpu(const struct scx_cmask __arena *c
 	 * In the worst case, the current logic traverses _all_ CPUs. It would
 	 * be too expensive to perform every task queue. We need to revisit
 	 * this if the traversal cost becomes problematic.
+	 *
+	 * bpf_for() stays: converted to bpf_arena_for(), this scan exceeds the
+	 * verifier's complexity limit.
 	 */
 	nr_cpus = cmask_weight(cpumask);
 	bpf_for(i, 0, nr_cpus) {
@@ -420,7 +423,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	cpumask = cpuc_cur->temp_mask;
 	cpdomc = get_cpdom_ctx(cpdom_id);
 	cd_cpumask = get_cpdom_mask(cpdom_id);
-	if (!cpdomc || !cd_cpumask || !cpumask)
+	if (!cpdomc || !cd_cpumask)
 		return;
 
 	cmask_copy(cpumask, cd_cpumask);

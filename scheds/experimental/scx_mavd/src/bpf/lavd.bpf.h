@@ -359,6 +359,7 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx __arena *c
 }
 
 extern struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+/* set by init_cpdoms(), bounded by LAVD_CPDOM_MAX_NR */
 extern int __arena_global		nr_cpdoms;
 
 /* queued_in_cpdom_id uses LAVD_CPDOM_MAX_NR for no domain and must get NULL */
@@ -370,6 +371,7 @@ static __always_inline struct cpdom_ctx __arena *get_cpdom_ctx(s64 id)
 }
 
 typedef struct task_ctx __arena task_ctx;
+struct cpu_ctx;
 
 extern u32 nr_cids;
 extern struct scx_cmask __arena *online_cmask;
@@ -379,7 +381,7 @@ extern struct scx_cmask __arena *idle_smt_cmask;
 int init_cid_masks(void);
 s32 claim_idle_cid(s32 cid);
 s32 pick_idle_cid(const struct scx_cmask __arena __arg_arena *allowed, u64 flags);
-void update_idle_cid(s32 cid, bool idle);
+void update_idle_cid(struct cpu_ctx __arena __arg_arena *cpuc, bool idle);
 
 extern struct cpu_ctx __arena *cpu_ctxs;
 

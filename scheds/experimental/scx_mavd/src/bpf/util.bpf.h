@@ -66,6 +66,19 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
 	return curr && rt_or_dl_task(curr);
 }
 
+/**
+ * get_cpu_ctx_ops - Get the CPU context for a cid the kernel handed a callback
+ * @cid: cid the kernel passed to the running callback, never a picker result
+ *
+ * The non-sleepable callback pins the scheduler and the kernel's cids are in
+ * range, so the array is indexed without validation.
+ */
+static __always_inline struct cpu_ctx __arena *get_cpu_ctx_ops(s32 cid)
+{
+	asm volatile("" :: "r"(&arena));
+	return &cpu_ctxs[cid];
+}
+
 /*
  * Two lookups, chosen by which task a program is asking about.
  *
@@ -106,6 +119,15 @@ __get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx __arena *cpuc)
 #define get_task_ctx_curcpu(p, cpuc) \
 	((task_ctx *)__get_task_ctx_curcpu((p), (cpuc)))
 #define get_task_ctx(p)	get_task_ctx_curcpu((p), get_cpu_ctx())
+
+/* reuse a validated slot only when it belongs to the executing CPU */
+static __always_inline struct cpu_ctx __arena *
+reuse_current_cpu_ctx(struct cpu_ctx __arena *cpuc)
+{
+	if (cpuc->raw_cpu == bpf_get_smp_processor_id())
+		return cpuc;
+	return get_cpu_ctx_ops(scx_bpf_this_cid());
+}
 
 static __always_inline task_ctx *find_task_ctx(struct task_struct *p)
 {

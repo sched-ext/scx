@@ -64,10 +64,6 @@ bool init_active_ovrflw_masks(struct pick_ctx *ctx)
 static __noinline
 bool init_ao_masks(struct pick_ctx *ctx)
 {
-	ctx->cpuc_cur = get_cpu_ctx();
-	if (!ctx->cpuc_cur)
-		return false;
-
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
 		ctx->a_mask = ctx->active;
 		ctx->o_mask = ctx->ovrflw;
@@ -152,6 +148,27 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 	return true;
 }
 
+/*
+ * The picker owns dst. All masks cover [0, nr_cids), with zero tail bits.
+ * Shared sources can change during this wordwise scan, as with lavd's
+ * bpf_cpumask_and(). The extra allocation word is not part of the scan.
+ */
+static __always_inline
+bool intersect_picker_masks(struct scx_cmask __arena *dst, const struct scx_cmask __arena *a,
+			    const struct scx_cmask __arena *b)
+{
+	u32 nr_words = (nr_cids + 63) / 64, i;
+	u64 nonempty = 0;
+
+	bpf_arena_for(i, 0, nr_words) {
+		u64 word = a->bits[i] & b->bits[i];
+
+		dst->bits[i] = word;
+		nonempty |= word;
+	}
+	return nonempty != 0;
+}
+
 static __noinline
 bool init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *idle_mask)
 {
@@ -167,29 +184,21 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *i
 	if (!ctx->ia_mask || !ctx->io_mask || !ctx->iat_mask || !ctx->temp_mask)
 		return false;
 
-	if (ctx->a_mask) {
-		cmask_copy(ctx->ia_mask, idle_mask);
-		cmask_and(ctx->ia_mask, ctx->a_mask);
-		ctx->ia_empty = cmask_empty(ctx->ia_mask);
-	}
+	if (ctx->a_mask)
+		ctx->ia_empty = !intersect_picker_masks(ctx->ia_mask, idle_mask, ctx->a_mask);
 	else
 		ctx->ia_empty = true;
 
-	if (ctx->o_mask) {
-		cmask_copy(ctx->io_mask, idle_mask);
-		cmask_and(ctx->io_mask, ctx->o_mask);
-		ctx->io_empty = cmask_empty(ctx->io_mask);
-	}
+	if (ctx->o_mask)
+		ctx->io_empty = !intersect_picker_masks(ctx->io_mask, idle_mask, ctx->o_mask);
 	else
 		ctx->io_empty = true;
 
 	if (ctx->ia_empty || !have_turbo_core || !turbo_cpumask)
 		ctx->iat_empty = true;
-	else if (turbo_cpumask) {
-		cmask_copy(ctx->iat_mask, ctx->ia_mask);
-		cmask_and(ctx->iat_mask, turbo_cpumask);
-		ctx->iat_empty = cmask_empty(ctx->iat_mask);
-	}
+	else if (turbo_cpumask)
+		ctx->iat_empty = !intersect_picker_masks(ctx->iat_mask, ctx->ia_mask,
+						       turbo_cpumask);
 	return true;
 }
 
@@ -207,20 +216,12 @@ s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
 	 * online_src_mask = src_mask ∩ online_mask
 	 */
 	online_src_mask = cpuc_cur->temp_mask;
-	if (!online_src_mask)
-		return -ENOENT;
 
 	online_mask = online_cmask;
 	cmask_copy(online_src_mask, src_mask);
 	cmask_and(online_src_mask, online_mask);
 
-	/*
-	 * Find a proper CPU in the preferred CPU order.
-	 */
-	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
-		if (i >= LAVD_CPU_ID_MAX)
-			break;
-
+	bpf_arena_for(i, sys_stat.nr_active, nr_cpu_ids) {
 		cpu = cpu_order[i];
 		if (cmask_test(cpu, online_src_mask))
 			return cpu;
@@ -237,8 +238,7 @@ static __noinline
 void init_cpdom_mask(struct scx_cmask __arena *dst, const struct scx_cmask __arena *cpdom,
 		     const struct scx_cmask __arena *eligible)
 {
-	cmask_copy(dst, cpdom);
-	cmask_and(dst, eligible);
+	intersect_picker_masks(dst, cpdom, eligible);
 }
 
 static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
@@ -609,6 +609,9 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 	 * Note that when a system is under-loaded, task donation works better
 	 * than task stealing because DSQs are mostly empty (i.e., it is hard
 	 * to steal from a DSQ).
+	 *
+	 * bpf_for() stays: converted to bpf_arena_for(), these scans exceed the
+	 * verifier's complexity limit.
 	 */
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
@@ -618,8 +621,6 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 			if (j >= nr_nbr)
 				break;
 			mig_cpdom = get_neighbor_id(cpdc, i, j);
-			if (mig_cpdom < 0)
-				continue;
 
 			mig_cpdc = get_cpdom_ctx(mig_cpdom);
 			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
@@ -648,6 +649,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 	return cpu;
 }
 
+/* the caller supplies a checked context for the executing CPU */
 __hidden __noinline
 s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
