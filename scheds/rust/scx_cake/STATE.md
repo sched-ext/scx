@@ -25,6 +25,10 @@ live WoW confirm); all hashes cited below resolve via those local backup branche
 2026-08-25: PR #3767 merged upstream (`4a2ab1fce`) with ALL of nightly's scx_cake
 content (subtree hash identical) — nightly reset onto upstream/main; pre-reset state
 in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
+2026-09-06: PR #3786 merged upstream (`c410fcbd7`) with the §G82 state — nightly
+rebased onto upstream/main `38872eded` (12 pre-§G82 commits dropped as already
+merged, 14 replayed clean); pre-rebase tip in `backup/nightly-pre-rebase-20260906`;
+the day's three commits squashed to one; origin force-pushed.
 
 </details>
 
@@ -32,14 +36,2155 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**2026-09-19 (evening) — ROUND-2 INSTRUCTION COUNCIL, POOL-TOKEN PROOF,
+PRE-PUSH REVIEW: six commits on the layout round, then the nightly squash
+(`keep/pre-squash-2026-09-19b` holds the 17 pre-squash commits).**
+
+| commit | what | receipt |
+|---|---|---|
+| `8f8a5ed7d` | codegen (council 4/4): seat and deep-idle RMWs in the relaxed fetch form (one `lock or/and`, was a cmpxchg loop); seat RUN without the lock and map lookup (HOLD/RUN under rq(cpu), RELEASE decides on pid/seq, RUN never writes pid/seq); u64 seat indices; nr_llcs read once in dispatch_search; stopping's hint compare dropped; cpu_release counts behind the mark | fnspills running 7/6/216 → 5/5/200, dispatch_search 7/34/615 → 7/36/599 |
+| `4639238fb` | idle-mask pointers cached at init (council 4/4, shape C 3-1): the kernel's idle and SMT-idle cpumasks are boot-allocated (idle.c `scx_idle_init_masks`, never freed; hotplug restarts cake), captured in ops.init as `__kptr_untrusted` statics in `.data.masks`; every hot read is one probe load, not a get+put kfunc pair | select_cpu 12/23/695 → 10/30/678, claim_warm 6/9/458 → 11/13/469; attach + rotation |
+| `114fbf18a` | both-empty dispatch gates (ring-steal qmask early-out, pending-token test) as always_inline in dispatch_search's frame; R12 (dispatch_search inlined into cake_dispatch) tried and dropped, 8/53 | dispatch_search 6/38/605 → 7/38/636 |
+| `9379f60bb` | **the pool token is proof** (council 4/4): a pooled task carries its pool + 1 in the low 5 bits of its slice; the token lowers where the task is next seen out of the pool (ops.running first, a re-enqueue, ops.disable), so a zero token proves an empty pool and the both-empty dispatch skips the pool count too. The interlock keeps `unserved` (inc before insert, dec at serve) for the update_idle kick and the landing wait; kicking on the proof token doubled dispatch runs (rot9: 157k → 309k/s); a raised `unserved` beside a zero token is a pop the serve never saw, reset on that evidence | dispatch_search 7/38/636 → 13/41/703, running 5/5 → 6/6 |
+| `d367bcef0` | pool-token fixes (external review, two agents): the tag lives in the slice, not the vtime key (stopping's charge made ordinary tasks read as tagged); `cake_slice_from_service` is the one grant source and clears the tag bits; the reset is a CAS on the value read; the cpu_idle program's autoattach off (attached twice on cpuidle hosts); `cake_llc_slot` back to the 128 B stride with a size assert | model check in the session scratchpad |
+| `fb057beee` | loader: a release run prints its identity once; the IRQ-sink publication and age-clock lines are `--verbose`; the signed-printed u64 offset gone | — |
+| `ceddc0b12` | **pre-push review fixes** (three Fable reviewers over `e355a60f2..fb057beee`, kernel citations in the session transcript): ops.disable's seen ran behind the one-word return (a wide host kept a token raised for a task promoted out of the class while queued); the stale-`unserved` reset re-reads the proof token after its CAS and gives back the count of an insert that raised both words between the read and the swap (x86 needs an NMI between two adjacent loads for it; arm64 none); `_Static_assert(!(SLICE_NS & CAKE_POOL_TAG_MASK))`; the cpu_idle tracepoint stays unloaded on a host wider than one word (its word has no reader there) | release + debug zero warnings, fmt, clippy; `cakebench try` on the squash `763365ecd` (binary `9121fbe4d124`, 10 s): verifier accepted, ran, native restored, 0 stalls |
+
+**Tag safety, traced on 7.2.6 ext.c:** the kernel writes `scx.slice` off-CPU
+only through `refill_task_slice_dfl` on the local/global/bypass enqueue
+paths that skip ops.enqueue (`!scx_rq_online`, bypassing, `PF_EXITING`,
+`SCX_ENQ_LAST`), and none can hold a tagged task: exiting and last need a
+run first (running strips), offline and bypass come with a hotplug or a
+PM notifier, and a hotplug exits cake (no `cpu_online`/`cpu_offline`
+ops; the loader re-execs). `SCX_SLICE_DFL` and `SLICE_NS` keep the tag
+bits clear. Reviewer notes kept, not fixed: the continuation-arm pinned
+KICK_PREEMPT zeroes whoever is curr when the irq_work lands (one extra
+dispatch if the target already picked the wakee; the old ENQ_PREEMPT on a
+user DSQ was ignored outright); stopping's unconditional `hint` store can
+lose one WOKE sample to a remote runnable stop (predates the round);
+`hop_max = tick/4` switches the tick predictor off when the coarse clock
+resolution falls outside 0.5–20 ms (no shipping HZ does).
+
+**2026-09-19 (later) — INSTRUCTION AND LAYOUT ROUND: two commits on top of
+the self-sizing set (`bd24209c3`, `8248fe6c3`; local, NOT pushed).**
+Council of three (instruction analysis; data layout / quantization /
+bitpacking; verifier+JIT cost model with one design ruling), fed by
+`bpftool prog profile` under appsim: select_cpu ~744 insns / ~500 cycles
+per run above the profile floor, dispatch ~467 / ~240, running ~65 / ~100,
+stopping ~40 / ~90, update_idle ~15 insns. **Only ~140 of select_cpu's ~500
+cycles and ~60 of dispatch's ~240 are cake's own instructions**; the rest
+is kfunc bodies (idle smtmask get+put, the atomic claim, dsq_insert; two
+rhashtable counts per dispatch). Instruction shaving is worth ≤ 5 ns per
+op; the 44 surviving rodata lddw+ldxb pairs are ≤ 25 cycles of independent
+L1 loads; the eight divides are one per placement (`work / n`, ~0.4 ms/s)
+plus rare/probe arms; 32-bit vs 64-bit ops cost the same on the x86 JIT.
+**Quantization rejected with a range proof:** `work ≤ age/4` reaches 2^43 ns
+after 2.4 h, so a 32-bit unit needs ≥ 2^11 ns, coarser than the 1464 ns
+floor the grant is clamped to; div r64 vs r32 differs ≤ 5 cycles. Narrowing
+fields saves nothing (same uop). Stride stays 128 B (Raptor Lake pairs
+128 B-aligned lines). Also recorded: every implicit-args kfunc now costs
+one more call (`scx_prog_sched` on the multi-scheduler tree) than the
+2026-09-15 ladder assumed.
+
+| commit | what | receipt (appsim 8-slot ABBABAAB vs its parent) |
+|---|---|---|
+| `bd24209c3` | dispatch counts its own queue only behind a set qmark bit; `cake_llc_of` folds on one LLC. **Ruling** (against STATE.md:454's rejection): every insert into DSQ[cpu] marks under rq(cpu)'s lock (ops.enqueue runs under task_rq's lock incl. the queued-wakeup path, ext.c 2055-2078, core.c 3911-3920, 4412-4425; REENQ paths ext.c 4394/4443/3159) and only this CPU's dispatch clears it under the same lock (ext.c 2923); removal paths only lower the count. No interleaving exists | dispatch 44.8 → 32.6 ns/run (−27 %), total cake BPF 32.3 → 30.4 ms/s; frames: 7/8 slots identical, s8_new 0.1 % low 1412 (see below) |
+| `8248fe6c3` | shared-line layout: one-CPU seat tests read the CPU's own seat slot (`held`, under the seat lock beside `pid`) instead of the global word every stage switch rewrites; running reads the word only through the holder census; frontier advances in 65 µs steps (`FRONTIER_GRAIN_NS`); one line per LLC pool (pending, mark, served); probe-only run-slot words on the second line | dispatch 33.2 → 32.2, running 27.1 → 26.5, stopping 14.5 → 13.8, total 30.6 → 30.1 ms/s; frames: 7/8 identical, s5_new 0.1 % low 1335 |
+
+**Unresolved, carried:** in each of the last two rotations one new-arm slot
+dipped at the 0.1 % low (a handful of 0.9–0.97 ms frames whose whole appsim
+chain ran long); old arms show the same frame class (s6_old max 0.90 ms,
+s4_old 0.84 in `rot3`), seven of eight slots per rotation are identical,
+and the 4-slot run of 2026-09-19 dipped on both arms. Not called null: the
+next rotation (or an A/A on `8248fe6c3`) decides whether the new arms carry
+it. Net over the round vs the pushed nightly `e355a60f2`: dispatch 42.7 →
+32.2 ns/run, total cake BPF 29.4 → 30.1 ms/s (the interlock's +2.8 minus
+these −2.4), frames flat within the carried question.
+
+Deferred from the layout lens, with a census owed first: lock-free seat
+slot (`pid|seq<<32`, −4 helper calls per stage pair, but a HOLD/RELEASE
+race can lose a reservation: not placement-neutral); stopping precomputing
+stage/starved/subhandoff into the groove to trade four remote-dirty task
+lines for one storage lookup (needs `perf c2c` on those loads).
+
+**2026-09-19 — SELF-SIZING ROUND: debloat + six build commits on top of the
+nightly `e355a60f2` (`c2664a27a` … `ecc608b5d`, local, NOT pushed): the
+maintainer picks what goes to testers.** Standard set 2026-09-19: fit any
+CPU (Intel/AMD, consumer/enterprise), no host-fitted ceilings, floors or
+pauses, seamless event-based handoffs, kernel coding style, no comment bloat.
+
+Councils (all Fable 5.1 unless noted; reports in the session scratchpad
+`selfsizing_compendium.md`, `selfsizing_designs.md`): magic numbers ×3
+(BPF constants, loader probes, design assumptions), static-to-dynamic plan,
+dual-CCD ×3 (multi-LLC paths, X3D placement, hardware audit), Threadripper
+4-CCD; designers A (measure at load) and B (observe at runtime) + arbiter;
+six reviewers (kernel API, verifier/cost, game path, portability, estimator
+stability, simplicity) voting K1–K12 / D1–D6; three code reviewers on the
+result. Built = everything at 6/6 or 5/6; deferred = the grant timer (D2,
+behind the `grant_lt_tick` census) and cpu_release evacuation policy (K2b
+built as claim+kick, the §G93 trace still decides whether to evacuate).
+
+| commit | what |
+|---|---|
+| `c2664a27a` | comment debloat to kernel style: cake.bpf.c 3509 → 2952 lines, comment lines 1062 → 516; instruction stream identical; `comment_lint` ceiling 0.70 → 0.30 |
+| `dd08b940a` | **§G95 enqueue/update_idle interlock**: `ops.update_idle` registered on every host; a per-LLC `pool_pending` token raised before a pool insert (the insert lands after its op, ext.c 2055-2079), lowered on every serve; `update_idle(idle=true)` self-kicks when up (idle.c 812-826 orders the bit before the call); a both-empty dispatch re-picks ≤ `CAKE_PEND_SPIN_MAX` for the landing then heals a token nothing lands for. Also: `alone` only for the owner's own put_prev (`p->on_cpu`); cpu_release claims+kicks a die-local idle CPU for own-queue work; `ops.disable` retires seats; pinned-wake verdict on the insert (kthreads) |
+| `0601e4b9c` | sizing from the host: toggles g85/g86/g87/g89 (27 sites) and `llcsplit` removed; serial gate per die (¾ of the waker's LLC's online CPUs idle) instead of 3N/4 of the possible span; steal order on every host ≤ STEAL_SPAN (sibling, distance, cross-die classes), `cand++` gone; `cake_claim_tries = max(4, die/4)` rodata; tick from `clock_getres(CLOCK_MONOTONIC_COARSE)` rodata (`CONFIG_HZ` gone), hop cap tick/4 (250 µs literal gone); hop probe logged always; load shapes (48,4) (96,4) (128,8) |
+| `5d92f48c6` | **§G96 hardware arms, inert here by rodata gates**: capacity-first cold pick on hybrid parts (`cake_cap_word`, one cache domain only); cpuidle driver + per-state exit latency in rodata, `tp_btf/cpu_idle` attached only with a driver → `cake_deep_idle_word` (state exit > handoff floor) avoided like IRQ-hot cores; multi-LLC: a stage thread off `cake_llc_pref_word` re-homes when a whole core is free there, workers follow the waker's die; V-cache mode re-read each second |
+| `6c6511881` | observe-only histograms under probe: hop (IMMED, `sched_info.last_queued`), handoff quantum, burst; loader prints antimode split + median; `--handoff-ns` sweep override |
+| `ecc608b5d` | review fixes: continuation-arm pinned verdict as KICK_PREEMPT (a user DSQ ignores ENQ_PREEMPT); second-move pool serve lowers the token; dispatch refills prev only when nothing landed; `pending_wait` kicks PREEMPT and heals by CAS on the count first seen; re-home pick honours seats/deep word; cap arm gated to one cache domain; V-cache pair's frequency die = the cache die's complement; load shapes set claim tries |
+
+**LLVM allocation, again (recorded for the next editor):** a constant
+`return true` in `cake_seat_blocks` cost select_cpu +10 spills (a rodata
+read of `cake_one_word` restores 12/23); inlining `cake_wake_protect` grew
+wake_place by 80 insns (own frame); the pinned kick after the insert put
+enqueue at 9/46 in every shape tried (accepted: enqueue runs ~8k/s).
+
+**Measured (appsim helldivers2-mission-fitted, 8 slots ABBABAAB, nightly
+`e355a60f2` BPF vs head `ecc608b5d`, all attached/restored; scratchpad
+`rot5/`):** 1 % low 1581 vs 1580 fps, 0.1 % low 1524 vs 1528, p99 0.619 vs
+0.619 ms, p999 0.648 vs 0.648 — frames identical. ns/run: select_cpu
+89.8 → 88.8, enqueue 193 → 188, dispatch 42.7 → 44.4 (+4 %: the token read
+and `!cake_local_nr` on the refill), running 28.6 → 27.4, stopping 14.9 →
+14.3. **Total cake BPF 29.4 → 32.1 ms/s (+9 %): `update_idle` 9.1 ns/run ×
+312k runs/s = 2.8 ms/s** (two entries per idle transition, body only; the
+trampoline is not in bpf_stats). That is §G95's price on an idle-heavy host:
+0.18 % of the machine, no frame change here; it buys the wait C1 removed
+under saturation. perf-sched-pipe (2 blocks vs native, noise warn): head
+0.757 µs/op vs native 1.183 (−36 %); the pre-round head was 0.731 vs
+1.164, the old nightly 0.755 vs 1.191 — the interlock's entries on a
+wake-storm microbench cost the 3 % the shape round had bought. **probe=1
+appsim slot (head, 45 s, 7.06 M selects):** ui_kick 2,139, pend_kick 3,025,
+pend_heal 1 (the leak fix holds), release_serve 298, pinned_preempt 730,
+kick_alone 300, select_direct 722, seat_retake 99k, pool_direct 110k;
+tried serial/retake/probe/tick 142/189,692/1,931/138,220; §G93 holds 4–8 µs
+band 5,832 of 7,318. Histograms: hop median < 512 ns (6.07 M of 7.06 M
+under 512 ns, tail to 8 ms); handoff quantum bimodal, antimode ≥ 8 µs
+(the 1464 ns floor sits below both modes on appsim); burst bimodal 2 µs /
+32 µs, antimode ≥ 16 µs (the 64 µs stage boundary sits above the upper
+mode's peak). These are appsim's distributions; the game's own are the
+ones that decide §G37 / the stage boundary.
+
+**Risks recorded, not fixed:** the interlock's bit-store → token-load order
+relies on x86's lock-prefixed `assign_bit` (arm64 `set_bit` is relaxed; a
+fetch-add read would cost a contended RMW per idle entry); sibling-first
+steal order changes the ring steal and neighbour probe on this host (priced
+in the rotation above: dispatch +4 %, frames flat); pinned kthreads
+(ksoftirqd, per-CPU kworkers) now preempt a stage mid-burst on every wake
+past a long sleep (`pinned_preempt` census); a worker whose wakers sit on
+two dies can ping-pong under the waker-die rule; stage herding onto one die
+on a uniform 4-CCD part is self-limiting by the whole-core test only; cpuidle
+threshold = handoff floor makes every state above C1 "deep" on the 5800X /
+14900K (soft: `cake_prefer_irq_clean` falls back); `cake_hist` is 512 KiB of
+BSS with probe off. None of §G96 has a capture: every arm is inert here and
+needs a tester's `-v --toggle probe=1` on the target host.
+
+**Record corrections:** :713 said the serial gate uses ceil(3N/4) of online
+CPUs — it used `nr_cpu_span * 3` until `0601e4b9c`; I11's "self-kick spin"
+objection is void on ≥ 6.13 (idle-to-idle re-pick does not notify); §G58's
+timer machinery is not in the tree (only in `77251dd02`); §S.5 names
+`cake_preempt_protect_ns`, which no longer exists (`PREEMPT_PROTECT_SHIFT`).
+
+Owed: maintainer's push decision; the §G93 trace on a WoW dungeon (gates
+cpu_release's evacuation, unchanged by this round); testers' probe=1 logs
+from a 5800X / 14900K / 7950X3D / Threadripper for §G96; the game-scene
+histograms before any actuation of the floor or the stage boundary (§G37
+Phase A' sweep: `--handoff-ns 800/1464/3000`); the grant timer behind
+`grant_lt_tick`.
+
+Squash note: the 22 commits of 2026-09-18/19 (`b95f00d57` … `534f6d335`)
+were squashed into one for the nightly push; the hashes cited in the two
+entries below name those pre-squash commits, kept on the local branch
+`keep/pre-squash-2026-09-19`.
+
+**2026-09-19 — SPEED COUNCIL VOTE, REVIEW, SEVEN COMMITS (`64e3a4591` →
+`f70d87461`, local, not pushed): §G93 census fix, a lost-wakeup fix, the
+V2/V6/V8 shape, the tried/fired census, V12, V14, V16. NONE MEASURED YET:
+the `try` (verifier: `__arg_nullable` on `cake_wake_place`, the V12
+subprogram) and the bpfstats rotation old-vs-new are owed before any is a
+keep.**
+
+Council: four Fable 5.1 speed agents (low/medium/high/xhigh) + four Opus 5
+hitch agents; compendium F1–F8 / V1–V23 in the session scratchpad
+(`vote_compendium.md`, `vote_tally.md`). Vote: V21/V22/V23 8/8; V12/V18/V19
+7/8; in-lens unanimous (hitch agents abstained "out of lens") V1, V2, V6,
+V7, V8, V14, V16; V11 4/5 (S1: race table first), V5 4/5 (S4: the qmark
+inline re-opens §G25), V15 4/6, V20 out of tree. **Rejected by vote, do not
+re-propose without new evidence:** V3 explicit starved guard (the DIV is
+already behind `cake_starved`, object insns 1324/1334 skip 1336), V4
+flatten the insert shim (its outlined copy has 0 hot callers), V9 jiffies
+`__ksym` (this host's BTF has no `jiffies` VAR; S2 read a type, not a var),
+V10 `exec_start` stamp (clock-family mix; a kconfig-gated clock is two
+hosts), V13 idle snapshot across select_cpu→enqueue (§G83; no channel), V17
+seq-versioned "pool proven empty" word (1/8: the kernel pops a user DSQ
+without ops.dequeue — consume, bypass, property change — so a producer seq
+cannot prove empty; §G41's 20 ms stall class). A Fable reviewer then
+validated the 7/8 + 8/8 + in-lens set against the code and object, and
+three independent Fable confirmers agreed on every "approve with changes"
+item (ballots in the session transcript).
+
+| commit | what | placement |
+|---|---|---|
+| `64e3a4591` | §G93 probe: `cake_release_census[path & 2]` folded the IMMED row into non-IMMED (PATHS=3); index by the bounded path | probe only |
+| `14d9f8ef9` | enqueue's anti-collision pooled wake had `goto no_idle`: a CPU idling between the pick and the insert read the pool empty and nobody kicked it (since 6b690648d, 2026-09-03; the 09-17 repair fixed the wake arm only). Now `goto kick_idle` | yes: one more idle search after a pooled wake; latency, never liveness |
+| `ac98fd65a` | V2 `cake_wake_admit` / `cake_admit_direct`: grant + key from one set of task loads, one quotient when the runtime term won (`cake_slice_from_service` exposes q); V6 dispatch both-empty leaves before the seat/peek state; V8 stopping tests the seat gate before `cake_stage` | identical |
+| `7fdfe5525` | V19 tried census: `cake_tried[cpu][gate]` BSS slots for serial, retake, neighbour probe, §G36 tick, printed under probe as `tried serial/retake/probe/tick`; counted in `cake_system_serial_tried` / `cake_cpu_curr_retake` wrappers | probe only |
+| `fe857db16` | V12: `cake_select_undecided` — the wake whose home holds a well-served peer claims an idle CPU from select_cpu (LOCAL_ON\|IMMED verdict: ops.enqueue skipped, synchronous insert); enqueue's arm keeps the grant test, the pool insert and the post-insert search, its own idle pick removed; `select_direct` stat | same CPU, different lane; forks now take this arm (were queued behind the busy home), exec wakes go to the pool |
+| `f9c1bdff1` | V14: enqueue_wake's `cpu_curr(tcpu)` serves the self-race test, `cake_wake_place` (`__arg_trusted __arg_nullable`) and `cake_wake_preempt`, which takes the occupant and a caller-computed window (`cake_wake_protect`) | verdict on a read a few hundred ns older; `rs->pid` check makes a changed occupant "no preempt" |
+| `f70d87461` | V16: select_cpu's four decided arms share one insert exit | identical |
+
+fnspills (st/ld/insns), tip → head: select_cpu 10/19/787 → 12/23/699;
+enqueue 11/33/735 → 7/28/656; dispatch_search 5/32/559 → 4/36/593
+(both-empty path: 2 st + 1 ld before the exit, was 9 stack ops in the first
+95 insns); stopping 20/25/316 → 18/26/301; wake_preempt 8/11/225 →
+15/16/236 (one kfunc read fewer); enqueue_wake 1/1/71 → 3/4/76 (V2's
+out-param). **LLVM lesson, recorded:** any new statement in select_cpu's
+body — an atomic, a cold call, a plain store to a fresh BSS address, an
+inline arm at the tail, a value carried to the tail — re-ran register
+allocation and kept `prev_cpu` on the stack for the whole function (9/18 →
+9/38 or 17/20); the census went into the gate's own first call and V12 into
+its own subprogram for that reason. V1 (one toggle read per function) was
+tried on select_cpu and dropped (12/23/699 → 12/29/684: the helpers' reads
+stay, the local costs fills). V7 (prev_cpu in a callee-saved register,
+snapshot-first order) not attempted: the same allocator; needs a JIT-level
+receipt, not source shaping. V18 needs `llc_misses` in the sudoers
+`prog profile` rule (today `cycles instructions` only). Static counts are
+attribution; the receipt for all of it is the bpfstats rotation.
+
+**Seamlessness council (three Fable 5.1 lenses: event completeness,
+rescues, state coherence; maintainer's standard 2026-09-19: no gaps,
+misses or rescues). Kernel facts they rest on:** K1 an insert made from
+ops.select_cpu/ops.enqueue lands only after the op returns
+(`mark_direct_dispatch` → `direct_dispatch`, ext.c 2055-2079), so every
+"search after the insert" in cake runs BEFORE the landing — the 09-17 and
+`14d9f8ef9` repairs narrow the window, they do not close it; K3 the kernel
+sets the idle bit first and calls `ops.update_idle` second, by design as an
+enqueue/update_idle interlock (idle.c 822-826); the idle-to-idle re-pick
+sets the bit with no notify, so a self-kick from update_idle cannot spin on
+this kernel (the I11 objection of 09-18 does not hold here); K2 a kick is
+irq_work delivered after the waker re-enables IRQs, so it always follows
+K1's landing; KICK_IDLE is dropped when the target is neither idle nor in
+dispatch, which never hits cake (every KICK_IDLE follows a won claim);
+WF_EXEC is not a wake (`sched_exec` gets prev_cpu back, no enqueue), so the
+exec note above is wrong and struck.
+
+| # | crack (votes) | window / consequence | rescue today | event-complete design |
+|---|---|---|---|---|
+| C1 | pool insert vs a CPU going idle (3/3) — waker's idle read precedes its landing (K1); idler's pool count (2919) precedes its bit set (K3); `cake_update_idle` returns at once on one-word hosts | 1–3 µs per idle entry, needs every other CPU busy; wakee waits for the next dispatch on the die, ≤ the occupant grant (3 ms) | "the next dispatch"; the 24 ms wall; watchdog | register `update_idle` on one-word hosts: on idle=true read `qmask[0]` and `nrq(pool)` (2 loads), self-kick flags 0 when non-zero; producer side makes `cake_wake_mark_set`'s xchg unconditional (a fence between insert and idle read). Cost = the trampoline per idle transition (I11 measured +11–16 ms/s in 09-18's form) — the harness decides |
+| C2 | `alone` skips the idle kick on every non-wake enqueue (2661-2670) (3/3) | a property-change / affinity re-enqueue or a slice-0 put_prev under an RT displacer lands on DSQ[tcpu] unkicked while CPUs idle; ≤ owner grant or RT hold | owner's next dispatch, a steal | `alone` only when the enqueuing CPU is tcpu and its curr is p (the owner's own put_prev); cpu_release reads `nrq(cpu)` and claims+kicks when non-zero |
+| C3 | `cake_wake_preempt` prices the OLD key (1627), the insert stamps the clamped one (3/3) | sleeper-vs-sleeper churn under saturation; a fresh occupant evicted by a wakee whose stamped key would sort behind it; the pinned arm has a third clamp (2469-2472) | none (policy) | stamp the clamped key before the verdict (`cake_admit_direct` on the wake route too) and unify the three key formulas |
+| C4 | seat bit outlives a holder that leaves SCX while blocked (RT promotion → `switched_from_scx` → `ops.disable`, not registered) (1/3) | on a light host self-sustaining: seat preference + decline keep the CPU idle, nothing runs there, the bit never clears; one CPU out of the warm set | load | register `ops.disable` → `cake_seat_retire`, as `cake_exit_task` does; pid reuse: retake/immunity compare pid only |
+| C5 | pinned kthread wake behind an occupant: `LOCAL_ON\|tcpu` with no IMMED and no PREEMPT, before the pinned-preempt verdict (2545-2549) (1/3) | a per-CPU kworker/ksoftirqd waits the occupant's grant, ≤ 3 ms; no counter | none | the pinned-user rule (2459-2479) delivered as `CAKE_ENQ_PREEMPT` on the insert |
+| C6 | §G41 mark set before the landing (K1): a same-LLC retire or the foreign rescue between mark and landing leaves a non-empty pool unmarked, multi-LLC only (1/3) | the other die skips it until a same-die dispatch re-sets the mark | that re-set; `offer_remote`'s kick | `cake_llc_pool_rescue` reads the count, not the mark; correct the 1533/794 comments |
+| C7 | `retake` flag set remotely (2063), cleared only by the next `running` on prev_cpu; if the PREEMPT insert is rerouted first it stays and exiles continuations (1/3) | one dispatch | self-heals | clear when consumed in enqueue (2637) |
+| C8 | `wake_served` stamped with the rq clock, compared cross-CPU without the clamp 358-360 promises (1/3) | TSC-skewed hosts only: spurious pool-first | — | clamp at the reader or `bpf_ktime_get_ns` (portability invariant) |
+
+Verified complete by the council: LOCAL_ON\|IMMED claims (lost claim → REENQ, displaced → REENQ; cake's REENQ arm covers both), PREEMPT riding the insert, kick-after-insert ordering (K2), `wake_mark_retire` (correct Dekker, SEQ_CST both sides), qmask, run-slot tear direction, `cpu_irq_live`, consume-skips-ineligible + pool forward. Not cracks: the 24 ms wall (a polled deadline over hysteresis), the cross-die slice wait (§G89 trade, 60 % 1 %-low receipt), tick-bound expiry (a timer in ops.running is priced, not recommended without a capture).
+
+Council's fix-first (all three): C1, then C2, then C3. Nothing implemented: C1 is a construct with a priced cost (I11's +11–16 ms/s vs a ≤ 3 ms tail that only saturation reaches), C3 changes placement — both are the maintainer's pick; C2, C4, C5, C7 are small and placement-widening on rare paths; C6/C8 are portability.
+
+Tooling: `bench/frame_attrib.py` (V22) joins a MangoHud log with the sched
+trace per frame (classes rt_displaced / preempted / wait / kwin_late /
+idle_wait / cpu_bound). Hitch fact F1 refined by the council: the Warframe
+capped-scene tail is two events per 273-frame period (A: +1.5 ms delayed
+present with a 1.8 ms catch-up; B: +0.7 ms ten frames later, kwin's repaint
+timer 0.9–1.4 ms late), native and cake identical to 0.04 ms; `perf record
+-a -g` filtered by tid offline names kwin's job without caps.
+
+**Measured overnight 2026-09-19 (1-shot, game closed).** `cakebench try`
+head 45a6bc2515fc: verifier accepted, native restored, 0 stalls.
+
+appsim ABBA (helldivers2-mission-fitted, 45 s per slot, bpfstats deltas,
+old = `494d7a496` receipt, new = head receipt, all four slots attached and
+restored; scratchpad `rot3/`):
+
+| callback | old | new | delta |
+|---|---:|---:|---:|
+| select_cpu ns/run | 89.6 | 87.9 | −1.8 % |
+| enqueue | 196.9 | 189.5 | −3.8 % |
+| dispatch | 46.1 | 42.2 | −8.6 % |
+| running | 27.9 | 28.2 | +1.3 % |
+| stopping | 14.7 | 14.2 | −3.4 % |
+| all cake BPF ms/s | 29.75 | 28.81 | −3.2 % |
+| appsim p99 / p999 ms | 0.618 / 0.650 | 0.620 / 0.653 | +0.3 % / +0.4 % (slot spread 0.649–0.656) |
+| appsim 1 % / 0.1 % low fps | 1579 / 1499 | 1569 / 1452 | −0.6 % / −3 % (s3_new 1382, s2_new 1522: slot noise) |
+
+perf-sched-pipe, 2 blocks each vs native (diagnostic tier, noise `warn`,
+external CPU 6–13 %; one old-arm sample `noisy` 28 %): old
+`4f189ad29129` 0.755 µs/op vs native 1.191; head `ccd4511b9be8` 0.731 vs
+native 1.164 → head −3.2 % per op against old, the same size as the BPF
+cost delta. Verdict: BPF cost down ~3 %, frame tails flat within slot
+noise, no regression seen; the frame-scale levers stay §G93 / blocked
+share / cold hops (V23).
+
+probe=1 appsim slot (head, 45 s, 7.05 M selects): tried/fired — serial
+96 / 3, retake 189,982 / 101,876, neighbour probe 1,742 / 1,141, tick
+evaluated 142,021 / rejected 4,868; select_direct (V12) 694 (0.01 %),
+pool_direct (reroute) 115,076, wp_fired 1,205, expiry_preempt 65; §G93:
+9,206 RT displacements (205/s), holds 4–8 µs band dominant. Nothing at
+fired=0 on appsim; the cut rule still needs both games.
+
+Owed, in order: probe=1 slot in both games (V19's cut rule: fired=0 in
+both games AND one saturated harness slot, with a recorded design reason);
+V18 seat pricing once the sudoers `prog profile` rule carries
+`llc_misses`; V11 race table; the seamlessness council's findings (below,
+when in); then the §G93 trace (`rt_displace_capture.sh 30`) and the
+irq_leave scene-matched bisect from the 09-18 list below.
+
+**2026-09-18 — TIME-GAP AUDIT, COUNCIL ROUNDS, GPU CHAIN: SIX COMMITS ON THE
+BRANCH, NONE MEASURED YET (local commits `b95f00d57` → `851d373b8`, not pushed).**
+
+Started from the 09-17 hotfix (two dedup edits that treated a snapshot as a
+state). Audit of every read→consume gap; a council of three (sibling
+schedulers, time gaps, registers/L1); two solvers in worktrees; six reviewers;
+then a GPU chain council of three and an optimisation council of six with a
+vote round. All numbers below are static attribution or council estimates:
+**no capture has run**; the A/B/C rotation and the GPU measurement set are
+owed before any of this is a keep.
+
+| commit | what | decision change |
+|---|---|---|
+| `b95f00d57` | D1 one whole-core snapshot per select_cpu; D2 one predictor clock per idle search; D3 running's clock for the frontier sweep; D4 probe tag call guarded at its sites; C1 run slot `pid` tag (running stamps, stopping zeroes; a remote pricer with a non-owner read prices nothing — core assigns `rq->curr` after `ops.running`, so the outgoing task was priced with its charged vtime) | none |
+| `ce4e92e66` | reviewer consensus 5+/6: I6 probe counters in cold `*_probe` subprograms behind one toggle test (select_cpu 1233→839 insns, TOTAL 8329→6319; spill counts are probe key stores); I1 seat-holder census by pid spares non-holders the storage lookup; I2 retake rides `ENQ_PREEMPT`; I7 `cake_multi_llc()` at callers; I8 running reads back its stamp; I9 hot BSS slot-aligned (`probe_busy_flag` shared `cake_seat_word`'s line: probe=1 census was inflated); I10b own-only dispatch refreshes by its run stamp; I4 loader `INTERVAL_MAX` 16→4 + disagreement reset (sink lag 32/48 s → 6/7 s) | I2 head insert; I10b one run of lag |
+| `ef4b07bb8` | probe census: `grant_{vacant,expired,lt_tick,ge_tick}` at the continuation-arm pool insert, `hd_corebusy`, `rej_irq`/`rej_tick`; run slot stores the grant | none |
+| `966ce4274` | the verdict rides the insert: `cake_wake_place` (idle → `LOCAL_ON` IMMED; yielding occupant → `LOCAL_ON` `ENQ_PREEMPT`; else pool + one search); retake evictee claims direct; `cake_claim_free` before the decline kick and the forward; `expiry_preempt`: an occupant past its grant yields to a continuation wake | same verdicts, earlier and bound; expiry: the tick's grace goes |
+| `5fdde1eab` | `cake_subhandoff`: a burst below `cake_handoff_max_ns` is not declined its warm home by the starved-turn gate | yes: sub-µs kthreads keep their home |
+| `851d373b8` | home claim and retake test the sink's thread (`cake_cpu_irq_bad`), not its core; cold pick keeps the core mask; `cake_core_irq_bad` removed | yes: CPUs 4 and 1 regain warm home/retake |
+
+Held by the councils, in the session scratchpad only (diffs exist for the
+first two): I10a `wake_served` grain (3/6: count `WAKE_SERVED_ST` writes vs
+consumes first; the stamp already has a `WALL/2` grain); I12 WOKE scope
+(4/6; comment must say device-handler and softirq wakes only); I3 derived
+core word from the idle word (**§G83, rejected 2026-09-03** — mechanism now
+replaces a kfunc pair, not an atomic; re-open is the maintainer's call);
+I11 idle-entry pool recheck (**dropped as written**: seat decline / affinity
+head → self-kick spin; 6.13–6.15 lack the interlock; +11–16 ms/s); P2.1
+chain-origin preempt on the continuation arm (4/6: waker kthread-or-stage ∧
+wakee slice < occupant slice, native's PREEMPT_SHORT shape; needs the
+`grant_*` census to show a CPU-bound regime in WoW and the maintainer to
+re-open gap 3's ban on wake-preempt levers); P5.2 deadline `bpf_timer`
+(only if `grant_lt_tick` carries the tail); P1.2(b,c) microburst seat
+exemptions (the 1464 ns bound splits the display chain: vkd3d_fence bursts
+are 1.6–2.1 µs); P3.2 third door onto a seat and P3.4 deferred retake (after
+the evictee census); P4.2 demote by measured share (after P4.1's census).
+
+Rejected on this host, recorded: "microburst follows the waker CPU" (§G47
+stands; the idle claim already runs the kthread during the handler with no
+IPI: no cpuidle driver, MWAIT C1 polling, exit < 1 µs; valid only where
+cpuidle exit exceeds the handler remainder, §G51's rodata gate). Do not
+enable BIOS Global C-State Control for the gaming profile: it is the only
+way this host acquires a C-state problem. Shallow-idle preference from BPF
+(14–22 ms/s for a NULL value here) and seat-sibling pairing (g72 null,
+§G38 +59%) stay parked.
+
+Facts the councils established (live `/proc`, kernel tree): IRQ 97 is on
+CPU 12 (the record's "13" was stale), `irq/97-nvidia` is FIFO (outside
+scx); the chain's SCX links are `nvidia-modeset/kthread_q` (~1.3 µs
+bursts, one wake per IRQ), `nvidia-drm/timeline-*` (~1 µs) and the game's
+submit threads (vkd3d_queue 18 µs); none reaches stage class. Hop p99 125 µs
+vs native 41 µs is the queued minority of ISR-origin wakes: the kick's
+irq_work waits for the handler (19–31 µs), then the pool wait when the
+preempt is refused. Slice expiry is tick-checked only, ticks are aligned
+(HZ=1000, no `skew_tick`), so under a full pool the wait is ~U[0,1) ms —
+the dominant term, not the 1.5 ms cap (a model; `grant_*` measures it).
+`scx_bpf_now()` in dispatch, stopping(true) and running takes the fresh
+`sched_clock` branch (the rq clock is unpinned around dispatch). Rule
+change on disk (gitignored `CLAUDE.md`, skill): invariants absolute, design
+guidelines yield to measurement; spills are priced (~0.2–0.3 ns per pair on
+Zen 5) against the helper/re-read/kfunc they avoid, never a gate alone.
+
+**Measured, same evening (`before` = `2b74d5b76` receipt `1722aa0bda96`, `tip` =
+`ca4dc1c6d` receipt `3b10a00cdc99`, both attached four times, verifier
+accepted, no stall, native restored each slot; a five-reviewer data council
+agreed 5/5 on every line).** Frame ABBA (`runs/game/WowB/2026-09-18`, MangoHud
+per-frame, 60 s × 4, GPU 98.7–98.9 % every slot): **NULL** — 1 % low 117.5 →
+118.1, 0.1 % low 111.6 → 112.9, p99.9 8.96 → 8.86 ms against a 0.29 ms
+before-vs-before spread; every metric sits on the slot-1→4 warm-up line; the
+chain waits 16–25 µs per 5.3 ms frame, nothing queues, the scheduler is off
+the critical path (the frame rig labels the build; it did not verify the
+attach). Cost rotation (`cake-bpfstats`, A B B A, 50 s deltas inside each
+attach, bpf_stats on for all four): **POSITIVE** — select_cpu 99.1/99.0 →
+90.5/91.5 ns/run, dispatch 83.3/81.3 → 73.4/69.6, enqueue/running/stopping
+level, BPF cost per program run 57.7 → 53.5 ns (−7.3 %, 4.6× the slot spread),
+−2.0 ms/s at matched load (~430k program runs/s, 2.5 → 2.3 % of one CPU);
+chain-thread migrations per dispatch −21..−28 % (vkd3d-swapchain 22 → 17 %,
+nvidia-modeset/kthread_q 30 → 22 %, vkd3d_fence 39 → 29 %, nvidia-drm
+timeline 49 → 35 %; both tip slots below both before slots, slot 4 rebounds
+to slot 1). One regression: `cake_irq_leave` +55 ns/run on identical bytecode
+(+0.24 ms/s; the `cake_irq_live` re-alignment or the per-thread depth reads on
+IRQ 97's exit path). Attribution: the ns wins belong to D1/D2 and I6/I7/I10b;
+the three decision-changing commits show only in the migration drop, and their
+stated aim (the earlier ISR-origin hop) is unmeasured. Cost slot 4 ran at a
+different load (GPU 83 %, IRQ 1774/s vs 2100–2240/s): per-call ns and
+migration fractions survive it, rates do not. Evidence: session scratchpad
+`rot/` (bpf/sched/irq/gpu snapshots per slot, `summary.md`), disposable.
+
+**`irq_leave` follow-up, same night.** A four-member council (layout, reader
+traffic, skeptic, fix design) agreed on a mechanism: `851d373b8` made the
+CPU 4/1 home test read the sink's `cake_irq_live` line (before, the sibling's
+chronic bit short-circuited it), and the 2026-09-17 SMT-paired slot gave
+CPU 12's handler-exit decrement a line transfer per remote read; symbol
+tables of both objects rule layout out. `92c2120d3` gives each CPU its own
+slot (the pairing's only reader left with `851d373b8`; −49 insns, edges
+27 → 11/12, no behaviour change) — kept as a correct simplification. **It did
+not confirm the mechanism:** the tip-vs-fix rotation ran in a different
+scene (GPU 59–68 %, IRQ 97 at 2.2–3.3k/s, every callback 10–15 ns dearer)
+and `irq_leave` read 121/225 tip vs 115/179 fix — within-arm spread larger
+than the arm gap, both far above the first rotation's 41/72. The skeptic's
+"bisect first" was right; the cause is open. Next: `bpftool prog profile`
+(cycles vs instructions) on `irq_leave` before vs fix, then a before-vs-fix
+rotation with the game parked on one screen so the scene cannot drift.
+Process fault recorded: that rotation ran without a fresh go and without a
+scene check.
+
+Rule written down (`docs/PERFORMANCE.md`, migration verdict): a migration
+count proves nothing; a reduction is a win only when waits stay flat, run time
+per burst and misses per instruction fall, and the census shows the removed
+moves were the home-was-idle kind. Today's −21..−28 % has layer 1a (waits
+flat) only; 1b/1c/2 owed.
+
+**Live dungeon capture, 22:10 CDT (maintainer's cake attached, WoW retail,
+observe-only, single arm; six-lens council).** GPU 97.5 %, host 3.1/16 CPUs
+busy, scheduler 32.5 ms/s = 1 % of busy time. **The frame is CPU-paced by the
+main thread** (93.7 % of a CPU, 195 µs bursts, 4.6k blocks/s of 14 µs, 0.43 µs
+mean wait, 0.2 % of wall): no WoW thread waits > 0.75 µs/dispatch, 93 % of
+wakes direct-placed, ThreadPool_High ×6 one per core (32 % migrations, the
+fan-out-collision kind), input/network/audio chains clean (audio entirely RT;
+NIC on CPU 2; input < 1 µs per cake hop). **One finding, four lenses:** the
+main thread takes **249 involuntary switches/s from RT** (kwin RR on CPU 4,
+50 µs; pipewire data loops FIFO on 1/5/6, 7 µs) and `cake_cpu_release`
+evacuates it cold every time (`scx_bpf_reenqueue_local` → REENQ → pool/claim),
+including the 7 µs holds where a warm wait beats the L2 refill; ~250 of its
+946 hops/s, the other ~700 follow voluntary blocks (home declined at wake:
+core busy / seat / lost claim — census needed). Est. 1–3 % of main-thread
+time, unmeasured. Candidate (gated on attribution): `cpu_release` keeps a
+seated stage on its own queue when the displacer's measured mean burst is
+below the refill bound (+~0.02 ms/s; decision change: bounded warm wait over
+a cold hop; confirm main migr 19.7 → ≤ 15 %, wait ≤ 0.9 µs, run/burst flat,
+frame ABBA not worse). Input lens flags one open check on `851d373b8`: a
+stage may now home on CPU 1, the mouse IRQ's sibling; A/B the IRQ-80 handler
+duration tip vs parent. Corrections to the record: xhci IRQ 80 = mouse
+receiver + GoXLR audio, keyboard = IRQ 46 on CPU 5; evdev reader is
+`libinput-connec` (RR); NIC = r8169 IRQ 135 on CPU 2 with
+`napi_defer_hard_irqs=1 / gro_flush_timeout=20 µs` (origin unknown). Next
+capture logs: MangoHud frames, per-CPU softirqs incl. HI, IRQ 135 + NET_RX,
+`cpu_release` by displacer burst, `pw-top` ERR deltas, evdev report count.
+Evidence: scratchpad `live1/` (disposable).
+
+**§G93 registered (design council: three designers + arbiter).** Probe
+half shipped; capture (`bench/rt_displace_capture.sh`) and parser
+(`bench/rt_displace.py`) in the tree; the gate waits for the trace. The
+capture runs as the user with tracefs events readable (`chmod -R o+rX
+/sys/kernel/tracing/events`, done 2026-09-18) and `sched_schedstats=1`.
+
+Owed, in order: (0) the ISR → `kthread_q` wake-to-run histogram per arm
+(bpftrace on `sched_wakeup`/`sched_switch`; tracefs must be opened by the
+maintainer) — the one measurement that says whether `966ce4274` earns its
+keep beyond the migration drop; (1) the A/B/C rotation HEAD-before-today `2b74d5b76` →
+`b95f00d57` → `ce4e92e66` → tip, `cake-bpfstats` ns/run per callback, WoW
+per-thread migrations/preemptions, `perf stat` IPC/L1d; (2) the GPU
+measurement set per arm: `nvidia-smi` 1 Hz, `/proc/<tid>/schedstat` every
+250 ms for the chain tids + IRQ-97 rate, `sched_schedstats=1` for `wait_max`,
+`perf stat -a -e msr/aperf/,msr/mperf/`; choke = a 250 ms bucket with a
+submit-chain thread's mean wait > 100 µs and GPU util ≥ 10 points under the
+arm's median, or `wait_max` > 1 ms; (3) probe=1 slot for the new census
+sites; (4) HD2 + WoW frame ABBA for `5fdde1eab` and `851d373b8` (the
+decision changes) and the §R.6 pipe/messaging guard for `966ce4274`.
+MangoHud is not injected in the current WoW instance: no frame claim
+without a relaunch under `mangohud %command%`.
+
+**2026-09-17 — HOT-PATH EFFICIENCY: select_cpu 118–130 → 87–90 ns PER WAKE, SCHEDULING
+UNCHANGED (one squashed commit; pushed to nightly for testing).**
+Deep dive into duplicate work and poor pathing in the hot path, measured per
+program with `cake-bpfstats` and per class with the probe census (which had
+failed to load since `ba1a8912e`; repaired here, hot path unchanged when the
+probe folds). Every step was gated on scheduling being the same before the
+next: per-thread migrations and preemptions from `/proc` for every WoW, kwin,
+pipewire and wineserver thread, WoW-process IPC and L1d miss rate from
+`perf stat`, verifier accepted, zero stalls, native restored. Twelve valid
+live-WoW Cake slots (login screen, ~45k selects/s, Battle.net launcher up as
+the noise source, recorded as a covariate). No MangoHud, so no frame claim.
+
+| step | select_cpu ns/wake (2 slots) | WoW main migr/switch | verdict |
+|---|---|---|---|
+| HEAD `d438af21c` | 118.4, 122.9 | 0.046, 0.049 | baseline |
+| dedup: no kernel idle scan on an empty word; kthread pool wake searches once; the §G38 sibling block (dead: the walk already tried it) leaves notify; SYNC test before the whole-core snapshot; one occupant read and one clock per notify; one-word affinity as a load | −1 to −5; enqueue −20 to −26% per run | level | keep |
+| A: `last_win` groove preference removed | 111.6, 110.9 | **0.088, 0.080** (kwin 1.5x) | superseded: the appsim census undercounted its steering (4.7%) because appsim has few whole-idle cores; WoW has many |
+| B: the task's own core first when whole-idle, unseated and clean, from a register; no storage lookup | 101.7, 110.8 | 0.040, 0.053 | keep |
+| layout: seat identity out of the per-switch run slot into `cake_seat[64]`; `irq_live` core-indexed (one line per SMT pair) | 99 to 111 | level | keep |
+| read-once: task age from jiffies × tick (HZ from kconfig, offset to the precise clock measured once in ops.init; `bpf_ktime_get_coarse_ns` is refused for struct_ops); loader publishes `cpu_irq_hot_cores` beside the sink words | 89.8, 87.4 | 0.125, 0.140 vs layout 0.131, 0.139 (same rotation) | keep |
+
+The tick clock is a lifetime quantity only (the slice cap's cycle term, age
+over switches): never a deadline, never a cross-stamp delta; one tick of
+staleness on a lifetime, floored at one slice for a task younger than a tick.
+Every per-frame decision keeps its nanosecond clock. Startup prints which age
+clock is live (`age tick clock (...)` or `age precise clock`).
+
+Census on the dedup candidate (appsim, 9.28M selects; ns per select after the
+empty-pair calibration): idle claim atomic 31.5, groove storage 28.7 (now gone),
+two DSQ counts in dispatch 30.2, ktime in task_slice ~20 (now ~4), whole-core
+snapshot ~6. Rejected on analysis: the own-queue qmask bit in place of the
+dispatch count (a clearer between mark and insert strands the task; closing it
+costs the atomic §G25 removed); a switch-synced cached clock (saves ≤3 ns more
+than jiffies for a per-CPU offset). Rejected on measurement: the 9/15 recovered
+stash `cake_core_irq_bad_once` (select_cpu 4/5 → 18/10 spills for two loads).
+
+Evidence: session scratchpad `bpfcost.sh`, `census.sh`, `wowab.sh`,
+`procthreads.py` and the `ab/`, `wow/`, `wow2/`, `wow3/`, `wow4/`, `census_cand/`
+run dirs (disposable). Receipts under `target/cake_receipt_builds/20260917T*`.
+`cakebench try` no longer refuses on a running game: it records the game as a
+covariate and blocks only on a leaked scheduler (`scx_cake_try.py`).
+
+Still owed before a scoring claim: per-thread wait time (`sched_schedstats=1`),
+the mouse-IRQ → game-thread chain (tracefs), and a frame capture.
+
+**Repair, same day (independent review, `.scx_cake_bench/reviews/20260917/
+idle-notify-race/`).** Two of the dedup edits were wrong and are reverted:
+(1) the kthread pool wake skipped the notify's second idle search on the
+claim that a second walk finds nothing new; time passes between the walks,
+and a CPU that went idle in that window was left unkicked (the task waited
+for the next dispatch anywhere, at most one slice). (2) The empty-word early
+return in `cake_pick_idle_clean` read "every present CPU is in the word"; the
+word is LLC-confined (`cpu_llc_word` is physical, no toggle), so with g89=0
+on a multi-LLC one-word host it skipped the kernel scan that found an idle
+CPU on the other die. Repair: the notify always searches; the empty return
+uses the un-masked word when g89 is off. Cost: the affected path fired 296
+times in 9.28M selects (census), so nothing measurable; folded spills level
+or lower. The parent's later idle-entry race (one look later) is inherent to
+idle picking and is bounded by any CPU's next dispatch; closing it needs an
+idle-side recheck, which one-word hosts omit for cost. Not this change.
+
+**2026-09-15 — FOUR SHAPE COMMITS + THE OPERATION COST AUDIT (unmeasured until
+2026-09-17; see the baseline row above).** `08763176e` Relaxed atomic store for
+the sink words; `ba1a8912e` dispatch peeks a head only when it competes with
+another; `9722bfcdd` rq clock for the stamp family (§G34 H1); `a2a8532a4`
+running reads task storage only while a seat is held; `ca4b7218b` a lone
+continuation kicks no idle CPU (`kick_alone`). Audit:
+`docs/AUDIT_OPERATION_COST_2026-09-15.md`. Its targets 1–4 stay open. The 17:58
+WIP stash from that day (`cake_core_irq_bad_once`) is rejected above.
+
+**2026-09-08 — REBASED NIGHTLY AND LAUNCHER ARGUMENT COMPATIBILITY.**
+Nightly is based on upstream/main `7cec98c51`. Range-diff against the
+published nightly confirms all 17 commits were replayed without source
+changes; the verifier fix's commit reference was updated. The subsequent
+private-runtime-helper fix is also retained. A separate squashed PR snapshot
+keeps the full final Cake tree and avoids rewriting the published nightly.
+
+Obsolete profile options continue with defaults and a warning, including
+`--profile gaming`, `--profile=performance`, `-p powersave` and attached
+short values. Fixed the retry parser's failure on `-pperformance` and
+`-vpperformance`; accepted short prefixes and other valid arguments survive.
+Warnings now precede version/topology exits as well as scheduler startup.
+Invalid values on supported options still fail; invalid toggle specifications
+continue to be ignored by the existing loader logic.
+
+Validation: debug/release builds, 31 unit tests plus 3 CLI integration tests,
+formatting, clippy, placement/topology regression models and the pool-mark
+ordering model pass. Cake emits no compiler warnings; Cargo still reports the
+unrelated existing `scx_rustland_core` unused `lib.include` manifest key.
+Release `--profile gaming --print-topology` and `-vpperformance --version`
+both succeed and print warnings. The capability-gated verifier test was not
+rerun; BPF source is unchanged from the prior verifier repairs. No scheduler
+activation or new performance measurement; native scheduling remains active.
+Model artifacts: `target/cake-nightly-pr-20260908/{review,topology}/`.
+
+**2026-09-07 — DUAL-LLC AND WIDE-HOST VERIFIER REPAIRS.**
+Current source is pool-direct plus two verifier repairs; the FPS results below
+belong to the pre-fix build. A user's 32-CPU/two-LLC load failed at the remote
+offer's atomic store: LLVM removed the ctz result's `& 63`, while the verifier
+could only bound the lowered byte lookup to 255. Preserve the array-index mask
+with `barrier_var`; the release BPF retains the AND. CPU selection is unchanged.
+Expanded load tests also exposed the frontier scan exceeding the one-million
+instruction verification budget on wide spans. Use numeric BPF iteration with
+the same scan bound, order, self exclusion and early exit. Ordinary advances
+still return before the scan; iterator overhead on outliers is not benchmarked.
+
+Reproduced the original map-access error locally (`off=299776`, map size
+280960), and the wide-host complexity failure. Both release and debug now pass
+the kernel verifier on synthetic CPU/LLC layouts 1/1, 16/1, 32/1, 32/2, 64/16,
+128/1 and 1024/1, using kernel `7.2.2-1-cachyos`. The new ignored
+`tests::verifier_load_topologies` requires BPF capabilities and loads without
+attaching or executing synthetic scheduling policy. This validates loadability
+on this kernel, not physical multi-CCD scheduling or other kernels.
+Both builds, 26 ordinary unit tests, placement/topology models (including all
+64 offer slots and frontier spans through MAX_CPUS), clippy, formatting and
+diff checks pass. Native scheduling remains active. Release SHA256
+`8fe31fcf4f685e15c12a91cf18863133629219f35371ef3ff999129f18a32886`.
+Evidence: `target/cake-verifier-fix/verifier-before.log.gz`,
+`verifier-debug.log`, `verifier-release.log`, and the build/model logs in
+that directory. No new game performance claim.
+
+**2026-09-07 — NIGHTLY SELECTION: POOL-DIRECT (USER AUTHORIZED PUSH).**
+The user selected the measured pool-direct build after a full campaign review
+(26 completed frame blocks, 114 windows; retained CSV hashes and recorded
+activation identities checked). Restore its exact production source and
+matching regression models, not the later serial-capacity endpoint. Publish
+as one squashed commit containing the 11 unpublished commits and this endpoint;
+preserve existing published history. Unrelated Cosmos/bench work is excluded.
+
+Authoritative receipt: `20260907T103113Z_cake-pool-direct_fbc5527c5403`.
+Measured release SHA256:
+`4b96c36dda88c41f889743d18be54cae66a71967703d6283f7e403c2c5f1c053`.
+BPF source SHA256:
+`6eb56d7a396b85061a11415013d2ade3cf8e9688d66dc441dca319d26345526c`.
+Ordinary release expected SHA256:
+`b5b1de58900cc4fce04868dc2401ed8126e335c3b157afddf68508fa960db63b`.
+
+Same-block predecessor/pool-direct results: average FPS 1455.46/1459.11;
+1% low 959.53/971.67; 0.01% low (inverse p99.99) 487.41/515.96.
+Four 25-second windows, 215.51 seconds total, 44/44 focus checks, release
+activation/capture/native-restoration checks passed. Both candidate 1% windows
+(967.22, 976.12) exceeded both predecessor windows (960.79, 958.28).
+Evidence: `scx_cake_bench/runs/kovaaks_pool_direct_20260907/frame-screen/`.
+This is the highest recorded block-average FPS and 1% low in this campaign;
+core-IRQ had a higher 0.01% block result. Short screens, baseline drift and
+sparse deep tails do not prove universal superiority or 1500 average FPS.
+
+Exact-source selection intentionally excludes later ready-dispatch,
+overflow-safe starvation arithmetic, serial-capacity, remote-service and
+diagnostic changes. Their preserved receipts/patches remain research evidence.
+Known limits of this endpoint: lifetime products can overflow at large
+counters; the serial threshold uses CPU-ID span rather than online count;
+seat decline remains; deferred-publication/remote-offer gaps remain modeled
+on dual-CCD paths. Diagnostic counters/array verifier issues are not repaired
+here. These limits must not be described as fixed by this publication.
+
+Publication checks: 86 Cake/scx_utils files match the receipt snapshot,
+excluding intentionally updated STATE.md and DESIGN.md. Rebuilt ordinary
+release matches `b5b1de58900c...` exactly. Release/debug builds, 26 Cake tests,
+the isolated observer-capability test, both extracted model suites, package
+clippy, formatting and diff checks passed. The unrelated scx_rustland_core
+unused-manifest-key warning remains; no Cake compiler warnings. Logs:
+`target/cake-hotpath-audit/pool-direct-publish-*`. No new game capture was run.
+Earlier local commits are retained at
+`backup/nightly-pool-direct-pre-squash-20260907`; publication is a normal
+fast-forward from the existing remote nightly tip.
+
+**2026-09-07 — SERIAL-CAPACITY PREPARATION (SUPERSEDED BY USER SELECTION ABOVE).**
+Stop new experiments after the remote-service screen. Restore the previously
+retained serial-capacity source, receipt
+`20260907T142022Z_cake-serial-capacity_fd6a23931b8c`, as the nightly candidate.
+The newer pool-truth and remote-service protocols remain preserved in their
+receipts for research; neither is included in this preparation. Review and
+clean the release diff while preserving the tested scheduling behavior and
+unrelated work. No 1500-FPS or universal superiority claim.
+
+Preparation verified: production Cake sources and required scx_utils helper
+match the retained receipt. Rebuilt ordinary release SHA256
+`05006e224cd339f3b6e1a18b7cfc93d589d6bbc487fbcdd60313405069d5a904`
+matches the retained build exactly. Release/debug builds, 26 Cake tests,
+isolated observer-capability test, both extracted model suites, Cake clippy,
+formatting and diff checks pass; logs: `target/cake-hotpath-audit/nightly-ready-*`.
+DESIGN.md was shortened to remove stale frame-clock/queue/storage claims.
+No scheduling behavior changed during cleanup and no additional capture ran.
+The untracked `src/core_performance.rs` and shared utility change belong to
+the candidate; unrelated Cosmos comparator edits remain separate. Native EEVDF
+remains active. No commit or push made during preparation. The parked
+dual-CCD publication/offer findings remain open in this retained version;
+passing offline models do not resolve those kernel-ordering concerns.
+
+The two parked receipts were sealed through `cakebench artifact archive` and
+their derived build trees pruned after checking process executable/cwd use:
+4,327,630,963 logical bytes removed. Source snapshots, binaries, receipts and
+capture results remain retained; both archive operations reported no failures.
+The serial-capacity receipt stays fully materialized. A scoped review patch
+is retained at `target/cake-hotpath-audit/nightly-ready.patch`, including the
+new core_performance module and required shared helper, excluding Cosmos.
+
+Model cleanup: successful DSQ moves now remove the modeled head instead of
+allowing repeated consumption. The ordinary-rescue test explicitly inserts a
+second head. Deferred-publication negative controls reproduce both the lost
+pool mark and prematurely cleared remote offer against the retained source;
+their output is labeled KNOWN GAP, not a passing safety claim. The extracted
+suite passes under UBSan with those expected gaps reproduced. Production
+source/binary remains unchanged; this only improves the regression model's
+fidelity. These are not live-kernel stall reproductions.
+
+Separate diagnostic patch: `target/cake-hotpath-audit/home-probe.patch` repairs
+the home-decline census (early whole-core rejection and short tasks were
+omitted). It adds an all-home denominator and seat outcome without changing
+placement. The 1,024 selector cases check exactly one matching outcome and
+identical placements/claim counts with probe off/on. Release/debug, 26 tests,
+clippy and formatting passed. This patch is not in nightly; no live capture
+or performance claim. The frozen source is restored after compilation.
+
+Home-census follow-up: a 30-second capture (59.41 s total) ran the receipt's
+default argv, silently omitting requested probe flags; invalid for this
+diagnostic question. The maintained manifest writer now rejects requested
+arguments that disagree with the exact receipt contract; 44 capture tests
+pass. A probe-default artifact then failed verifier load at the dispatch
+scratch-array store (no activation). Replaced that callback-only 1,024-byte
+array with a local boolean in the separate diagnostic patch; extracted models
+pass and receipt `20260907T163545Z_cake-home-local_34bd494d0068` builds and
+validates. Its verifier/activation is still untested: the user closed Kovaaks
+before the retry. No capture remains running, native EEVDF is confirmed,
+and nightly source/release hashes still match serial-capacity. Earlier two
+diagnostic receipts were archived and their derived build trees pruned.
+Evidence: `scx_cake_bench/runs/kovaaks_home_probe_20260907/`.
+
+**2026-09-07 — REMOTE WAKE SERVICE WITHOUT MAILBOX (SCREENED, PARKED).**
+The deferred-commit model reproduces an early dispatch clearing a remote offer
+before insertion commits; the later kick cannot consume fresh work because
+ordinary rescue applies an age gate. Control source/binary/failure retained in
+`target/cake-placement-checks/remote-offer-control/`. Reference kernel permits
+idle-mask visibility during dispatch before idle put-prev; not exact live
+kernel reproduction. Test removing the mailbox and fresh-wake age restriction
+from foreign wake-pool rescue. Dispatch keeps own/pool/ring preference first,
+then attempts committed foreign pool work. Producers still claim and kick one
+affinity-compatible idle remote CPU; private continuation queues retain their
+cross-CCD locality gate. No future offer is taken as proof of published work.
+Budget: protocol deletion, deferred-kick/empty/head/failed-consume models,
+both builds/tests/clippy, one release screen below five minutes against
+pool-truth. The cost/locality tradeoff needs real dual-CCD testing; no universal
+performance claim from this host. Reject material single-CCD regressions.
+Both builds, 26 tests, clippy and both model suites pass. Four 25-second
+release windows took 216.87 s; 44/44 focus and valid activation/capture/native
+restoration. New/old average FPS 1457.61/1449.75; 1% low 919.15/904.86;
+0.01% low 499.31/486.54; p95 frame delta +6.81%. Not an all-metric win or
+dual-CCD validation. User requested ending experiments and preparing the
+earlier serial-capacity nightly candidate. Preserve this protocol in receipt
+`20260907T155836Z_cake-remote-service_7c608705d547`, measured binary
+`9742079f4b77`, BPF `a3df25a1d85c`; remove it from the nightly worktree.
+Evidence: `scx_cake_bench/runs/kovaaks_remote_service_20260907/frame-screen/summary.json`.
+
+**2026-09-07 — FOREIGN POOL VISIBILITY (FIXED IN RECEIPT, PARKED).**
+Reference kernel `kernel/sched/ext/ext.c` records direct insertion in the
+enqueue callback and commits after return. Model now covers producer insert
+request, foreign empty observation/mark retirement, then kernel commit. The
+old rescue skips the committed pool: reproduced assertion failure in
+`target/cake-placement-checks/pool-truth-control/failure.txt`. This is a model
+of source ordering, not a reproduced live stall; reference source is not an
+exact installed-kernel build match. Remove the pool mark and its producer/
+dispatch atomics; foreign rescue checks actual DSQ count before peeking.
+Preserve age/affinity gates and explicit remote offers. Single-LLC rescue is
+still gated off. Cost shifts from publication atomics to count queries on
+idle foreign searches; real dual-CCD performance requires that hardware.
+Budget: one protocol removal, deferred-commit model plus existing suites,
+release/debug/tests/clippy, one release game screen below five minutes.
+Both profiles, 26 tests, clippy and both models pass. Added count/head race
+and failed-consume cases; successful service still requires the move result.
+Production change removes 46 net lines, the 16-slot shadow array and its
+counter. Initial 216.00 s frame block had 43/44 focus checks and is excluded
+from performance conclusions. Unchanged reversed-order repeat took 216.76 s,
+44/44 focus checks, valid identities/captures and native restoration. New/old
+average FPS 1444.30/1452.21; 1% low 905.51/905.79; 0.01% low 491.54/500.84;
+p95 frame delta +5.76%. No gain or neutrality established. Retain correctness
+fix under review, not a promoted performance winner; serial-capacity rollback
+stays complete. Single-CCD validation cannot establish foreign-rescue costs
+or prove a dual-CCD stall is eliminated.
+Evidence: `scx_cake_bench/runs/kovaaks_pool_truth_20260907/frame-repeat/summary.json`.
+Receipt `20260907T153714Z_cake-pool-truth_17de8b6dc0f8`, measured binary
+`a67852e45ecc`, BPF object `b202c0566cff`; ordinary release `4104469cc65e`.
+Parked outside the nightly preparation at the user's request to prepare the
+earlier tested candidate; the modeled visibility concern remains open there.
+
+**2026-09-07 — EXPLICIT PRIORITY SEAT CLASS (SCREENED, REVERTED).**
+The peer-occupied enqueue route cannot reuse its busy owner as an idle home.
+Test recognizing negative nice as stage-class protection in addition to the
+existing burst criterion, with SCHED_IDLE excluded from the priority shortcut.
+Kovaaks main/render currently request nice -3/-1; render's mean 35 us burst
+misses the existing 64 us seat class. Preserve all normal-priority burst
+decisions, affinity, IRQ, RT/pinned retake exclusions and weighted service.
+No task names, new state, clock or tuned burst threshold. Cost: static-priority
+read plus policy read for negative-nice tasks; more short-burst seats may add
+locking/preemptions and delay workers. Budget: one classification change,
+nice/policy and retake models, both builds/tests/clippy, one release ABBA below
+five minutes; reject mixed or adverse game results. A positive frame screen
+needs a short existing thread-counter follow-up before claiming locality gains.
+Both profiles, 26 tests, clippy and both model suites pass, including all nice
+levels and SCHED_IDLE exclusion; burst-only control fails the new policy cases.
+Four 25-second release windows took 217.70 s; 44/44 focus checks and all
+identity/capture/restoration checks valid. New/old average FPS 1434.27/1439.52;
+1% low 896.67/908.74; 0.01% low 498.24/496.67; p95 frame delta +17.07%.
+Background variation and sparse tails limit attribution, but no convincing
+game win justifies broader seat protection. Reverted; skip the conditional
+thread-counter follow-up. Neither this nor the synchronous-home screen earns
+another burst-threshold or priority-class tuning sweep.
+Evidence: `scx_cake_bench/runs/kovaaks_priority_seat_20260907/frame-screen/summary.json`.
+Receipt `20260907T152432Z_cake-priority-seat_891161286436`, binary `86f7c6ea571e`,
+BPF object `595e459e978e`; full identities retained in the receipt.
+Restored release/debug pass and ordinary release matches `05006e224cd3`.
+Rejected artifact archived and 2,163,887,876 logical bytes pruned.
+
+**2026-09-07 — IDLE HOME ON SYNCHRONOUS WAKE (SCREENED, REVERTED).**
+Test removing the stage-only exemption from the synchronous-wake home veto.
+An idle, affinity-compatible, uncontended, IRQ-clean home can be atomically
+claimed regardless of burst class; a synchronous flag alone does not establish
+that abandoning its cache is beneficial. Preserve serial busy co-location,
+seat/retake, starvation, whole-core preference and failed-claim fallback.
+Existing render traces show high migration and a 35 us lifetime mean burst,
+below the 64 us stage threshold. This is a locality hypothesis, not proof of
+frame causality. Budget: one gate removal, extracted selector gate model,
+release/debug/tests/clippy, one release ABBA block below five minutes against
+serial-capacity. Reject extra frame-tail cost or an unconvincing result;
+do not tune the stage threshold to this game's burst or change game settings.
+Both profiles, 26 tests, clippy and both models passed; the old veto fails the
+new selector expectation (offline policy coverage only). Four 25-second release
+windows took 217.36 s, 44/44 focus samples, valid identities/captures and native
+restoration. New/old average FPS 1445.57/1446.68; 1% low 902.88/909.95;
+0.01% low 506.91/464.68; p95 frame delta -8.08%. The closing baseline's deep
+tail drives much of the apparent tail gain. Mixed results establish neither
+a repeatable gain nor neutrality. Revert; no further threshold tuning.
+Evidence: `scx_cake_bench/runs/kovaaks_sync_home_20260907/frame-screen/summary.json`.
+Receipt `20260907T151205Z_cake-sync-home_843ef54ce83d`, binary `bbc311dc6750`,
+BPF object `f533ad5b0e84`; source/BPF/binary identities retained in the receipt.
+Restored release/debug pass; ordinary release matches `05006e224cd3`.
+Rejected artifact archived and 2,163,686,271 logical bytes pruned.
+
+**2026-09-07 — NATIVE OWNER HEAD (SCREENED, REVERTED).**
+Isolated the owner count+peek replacement while preserving the pool count.
+Old/absent/fixed-native models, release/debug, 26 tests and clippy passed.
+Four 25-second release windows took 218.55 s; runtime/captures valid,
+44/44 focus checks, native restored. New/old average FPS 1449.65/1456.45;
+1% low 899.96/908.83; 0.01% low 461.53/522.52; p95 frame delta -9.65%.
+Both candidate deepest tails again fell below both baselines. Background
+variation and thin tails limit causality, but preserving the pool count did
+not rescue the game result. Reverted; stop this lookup-removal experiment.
+Evidence: `scx_cake_bench/runs/kovaaks_owner_head_20260907/frame-screen/summary.json`.
+Trial `20260907T144805Z_cake-owner-head_75d44c2dd295`, binary `3e12c6cbdc88`,
+BPF source `c3e90da86b50`; full identities in the receipt.
+Restored release/debug and baseline release hash verified. Rejected artifact
+archived and 2,163,738,261 logical bytes pruned.
+
+**2026-09-07 — NATIVE DISPATCH HEADS (SCREENED, REVERTED).**
+Tested one native head lookup per own/pool queue on symbol+kernel>=7.1,
+matching the compatibility gate; older kernels kept count-before-iterator.
+Queue ordering, starvation, unconditional second move and forwarding remained.
+Native/absent/pre-fix models, both profiles, 26 tests and clippy passed.
+Four 25-second release windows took 217.45 s, valid runtime/captures and
+44/44 focus checks; native restored. New/old average FPS 1449.95/1447.96;
+1% low 914.03/911.92; 0.01% low 480.61/521.18; p95 frame delta -13.86%.
+Both candidate deepest tails were below both baselines. Thin tails and
+background variation limit causality, but this tradeoff is not a game win.
+Restored the count-based path. A nullable head and a count can observe
+insertion/removal differently; the capture does not attribute the tail to
+that mechanism. Test the owner-only lookup separately, retaining pool counts.
+Evidence: `scx_cake_bench/runs/kovaaks_native_heads_20260907/frame-screen/summary.json`.
+Trial `20260907T143400Z_cake-native-heads_0c94fb6b2d91`, binary `bc84834a80b4`,
+BPF source `e8920b892592`; full identities in the receipt.
+Restored profiles and release hash verified. Rejected artifact sealed and
+2,163,830,533 logical bytes pruned.
+
+**2026-09-07 — SERIAL CAPACITY INPUT (FIXED, LIVE ATTACH CHECKED).**
+The 75%-idle handoff gate used possible CPU-ID span as capacity. With eight
+online CPUs in a span of 128 it could never pass. Derive ceil(3N/4) once
+from the existing online topology count; compare idle count directly.
+Hotplug uses the existing scheduler restart behavior. The old predicate
+fails the sparse-ID model; the correction passes. All 17 idle-count verdicts
+on this 16-online/16-span host are unchanged. No new per-wake read, map or
+state update; the threshold arithmetic moves out of the BPF hot path.
+Both model suites, release/debug, 26 tests and clippy pass. One 20-second
+release capture completed in 49.16 s with verified runtime identity and
+10/10 focus checks; native restored. Average FPS 1437.86, 1% low 894.80,
+0.01% low 506.73. This is attach/service validation, not an A/B, neutrality,
+FPS gain or 1500-FPS proof. Real sparse/dual-CCD hosts remain untested.
+Evidence: `scx_cake_bench/runs/kovaaks_serial_capacity_20260907/attach-check/summary.json`.
+Receipt `20260907T142022Z_cake-serial-capacity_fd6a23931b8c`, measured binary
+`209da430ea20`, BPF source `6ceac75ba107`; ordinary release `05006e224cd3`.
+
+**2026-09-07 — POOL NOTIFICATION RETRY (SCREENED, REVERTED).**
+An early idle-claim failure skipped the later local notification on the
+pool route. The extracted enqueue model reproduces a missed compatible
+idle CPU. Removing the shortcut passed 1,778 single/dual-LLC affinity
+interleavings, both model suites, release/debug, 26 tests and clippy.
+Four 25-second release windows took 216.67 s; all captures and 44/44 focus
+checks valid, native restored. New/old average FPS 1449.71/1452.63; 1% low
+904.38/913.40; 0.01% low 480.49/504.02; p95 frame delta improved 3.76%.
+Opposing paired windows and thin deepest tails do not prove a regression
+or neutrality. Reverted the extra idle scan; the missed notification remains
+open. Kernel direct insertion commits after enqueue returns, so retrying
+also cannot establish a fully ordered publication/idle protocol. The pool
+mark's negative meaning needs review against that deferred commit boundary.
+Evidence: `scx_cake_bench/runs/kovaaks_pool_notify_20260907/frame-screen/summary.json`.
+Trial receipt `20260907T140607Z_cake-pool-notify_5a8b426a4ec0`, binary
+`94d45cea3c91`, BPF source `a5c1aea61f5f`; full identities in the receipt.
+Restored profiles built and release hash matched starvation-safe. The rejected
+trial archive is sealed; 2,163,780,564 logical bytes pruned.
+
+**2026-09-07 — SERVICE QUANTUM AND WAKE BUDGET (SCREENED, REVERTED).**
+Tested removing the half-cycle cap from service grants while preserving its
+wake-preemption limit lazily. Main lifetime burst/cap were 477.7/345.4 us;
+render 35.1/32.4 us. The common compiled grant used one division and no
+clock; a busy wake could spend a second division for unchanged urgency.
+Both profiles, 26 tests, clippy and arithmetic/urgency models passed.
+Four 25-second release windows took 216.89 s; all captures and 44/44 focus
+checks valid, native restored. New/old average FPS 1449.63/1446.75; 1% low
+908.02/903.63; 0.01% low 483.50/486.86; p95 frame delta +0.32%.
+These small mixed differences do not justify the policy change. Restored
+BPF, models and DESIGN to starvation-safe; no repeatable gain or 1500-FPS
+claim. Kernel slices are accounting budgets; switch traces alone do not
+prove a slice caused each interruption. Evidence:
+`scx_cake_bench/runs/kovaaks_service_quantum_20260907/frame-screen/summary.json`.
+Trial receipt `20260907T135116Z_cake-service-quantum_4962003a7999`, binary
+`2fbb2b2241da`, BPF source `81c3ca19a1ca`; identities in the receipt.
+Restored release/debug builds passed and the release hash matched the retained
+baseline. Trial archive sealed; 2,163,973,103 logical bytes pruned.
+
+**2026-09-07 — DIRECT WAKE DELIVERY (SCREENED, REVERTED).**
+Queued wakeup can skip select_cpu during switch-out races and adds a remote
+activation IPI. Test clearing ALLOW_QUEUED_WAKEUP so eligible wakes reach
+the existing warm/core/affinity selector before activation. Cake 1.1.3's
+receipt does not request this flag; current Cosmos enables it in its loader,
+so it alone does not explain the Cosmos placement advantage. Tradeoff:
+the waker waits for switch-out and pays the destination rq lock/cache traffic.
+Budget: one ops-flag endpoint with truthful loader reporting, both profiles/
+26 tests/clippy, existing models, one release frame block below five minutes
+against starvation-safe. No new placement heuristic or game changes. Reject
+an unjustified regression; real dual-CCD cost remains unmeasured here.
+Both profiles, 26 tests, clippy and both model suites passed; compiled BPF
+callback instructions were identical. Four 25-second release windows completed
+in 216.89 seconds; all captures and 44/44 focus checks valid, native restored.
+New/old average FPS 1436.15/1452.81; 1% low 913.22/915.36; 0.01% low
+514.36/508.20; p95 frame-delta jitter rose 3.66%. The final candidate window
+drives the mean loss, so external-load uncertainty prevents a precise causal
+regression estimate. More selector coverage earned no repeatable gaming win.
+Restore queued delivery and the loader byte-for-byte to starvation-safe.
+Evidence: `scx_cake_bench/runs/kovaaks_direct_wake_20260907/frame-screen/summary.json`.
+Trial receipt `20260907T132132Z_cake-direct-wake_19631ac3fd36`, binary
+`43ce77a07325`, BPF source `204423d87b0b`; full identities in the receipt.
+Restored release/debug builds pass; release hash matches starvation-safe.
+Trial sealed and derived trees pruned: 2,163,770,451 logical bytes.
+
+**2026-09-07 — LIFETIME STARVATION COMPARISON (FIXED, SCREENED).**
+The fixed 16-bit pre-scale does not keep lifetime cross-products inside u64.
+Overflow can reverse both starvation predicates and consequently home,
+pool-priority and preemption decisions. Preserve the existing quantization
+and thresholds; ordered factors prove the common false verdict directly,
+otherwise retain the small-operand multiply path and use an exact
+wide-product comparison only outside its proven bound. No per-task history,
+clock or new policy threshold. Budget: reproduce reversals, compare boundary
+and randomized inputs against a native 128-bit oracle, both profiles/26
+tests/clippy, then one release frame screen under five minutes against
+ready-dispatch. Reject an unexplained gaming regression; static arithmetic
+correctness does not establish an FPS gain.
+Reproduced both false-positive predicates with wait `2^47`, runtime `2^48`
+ns and equal switch/dispatch counts `2^33-1`. Both should be false; old code
+returned true after wrapping. The fix matches a native 128-bit oracle on
+330,321 boundary/random cases, including wide carries, ties and zero-run
+behavior. A compiler barrier keeps LLVM from rebuilding unsupported i128
+BPF arithmetic. Both model suites, release/debug, 26 tests and clippy pass.
+Four 25-second release windows completed in 217.53 seconds; all captures,
+runtime identities and 44/44 focus checks valid, native restored. New/old
+average FPS 1454.19/1447.51; 1% low 913.62/915.10; 0.01% low
+498.42/497.48; p95 frame-delta jitter fell 4.58%. Retain the correctness fix:
+no material regression observed, but mixed windows and external load not
+separately attributed prevent a repeatable-gain or equivalence claim.
+Evidence: `scx_cake_bench/runs/kovaaks_starvation_safe_20260907/frame-screen/summary.json`.
+Measured receipt `20260907T130412Z_cake-starvation-safe_426c96a0d9ee`, binary
+`054f6de479f9`, BPF source `e1ee90b27684`; full identities in the receipt.
+Only preexisting workspace issues: rustland's unused `lib.include` manifest
+key and a Cosmos formatting difference; Cake's format and warning gates pass.
+
+**2026-09-07 — SERVE READY WORK AT DISPATCH (SCREENED, PROVISIONAL).**
+Stronger seat avoidance reduced game performance. Remove the dispatch-only
+seat refusal and forwarding kick: a CPU in dispatch attempts ready work now.
+Keep cold/home seat preferences, holder immunity/retake, affinity enforcement,
+failed-consume forwarding, fairness and remote service. Remove the two dead
+census entries; align the loader table, including its missing pool-direct label.
+Budget: one removal, direct-service/affinity models, both profiles/26 tests/
+clippy and one release mirrored frame block under five minutes. Reject an
+unjustified game regression; no new state or prediction mechanism.
+Release/debug, 26 tests, clippy and both model suites passed, including 512
+compatible-head/seat/CPU cases that now consume directly without a kick.
+Four 25-second mirrored release windows completed in 217.20 seconds; all
+captures and 44/44 focus checks valid, native restored. New/old average FPS
+1450.64/1449.85; 1% low 909.87/906.13; 0.01% low 492.87/483.62;
+p95 frame-delta jitter fell 2.63%. No material regression observed; small,
+mixed windows and sparse tails establish neither a repeatable gain nor
+equivalence. Keep the simpler policy provisionally, with pool-direct retained.
+Evidence: `scx_cake_bench/runs/kovaaks_ready_dispatch_20260907/frame-screen/summary.json`.
+Measured receipt `20260907T124413Z_cake-ready-dispatch_1eabd3acd98c`, binary
+`0555ea749071`, BPF source `fe3368f6c5ae`; receipt carries full identities.
+
+**2026-09-07 — CONSISTENT SMT SEAT PREFERENCE (SCREENED, REVERTED).**
+Cold choices already avoid both SMT threads of a held seat, but a worker's
+home claim and an idle sibling's dispatch bypass that preference. Apply the
+same physical-core avoidance to those two paths. A holder still takes its
+own seat; affinity-limited/all-held capacity still serves work, and the pool
+wall backstop remains. No new state, predictor or classification threshold.
+Budget: one policy endpoint, source-extracted SMT/affinity models, both
+profiles/26 tests/clippy and one release ABBA frame screen below five minutes.
+Reject if the added avoidance does not justify its gaming/locality cost.
+The old source failed the sibling-admission model; the candidate passed
+450 SMT/affinity cases plus existing gates, release/debug, 26 tests and clippy.
+First activation was rejected by the verifier before attachment: LLVM lost
+an inlined CPU-index bound. Explicit bounds at the owner loads repaired it.
+The repaired release completed a mirrored candidate/old/old/candidate block:
+216.65 seconds, all captures and 44/44 focus checks valid, native restored.
+New/old average FPS 1445.03/1457.06; 1% low 906.54/940.16; 0.01% low
+491.85/455.73. Both candidate average/1% windows were below both old windows;
+p95 frame-delta jitter rose 13.4%, and the deepest-tail benefit was inconsistent.
+Reverted this stronger avoidance and its model edits. Consistent reservation
+rules are a performance tradeoff, not enough reason to defer runnable work.
+Evidence: `scx_cake_bench/runs/kovaaks_smt_seats_20260907/frame-screen-bound/summary.json`.
+The rejected first receipt was archived; 2,163,677,079 logical bytes pruned.
+The screened receipt was also archived (2,163,978,983 bytes pruned). Restored
+source/models and release hash match pool-direct; both restored profiles build.
+
+**2026-09-07 — OWNER QUEUE EMPTY FAST PATH (SCREENED, REVERTED).**
+Only enqueue adds to a CPU's custom queue, marking before the synchronous
+custom insertion completes under the owner's rq lock. Dispatch holds that
+same lock for its initial queue reads; remote consumers only remove tasks.
+Use a clear own mark to skip its count lookup and redundant publication.
+Keep count-based retirement for a set mark and direct counts for shared pools.
+Budget: one dispatch change, queue-transition/boundary models, both profiles,
+26 tests/clippy and one release ABBA frame screen below five minutes. Reject
+an unsupported ownership assumption or a gaming regression. No new state.
+Ownership audit and all queue models passed, as did release/debug, 26 tests
+and clippy. Four 25-second windows completed in 217.43 seconds, all captures
+and 44/44 focus checks valid, native restored. New/old average FPS
+1439.88/1453.73; 1% low 914.95/909.33; 0.01% low 502.49/506.19. Both
+candidate averages fell below both predecessor windows; p95 frame-delta
+jitter rose 6.5%. Source consistency and one fewer kernel lookup did not earn
+a gaming benefit. Reverted the fast path and its trial-only model changes;
+baseline drift/noise still prevent a precise causal regression estimate.
+Evidence: `scx_cake_bench/runs/kovaaks_owner_empty_20260907/frame-screen/summary.json`.
+Both restored profiles build; source and ordinary release hashes match the
+retained pool-direct endpoint. Trial archive pruned 2,163,772,026 logical bytes.
+
+**2026-09-07 — PRESERVE HOME IRQ REJECTION (SCREENED, REVERTED).**
+The home check sees live IRQ depth on either SMT thread, but the following
+winner/rank search reconstructs noise from chronic IRQ publication only. It
+can therefore select the same core it just declined, despite a quiet equal
+alternative. Carry that observed rejection into the existing noise mask and
+SMT expansion. Preserve historical winner/locality and all-noisy capacity;
+add no new sensor, clock or scan. Budget: one logic fix, boundary models,
+both profiles/26 tests/clippy and one ABBA release frame screen under five
+minutes. Revert a gaming regression; do not claim FPS from source consistency.
+Models reproduced the lost observation and verified propagation, SMT expansion
+and all-noisy fallback. Release/debug, 26 tests and clippy passed. Four
+25-second windows completed in 217.30 seconds; 44/44 focus checks and all
+captures passed, native restored. New/old average FPS 1439.43/1442.20;
+1% low 907.61/903.64; 0.01% low 461.33/521.98. Both candidate deepest lows
+were below both old windows; p95 frame-delta jitter rose 6.7%. Sparse tails
+and baseline drift limit inference, but stronger IRQ avoidance earned no
+gaming benefit. Restore the prior policy/models byte for byte; transient IRQ
+avoidance remains a placement tradeoff, not a CPU-eligibility requirement.
+Evidence: `scx_cake_bench/runs/kovaaks_irq_reject_20260907/frame-screen/summary.json`.
+Restored release/debug builds pass. Trial receipt sealed and derived trees
+pruned: 2,163,725,531 logical bytes; native EEVDF restored.
+
+**2026-09-07 — CURRENT-STATE IDLE FALLBACK (SCREENED, REVERTED).**
+Scheduling-logic hypothesis: after the actual warm home fails, choose from
+present idle/core/seat/IRQ/rank state instead of a last successful fallback CPU.
+That remembered CPU is not updated by home, serial, pool or stolen placements,
+so it can override a stronger available core after the task has run elsewhere.
+Remove that selector history and its per-wakeup storage lookup; retain home,
+seat ownership and all affinity/progress fallbacks. Historical G75-off combined
+home-backoff and winner removal regressed tails; the current tree already lacks
+home-backoff and now has CPPC/core-IRQ ranking. This isolates the remaining
+winner preference. Budget: one policy change, source-extracted boundary models,
+release/debug/26 tests/clippy and one ABBA frame screen under five minutes.
+Revert if gaming results do not justify the change; no new benchmark machinery.
+Models, release/debug, 26 tests and clippy passed. Four 25-second windows
+finished in 216.96 seconds; 44/44 focus checks and all captures passed, native
+restored. New/old average FPS 1455.42/1453.93; 1% low 909.24/914.66;
+0.01% low 449.28/495.15. Average benefit is negligible; sparse deepest tails
+do not quantify a reliable regression, but the endpoint does not justify
+removing useful locality history. Restored policy/models byte-identical to
+pool-direct. Evidence: `scx_cake_bench/runs/kovaaks_current_idle_20260907/frame-screen/summary.json`.
+Trial receipt archived and derived trees pruned: 2,163,808,692 logical bytes.
+
+**2026-09-07 — CACHE / EXECUTION ATTRIBUTION (SCREENED; RAW IBS FOLLOW-UP).**
+Maintained PMU/strict game rotation compared core-IRQ Cake with Cosmos in
+157.16 seconds: four valid arms, 24/24 foreground checks, no lost records,
+native restored. Main sampled IPC favored Cake; render IPC favored Cosmos.
+L1 data miss estimates were broadly similar. Two-second IBS windows had few
+misses; one 7079-cycle DXVK load is not a recurring bottleneck. Render moved
+1547–1719 times/s on Cake versus 329–352 on Cosmos. Evidence and limitations:
+`scx_cake_bench/runs/kovaaks_cache_20260907/threads/summary.json`. Eight raw
+files compressed and roundtrip verified (55.26→6.60 MB); archive index retained.
+
+User requests AMD IBS sampling and scheduling-only changes; game settings
+remain untouched. One raw-register IBS ABBA block compared pool-direct with
+core-IRQ, retaining branch and completion/retirement fields omitted by ordinary
+perf miss weights. Overlapping sampled operation latency is not lost frame time.
+
+Follow-up hypothesis: on a user wake already destined for the pool behind a
+served peer, move the existing idle claim before insertion and directly admit
+that wake when it succeeds. This avoids publishing one task then notifying a
+CPU that may consume another head. Preserve unsuccessful/pinned/forced-requeue
+routes and IRQ/core/seat preferences. Budget: one implementation, boundary
+models, both builds and one release ABBA screen under five minutes; reject an
+unconvincing or adverse gaming result instead of retaining extra branch cost.
+Implemented; models, both profiles, 26 tests and package clippy pass. Four
+25-second windows completed in 215.51 seconds, all 44 foreground checks valid,
+native restored. New/old average FPS 1459.11/1455.46; 1% low 971.67/959.53;
+0.01% low 515.96/487.41. Candidate p99 improved 13 µs; max frame slightly
+worsened. Both candidate 1% windows beat both old windows, but average drift
+and sparse deepest tails prevent a reliable all-metric claim. Keep under
+evaluation for the IBS follow-up. Source SHA256 `6eb56d7a396b85061a11415013d2ade3cf8e9688d66dc441dca319d26345526c`;
+receipt `20260907T103113Z_cake-pool-direct_fbc5527c5403`. Frame evidence:
+`scx_cake_bench/runs/kovaaks_pool_direct_20260907/frame-screen/summary.json`.
+Raw IBS follow-up completed: 24/24 foreground checks, zero lost records and
+127,759 game samples, native restored. Render period-weighted tag-to-retire
+mean was 74.68/76.81 cycles for direct admission versus 79.71/80.08 for the
+predecessor; tag-to-completion and miss-latency results were mixed. Sampled
+operation latencies overlap and are not CPU time or frame time. Thread-wait
+differences vary more between old windows than between policies. No Cake JIT
+symbol was resolved, so unknown kernel IPs were not assigned to Cake.
+Code-shape follow-up rejected before another live screen: splitting the peer
+route or only deferring its unused continuation clamp increased static stack
+references. The split passed models, both profiles, 26 tests and clippy; it
+did not earn a performance claim. Restore the screened pool-direct source and
+models byte for byte, without another helper or predictor. Raw IBS is now
+retained by the existing collector; 13 focused harness tests pass. The raw
+block took 152.91 seconds. Evidence and reproducible decoder hash:
+`scx_cake_bench/runs/kovaaks_ibs_raw_20260907/threads/summary.json`.
+Four raw files compressed and roundtrip verified (77,935,816→13,264,020
+bytes); archive index retained. Restored release/debug builds pass; ordinary
+release SHA256 `b5b1de58900cc4fce04868dc2401ed8126e335c3b157afddf68508fa960db63b`.
+Current verdict: pool-direct remains a measured candidate with directional
+render/tail improvement; main, driver and deepest-tail results are mixed, and
+the 1500-FPS/all-metric target remains open. No game settings changed.
+
+**2026-09-07 — ENQUEUE HOME CLAIM (SCREENED, REVERTED).**
+Tested direct admission for movable user wakeups that bypass `select_cpu`,
+requiring a quiet whole-home-core claim before queue insertion/notification.
+Budget: one change, boundary models, both profiles and one release ABBA screen
+under five minutes against core-IRQ; reject a clear gaming regression. Affinity,
+seat, starvation, claim-loss, pinned/wide/forced-requeue and IMMED compatibility
+models passed, as did release/debug, 26 Rust tests and package clippy.
+Four 25-second windows finished in 216.69 seconds; all captures/activation
+checks and 44/44 focus samples passed, native restored. New/previous means:
+average FPS 1458.91/1456.27, 1% low 961.43/956.41, 0.1% low 556.51/550.55,
+0.01% low 507.11/524.71. About four frames support each deepest percentile.
+Small mixed results do not justify another branch chain; this is not proof
+of a repeatable tail regression. Trial policy/counter/tests removed; restored
+source/models match the retained core-IRQ snapshot byte for byte. Rebuilt both
+profiles; ordinary release SHA256 is again `17385dc24c96791af0cb10daaf39a9a983b753d50cd76c79c9e6b12777294fe6`.
+Evidence: `scx_cake_bench/runs/kovaaks_enqueue_home_20260907/frame-screen/summary.json`.
+Trial receipt `20260907T095422Z_cake-enqueue-home_48389cbede25` was sealed (13
+hashes) and its derived trees pruned: 2,163,826,228 logical bytes. No new report.
+
+User's core/boost/cache steering: live CPPC ranks cores 4/5 highest (196), then
+3 (191), 1 (186), 2 (181), 0 (176), 6 (171), 7 (166). These are ordinal
+hints, not throughput ratios. Cake already uses startup ranks after eligibility
+and locality preferences; it does not track live boost headroom. Active
+amd-pstate-epp with the `powersave` governor and EPP `balance_performance`
+(read from sysfs 2026-09-18; an earlier note here said performance), boost
+enabled, effective C0 5.46–5.53 GHz on every thread. Each SMT pair
+shares 48 KiB L1 data and 1 MiB L2; all cores share 96 MiB L3. IBS op/fetch PMUs
+are exposed, but no IBS cache/IPC profile was collected. Next distinguish
+effective throughput and cache-miss cost from CPU rank before adding policy.
+The 1500-FPS and all-metric targets remain open.
+
+**2026-09-07 — PHYSICAL-CORE IRQ ENDPOINT (UNCOMMITTED, SCREENED).**
+Direct Cake/Cosmos thread diagnostics show excess Cake render/driver migrations
+and repeated realtime display interruptions. Valid Cake traces also place main/
+render work opposite the GPU IRQ CPU: 38–190 ms of sibling IRQ overlap in a
+three-second trace. Test a single packed publication of the existing chronic
+IRQ set, expanded by the existing SMT map for cold choices; home/retake checks
+also inspect the sibling. Keep whole-core/seat priorities and an unrestricted
+eligible fallback. No new sampler or reservation. Budget: one implementation,
+offline affinity/topology checks, release/debug validation, one release frame
+screen under five minutes; reject a clear gaming regression. The immediate
+admission change was screened separately first (below).
+
+Implemented with one IRQ snapshot per search, shared SMT expansion, packed
+loader publication (1,024 bytes→128) and no new map/sampler. Release/debug,
+26 Rust tests, package clippy and extracted policy models pass; 65,280 IRQ/
+affinity combinations retain noisy fallback and whole-core/seat priorities.
+The unrelated workspace manifest-key warning remains. Kernel attach succeeded.
+
+Six mirrored 13-second frame windows finished in 248.40 seconds; all captures
+and 54/54 focus samples passed, native restored. Means of window metrics:
+
+| Metric | Immediate predecessor | Core-IRQ Cake | Cosmos |
+|---|---:|---:|---:|
+| Average FPS | 1448.33 | 1458.95 | 1441.25 |
+| 1% low FPS | 968.82 | 966.07 | 969.40 |
+| 0.1% low FPS | 548.57 | 554.08 | 548.32 |
+| 0.01% low FPS | 516.80 | 527.05 | 495.79 |
+
+Both new windows beat both predecessor windows on average FPS. Retain as a
+candidate: 1% low is 0.28% below the predecessor; no reliable all-metric win or
+neutrality proof. Deepest tails have about two supporting frames per window.
+Four further 11-second counter windows with one-second traces passed all 20
+focus and trace-consistency checks. Mean render sibling-IRQ overlap fell from
+30.95 to 3.33 ms per trace (about 89%); render runnable wait 2.00→1.26 ms/s,
+DXVK-submit 1.23→0.29. Main wait rose 0.239→0.322 ms/s. Physical-core moves
+rose: main 62→121/s, render 1305→1524/s, DXVK-queue 2594→3541/s. This confirms
+the IRQ preference's effect and exposes its locality tradeoff; overlapping
+IRQ time is not measured lost CPU work. Background and realtime exposure vary.
+
+The user's 1500-FPS milestone needs another 18.76 µs off the mean frame
+(685.42→666.67 µs). Diagnostic aggregate game runnable wait is only about
+2 µs/frame when scaled by the frame-screen FPS; windows differ and parallel
+waits overlap. Focus next on execution/locality costs, not a promise that
+eliminating queue waits alone supplies the gap. The original all-metric goal
+remains active. No dual-CCD hardware or GPU execution/input-latency result.
+
+Measured release: `target/cake_receipt_builds/20260907T091208Z_cake-irq-core_acae2b93f490/scx_cake`,
+SHA256 `48c6beeed82e24421b2bb64d9dec0286e56a81a01f6fa96fe12599a0b142c4a8`;
+receipt SHA256 `ef8c844f49529fcd63871761ad97035fc34a7741c4720c2ad3de93444d5057ce`.
+Evidence: `scx_cake_bench/runs/kovaaks_irq_core_20260907/{frame-screen,threads}/summary.json`.
+Four new raw traces were compressed and roundtrip verified (193,185,548→
+13,101,877 bytes). STATE remains the narrative audit trail; the existing
+DESIGN IRQ paragraph was corrected without a new report. Native EEVDF restored.
+The superseded RT candidate was sealed (13 receipt hashes verified) and its
+derived build trees pruned: 2,163,548,432 logical bytes. Nightly, exact-slice,
+immediate/core-IRQ candidates, Cosmos and 1.1.3 remain available. Thread-runner
+IDs now include the output-path digest so two `threads/` directories cannot
+reuse activation IDs; six harness tests and distinct-path checks pass.
+
+**2026-09-07 — IMMEDIATE ADMISSION FOLLOW-UP (SCREENED, MIXED).**
+Previous goal turn made code and measurement progress; the all-metric target
+remains open. Kernel `SCX_ENQ_IMMED` can reject a local placement if the idle
+claim loses its CPU before insertion, and returns interrupted immediate tasks
+through enqueue. Cosmos uses it; Cake's claimed idle placements did not.
+Live BTF confirms bit 33. Apply the optional enum only to claimed home/warm/
+kernel-thread placements; preserve intentional serial/retake queueing and the
+older-kernel fallback. Existing forced-requeue pooling supplies the alternative
+CPU route. No new predictor or map. Source-extracted tests cover 1,024 feature/
+placement combinations plus returned/pinned kernel work; six thread-harness
+tests pass after allowing declared Cosmos receipts and a four-arm comparison.
+Hypothesis: reduce rare local-DSQ waits without losing main-thread locality.
+Six 13-second frame windows (previous/new/Cosmos/Cosmos/new/previous) finished
+in 245.19 seconds; all captures and 54/54 focus samples passed, native restored.
+New/previous/Cosmos means: average FPS 1446.58/1450.94/1436.60; 1% low
+940.13/949.91/949.31; 0.01% low 506.06/499.58/458.52. Mixed screen, no proven
+neutrality or performance win. Previous Cake drifted 1458.97→1442.91; only about
+two tail frames per window. The core-IRQ follow-up below must justify the
+combined endpoint. Receipt `20260907T084811Z_cake-immediate_043e26f70e4e`, binary
+SHA256 `1c39856c203c8963ad4de99387cb292d5b8838a489bbe40773bf282ecb75e365`.
+Evidence: `scx_cake_bench/runs/kovaaks_immediate_20260907/frame-screen/summary.json`.
+
+Four direct Cake/Cosmos thread windows passed all 20 focus samples and runtime
+checks. Cake render runnable wait was 2.04–2.18 ms/s versus Cosmos 0.208–0.236;
+most excess runnable interruptions in valid traces lead to realtime display/
+compositor tasks. Immediate requeues were 4,734–4,959 per window across the
+whole scheduler, with zero repeated-requeue events. These are diagnostics, not
+game-specific admission-failure counts or frame causation. Cosmos trace 2 has
+one duplicate switch and is excluded from placement conclusions; traces 1/3/4
+pass consistency checks. Evidence: `runs/kovaaks_immediate_threads_20260907/`
+in the bench repository. Four raw traces were compressed and roundtrip verified
+(552,842,476→35,842,738 bytes); indexed sources and summaries retained.
+
+**2026-09-07 — EXACT-SLICE / FORCED-REQUEUE ENDPOINT (UNCOMMITTED, SCREENED).**
+The follow-ups below now pass release/debug builds, all 25 Cake tests, package
+clippy `--no-deps -D warnings`, extracted enqueue/seat/placement checks and
+slice arithmetic checks. BPF disassembly confirms one division in
+`cake_task_slice`, previously two; this is instruction attribution, not a
+measurement of saved nanoseconds. The new binary attached and restored cleanly.
+
+Previous RT candidate/new/new/previous, four 30-second windows, finished in
+237.09 seconds with 48/48 focused samples. New average FPS was 1452.16 versus
+1433.28; 1% low 955.22 versus 944.54; 0.1% low 550.92 versus 546.75.
+0.01% low was slightly lower, 508.24 versus 512.62, with only about four tail
+frames per window. The previous candidate drifted from 1441.40 to 1425.15 FPS.
+
+Native/new/Cosmos/Cosmos/new/native, six 13-second windows, finished in 201.30
+seconds with 44/44 focused samples. All capture/identity/activation checks and
+native restoration passed. Means of window metrics:
+
+| Metric | Native EEVDF | New Cake | Cosmos 1.1.6 |
+|---|---:|---:|---:|
+| Average FPS | 1382.05 | 1448.97 | 1435.08 |
+| 1% low FPS | 901.24 | 949.04 | 953.52 |
+| 0.1% low FPS | 528.88 | 552.59 | 548.96 |
+| 0.01% low FPS | 415.60 | 498.81 | 519.21 |
+
+**The reliable all-metric target is not met.** Cosmos retains better 1% and
+0.01% lows in this screen. Native varied 1414.00–1350.10 FPS; roughly two frames
+per window support the deepest tail. Keep the correctness/overhead candidate,
+without claiming proven neutrality or universal game improvement. Latest
+direct 1.1.3 comparison is recorded below. Dual-CCD performance and GPU
+execution/input latency remain unmeasured.
+
+Final binary versus 1.1.3, 1.1.3/new/new/1.1.3, four 20-second windows, finished
+in 197.50 seconds; 41/41 focus samples and all runtime/capture/restoration checks
+passed. New versus 1.1.3 means: average FPS 1437.75/1353.50 (+6.22%), 1% low
+948.02/885.55 (+7.05%), 0.1% low 548.27/480.67, 0.01% low 502.14/418.22.
+This separate screen supports the candidate, with the same single-scene and
+sparse-tail limits. Evidence: `scx_cake_bench/runs/kovaaks_exact_20260907/cake113-screen/summary.json`.
+
+Measured release: `target/cake_receipt_builds/20260907T080210Z_cake-exact-release_6a017b23c35c/scx_cake`,
+SHA256 `b12ef1edd5bcaaaca57690f0b50870ebb00fdb2cbb6995b29535dae1e90856b7`;
+receipt SHA256 `840d368b35c4761b07237d8c5af8d19e13645008b9d17a99145619a081d070f6`.
+Evidence: `scx_cake_bench/runs/kovaaks_exact_20260907/{previous-screen,native-cosmos-screen}/summary.json`;
+build/model logs in `target/cake-hotpath-audit/`. Ordinary release/debug binaries
+are rebuilt too; the path above is the exact measured image. System left on
+native EEVDF, game running. No commits, pushes or new narrative reports.
+
+Two more superseded complete receipts were verified, archived and pruned
+(4,327,414,953 logical bytes). The incomplete Cosmos build stays explicitly
+failed: its sources, crate archives, binaries and failure evidence are retained;
+verified dependency extracts and Cargo intermediates were pruned separately
+(2,092,016,198 logical bytes), recorded in `DERIVED_PRUNED_FAILURE.json`.
+The latest six traces were compressed and roundtrip-verified (833,650,506 to
+81,287,863 bytes). Measured nightly, preceding RT candidate, final candidate,
+Cosmos and Cake 1.1.3 remain available; historical evidence stays indexed.
+
+**2026-09-07 — REALTIME DISPLACEMENT AND COSMOS COMPARISON (UNCOMMITTED).**
+Folded narrow home availability into one kernel whole-core mask acquisition;
+atomic logical-CPU admission still decides ownership. Probe-only burst reads
+now sit inside the probe guard. Added `cpu_release` to reenqueue local work
+when a higher scheduling class takes the CPU: otherwise interrupted tasks with
+slice remaining stay in the kernel local DSQ, inaccessible to Cake's steal
+queues. KWin is live SCHED_RR priority 1; prior traces associated long DXVK
+resume waits with KWin interruptions. This is a queue-access fix, not inferred
+game dependency or permission to preempt realtime work.
+
+Cosmos 1.1.6 now has a strict release receipt route. Its BPF policy is unchanged;
+loader-only changes shared Cake's post-attach capability drop/inspection and
+reexec helpers, then in `scx_utils::misc`, since `5af8b267f` private to Cake's
+`main.rs` (the Cosmos patch was never committed; its stashes were dropped
+2026-09-17). The helper clears the calling thread's
+capabilities, not capabilities retained by other threads. A child-process test
+checks `/proc/thread-self/status` and dumpability. Initial Cosmos closure,
+overlong stats socket and retained-capability inspection failures were rejected
+before capture and retained; fixed profile uses a confined relative stats path.
+Cake release/debug and 25 tests pass; Cake package clippy `--no-deps -D warnings`
+passes. Whole-dependency clippy and three Cosmos warnings remain pre-existing.
+Receipt/source/capture/archive tests: 101 passed, plus the archive-name test.
+
+Six 13-second frame windows, Cosmos/new Cake/previous Cake/previous Cake/new
+Cake/Cosmos, finished in 250.52 seconds. All six captures, exact activation
+hashes and 54 focus samples passed; native restored. Means of window metrics:
+
+| Metric | Previous core-claims Cake | New Cake | Cosmos |
+|---|---:|---:|---:|
+| Average FPS | 1429.85 | 1454.79 | 1448.07 |
+| 1% low FPS | 952.37 | 968.98 | 957.55 |
+| 0.01% low FPS | 474.67 | 496.70 | 514.09 |
+
+**Screen only: the all-metric target is not met.** About 1.8 tail frames per
+window support 0.01%; the previous Cake windows also drifted. A separate
+native/new/previous/previous/new/native thread diagnostic passed all 30 focus
+samples, identity checks and trace consistency checks. Main-thread runnable
+wait was 0.159–0.212 ms/s new, 0.855–3.871 previous, 4.892–6.572 native.
+New main physical-core moves were 44–57/s versus previous 38–43/s: evacuation
+has a locality cost. RT exposure varied greatly (previous DXVK-submit R+
+events 829 then 16); new short resume tails cannot establish a universal
+speedup. No dual-CCD hardware result or GPU execution/input-latency measurement.
+
+Measured Cake receipt: `target/cake_receipt_builds/20260907T071639Z_cake-rt-final_5762fb7fcedf/`,
+binary SHA256 `dc23126b00f1ebd6790e1d4ceefd5844cd057f8088db668acf127dbedc94e924`.
+Cosmos receipt: `target/cake_receipt_builds/20260907T071558Z_cosmos-observable_294293d795b9/`,
+binary SHA256 `a405b67eacef53c105b6f9f7ea77d91d890294cc9c29ff5ad857fb582393e8f8`.
+Frame evidence: `scx_cake_bench/runs/kovaaks_threads_20260907/rt-cosmos-observable-screen/`;
+thread evidence: `scx_cake_bench/runs/kovaaks_rt_threads_20260907/`.
+Four superseded complete receipts were hash-verified, archived and pruned,
+pruning 9,045,392,823 logical bytes; incomplete failed receipt was correctly refused.
+Perf traces are losslessly compressed with hashes and roundtrip verification
+in each run's `trace-archive.json`; original capture metadata is preserved.
+
+Follow-up (measured in the endpoint above): movable `SCX_ENQ_REENQ` continuations use the
+existing LLC pool so an idle second CCD receives an explicit offer when the
+owner's CCD is full. Continuation vtime is preserved without sleeper credit;
+pinned tasks retain the owner queue. Extracted full-enqueue tests cover this
+route, local preference, affinity, wide/single-pool fallback and seat collisions.
+The same follow-up records seat acquisition PID and generation: a nonleader
+exec changes PID, and delayed retirement must neither leak the old reservation
+nor clear a replacement that reused its PID. The old model reproduces the leak;
+exit/resume/migration/replacement tests now pass. Per-CPU slots remain 128 bytes;
+the task-storage value grows from 4 to 16 bytes, without another lookup/map.
+Slice arithmetic is factored from two divisions into one exact quotient plus
+remainder tests. Exhaustive small inputs, floor/cap/u64 edges and 200,000 random
+cases match the mathematical policy; no new cached estimate. Endpoint results
+and their limits are recorded above.
+
+**2026-09-07 — KOVAAK'S THREAD AUDIT AND THREE-ARM SCREEN.**
+Native/Cake/Cake/native thread diagnostics completed with 20/20 focused samples,
+stable 161-thread identity and zero trace switch mismatches/unmatched IRQ exits.
+Cake reduced GameThread physical-core moves from 511–819/s to about 25/s and
+RenderThread4 from 4,164–4,312/s to 946–1,016/s. Short DXVK threads are a tradeoff:
+queue preempt-to-resume p99 was about 145 us versus native 6–15 us. These short
+traces do not establish job dependencies or frame causality; the first native
+window had substantially more GameThread wait. Retain main-thread locality.
+The subsequent candidate makes narrow home placement consult kernel whole-core
+availability, covering claimed-but-not-yet-running siblings and all SMT members.
+Release/debug, 25 Rust tests, clippy and source-extracted policy models pass.
+Two 20-second windows each, native/candidate/1.1.3/1.1.3/candidate/native, completed
+in 247.90 seconds; all six captures, activation hashes, 53 focus samples and
+native restoration passed. Means of window metrics:
+
+| Metric | Native EEVDF | Candidate | Cake 1.1.3 |
+|---|---:|---:|---:|
+| Average FPS | 1417.25 | 1453.01 | 1364.03 |
+| 1% low FPS | 921.89 | 959.79 | 886.99 |
+| 0.1% low FPS | 552.68 | 552.70 | 501.14 |
+| 0.01% low FPS | 465.89 | 495.89 | 440.22 |
+| p95 absolute frame-to-frame delta, ms | 0.2572 | 0.0885 | 0.3064 |
+
+**Positive short screen, not reliable superiority across all metrics.** The new
+0.01% metric is inverse p99.99 frame time (tested separately from 0.1%); only
+about three tail frames per window support it. No Cosmos arm, dual-CCD result,
+input-latency measurement or isolation of this latest change. Receipt binary:
+`target/cake_receipt_builds/20260907T062452Z_cake-core-claims_8a2c08096195/scx_cake`,
+SHA256 `9c18fc1f7105eba08a4e49917d9d0dff57a18c8e0e59b2c38ebed56d8f02ad6d`.
+Evidence: `scx_cake_bench/runs/kovaaks_threads_20260907/`; frame summary in its
+`frame-screen/summary.json`. An unmeasured follow-up folds logical/SMT home
+availability into one kernel-mask acquisition; final atomic admission remains.
+
+**2026-09-07 — ONE-SHOT HOT-PATH ENDPOINT (UNCOMMITTED, SCREENED).**
+The first Kovaak's comparison stopped after its nightly arm: candidate BPF load
+failed before activation. `debug(false)` had disabled libbpf warnings; the loader
+now retains WARN output. This exposed an unbounded seat index after the map
+helper. Re-masking the reloaded index fixed the verifier failure. The repaired
+placement/idle-callback candidate then attached and detached cleanly through the
+receipt runner; native restored. That five-second diagnostic is not an A/B result.
+Next endpoint factors regular SMT sibling maps into two masked shifts at startup
+(irregular maps retain the walk) and removes retake's unused live-vtime calculation
+and duplicate occupant lookup. Retake keeps SCX/vtime, pinned, stage and self
+exclusions. No new per-switch publication or predictor. A proposed tiny-burst
+slice shortcut was dropped: none of 161 sampled Kovaak's threads qualified.
+Release/debug, 25 Rust tests, clippy `-D warnings`, extracted ownership/affinity
+models, all 63 SMT shifts and retake exclusions pass; only the pre-existing
+upstream `lib.include` warning remains.
+Evidence: `target/cake-hotpath-audit/`, `target/cake-placement-checks/` and
+`scx_cake_bench/runs/kovaaks_placement_20260907/`. The failed initial 45-second
+ABBA attempt is retained. The final screen completed four 35-second windows,
+three-second settles and receipt checks in 258.95 seconds. All 53 focus samples
+matched Kovaak's; both release arms and native restoration verified. No new
+narrative report. Two-window means, candidate versus the retained nightly:
+
+| Metric | Measured nightly | Candidate | Change |
+|---|---:|---:|---:|
+| Average FPS | 1439.62 | 1458.92 | +1.34% |
+| 1% low FPS | 941.79 | 952.82 | +1.17% |
+| 0.1% low FPS | 553.95 | 557.47 | +0.64% |
+| p99 frame time | 1.06188 ms | 1.04971 ms | -1.15% |
+| p99.9 frame time | 1.80525 ms | 1.79381 ms | -0.63% |
+| p95 absolute frame-to-frame delta | 0.13125 ms | 0.11123 ms | -15.26% |
+
+**Keep as a correctness/overhead candidate, not a proven repeatable FPS win.**
+Nightly windows were 1453.50/1425.74 FPS and candidate windows 1461.07/1456.78;
+nightly itself drifted 1.91%. GPU utilization averaged 58.46/59.20%, CPU clock
+5536/5537 MHz. Max-frame means were 3.00972/3.01944 ms (+0.32%). One short
+single-LLC screen cannot prove neutrality, isolate mechanisms, or validate
+dual-CCD/wide-host performance. It did show no stall/load/restoration failure.
+Full metrics, per-window data and exact activation hashes:
+`scx_cake_bench/runs/kovaaks_placement_20260907/screen-01/summary.json`.
+Final release receipt:
+`target/cake_receipt_builds/20260907T055533Z_cake-placement-final_9547a80f1770/artifact_receipt.json`;
+binary SHA256 `03f1fa6ea315f756fb317dad1ef08acce45678bfc66e154e5cddb558efd97af9`.
+The ordinary `target/release/scx_cake` is also rebuilt; the receipt binary above
+is the measured artifact. System left on native EEVDF, game left running.
+Four superseded build transactions were hash-verified and archived through
+`cakebench artifact archive --prune`; 8,655,247,461 bytes of derivable build files
+were pruned. Measured nightly and final candidate retain complete live receipts.
+
+**USER DIRECTION 2026-09-07 — VELOCITY.** Keep roughly 80% of effort on code
+investigation/design/changes and 20% on targeted testing. No benchmark block
+longer than five minutes. Kovaak's is user-set to 800x600 for high focused FPS;
+verify GPU load rather than assume CPU limitation. The planned ten-pass campaign
+was shortened before any capture to one four-window, 45-second ABBA screen.
+Keep this file as the change/user-attempt audit trail and measured-nightly
+reference; external narrative documents need a distinct project use case.
+
+**2026-09-07 — DOCUMENTATION CONSOLIDATION.** User confirmed this file remains
+our full change/testing audit trail and measured-nightly reference. Removed
+12 redundant or superseded external notes; raw evidence and original experiment
+protocols remain. Exact originals and the inventory are archived once under
+`.scx_cake_bench/reviews/20260906/notes-before-consolidation-20260907.tar.gz`.
+The session produced 27 new documents (1,842 lines, 155,781 bytes), updated this
+file and changed 20 maintained code/test files; copied build snapshots are excluded.
+Results stay with their captures; current findings and test outcomes belong here.
+User has opened Kovaak's with MangoHud for release-candidate/nightly comparison.
+
+**Next investigations, not established game bottlenecks.**
+- `cake_occupant_live` reads task identity/vtime and a separate CPU timestamp;
+  remote switches can mix execution epochs. Wake preemption fetches the occupant
+  again; retake now uses one eligibility read and no timestamp. Evaluate one
+  coherent owner/generation snapshot with bounded rejection;
+  price its publication cost before adding per-switch state. RCU is not a
+  cross-field snapshot, and a coherent observation still cannot freeze a CPU.
+- Pinned kernel wakes bypass pinned-user wake preemption and can await the
+  occupant's yield/slice completion. Test bounded service for actual dependencies.
+- Dual-CCD notification tries local/neighbour preemption before remote idle
+  offers. Measure real cross-CCD transfer versus local interruption cost.
+- Seat retirement adds a task-storage lookup on narrow `running`; current burst
+  class or held-bit checks cannot safely replace ownership tracking.
+- Slice calculation has two divisions and a clock read per selected placement
+  path. LLVM already skips the suspected extra cadence divide after rejection.
+
+
+**EARLIER OFFLINE CHECKPOINT — HOT-PATH AUDIT (2026-09-07).**
+The loader now omits `update_idle` and disables its autoload when
+`cake_one_word` is true: kernel masks supply narrow availability and this
+callback otherwise returns immediately. Wide-host occupancy tracking remains.
+Release/debug builds, 24 Rust tests (including both real skeleton callback
+configurations) and clippy with `-D warnings` pass; the upstream manifest-key
+warning remains. At this checkpoint there was no verifier load or performance
+comparison; the later endpoint screen is recorded above.
+Audit details and preserved before-build: `target/cake-hotpath-audit/`.
+The separate FFXI capture is a debug-client/EEVDF diagnostic, not candidate
+validation: `scx_cake_bench/runs/ffxi_chain_20260907T043421Z/REPORT.md`.
+
+**EARLIER OFFLINE CHECKPOINT — PLACEMENT STATE REPAIR.**
+The user authorized all four review changes and stopped runtime data collection.
+Narrow placement now reads kernel idle/SMT masks; removed the private core mask,
+g95 retirement construct, historical home-miss backoff, idle hint and escape
+picker that abandoned successful claims. One cold ordering retains eligible
+fallbacks and uses startup capacity/preference tiers; warm home stays first.
+Seats track their owning CPU in task storage; per-CPU locks serialize owner/bit
+replacement, migration retirement and exit even after the held bit was cleared.
+This adds storage lookups/seat-transition locking and kernel-mask access costs;
+fewer source branches do not prove a performance improvement. Release/debug,
+clippy, 23 Rust tests and source-extracted affinity/ownership/claim models pass.
+Removed remaining dormant G90–G97 options and the frame histogram/poller whose
+policy consumer was removed. Unknown occupant/IRQ samples no longer count as
+positive evidence. Last-winner and handoff prediction remain: historical screens
+showed utility; removing home-miss backoff has no isolated performance result.
+At this checkpoint no verifier load, scheduler activation, benchmark or game
+capture had been run; the later endpoint screen is recorded above.
+Checks: `target/cake-placement-*.log`, `target/cake-placement-checks/`.
+The retained c7b78047e release remains the measured reference.
+
+**IMPLEMENTED — STARTUP CORE PERFORMANCE DISCOVERY (UNCOMMITTED).**
+User requested startup topology/performance discovery. `core_performance.rs`
+reads platform preferred-core ranks, raw capacity and advertised frequency,
+groups actual SMT siblings by topology, and emits capacity/preference order in
+the startup banner. `--print-topology` runs that same discovery without BPF
+attach. Complete, consistent sources only: partial/zero/conflicting data do not
+demote unknown cores; no frequency-as-throughput assumption. AMD preferred-core
+rank falls back to complete ACPI CPPC hints, otherwise equal preference. Raw
+capacity is kept separate from scx_utils' guessed/normalized capacity. This
+host reads physical core 4=5 > 3 > 1 > 2 > 0 > 6 > 7, all capacity 1024.
+Initially discovery only; now feeds the cold-ranking endpoint screened above.
+Debug/release/clippy and 18 loader tests passed; the existing upstream unused
+`lib.include` manifest warning remains. Exact final checks and readout:
+`scx_cake_bench/runs/wow_placement_20260906/core-topology-*.log`.
+
+**CORRECTION — CAPTURED DEFAULTS MATTER.**
+The captured c7b78047e release has g90/g91/g92/g93/g94/g95/g97 OFF; activation
+argv has no overrides. Source descriptions of rotated scanning (g94), census
+sink masking (g97), warm-half recovery (g93), immediate claim retirement (g95)
+and stage-first pool dispatch (g92) describe optional constructs, not enabled
+mechanisms. The fallback scan starts at CPU 0. Independent home/notification
+IRQ checks remain active. Corrected both placement reports; no observed metric
+changes. Inspect enabled paths before designing a replacement or attributing
+observations to a dormant branch.
+
+**FOLLOW-UP — PREFERRED CORES AND URGENT DSQ REVIEW.**
+Live preferred-core ranking is enabled: cores 4/5=196, 3=191, 1=186, 2=181,
+0=176, 6=171, 7=166; capacity is equal (1024). Logical CPUs 8–15 are SMT
+siblings, not inherently weaker processors. Post-capture rank/residency join:
+leader time on cores 4/5 was 63.11% native, 15.40% current, 27.66% 1.1.3.
+Ranks were read AFTER the traces and are not measured execution-speed ratios.
+Current custom picker does not consume preferred-core ranking; old 1.1.3 has
+rank arrays behind its initial kernel idle helper. Propose a cold-placement
+tie-breaker after consistent core/seat/IRQ ranking, not rank-driven migrations
+from a healthy warm home. An urgent DSQ could address queue head blocking, but
+not placement by itself: existing stage preference compares pool head versus
+own head only. Measure internal DSQ waits before adding a bounded per-LLC
+urgent lane; preserve worker/dependency/background service. No code changes or
+performance claims. Evidence and design:
+`scx_cake_bench/runs/wow_placement_20260906/REPORT.md` (retained core-rank follow-up).
+
+**PICKUP 2026-09-06 — WOW WHOLE-SYSTEM PLACEMENT AUDIT.**
+The user prioritizes the entire game pipeline and effective background service,
+not leader affinity or CPU time in isolation. Completed native/current/1.1.3/
+1.1.3/current/native observation: six 15-second windows, five-second settle,
+three-second all-CPU scheduling/IRQ trace in each. Current release c7b78047e;
+old release 1161e4828 has loader-only harness backports. All arms verified and
+native restored. Focus observational; 96 target TIDs, no newly observed TIDs;
+all decoded CPU histories consistent, no reported loss or unmatched IRQs.
+Placement parser now handles perf's exited-task header TID -1 using switch
+payload identity; regression-tested. Main wait: 12.77/3.67/5.62 ms/s for native/
+current/1.1.3; main physical-core moves 817/1234/247 per second; high-worker SMT
+overlap 5.66/18.69/15.25%; main direct IRQ overlap 0.965/0.148/0.842%. Different
+activity and other-host load; current main CPU time lower in longer windows.
+No FPS, useful-work, neutrality or causality claim. Current pool notification
+ranks idle threads before its later whole-core preference, unlike direct warm
+claims; measure unified ranking first. Source-derived seat transition construct
+also leaves a reservation on an old CPU after holder migration and exit; no live
+BPF reproduction yet. Proposed ownership repair, retained locality, sibling IRQ
+preference and recent-history classification are hypotheses, not applied policy.
+All-thread CPU/sibling/latency CSVs and source-linked review are in
+`scx_cake_bench/runs/wow_placement_20260906/REPORT.md`; three preceding execution
+rotations now have reports too. Cosmos untested: installed 1.1.6 lacks a valid
+generic receipt route; current producer/validator hard-code Cake. Artificial
+Helldivers appsim remains paused. No scheduler changes, promotion or push.
+
+**USER DIRECTIVE 2026-09-06 — THREAD A/B FOCUS IS OBSERVATIONAL.**
+The user requested removal of the focus constraint to improve testing velocity.
+`cakebench game ab --metrics threads` now continues across window switches and
+focus-detector failures. Record timestamped foreground/background/unknown focus
+samples and counts; do not stop or request focus confirmation for this route.
+Use the game PID, not a browser title containing the game name, for attribution.
+Process identity, receipt/runtime verification, scheduler-state checks and native
+restoration remain enforced. Four focused regression tests pass, including a
+capture completing across a focus switch and cleanup after process identity
+failure. Existing interrupted results remain invalid under their original
+protocol; do not relabel them. Historical frame-capture protocols are separate.
+Tooling evidence: `scx_cake_bench/runs/thread_focus_observe_20260906/`.
+
+**PICKUP 2026-09-06 — QUIETER WOW REPEAT.**
+Same frozen release candidate, fresh ABBA/BAAB protocol. Seven 45-second windows
+completed; browser focus interrupted the eighth, which was retained invalid.
+Native restored, all Cake exits normal. Compare six windows in three complete
+pairs; keep seventh native unpaired. Other-host CPU means were 43.2% native and
+59.8% Cake, much lower than the earlier compiler spike. Main wait averaged
+9.05 vs 7.79 ms/s (-13.9% Cake); wait/runtime -11.2%. Matching retained 21/27
+intervals per arm: main wait changes -33.6%, +1.0%, -2.6%, with most aggregate
+gain from the first pair. Large main-wait regression did not reproduce, but
+three pairs do not establish a gaming gain or neutrality. High-worker
+wait/runtime increased 16.4% (1.861% to 2.168%). Main migrations remained 3.0x
+native, also about 3.0x after context-switch normalization. Worker wait and
+migration costs remain open; no frame/cache evidence or attribution to the
+individual topology fixes. No source change, promotion or push. Evidence:
+`scx_cake_bench/runs/wow_raid_quieter_20260906/REPORT.md`. Keep prior noisy
+rotations separate; artificial appsim testing remains paused.
+
+**PICKUP 2026-09-06 — WOW LOAD-ATTRIBUTED FOLLOW-UP.**
+Seven additional 45-second windows completed with the same release candidate;
+focus changed during the eighth arm's settle, so that measurement was aborted
+and native restored. Six windows form three complete pairs; the seventh native
+window is retained but excluded from comparison means. All exits were normal.
+A five-second native interval caught `rustc` using 11.2 cores; main wait reached
+259 ms/s. Complete-pair mean wait reversed to 26.52 ms/s native versus 10.05 Cake,
+but the compiler spike dominates: this is not a Cake win. Predeclared matching
+within 25 percentage points of both other-host and game CPU retained only 8/27
+intervals per arm. Matched wait changes were +26.9%, -5.2%, -3.5%; normalized
+wait/runtime +33.1%, -0.9%, +2.7%. No consistent wait regression or neutrality
+established. Main migrations remained 2.75x native overall and 2.28–2.94x in
+matched intervals; normalization by context switches preserves the difference.
+Background load clearly confounds wait numbers; migration behavior is the more
+repeatable candidate/native difference. Its frame/cache cost and whether the
+topology fixes introduced it remain unmeasured. No frame data, promotion or push.
+Evidence: `scx_cake_bench/runs/wow_raid_loadcheck_20260906/REPORT.md` and
+`rotation-03/analysis.json`. Earlier failed focus attempts and all invalid rows
+retained. Artificial appsim testing remains paused for the raid.
+
+**PICKUP 2026-09-06 — WOW RAID THREAD A/B, DIAGNOSTIC CONCERN.**
+At the user's request, ran native/Cake/Cake/native while they raided in WoW:
+four 45-second windows, 10-second settle, final release candidate `c7b78047e`,
+same receipt as the topology endpoint below. Both Cake activations verified;
+all four windows retained process/focus identity and restored native. No detected
+watchdog stalls; Cake logs show normal userspace unregister. Native is active.
+Mean main-thread runqueue wait: native 12.98 ms/s, Cake 24.60 ms/s (+89.5%).
+Main-thread migrations: 2,618/s versus 7,376/s. Wait increased in both opposite
+order pairs, including normalized wait/runtime. Other CPU load was unequal
+(139.0% native, 179.6% Cake), and raid activity changed. This is a concern to
+investigate, not proof of a regression or a gaming win. No FPS/frametime capture
+or comparison against baseline Cake; no attribution to individual repairs.
+`scx_cake_bench/runs/wow_raid_ab_20260906/REPORT.md` has raw-arm links, activation
+proof, load context and conclusions. Prior non-frame workload data lives in
+`runs/wow_raid_shape_20260906/`. Maintained game A/B now supports explicit-receipt
+`--metrics threads` for no-MangoHud observation. Helldivers appsim remains paused
+for the raid; no promotion or push.
+
+**PICKUP 2026-09-06 — TOPOLOGY REPAIRS, APPSIM PAUSED FOR USER'S WOW RAID.**
+Current code candidate `c7b78047e`, baseline `b7529e356`. Implemented cached
+seat/sink eligibility, populated steal-matrix bounds, SMT-aware seat preference,
+empty-pool mark retirement, explicit remote pool offers with immediate service,
+and outlier frontier publication that retains weighted task accounting.
+The simulated split path also exposed a verifier rejection in physical LLC
+indexing: compiler barriers preserve individual bounds after LLVM combines the
+checks. Both split controls needed this repair; it is not an explanation of
+the reported one-time field freeze.
+
+A follow-up ordering audit found that conditional pool-mark publication could
+miss a racing clear while the producer's queue write remained buffered. Atomic
+publication now orders enqueue visibility against retirement. Publication and
+local retirement are gated out when there are no foreign-pool readers (one LLC
+or g89 off). Multi-LLC pool insertion pays an atomic publication; its cost on
+physical dual-CCD hardware remains unmeasured. The mark-store counter still
+counts zero-to-one transitions, not every atomic publication.
+
+Offline gates pass: release/debug, clippy, 12 loader tests, source-extracted
+placement/affinity/frontier/steal models, and a two-thread TSO model reproducing
+the original lost-mark case and excluding it with atomic publication. The TSO
+model is not a live kernel race reproduction or an all-architecture proof.
+Only the pre-existing upstream unused `lib.include` manifest warning remains.
+
+The first endpoint (`ac3cae09b`, arm 7) completed 10 baseline and 10 candidate
+45-second Helldivers mission appsim captures. Mean candidate changes: p99
+**+2.83%**, p99.9 **+7.79%**, synthetic 0.1% low **-8.76%**. All were noisy;
+paired block effects changed direction and intervals were wide. No neutrality
+or improvement was established. Retained under
+`scx_cake_bench/runs/topology_helldivers_fixed_20260906/`; 57 captures completed
+before the publication correction, including incomplete native screening.
+
+The corrected endpoint (arm 8) has passed normal and simulated-split live
+activation. Its fresh comparison is **paused at 5 captures per arm** because
+the user started a World of Warcraft raid. It looks faster in aggregate but
+received substantially less external load, so remains inconclusive. Twelve of
+42 planned captures completed; 30 remain: ten combined captures, adjacent 7/8,
+native, corrected split controls, and isolated frontier 5/6 with nice19 and
+SCHED_IDLE loads. Preserve all prior rows; do not pool different rotations.
+No detected watchdog stalls in completed captures. Native scheduling restored.
+No real-game capture or physical dual-CCD performance result exists.
+
+Canonical pending run: `scx_cake_bench/runs/topology_helldivers_atomic_20260906/`.
+`PAUSED.json` has exact counts, means and load; `plan.json` binds release
+receipts and the five-block combined order. After the raid and resumption,
+remove `PAUSE_AFTER_CAPTURE` and run its `run.py` with output appended to the
+existing log. It validates and adopts completed captures before continuing.
+Do not run `extend.py` from the preceding rotation. Final code receipt:
+`target/cake_receipt_builds/20260906T235006Z_topology-8-atomic-publication_f9b5ac2a8a62/artifact_receipt.json`.
+Binary `871803484ed06e9967f498e10362af0213a1aeb59a61b7983517ddbfbe5d8d2f`;
+BPF `86e549450dc930140c9327696c0ffa61b4170033fad0c6e1f64b0a8224a324b6`.
+Experiment and earlier audit: `.scx_cake_bench/reviews/20260906/topology-paths/`.
+Changes remain under test; no performance promotion or push.
+
+**PICKUP 2026-09-06 — APPSIM REVIEW SCREEN COMPLETE, INCONCLUSIVE.**
+Compared `fc1b5e6fb` (preceding review fixes) against `b7529e356` (follow-up)
+using current-boot v5 receipts and the maintained `cakebench app-sim run
+--scheduler cake --receipt ...` activation route. Default toggles, no verbose
+or probe instrumentation. Host: Ryzen 7 9800X3D, 8 cores / 16 threads, one LLC,
+kernel 7.2.2-1-cachyos. The fixed Helldivers mission simulation ran 45 s per
+capture, ABBA + BAAB, four captures per arm. Repeated the entire rotation after
+the user reported a quieter host; retained both rotations separately.
+
+Fresh rotation means, baseline -> candidate: p99 **0.6332 -> 0.6251 ms
+(-1.27%)**, p99.9 **0.7737 -> 0.7530 ms (-2.68%)**, simulated 1% low
+**1396.7 -> 1447.8 (+3.66%)**, simulated 0.1% low **839.6 -> 946.6
+(+12.74%)**, chain p99 **611.72 -> 602.88 us (-1.44%)**. Average synthetic
+rate stayed at the configured ~2079 Hz; this is not real-game FPS.
+
+No performance verdict: both primary changes are below the predeclared 5%
+practical threshold. All fresh captures are `noise_class=noisy`, with external
+CPU averaging **73.39% A / 144.99% B** (100% = one core); compiler and browser
+work continued. The two blocks' p99.9 effects were **+19.35% / -20.00%** and
+0.1% low effects **-12.80% / +38.77%**. The first, more heavily contaminated
+rotation went the opposite way in aggregate (p99 +11.87%, p99.9 +38.43%);
+it is not pooled with the repeat. No detected stalls/watchdog exits across
+the 16 comparison captures; every arm passed binary/BPF/runtime identity and
+ended with user-space unregister. Native scheduling restored. Neither native
+EEVDF performance, BPF callback self-cost, dual-CCD behavior nor live games was
+tested here. Keep as a correctness-tested candidate, not a measured promotion.
+
+Raw frames, per-arm noise, source plan, exact identities, retained activation
+proofs and report: `scx_cake_bench/runs/appsim_review_quiet_20260906/REPORT.md`.
+First rotation: `runs/appsim_review_20260906/`. Receipt A:
+`target/cake_receipt_builds/20260906T202656Z_review-20260906_412302cfcf31/artifact_receipt.json`;
+receipt B: `target/cake_receipt_builds/20260906T204838Z_review-completion-appsim_2345cb6a503b/artifact_receipt.json`.
+The appsim launcher initially attributed a retained binary to current checkout
+HEAD; corrected the shared runner-manifest builder to use the validated
+receipt's commit, added a regression test (three focused tests pass), and
+restarted the complete rotation. The initial metadata pilot is retained apart.
+
+**PICKUP 2026-09-06 — REVIEW COMPLETION, PERFORMANCE NOT YET MEASURED.**
+`fc1b5e6fb` contains the preceding review fixes: affinity-masked seat decline
+and pool forwarding, tracepoint auto-attach disabled and exits attached first,
+all-CPU LLC enumeration, possible-CPU span, offline sink filtering, bounded
+wake-hop probe, and corrected storage walk. Its reported live checks belong
+to that commit; they do not establish acceptance of the follow-up candidate.
+
+The follow-up closes partial IRQ-pair cleanup and installs the hooks before
+struct_ops activation; separates physical LLC identity from collapsed pool
+indices (including CPUs above 63); re-peeks a pool head after failed moves
+before forwarding; and prefers a clean compatible forwarding target. It gates
+both frame-clock observation and polling on **g91 or verbose**, defers groove
+storage and stage classification until after serial placement, and uses one
+home decision/claim for probe and normal execution. Probe no longer gets an
+extra idle claim; its stage SYNC refusal counter no longer mislabels a home
+that production accepts. Stage classification remains division-free with an
+explicit overflow guard. Storage diagnostic checks full-cycle value equality,
+reports bounded-cache misses, and makes no in-kernel helper-cost claim.
+
+Offline checks: 12 loader tests; current-source C regressions covering 210
+mixed-affinity seat configurations plus a concurrent head replacement, no
+compatible idle target, and starvation service; 512 home-gate combinations
+with identical probe-off/on choices; all 16,384 CPU pairs in a synthetic
+128-CPU topology; stage arithmetic overflow boundaries. Storage coverage/value
+checks pass at 256/8192/131072 tasks with address/undefined-behavior sanitizers.
+Release, debug and clippy pass; only the existing upstream
+`scx_rustland_core/Cargo.toml` unused `lib.include` manifest warning remains.
+
+Build attribution only, baseline `fc1b5e6fb` -> candidate: unpruned static
+select_cpu stack stores/loads **67/93 -> 50/62**, dispatch_search **41/39 ->
+34/38**, running **10/5 -> 10/6**; total disassembled instruction rows
+**8425 -> 8109**. These include diagnostic/toggle paths and are not executed
+instruction counts, verifier acceptance, or performance results. Candidate
+binary `65ba4f5013866fa9cf8d6f6e7c25891a46f7382ebba39a7830e1f69acd3bafd8`,
+linked BPF `536130541302bb206ed76baae9e5f8b621b95153ba74e4c011b1c9bcb0826622`.
+Baseline source/binary/object, experiment, logs and candidate are retained at
+`.scx_cake_bench/candidates/review-20260906/`. No follow-up activation,
+appsim, native-pair or game score yet; no policy toggle defaults changed.
+
+Open policy investigations (confirmed source mechanisms; outcomes unmeasured):
+
+| mechanism | evidence and next experiment |
+|---|---|
+| Weighted frontier drag | `stopping` charges nice +19/SCHED_IDLE at approximately 68.27/341.33 times runtime; a subsequent `running` can publish that task's high vtime globally. New wake admission is clamped against that frontier and can then fail the vtime preemption gate on normal-weight CPUs. This is not an unconditional machine-wide preemption disable: occupant vtime, admission depth and other gates matter. Compare admission-clock changes while retaining weighted service/fairness; measure low-priority hog co-run, critical wake tails, and background share. |
+| Idle foreign LLC has no producer notification | Multi-LLC `cake_pick_idle_clean` stops at the local hint; rescue runs from a foreign CPU's dispatch and only consumes an eligible old/starved head. A fully idle die has no timer supplied by the starvation predicate. Test one affinity-compatible foreign notification on an explicit spill condition **paired with matching rescue eligibility**; a kick alone may wake a CPU that still refuses the fresh head. Guard cache locality and frame tails as well as throughput. |
+| A seat reserves one logical CPU | `cake_claim_warm` removes seat bits, not their sibling bits, from `cake_core_free`; the holder's home later checks sibling occupancy. Test sibling-aware whole-core preference with fallbacks that preserve runnable-work progress; do not reserve a whole core unconditionally. Include g93 on/off and worker fan-out. |
+| Sink confidence and sampling | An untrusted split returns before changing publication/streaks/backoff; repeated untrusted windows can retain stale sinks indefinitely. At a 16-tick interval two trusted hot windows can take about 32 s. Test confidence expiry and returning to short sampling on uncertainty/first changed candidate, separating legitimate persistent sinks from stale ones. Frame-clock syscalls are removed when unused in this candidate; sink monitoring still runs. |
+
+The maintained `cakebench app-sim run --scheduler cake --receipt ...` route
+supports receipt-verified activation and cleanup; use it for diagnostic appsim
+rotations (completed above). It is separate from sealed `native-pair` scores.
+Native workloads and repeated Helldivers (or agreed other game) ABBA remain
+the next validation steps.
+
+**PICKUP 2026-09-06 — REBASE, §G96 OUT, A FREEZE REPORT.** Nightly rebased
+onto upstream/main `38872eded` (PR #3786 merged the §G82 state, subtree
+identical; pre-rebase tip in `backup/nightly-pre-rebase-20260906`). §G96
+removed from the tree (lost on its own). §G90-§G97 stay under test, default
+off, one `--toggle gNN=1` each; the g93+g94+g95+g97 stack is the candidate
+default, held for a game read. Field: a tester reports a complete freeze on
+first run of the pushed nightly `bff058461` -- g90-g97 were all off in that
+binary, so the cause is in the default-on set (g85 g86 g87 g89) or §G88 (no
+toggle). Triage order for the tester: `--toggle g89=0` (host-LLC keyed,
+newest), then g86=0, g85=0, g87=0; all four off is the §G82 state upstream
+ships. Wanted from the report: CPU/CCD count, kernel, binary hash, any
+watchdog line, dmesg. Origin fork force-pushed 2026-09-06 with this state:
+defaults unchanged from `bff058461`, g96 gone. Startup trimmed: stock prints
+version, host, attached, and overrides only when given; slice, kernel paths, the
+full toggle line, sinks, frame clock and exit events sit under `-v`; `--help`
+lists every toggle with its default from one table checked against rodata.
+
+**Appsim 2026-09-06, every toggle on (g90-g95, g97) vs off, placebench
+mirrored, 2 slots per arm (`runs/llc_20260904/placebench_20260906_142859`,
+run binary `4caa6c92`, arm `g90-97`):** ok 71.2 / 69.0 vs 64.7 / 66.4 %;
+miss 8.9 / 12.7 vs 17.1 / 15.5 %; queued-while-idle 14,609 / 17,690 vs
+42,453 / 62,460; p99.9 0.664 / 0.662 vs 0.655 / 0.743; 1% low 1478 / 1409
+vs 1548 / 1420; 0.1% low 962 / 733 vs 1326 / 785. Placement wins as the
+g93-g97 stack did; the 0.1% tail is not better and leans worse (n=2, not a
+verdict). Today's off arm sits above the 2026-09-04 off arm (ok 65.6 vs
+58.4-60.4 %), so compare inside one rotation only. Loader now prints a
+second start line, `toggle  changed from default: ...`, naming each override.
+
+**PICKUP 2026-09-04 late night — CODE AUDIT + PLACEMENT AUDIT.** Machine on
+EEVDF. Tree: cleanup committed (below); §G90-§G92 under test, off.
+
+**Redundancy audit, verified on the paths before touching anything.** Real:
+select_cpu computed the burst three times per wake (retake gate, stage probe,
+home gate); a pool wake computed its slice at the insert and again in
+`cake_wake_preempt` (§G87) and for the producer key; stopping computed the
+burst twice; every pool insert read the die twice; three pool insert sites
+were the same six lines. Not real: the five `cake_task_slice` calls inside
+select_cpu sit on exclusive return paths (one per wake). Fixed: one `stage`
+bool per function, the slice passed insert -> notify -> preempt, one
+`cake_pool_insert()`, `cake_cross_llc` (was `cake_xllc`, it gates the steal
+ring), probe cross-die counts in a `__noinline cake_probe_x`, and the loader
+warns when its census name table and the map disagree (two off-by-one build
+breaks today, a silent zero at runtime). The spill claim did NOT hold: probe
+code out of the hot frames moved select_cpu 60/71 -> 58/74, total 328/205 ->
+326/210; the frames are big for their own reasons. Decisions byte-identical.
+
+**Scheduler self-cost, probe off, appsim HD2 mission window, this build vs
+the 2026-09-03 base:** select_cpu 107 -> 125 ns at 151k/s; enqueue 243 -> 287
+ns but reached 62k -> 11k/s (direct claims 58 -> 85%); dispatch 230 -> 87 ns
+at 158k/s; running 41 -> 39; stopping 17 -> 13; update_idle 19 -> 19 at
+287k/s. **Sum 95.8 -> 50.5 ms/s of CPU (-47%)** with appsim p99 0.627 ->
+0.620, p99.9 0.680 -> 0.649, 1% low 1513 -> 1577. The day's stack halved the
+BPF cost by taking the pool and its dispatch churn out of the common path.
+
+**Placement audit (`runs/xsched_20260904/placeaudit.py`, 1.5M scored wakes
+per arm on the HD2 traces).** Rank order, measured (§G38): 0 warm previous
+CPU with its sibling idle, 1 a whole free core, 2 warm previous CPU with the
+sibling busy, 3 an idle thread beside a busy one, 4 a busy CPU while
+something was idle, 5 nothing idle. "ok" took the best available;
+"contended" = the best CPU was claimed by someone else within 30 us.
+
+| role | cake g86 ok / contended / miss % | cosmos | native | cake's top misses (best->chosen: n, p99 us) |
+|---|---|---|---|---|
+| `ad pool !LP wor` (641k) | 49.5 / 30.7 / 19.8 | 61.0 / 24.5 / 14.4 | 70.6 / 24.1 / 5.3 | 2->3 65,306 (2); 3->4 40,710 (202); 0->1 11,115 (2); sink 81,372 |
+| `thread pool wor` (557k) | 76.0 / 16.3 / 7.7 | 70.4 / 16.0 / 13.5 | 50.8 / 26.2 / 23.0 | 0->1 13,473 (3); 3->4 11,472 (233) |
+| nvidia kthreads (52k) | 88.8 / 1.5 / 9.7 | 94.2 / 1.5 / 4.3 | 74.5 / 1.1 / 24.3 | 3->4 3,006 (231) |
+| `vkd3d_fence` (44k) | 89.7 / 2.3 / 8.0 | 93.3 / 1.8 / 4.9 | 75.1 / 2.5 / 22.4 | 3->4 1,936 (262) |
+| `main` (16k) | 78.5 / 1.0 / 20.5 | 81.2 / 1.0 / 17.8 | 73.8 / 1.6 / 24.5 | 3->4 1,330 (57); 1->4 1,079 (4, the retake, by design) |
+
+Cake's decision misses, ranked: (1) 3->4, queued while an idle thread
+existed, ~62k across roles, the only one with latency (p99 200-260 us),
+cosmos near zero: a pool wake whose claim failed, served by a busy CPU's
+dispatch; (2) 2->3, warm half core declined for a cold half core, ~72k: the
+§G38 veto refuses the home when its sibling is busy and the walk then takes
+any idle thread, cache loss with no gain; (3) sink landings while a clean
+CPU was idle, 112k: the census walks pick the lowest bit and never skip
+sinks, every scheduler does it here (cosmos 148k, native 115k); (4) 0->1,
+warm whole core declined for another whole core, ~27k: the groove gate stops
+asking a home after 8 misses even when the word shows it idle. Contended is
+higher for cake (30.7 vs 24.5 / 24.1): every waker reads the same lowest bit.
+Native's own biggest miss is 0->1 at 115k on the second worker pool: it leaves
+a warm, fully idle core more than cake does.
+
+**Built 2026-09-04 night, under test, default off; g96 removed 2026-09-06 (`runs/llc_20260904/
+placebench.py`: a sched trace of appsim per arm, audited by placeaudit.py;
+result appended when the mirrored run finishes):**
+
+| toggle | construct |
+|---|---|
+| g93 | warm home with a busy sibling is taken before a cold idle thread (`g93_home`); the groove gate asks a home the census word shows idle regardless of the miss count (`g93_ask`) |
+| g94 | every census walk starts at the task's previous CPU and wraps (`cake_pick_bit`), instead of bit 0: breaks the lowest-bit herd, keeps locality |
+| g95 | a won claim clears cake's idle-thread bit and the core's free bits at once (`cake_claim_retire`, two relaxed atomics per claim), so the next waker never reads a CPU already spoken for; update_idle clears again, idempotently |
+| g96 | HINT_SLOTS (4) going-idle mailboxes per die: dispatch publishes into slot cpu & 3, a wakee claims from the slot of its previous CPU first (`g96_slot`) |
+| g97 | census walks prefer non-sink bits (`cake_sink_word`, loader-published beside `cpu_irq_hot`), a sink only when nothing else is idle (`g97_skip`) |
+
+**Placement benchmark result (appsim HD2 mission, unpinned, 20 s sched trace
+per slot audited by placeaudit.py, ~1.47M scored wakes per slot):**
+
+| arm (2 slots, mirrored) | ok % | contended % | miss % | queued while idle | p99 / p99.9 ms | 1% / 0.1% low |
+|---|---|---|---|---|---|---|
+| off | 58.4 | 17.0 | 24.6 | 89,891 | 0.623 / 0.655 | 1527 / 1244 |
+| g93 | 63.5 | 18.6 | 17.8 | 68,305 | 0.623 / 0.651 | 1572 / 1515 |
+| g94 | 64.4 | 18.3 | 17.3 | 60,610 | 0.621 / 0.650 | 1575 / 1520 |
+| g95 | 61.7 | 18.6 | 19.7 | 38,124 | 0.621 / 0.649 | 1576 / 1521 |
+| g96 | 55.8 | 15.7 | 28.4 | 100,908 | 0.624 / 0.661 | 1559 / 1456 |
+| g97 | 59.4 | 16.9 | 23.7 | 83,734 | 0.622 / 0.651 | 1573 / 1518 |
+| all five | 65.8 | 20.3 | 13.9 | 34,510 | 0.620 / 0.653 | 1572 / 1480 |
+
+Confirm, 4 slots each, mirrored: off ok 60.4% / contended 17.0% / miss
+22.6% / queued-while-idle 74923 / p99 0.622 / p99.9 0.651 / 1% low 1568 /
+0.1% low 1568; **stack g93+g94+g95+g97: ok 66.6% / 19.2% / 14.2% /
+23124 / 0.620 / 0.650 / 1577 / 1577.** Every stack slot beat every off slot
+on the queued-while-idle count (21,030-23,718 vs 75,623-88,596). g96 loses on
+its own and leaves the tree. g97 was inert on appsim: cake's live sink set
+without a game is CPU 9 only; its number is a game read (under HD2 the set is
+[9, 13]). g95 shifts claims toward higher-numbered CPUs as the low bits retire
+first, which is the case g97 exists for. Contended rises with every winner
+(17.0 -> 18.3-19.2): more claims land on real idle CPUs and race.
+
+Owed: the same audit on an HD2 trace, stack on vs off, then the frame
+rotation; the pinned/saturated read; then hardwire the keeps.
+
+Next construct to discuss: placement order (§G93): home with a busy sibling
+before a cold idle thread; sinks masked out of the census walks with
+fallback; the groove gate asks an idle home regardless of miss count; the
+walk starts at the previous CPU and wraps. Then the 3->4 root cause (kick
+lost vs no kick) with a probe.
+
+**PICKUP 2026-09-04 night — SATURATION CONSTRUCTS §G90-§G92, under test, default
+off.** Field (9950X3D, Darktide Rolling Steel, single runs): lavd 1.1.2 211.50 /
+155.18 / 63.30 (97th / avg / 1% low) vs cake `9e252f622` 201.82 / 149.25 / 60.37
+(crate 1.1.3: 178.91 / 128.73 / 53.76). A uniform 4-5% gap on all three columns
+with the game pinned to one 8-core die = throughput under a saturated die, the
+regime where the seat rules keep no queue empty. Three class-relative answers,
+each behind a toggle:
+
+| toggle | construct | saturated appsim here (HD2 mission spec pinned to 4 cores, 20 s slots, mirrored, 2/arm) |
+|---|---|---|
+| g92 | a stage at the pool head is served ahead of a non-stage own head without the one-slice margin (`pool_stage_first`) | 0.672 / 0.823 / 1347 vs off 0.771 / 0.927 / 1191 (p99 / p99.9 / 1% low) in its rotation |
+| g91 | stage slice: two bursts capped at one voted frame, never above `STAGE_SLICE_MAX_NS` (6 ms), instead of half the clamped period; only for a stage whose raw period is within 2 frames (`stage_slice`) | 0.728 / 0.870 / 1245 vs the same off |
+| g90 | producer rank: wakes issued per burst counted in the run slot (`woke`), folded into the groove at stopping for stage class (`fanout8` EWMA), `FANOUT_MIN` 4; a producer's pool key sits one slice deeper (`producer_ins`) and its wake preempt skips the protect window down to the handoff floor (`producer_preempt`) | 0.683 / 0.784 / 1373 vs off 0.661 / 0.748 / 1428 |
+| all three | | 0.679 / 0.803 / 1334 vs off 0.653 / 0.735 / 1446 |
+
+**Read: unresolved at n=2.** The off arm alone spans p99 0.636-0.771 and 1% low
+1191-1503 across rotations, wider than any toggle's effect; the stack read
+negative and g92 alone positive in different rotations. The simulated frame is
+a fork-join, so ranking a stage above its own workers can delay the join --
+a real caveat for g90/g91, not yet a verdict. Needs 6/arm (~10 min, a go) or
+the game: HD2 at a CPU-bound preset here, Darktide there with each toggle alone.
+Spills: wake_preempt 18/10, task_slice 3/0, stopping 11/9; TOTAL 328/205.
+Rig: `runs/llc_20260904/satrot.py` (mirrored appsim rotation, `CPUS`, `ROUNDS`),
+`hd2-mission-20s.conf`.
+
+**Dual-CCD extension of the same idea (not built):** the producer is the anchor.
+A worker woken by a producer on the other die should claim on the producer's
+die (the waker's LLC, known in select_cpu), not its own stale home; and a
+producer's first seat should land on the largest-L3 die. Both are `cpu_llc_word`
+reads at sites that exist; both need the fake split for coverage and a 9950X3D
+for the number.
+
+**PICKUP 2026-09-04 late — DUAL-CCD / LLC AWARENESS. §G88 confirmed in the
+field (9950X3D, DOOM TDA Uprising, single runs each on `f28fc5d21`): g85
+204.60 / 167.64 / 112.63 (97th / avg / 1% low), g86 206.69 / 168.47 / 108.10,
+both 202.61 / 165.52 / 111.54, g87=1 207.45 / 170.16 / 114.66; lavd 1.1.2 on
+the same box 206.57 / 169.50 / 117.54. The 47 fps 1% low of the 9-4 morning
+build is gone. Tester's setup: game pinned to die 0 (96 MB L3, cores 0-7 =
+PUs 0-7 and 16-23), everything else on die 1 (32 MB, cores 8-15), system in
+frequency mode. §G87 approved by the maintainer on that chart: default ON,
+`--toggle g87=0` is the off-switch.**
+
+**§G93 (under test, probe half only; design council 2026-09-18): the
+RT-displacement release gate.** Construct: `ops.cpu_release` re-enqueues a
+displaced SCX task only when the displacer's own mean burst
+(`sum_exec_runtime/nvcsw`, no identity) is at least the displaced task's
+burst >> `CAKE_RELEASE_REFILL_SHIFT`; otherwise the task stays at its local
+DSQ head (a task core re-enqueued for IMMED is re-inserted there without
+IMMED at enqueue; a slice-exhausted one keeps its owner queue with the qmark
+hidden until `ops.cpu_acquire`). Hypothesis: for sub-refill holds (pipewire
+data loops, 5–10 µs) a warm wait beats a cold migration (§G38 +59 %); the live
+dungeon capture showed the main thread displaced ~249/s, 88 % hopping cold.
+Kernel facts (ext.c, tree 7.2): release fires at the end of
+`put_prev_task_scx` after `stopping`; a preempted task with slice > 0 sits at
+the local head unless IMMED (then core itself re-enqueues it, reason
+PREEMPTED, before release); slice == 0 goes through `ops.enqueue` as a plain
+continuation; a local DSQ is rq-private, so a stay is invisible to the steal
+ring for the hold; the displaced task cannot be peeked from release;
+`cpu_release/acquire` carry a deprecation warning upstream in favour of
+`SCX_ENQ_IMMED` (alternative (ii), a per-CPU hold average from a tracepoint,
+held). Gate: trace T1–T5 (`bench/rt_displace.py`): keep home for a displacer
+band iff CI95_low(refill) + lat_hop > p90(hold), refill from the wake-side
+warm-vs-cold split (today's displacements almost never stay) with §G38 as
+the prior; then a one-binary `--toggle release=0|1` ABBA on a CPU-paced
+scene, ≥ 4 runs/arm, screened on severe-frame ratio, scored on 0.1 % low and
+p99.9−median, layers 1a/1b flat or better, bpfstats level. Shipped now
+(probe half, `4e930d1b3`+): `stopping(runnable)` stores the outgoing burst
+inputs, slice and IMMED bit in the run slot; `cpu_release` counts path × band
+× reason into `cake_release_census`/`cake_release_reason` and stamps the
+release; `ops.cpu_acquire` (registered under probe only) histograms the hold
+into `cake_acquire_hist`; the loader prints all three at exit. Costs, probe
+off: none (rodata-folded; the acquire op is not registered). Constants:
+`CAKE_RELEASE_BAND_SHIFT` 10 (ns → ~µs), `CAKE_RELEASE_BANDS` 8 (1 µs ..
+≥ 128 µs, one band per RT population), `CAKE_RELEASE_PATHS` 3,
+`CAKE_RELEASE_REASONS` 4; `CAKE_RELEASE_REFILL_SHIFT` lands with the gate
+from the trace's bound sweep (§S.5 precedent: measured, not chosen). Risks
+recorded: a long RR hold is unbounded by cake (no tick on an RT-held CPU),
+so eligibility per band needs the hold p90 first; the hidden-mark arm parks
+work for the hold's length; the upstream direction away from `cpu_release`.
+
+**§G89 (shipped, default on, `--toggle g89=0` = one pool, LLC-blind): die-
+local pool and picks.** One wake pool per LLC (`LLC_WAKE_DSQ_BASE + llc`,
+`MAX_LLCS` 16, `cpu_llc_id` + `nr_llcs` in rodata; more LLCs than pools
+collapses to one, logged); `wake_served`, `wake_mark` and the going-idle
+hint per LLC; on a multi-LLC host `pick_idle_clean` never leaves the die
+(census walk, then an idle sink on the die, then the die's hint, then
+nothing -- the kernel's LLC-blind scan is not asked); the steal ring crosses
+a die only for a head a whole `SLICE_NS` behind the frontier, stage or
+worker; `cake_llc_pool_rescue` takes another die's pool head only when it
+is a slice behind or its pool hit the 24 ms wall; the neighbour probe walks
+the loader's steal order (same die first) instead of cpu+1. One-LLC hosts
+are unchanged by construction.
+
+**Scaffold: `--toggle llcsplit=1`** (loader-only) presents this 9800X3D to
+the BPF side as two dies (cores 0-3 + siblings 8-11, cores 4-7 + 12-15):
+every routing decision runs as on a 9950X3D; the fabric penalty is not
+emulated. Probe census gained per-site cross-die counters (`x_*`).
+`runs/llc_20260904/`, appsim HD2 mission, 45 s + 15 s idle, per 12-arm
+census (of ~7.05M selects):
+
+| counter | flat | split, g89=0 | split, g89=1 |
+|---|---|---|---|
+| x_claim (claim_warm) | 0 | 0 | 0 |
+| x_hint / hint claims | 0 / 5.6k | 169,011 / 177,396 | 0 / 80 |
+| x_notify_kick / kicks | 0 | 4,407 / 5,967 | 0 / 663 |
+| x_kt_local / kthread local | 0 | 1,420 / 46,589 | 0 / 18,481 |
+| x_probe_fired / fires | 0 | 110 / 235 | 0 / 311 |
+| x_pool_served / pool served | 0 / 630k | 470,744 / 735,915 | 0 / 104,794 |
+| x_steal_moved / attempts | 0 / 1.04M | 883,220 / 1.63M | 927 / 352,914 (b run) |
+| holds >300 us global | 1,105 | 719 | 89 |
+| appsim p99 / p99.9 / 1% low / 0.1% low | 0.622 / 0.654 / 1559 / 1407 (89b) | 0.624 / 0.664 / 1485 / 996 | 0.621 / 0.654 / 1559 / 1385; b: 0.623 / 0.660 / 1538 / 1274 |
+
+Flat g89=0 vs g89=1: 0.622 / 0.653 / 1566 / 1451 vs 0.622 / 0.654 / 1559 /
+1407 -- identical inside appsim noise (one flat89 run took a 1.020 p99.9 slot).
+Spills: select_cpu 61/72, enqueue 18/22, dispatch_search 29/34, ring_steal
+17/9, pool_rescue 6/3; TOTAL 307/191 (was 269/131).
+
+**FIELD 2026-09-04, `9e252f622`, same tester and setup, single runs:** g89=1
+205.27 / 169.11 / 117.34 (97th / avg / 1% low) vs g89=0 204.47 / 168.59 /
+110.94: +6.4 fps on 1% low from the die-local pool, level with lavd 1.1.2
+on that box (206.57 / 169.50 / 117.54). The 9-4 morning build read 47.14.
+
+Loader (2026-09-04): an option cake does not have (`--profile default`,
+`--mode=gaming`, a stray token) is dropped with a WARN line and the
+scheduler starts with defaults; an unknown or malformed `--toggle` is
+ignored the same way. Real errors on real options keep clap's behaviour.
+
+Owed: (1) a second pair of DOOM runs to firm the 1% low; (2) the V-cache preference for stages (first seat on the largest-L3
+die when it has a free core) -- the loader knows every LLC's cache size,
+nothing uses it for placement yet; (3) the handoff floor, slot stride and
+probe depth audit items stand; (4) the real cross-CCX counter on a 9950X3D:
+`perf stat -e ls_any_fills_from_sys.far_cache,l2_fill_rsp_src.far_cache -p
+<game>` per arm.
+
+**FIELD REGRESSION 2026-09-04 evening — DOOM: The Dark Ages (Uprising), 9950X3D
+(two LLCs), nightly `6c828c1cb` vs lavd 1.1.2: 97th 213.09 vs 206.57, avg
+128.59 vs 169.50, 1% low 47.14 vs 117.54 (avg of 2). The 09-02 nightly on the
+same box read avg 170.64 / 1% low 112.03. Cause (by construction; this host
+has one LLC and cannot show it): §G85's seat decline and §G86's claim walk
+take the lowest set bit of the idle census word with no LLC awareness, so
+on a two-die host the whole-core and idle-thread claims, now effective (58 ->
+85% direct), and the declined pool work land on the other die. Yesterday's
+one-try claim failed often enough that wakes fell to the pool, which a
+same-die CPU usually served.**
+
+**§G88 (shipped, unconditional): `cpu_llc_word[cpu]` in rodata, one word per
+CPU naming the CPUs that share its LLC (loader-filled from `llc_id`, all ones
+for a CPU the topology does not describe). `claim_warm`, the seat-aware pick
+in `pick_idle_clean` and the seat decline are confined to the task's own
+LLC; a die with nothing idle sends the wake to the pool as before. One-LLC
+hosts are byte-identical in behaviour (mask all ones): schbench wake p99 6-7
+us, hackbench 0.18 s, attach clean. §G85 and §G86 got their off-switches
+back, default ON: `--toggle g85=0`, `--toggle g86=0` (one `--toggle` per
+name), so a field tester bisects on one binary. Owed from the tester: three
+runs, default / g86=0 / g85=0; if the default is still behind, the per-LLC
+pool (§S.8 shape) is the next construct, since the pool itself stays
+LLC-blind.**
+
+**PICKUP 2026-09-04 18:00 — CROSS-SCHEDULER SPOT CHECK (HD2, max preset,
+GPU-bound) + §G85 seat rules + §G86 claim retry. Machine on EEVDF, HD2 open.
+§G85 and §G86 SHIPPED (maintainer 2026-09-04, "pure wins"): both toggles
+removed, the code is unconditional; the regression arm is the 2026-09-03
+receipt `n0903-g85base` (seat rules and retry absent). Only `--toggle
+probe=1` remains.**
+
+Rig: `scx_cake_bench/runs/xsched_20260904/` — `xsched.py` (N-arm mirrored
+MangoHud snippets, ops-name identity + sha256 per slot, game/ext CPU % and
+GPU covariates; arms in `arms/*.json`, any scheduler binary), `cpuattr.py`
+(perf stat + per-thread CPU and preemptions per arm), `chaincap.py` +
+`gpuchain.py` / `kthreadhop.py` / `idleatwake.py` (nvidia-ISR wake chain,
+hop by hop, class IDLE/PREEMPT/WAITED, idle CPUs available at each queued
+wake), `framecap.py` + `frameautopsy.py` (MangoHud frames aligned to a sched
+trace; per-frame waits). Competitors in tree: lavd 1.1.3 `--performance`,
+cosmos 1.1.6 `-c 0 -p 0` (scx_loader gaming_mode flags), pandemonium 5.19.0
+defaults. lavd and cosmos need `SCX_STATS_BASE_PATH` set to a writable dir
+(sudoless): that env read lives in `rust/scx_stats/src/server.rs` as a LOCAL
+skip-worktree patch (2026-07-06), not in HEAD; cargo missed it until
+`touch rust/scx_stats/src/*.rs`.
+
+**HD2 max preset (GPU 99%, 2730 MHz, 109 fps): every scheduler ties on avg;
+tails at 20 s slots, 2/arm (first read, HEAD g85 off):** native 87.6 / 83.3
+/ 11.142 / 11.777 (1% low / 0.1% low / p99 / p99.9), cake 90.4 / 85.2 /
+10.700 / 11.433, lavd 83.7 / 61.9 / 10.762 / 11.717 (one 46 ms frame),
+cosmos 91.6 / 89.2 / 10.640 / 11.130, pandemonium 87.7 / 83.3 / 11.069 /
+11.864. Cosmos ahead of cake on 0.1% low 2/2 and p99.9 2/2.
+
+**Why cake's game CPU time is lower (perf stat, 10 s/arm):** instructions
+equal (53.3-54.1 G/s), cycles 25.75 vs 27.05-27.2 G/s, IPC 2.100 vs
+1.962-1.972 (pandemonium 1.747); the saving is the seven `ad pool !LP wor`
+threads (28 us bursts, below seat class) at 62% vs 90-101%: placement, not
+switches (cs 74.5k vs 75.8-77.4k/s). Same data: cake preempts the renderer
+threads 1491/s vs cosmos 464, lavd 359 -- the main render thread runs 62 ms
+bursts, slice cap 1.5 ms, cosmos's slice is 1 ms, so occupancy, not slice.
+
+| toggle | construct | read | verdict |
+|---|---|---|---|
+| §G85 | **exclusive seat**: seat_pid in the run slot; a stranger's home claim and the pool kick skip a held seat; (added 2026-09-04) a stage on its own seat is immune to the wake preempt (`seat_immune`); a returning holder that finds a non-stage, unpinned occupant takes the seat back with a preempt kick (`seat_retake`) and the occupant's re-enqueue goes to the pool (`seat_reroute`, `retake` flag in the slot, cleared by running); a held seat's dispatch declines pool work and kicks an idle non-seat CPU instead (`seat_decline`) | HD2: renderer preempts 1128 -> 860/s (main render thread 486 -> 333), total nvol 2416 -> 2103; census 12 s: immune 91/s, retake 325/s, reroute 295/s, decline 1810/s; frames 20 s x 4/arm: 0.1% low 85.7 vs 85.0, p99 10.700 vs 10.824, p99.9 11.460 vs 11.529 (lean, ranges overlap); pool kicks landing on idle seats 527 -> 1555/s (declined seats stay idle and the fallthrough pick takes them when the lowest free bit is a sink) -- OPEN | **shipped** (maintainer 2026-09-04) |
+| §G86 | **claim retry + kthread pool**: `claim_warm` and the seat-aware pick walk up to `CLAIM_TRIES`=4 bits of the idle word (the word lags the kernel bit by one claim window, every waker read the same lowest bit: one try won 53% core / 14% thread / 15% notify claims); an unbound kthread wake with no claimed CPU takes the pool + notify instead of the busy prev CPU's local queue | census: direct claimed placements 58 -> 85% of wakes, pool 31 -> 11%, holds >300 us 3341 -> 105 (global) and 676 -> 12 (local) per 12 s, thread-claim win 14 -> 44%, kt_pool 285/s; chain trace: nvidia-modeset hop p99 369 -> 125 us (max 2651 -> 511; cosmos 189, native 41), nvidia-drm p99 1263 -> 124, ISR -> last hop p99 482 -> 267 (cosmos 317, native 377), `!LP` worker pool waits 33.7 -> 18.1% (p99 169 -> 82 us), fence/swapchain max 743/2606 -> 302/455 us (cosmos 354/357); frames 20 s x 4/arm vs g85-only vs cosmos: 91.7 / 87.6 / 10.580 / 11.305 vs 91.9 / 86.7 / 10.550 / 11.259 vs 92.7 / 88.0 / 10.529 / 11.072 -- tie | **shipped** (maintainer 2026-09-04) |
+
+**The GPU wait chain, wallclock per hop (us p50 / p99), one 20 s trace per
+arm:** ISR duration 19-20 / 31-32 on every arm; ISR -> `vkd3d_fence` running
+native 1 / 230, cake 1 / 172 (g85), 1 / 147 (g86), cosmos 1 / 195; ISR ->
+next submit ioctl 521-584 / 4373-4565 everywhere; nvidia IRQ inter-arrival
+p99 3.07-3.11 ms, no gap over 12 ms on any arm. The only hop that differed
+was the display kthreads (`nvidia-modeset/kthread_q`, `nvidia-drm/timeline`)
+the ISR wakes: under cake they queued behind a game worker 6-9% of the
+time (native 0.6%) while another CPU was idle 95% of those times
+(`idleatwake.py`; native 19-44%, cosmos 2-20%) -- the kthread fallback to
+the busy prev CPU with no preempt, plus the one-try claim. §G86 answers
+both. **Slow-frame autopsy (frames >= 11 ms, MangoHud aligned to the
+trace):** cake-g86 1 slow frame in 2135, cosmos 6 in 2143; inside them the
+worst scheduling wait was 96 us (cake) / 165 us (cosmos), no IRQ gap, fewer
+waits than a normal frame: at this preset the tail is GPU/app, not the
+scheduler. Frame parity is the ceiling here; the scheduler separates in a
+CPU-bound regime (KovaaKs menu, or HD2 at a lower preset). Cake before ->
+after, 4/arm: 1% low 89.8 -> 91.7, 0.1% low 85.0 -> 87.6, p99 10.824 ->
+10.580, p99.9 11.529 -> 11.305; gap to cosmos on 0.1% low -3.4 -> -0.4 fps.
+
+Spills (`fnspills.py`, release object, spills/fills): select_cpu 61/59 vs
+57/40 on the 2026-09-03 receipt, enqueue 16/8 vs 14/10, dispatch_search
+unchanged; TOTAL 269/131 vs 246/106 -- the retry loops and the retake.
+
+Owed, in order: (1) KovaaKs menu mirrored screen, shipped vs the
+2026-09-03 receipt, 8/arm, then the wallclock fast ABBA (pipe + messaging)
+-- the claim retry touches every wake; a regression there reopens the
+decision; (2) HD2 at a
+CPU-bound preset, 4-arm rotation vs cosmos / lavd / pandemonium; (3) the
+seat pick fallthrough onto idle seats (skip sink bits inside the seat-aware
+pick); (4) `ext%` under cake (32-45% of a CPU vs 17-26 native/cosmos) is not
+a user process (per-process deltas identical) -- kernel-side, unowned.
+
 **PICKUP 2026-09-02 11:30 — VELOCITY SESSION: 14 constructs g60-g73 built and
 snippet-scored against crate 1.1.3 at the KovaaKs menu. Best arm ties 1.1.3 on
 1% low / p99 / p99.9 and trails 2% on average fps. Machine on EEVDF, KovaaKs
 left open at the menu. Every diagnostic probe (placement census, hold attribution by queue
-kind, home-decline reasons, the hitch black box) is gated behind `--toggle
-probe=1` and costs nothing off; the winning stack (g65, g69, g71, g75, g77, g79, g81; g76 and g80 are
-unconditional) is the DEFAULT, each switchable off with `--toggle gNN=0`; the
-experiments (g60-g64, g66-g68, g70, g72-g74, g78, g82) default OFF.**
+kind, home-decline reasons, site counters, the hitch black box) is gated behind
+`--toggle probe=1` and costs nothing off. The shipped stack (§G65, §G69, §G71,
+§G75, §G77, §G79, §G81, §G76, §G80, §G82) is UNCONDITIONAL code since 2026-09-03;
+every default-off construct (g39b, g46, g51, g52, g56-g64, g66-g68, g70, g72-g74,
+g78, m6, m7, g83, g84) was removed from the tree under the rule below. Their
+rows stay in the ledger; their code is in git history at 0450303ae.**
+
+**Rule (maintainer, 2026-09-03): rejected constructs leave the code. STATE.md
+keeps the § number, the design and the numbers; the tree keeps only what ships
+or is under test. A toggle that is off by default is a construct under test,
+not a home. Regression arms come from receipts of earlier commits.**
 
 Rig: `runs/overnight_game_20260901/snip.py <arm> <arm> [<arm>]` — mirrored
 slots of `LOG_S` s MangoHud logging driven over the control socket, arms attached
@@ -111,6 +2256,8 @@ whole of every slot (attach logs end in the clean detach line, nr_rejected 0;
 | g78 | rotor on the first whole-core claim + last_win as cpu+1 | 1% low 492: spreading is wrong here | drop; the cpu+1 encoding stays |
 | g79 | **seat hold**: a blocking stage-class thread keeps its core; other wakes skip held cores while any other is free | the win above; GameThread migrations were 12,629/28 s vs 1.1.3's 650 | keep, hitch OPEN |
 | §G82 | **one idle census word** (unconditional, no toggle): `thread_free` folded into `idle_words[0]`, `idle_nr` kept for hosts >64 CPUs only (popcount inside one word), §G54 park producer/retract behind `!g69`; update_idle entry 5 atomics -> 1-2, exit 4 -> 1-2 | 2026-09-02 KovaaKs menu, 4 mirrored rounds ABBA/BAAB, 20 s slots, 8/arm: avg 705.0 vs 702.9, p99 1.747 vs 1.779, p99.9 flat, ahead on avg+p99 in 4/4 rounds, ranges overlap (maintainer: keep on the consistent lean); 0 stalls in 47 attaches; loader now accepts `--toggle probe=1` (match arm was missing); the g79 first-frame hitch hit 1/8 plain slots, 0/23 probe-armed cycles, black box empty -- OPEN | **shipped** |
+| §G83 | **derived whole-core word**: `cake_core_word()` = idle_words & (idle_words >> sib_xor), loader-verified pair shape (xor 8 here), update_idle drops the core_free atomic (172k/s -> 0 on appsim) | 2026-09-03 KovaaKs menu, 2 four-arm rotations ABCDDCBA/DCBAABCD, 8 s slots, 4/arm, screen on: avg 702.8 vs base 705.7, 1% low 402.1 vs 401.4, 0.1% low 370.7 vs 368.0, p99 1.793 vs 1.741 -- level; the atomic is real CPU, invisible at the menu; 0 stalls | **rejected** (maintainer) |
+| §G84 | **hint store gate**: dispatch publishes the going-idle hint only over an empty or stale word (stores 94.8k/s -> 18k/s, hint claims 18.9k/s -> 8k/s) | same rotations: avg 696.5 vs 705.7, 1% low 401.5 vs 401.4, 0.1% low 366.7 vs 368.0, p99 1.779 vs 1.741; -9 fps avg, also -10 in a screen-off rotation (discarded as record, kept as hint): 4/4 rotations against. Combined g83+g84: avg 699.7, tails ahead (0.1% low 378.8), mixed | **rejected** (maintainer) |
 
 Why the average was behind (thread_cores.py, 1.1.3 vs stack): 1.1.3 GameThread
 650 migrations, stack 12,629 — a dxvk/render wake took GameThread's core in its
@@ -133,8 +2280,13 @@ Tools added this session (all in `runs/overnight_game_20260901/`): `snip.py`
 
 Next: (1) close the g79 hitch (catch it without perf: bpftrace on the render
 thread's wake at log start, or make snip.py record the seat word at attach);
-(2) BPF self-cost: symbolized profile, then cut select_cpu to one storage
-lookup + one claim, update_idle to one atomic; (3) fold the stack into defaults
+(2) BPF self-cost: the atomics census (`runs/atomics_census_20260903/`,
+`--toggle probe=1` site counters + clock-pair timers) prices every site on
+appsim: dispatch move_to_local 161 ns x 131k/s is half of all BPF time,
+51% of idle claims lose (home 61%, warm_thread 62%), select pays one
+task-storage lookup (29 ns) + one clock read + divide per wake; update_idle
+to one atomic (§G83) was null at the menu -- the next lever is the failed
+claims and the move hit/miss split, not nanoseconds; (3) fold the stack into defaults
 once (1) closes, then the wallclock guard (`fast_ab.sh`) and a 60 s cycle.
 Probe branches: `probe/overnight-20260901-g63` (arms), `probe/g70-arm`.
 
@@ -708,6 +2860,15 @@ real session), live replica (loader logic run standalone on the live host), audi
 
 | # | change | evidence | verdict | key numbers |
 |---|---|---|---|---|
+| **G93** | **RT-displacement release gate: `cpu_release` re-enqueues only when the displacer's measured burst exceeds the displaced task's refill; probe half shipped (run-slot burst inputs, release/acquire census; path-row mask fixed `64e3a4591`)** | **TRACE owed (`bench/rt_displace_capture.sh` + `rt_displace.py`, WoW CPU-paced dungeon)** | ⏳ **UNDER TEST 2026-09-18**: probe half in, gate not built | live 22:10: main thread 249 RT displacements/s, 88 % hop cold; ~520/s data-loop holds 5-10 µs, ~500/s kwin 48 µs; gate ships iff CI95_low(refill)+lat_hop > p90(hold) per displacer band |
+| **G95** | **enqueue/update_idle interlock: per-LLC pool-pending token, self-kick from update_idle, bounded re-pick then heal (`dd08b940a`, fixes `ecc608b5d`)** | appsim 8-slot: frames identical, +2.8 ms/s update_idle entries; census ui_kick 2.1k/45 s, pend_heal 1 | ✅ **BUILT 2026-09-20**, priced | closes crack C1 under saturation; game-scene receipt owed |
+| **G96** | **hardware arms, rodata-gated: capacity-first pick (hybrid), cpuidle deep-idle word (tracepoint, driver hosts), preferred-die stage home + waker-die workers (multi-LLC) (`5d92f48c6`, `ecc608b5d`)** | inert on this host by construction (`cake_cap_tiers`=0, `cake_idle_exit_max_ns`=0, `nr_llcs`=1) | ⏳ **UNMEASURED 2026-09-20** | needs testers' probe=1 logs on 5800X / 14900K / 7950X3D / TR |
+| **G89** | **die-local pool, hint, pick, steal gate, probe order; `--toggle llcsplit=1` scaffold** | **CENSUS on the fake split (appsim)** | ✅ **SHIPPED 2026-09-04** | cross-die: hint 169k → 0, pool service 471k → 0, steal 883k → 927; 1% low 1485 → 1559; one-LLC identical |
+| **G88** | **LLC-confined census walks and seat decline** | **FIELD (9950X3D DOOM)** | ✅ **SHIPPED 2026-09-04** | 1% low 47.14 → 108 to 115 across all flag combinations; lavd 117.54 on that box |
+| **G87** | **protect window and pinned margin bounded by the wakee's slice** | **rig + FIELD** | ✅ **SHIPPED 2026-09-04 (maintainer)** | cyclictest spikes >100 us 230 to 6331 → 10 to 14; DOOM g87=1 170.16 avg / 114.66 1% low, best of four |
+| **G86** | **claim retry across the idle word + unbound kthread wake takes the pool** | **CENSUS + WAKE + FRAME (HD2 GPU-bound)** | ✅ **SHIPPED 2026-09-04** | holds >300 us **3341 -> 105** /12 s; display kthread hop p99 **369 -> 125 us**; ISR->last hop p99 482 -> 267 (cosmos 317, native 377); frames tie cosmos; under test |
+| **G85** | **exclusive seat: immune / retake / reroute / decline** | **ATTR + FRAME (HD2 GPU-bound)** | ✅ **SHIPPED 2026-09-04** | renderer preempts **1128 -> 860/s**; 0.1% low 85.7 vs 85.0, p99.9 11.460 vs 11.529 (overlap) |
+| — | **cross-scheduler HD2 max preset** (native / cake / lavd / cosmos / pandemonium) | **FRAME, 20 s x 2-4/arm** | ⚖️ **all 109 fps; cosmos tails ahead of HEAD by 0.3 ms p99.9, tie after G85+G86** | slow frames are GPU-side on every arm (autopsy); CPU-bound rotation owed |
 | G10.2/3 | route on burst CLASS, not the wakeup bit | STATIC | **unmeasured** | — |
 | G10.4/5 | per-task slice; stages preempt-immune | STATIC | **unmeasured** | +230 insns |
 | G10.6 | chain-gate the cadence dose | STATIC | **unmeasured** | 0 spills, 1450 insns |

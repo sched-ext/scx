@@ -1,198 +1,216 @@
-<div align="center">
+# scx_cake
 
-# 🍰 scx_cake
+A Linux `sched_ext` CPU scheduler focused on gaming responsiveness and general-purpose use.
 
-**A pluggable CPU scheduler for Linux, built for gaming.**
+Cake tries to keep runnable tasks from waiting unnecessarily while preserving
+cache locality and fair CPU service. Its name comes from the CAKE network queue
+manager. Scheduling decisions use task activity and hardware topology, not game
+names or application profiles.
 
-Steady frame times, low input lag, small worst-case stutters —
-while staying a competent general-purpose scheduler.
+This README describes the source in this checkout. An installed package may
+differ: check `scx_cake --version` and `scx_cake --help`.
 
-[![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
-[![Kernel: 6.12+](https://img.shields.io/badge/kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
-[![sched_ext](https://img.shields.io/badge/sched_ext-BPF-orange.svg?style=flat-square)](https://github.com/sched-ext/scx)
+[Build and run](#build-and-run) · [Flags](#command-line-flags) ·
+[Toggles](#toggle-settings) · [Design](#how-scheduling-works) ·
+[Limits](#hardware-support-and-limits) · [Source](#source-and-further-reading)
 
-**The mission: a scheduler I would want to use for gaming.**
+## Build and run
 
-[How it works](#how-it-works) ·
-[Performance](./docs/PERFORMANCE.md) ·
-[Design](#the-design-in-one-page) ·
-[Docs](#source-tour) ·
-[Contributing](#contributing)
+Requirements:
 
-</div>
+- A Linux kernel with `CONFIG_SCHED_CLASS_EXT=y`, BPF support and kernel BTF.
+  See the repository's [kernel configuration](../../../kernel.config).
+  Compatibility wrappers handle supported API differences; a kernel version
+  or distribution name alone does not establish that this build will load.
+- The repository's [Rust toolchain](../../../rust-toolchain.toml), Clang with
+  BPF support, and the system libraries listed in the
+  [build instructions](../../../README.md#build--install).
+- Permission to load and attach the scheduler, provided by your scheduler
+  service or system administrator. The commands below do not grant permissions.
 
----
+From the scx repository root:
 
-The name and philosophy come from CAKE, the network queue manager that
-fixed router bufferbloat: keep queues short, give latency-critical work a
-fast path by construction, share the rest fairly.
+```sh
+cargo build --locked --release -p scx_cake
 
-It runs via `sched_ext`, which loads schedulers as sandboxed BPF programs.
-If the scheduler misbehaves, the kernel watchdog evicts it and the default
-scheduler is back within seconds.
+# Inspect the binary and host without starting the scheduler.
+./target/release/scx_cake --version
+./target/release/scx_cake --help
+./target/release/scx_cake --print-topology
 
-1.2.0 is a clean-slate rewrite. Development is measurement-driven: changes
-must survive interleaved benchmark A/B, and placement changes must survive
-live-game frame A/B. AI-assisted code goes through the same
-no-change-lands-on-trust gate. How performance is measured, and where
-results stand: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
-
-## Getting it running
-
-| | |
-|---|---|
-| **Kernel** | 6.12+ with `CONFIG_SCHED_EXT=y` — check `zgrep SCHED_EXT /proc/config.gz`. Kernels with the 7.1 kfuncs take the fastest paths; older ones take compat fallbacks. Gaming distro kernels (CachyOS et al.) qualify |
-| **Build** | `cargo build --release -p scx_cake` from the scx repo root (Rust toolchain + clang ≥ 17) |
-| **Run** | `sudo ./target/release/scx_cake` |
-| **Is it active?** | `cat /sys/kernel/sched_ext/root/ops` prints `cake_…` |
-| **Stop** | <kbd>Ctrl</kbd>+<kbd>C</kbd> detaches it; the default scheduler resumes immediately |
-| **If evicted** | the exit reason lands in `dmesg` (grep `sched_ext`) |
-
-The binary takes `-v` and `-V` and nothing else — that is the point.
-(`intf.h` carries no policy switches and no cflag inputs; the loader
-measures the host's topology at attach, so one binary fits any machine.
-Experiments are A/B'd as two git commits, never a build flag — see
-[`DESIGN.md`](./DESIGN.md).)
-
-## How it works
-
-A CPU scheduler answers one question thousands of times per second: *this
-task just became runnable — where should it run, and does anything need to
-get out of the way?*
-
-Most of the time a core is free and the answer is easy: cake hands the task
-straight to it, preferring cores whose caches still hold its data. When
-every core is busy, the core rule:
-
-| the task… | goes to… | because… |
-|---|---|---|
-| just **woke up** and is *waiting more than it runs* | one **shared waiting line** every core checks | the first core to free up anywhere picks it up. A well-served wake queues on its own core instead |
-| **used up its turn** | **its own core's line** | its data is still hot in that cache; it loses nothing by waiting there |
-
-Four refinements exist specifically for games, each measured on a real one:
-
-- **Keep a busy thread on its own core.** Linux's default idle-search
-  prefers a wholly-free core over the task's own still-warm one; for a
-  render thread that trade is backwards, so cake claims the old core first
-  when free.
-- **Never queue behind an equally busy peer.** If the core a task wants is
-  held by another well-served task, it goes to the shared line instead.
-- **Bound the worst case pessimistically.** The turn-length cap reads the
-  frame clock (the display's measured refresh cadence) conservatively, so a
-  brief mis-measure can never widen it.
-- **Never hand a wake to a CPU that is busy with hardware** — next section.
-
-### Interrupt-aware placement
-
-The kernel steers device interrupts — GPU, NVMe, network — onto specific
-cores ("sinks"). A task placed on one stops every time an interrupt fires.
-Cake vetoes those cores on three time scales, all measured, none
-configured:
-
-| time scale | signal | how it is kept | on a hit |
-|---|---|---|---|
-| **average** | the CPU spends real *time* in interrupt handlers (time share, not event counts) | the loader re-measures on a 1–16 s cadence that slows as the set proves stable; the cut is the widest gap in the host's own sorted distribution — no Hz threshold, never a one-shot sample at attach | chronic sinks leave the placement set |
-| **this instant** | inside a handler right now | handler entry/exit tracepoints keep a per-CPU bit | the pick retries once toward any clean idle CPU |
-| **near future** | the next timer tick fires before the task could land | per-CPU next-tick time vs the measured wake-hop cost (the time for a wake to reach another CPU and start running) | that pick is refused |
-
-How this is measured: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
-
-### Life of a wake under load
-
-```mermaid
-flowchart TD
-    W([task wakes]) --> H{learned serial handoff,<br/>waker's queues empty?}
-    H -- yes --> WC[waker's CPU]
-    H -- no --> I{idle core found?}
-    I -- yes --> DD[run there now]
-    I -- no --> S{sync handoff or sleeper,<br/>waker's queues empty?}
-    S -- yes --> WC
-    S -- no --> P{own old CPU free-ish,<br/>task barely slept, or global<br/>queue backlogged?}
-    P -- yes --> PC[own previous CPU]
-    P -- no --> G[global wake queue —<br/>kick warmest idle CPU]
+# Start with the default policy, once permissions are provisioned.
+./target/release/scx_cake
 ```
 
-Every concrete target passes the chronic-sink and mid-handler vetoes first;
-the tick look-ahead additionally guards the idle pick, its retry, and the
-kicked sibling. Fairness comes from a per-task virtual-time clock: tasks
-that have consumed less CPU run first, weighted by nice level.
+You can also select Cake through your distribution's scheduler service.
+The default policy needs no profile or toggle options.
 
-## The design in one page
+While running, `cat /sys/kernel/sched_ext/root/ops` identifies the active
+scheduler; Cake's name starts with `cake`. Press Ctrl+C to stop a foreground
+instance. Detaching returns scheduling to the kernel's default scheduler.
+Check service logs, terminal output and the kernel log for startup or exit
+errors. Cake requests a five-second runnable-stall watchdog; it is a recovery
+mechanism, not a latency guarantee.
 
-<details>
-<summary><b>Vocabulary — eight terms carry everything</b></summary>
-<br>
+## Command-line flags
 
-| term | meaning |
+| Flag | Default | Behavior |
+|---|---|---|
+| `-h`, `--help` | Off | Print supported flags and toggle defaults, then exit |
+| `-V`, `--version` | Off | Print the version, then exit |
+| `--print-topology` | Off | Print discovered core topology, capacity and preferred-core information, then exit without attaching |
+| `-v`, `--verbose` | Off | Enable verbose libbpf output, startup details, IRQ diagnostics and exit event counts |
+| `--toggle NAME=0\|1` | No overrides | Override a setting from the table below; repeat the option for multiple settings |
+
+`--version` takes precedence over `--print-topology`. These inspection modes
+do not apply or validate toggle specifications. In particular,
+`--print-topology --toggle llcsplit=1` still prints the real host topology.
+
+### Obsolete and invalid options
+
+Unknown options from an old `scx_loader` configuration or another launcher
+are ignored with a warning. Their associated values are discarded, and valid
+options still apply. If no valid override remains, Cake uses its defaults.
+
+Examples of ignored legacy arguments:
+
+- `--profile gaming`
+- `--profile=performance`
+- `-p powersave`
+- `-pperformance`
+
+In `-vpperformance`, `-v` still enables verbose output and the obsolete
+`-pperformance` suffix is ignored. None of these profile names selects a policy.
+
+Invalid toggle specifications are warned about and ignored during scheduler
+startup. They do not undo earlier valid overrides. Missing values for supported
+options, such as a bare `--toggle`, remain errors. `--help` exits before logging;
+version and topology output can be accompanied by unknown-option warnings.
+
+## Toggle settings
+
+Names are case-sensitive. Values must be exactly `0` (off) or `1` (on).
+Settings are read at startup; changing them requires restarting Cake.
+Repeated valid assignments are processed in order, so the last one wins.
+
+| Name | Default | What it controls |
+|---|---|---|
+| `g85` | `1` | Seat rules that protect a pipeline-stage task's association with a CPU |
+| `g86` | `1` | Retry idle-CPU claims and allow eligible kernel-thread wakes to use a shared pool |
+| `g87` | `1` | Base wakeup protection and pinned-wake preemption margins on the waiting task's own slice |
+| `g89` | `1` | Use per-cache wake pools and cache-local routing; `0` selects one shared pool and disables this routing policy |
+| `probe` | `0` | Collect additional BPF placement and delay diagnostics, reported at exit |
+| `llcsplit` | `0` | Testing only: split the host's cores into two synthetic cache domains, keeping SMT siblings together |
+
+`-v` and `probe` are independent: verbose logging does not enable probe
+instrumentation. Neither is needed for normal scheduling. `llcsplit` changes
+the topology supplied to the scheduling policy; it does not reproduce physical
+inter-cache costs. Hardware fallbacks still apply. There is no `g88` toggle.
+
+With launch permissions already provisioned:
+
+```sh
+# Log details with the default scheduling policy.
+./target/release/scx_cake -v
+
+# Collect additional diagnostics.
+./target/release/scx_cake --toggle probe=1
+
+# Compare one shared wake pool with the default per-cache policy.
+./target/release/scx_cake --toggle g89=0
+```
+
+## How scheduling works
+
+An **LLC** is a last-level cache shared by a group of CPUs. A **DSQ** is a
+dispatch queue managed through `sched_ext`.
+
+Cake uses CPU-owner queues and shared wake queues. With the default policy
+and supported topology, each LLC has a wake queue. Wider layouts can fall
+back to one shared wake queue.
+
+| Situation | Usual behavior |
 |---|---|
-| **DSQ** | dispatch queue, sched_ext's queue primitive. One per CPU plus one global **wake queue** |
-| **vtime** | virtual runtime: CPU time consumed, weighted by priority. Lower = runs sooner |
-| **frontier** | the highest vtime reached — the fairness clock's "now" |
-| **sleeper vs peer** | vtime well behind the frontier = just slept, earned credit, fast service; at the frontier = ran all along, can wait |
-| **slice** | per-task turn length: twice its own measured burst, floored at one context-switch cost, capped at half a frame |
-| **starved** | waiting longer than it runs, computed from counters the kernel already keeps. Cake's main discriminator |
-| **frame clock** | the display's real cadence, measured by voting on thread wake rates. Follows 60/144/240 Hz and VRR with no configuration |
-| **sink** | a CPU the kernel steers device interrupts onto — see the veto table above |
+| A task wakes and Cake claims an eligible idle CPU | Admit the task directly to that CPU |
+| An eligible wake's estimated mean wait exceeds twice its mean CPU burst | Normally use its LLC's shared wake queue so nearby CPUs can serve it |
+| A task uses up its slice | Return it to its owner queue, preserving locality |
+| A CPU needs work | Check remote offers, its owner queue and its wake pool, then other eligible queues |
 
-</details>
+Affinity restrictions, pinned tasks, serial handoffs and forced requeues add
+exceptions. These are common paths, not unconditional routing rules.
 
-<details>
-<summary><b>The rest of the mechanism — edge cases, preemption, dispatch</b></summary>
-<br>
+Placement considers cache warmth, whole idle cores, SMT interference and
+platform capacity/preferred-core hints. A **seat** associates a CPU with a
+pipeline-stage task; it is not an exclusive reservation or a CPU-affinity change.
+Task storage retains placement history.
 
-- a woken task stays on its old core when cache warmth outweighs the shared
-  line's speed;
-- a sleeping partner takes over its waker's core — two tasks ping-ponging a
-  message run fastest sharing one core;
-- the backlog gate exists because a saturated machine must not scatter
-  wakes — it would tear communicating pairs apart;
-- preemption has two opposite gates: claiming an empty-ish home may kick an
-  occupant only while it has barely started (under 1/32 of a frame slice)
-  and the wakee leads on fairness; with no idle CPU anywhere, an occupant
-  is kicked only once it has run a real fraction of a frame, is not a
-  pipeline stage, and the wakee's fairness clock is earlier;
-- expired tasks requeue on their own CPU and advertise via a per-CPU "may
-  hold work" mark. Dispatch drains own queue vs wake queue by earliest
-  vtime (with hysteresis so the global queue's lock isn't stampeded), then
-  ring-steals from neighbors, then keeps running what it has;
-- fairness accounting is nearly free: the turn charge is the delta of the
-  kernel's own `sum_exec_runtime`, weighted by a reciprocal table, and new
-  tasks start exactly at the frontier.
+Cake also prefers CPUs with less interrupt work. It samples interrupt-time
+shares, tracks active interrupt handlers, and uses tick look-ahead when the
+required information is available. Noisy CPUs remain usable when suitable
+cleaner CPUs are unavailable.
 
-</details>
+### CPU time and fairness
 
-The mechanism-level version of all of this — every rule, threshold, and
-receipt — is [`DESIGN.md`](./DESIGN.md).
+Virtual runtime orders service using consumed CPU time and nice-level weights.
+The adaptive task-slice calculation uses lifetime runtime, task age and voluntary
+switch count. It has a fixed **1,464 ns floor** and **1.5 ms cap**. Some paths,
+including local kernel-thread wake admission, use the fixed **3 ms** slice instead.
 
-## Compared to other scx schedulers
+The startup handoff probe does not set the adaptive slice floor. It supplies
+diagnostic data and, when usable, a timing horizon for tick look-ahead.
+Cake does not sample a display or game frame clock.
 
-`scx_lavd`, `scx_bpfland`, and `scx_rusty` are mature, feature-rich
-schedulers built on heuristics and tracked state. Cake's bet: zero per-task
-state, zero tunables, one algorithm small enough to audit in an afternoon —
-adaptivity comes from classifying the current scheduling state, and the
-only learned state is one per-CPU three-bit handoff-confidence hint.
+See [DESIGN.md](./DESIGN.md) for the policy details and construct names.
 
-## Source tour
+## Hardware support and limits
 
-| file | contents |
+Topology is discovered at startup; it is not baked in from the build machine.
+
+- Present CPU IDs must fit in 0–63 for the narrow claim, seat and per-LLC pool
+  paths. A wider present-ID span uses the kernel idle picker and one wake pool.
+- At most 16 LLC wake pools are represented. More LLCs collapse to one pool.
+- The compiled CPU-ID span limit is 1,024, including possible CPUs. This is
+  an ID-space limit, not just the number of online CPUs.
+- Missing or incomplete capacity/preference data retains fallback placement.
+  Advertised maximum frequency is reported, not treated as a speed measurement.
+
+Known limits include overflow in lifetime wait/run comparison products, delayed
+cross-LLC service when advisory queue information is stale, and serial-handoff
+eligibility based on CPU-ID span rather than online CPU count. A fixed **24 ms**
+starvation fallback lets dispatch favor an unserved pool. This is a policy
+constant, not a deliberate task delay or a guaranteed maximum wait; its current
+tuning is not established by these docs. See
+[DESIGN.md](./DESIGN.md#starvation-fallback-24-ms).
+
+Performance depends on the workload, topology and kernel. Historical benchmark
+or game results do not establish the performance of every later build.
+
+## Verification and bug reports
+
+Run the portable regression tests from the repository root:
+
+```sh
+cargo test --locked -p scx_cake
+```
+
+The ordinary tests do not activate the scheduler. The optional verifier-load
+test is ignored by default and requires appropriate kernel support and BPF
+permissions. Passing these tests does not prove live scheduling performance.
+
+For a bug report, include the version or commit, kernel version, CPU/topology,
+exact launch arguments, and relevant scheduler and kernel logs.
+
+## Source and further reading
+
+| File | Purpose |
 |---|---|
-| `src/bpf/cake.bpf.c` | the scheduler — 8 callbacks, ~1.5k lines, about a third comments explaining the why |
-| `src/bpf/intf.h` | the constant surface: the `SLICE_NS` boot seed, frame-clock bands, and the IDs shared with the loader |
-| `src/main.rs` | the loader: attach, exit reporting, hardware probes, frame-clock publish, sink monitor |
-| [`STATE.md`](./STATE.md) | **start here** — current state, the experiment ledger, and the `§` rationale registry every source comment resolves to |
-| [`DESIGN.md`](./DESIGN.md) | the full design: every rule, constant, invariant |
-| [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md) | how performance is measured and where results stand |
-| [`docs/`](./docs/README.md) | live investigations; the campaign gate log in [`docs/archive/`](./docs/archive/) |
+| [src/main.rs](./src/main.rs) | Flags, toggle defaults, topology setup, attach/restart and IRQ monitoring |
+| [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | Scheduling policy, task state, queues and service accounting |
+| [src/bpf/intf.h](./src/bpf/intf.h) | Shared constants and topology limits |
+| [src/core_performance.rs](./src/core_performance.rs) | Capacity and preferred-core discovery |
+| [tests/cli.rs](./tests/cli.rs) | CLI regression tests without attachment |
+| [DESIGN.md](./DESIGN.md) | Current policy and known limits |
+| [STATE.md](./STATE.md), [docs/](./docs/README.md) | Historical research and experiment records; may describe older or rejected behavior |
+| [docs/PERFORMANCE.md](./docs/PERFORMANCE.md) | Measurement background and historical results |
 
-## Contributing
-
-Bug and stall reports welcome via GitHub issues — include
-`dmesg | grep sched_ext` and your CPU/kernel. Behavioral changes must
-survive the interleaved A/B discipline above, so PRs should come with
-benchmark evidence, not just reasoning.
-
----
-
-<div align="center">
-<sub>GPL-2.0 · built on <a href="https://github.com/sched-ext/scx">sched_ext</a></sub>
-</div>
+License: GPL-2.0-only.

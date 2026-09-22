@@ -1,10 +1,11 @@
 # scx_cake/docs — what is here, and where the rest went
 
-**2026-08-18 restructure:** docs root now holds only live design and evidence
-files; everything from a completed campaign sits in [`archive/`](archive/);
-local scratch was deleted (recoverable from the vault or never worth keeping).
-Earlier, the 2026-08-06 cleanup moved 261 MB / 149 files to the vault —
-nothing from that cleanup was deleted either.
+**2026-09-15 tidy:** root holds live material only (cited from `STATE.md`, source,
+or backing an open experiment). Completed dated reviews and analyses moved to
+[`archive/`](archive/) and are tracked there. Untracked 2026-05/06 bulk data and
+scratch (`*_2026-05-23.*`, `research/`, `superpowers/`, `glm-5.2-findings/`) went to
+the vault tarball below and were removed here. Earlier restructures: 2026-08-18
+(root pruned to live files) and 2026-08-06 (261 MB / 149 files to the vault).
 
 `docs/*` is gitignored (`.gitignore:2`). `docs/archive/` and an explicit
 whitelist of docs-root files are tracked; anything else here exists only on
@@ -26,34 +27,31 @@ reference for everyone else.
 
 | Location | Holds |
 |---|---|
-| `docs/` (root) | live material only: active investigations, standing references, registered research |
-| [`archive/`](archive/) | one file: the EEVDF campaign gate log. Every other dated record lives in git history |
-| `research/` | local scratch, never tracked, never cited from canonical files |
+| `docs/` (root) | live material only: standing references (`TOOLING.md`, `KERNEL_TOOL_INVENTORY`, `RT_PLACEMENT_LOGIC`, `PERFORMANCE.md`), the current cost audit (`AUDIT_OPERATION_COST_2026-09-15.md`), registered research, and the dated files `STATE.md` cites |
+| [`archive/`](archive/) | completed dated reviews, audits, plans and the EEVDF campaign gate log; tracked, so a `STATE.md` citation into it resolves for everyone |
 
-The archive was pruned to one file on 2026-08-18. Conclusions live in
-`STATE.md` (ledger + `§` registry); the dated records behind them are in
-git history. To read a removed record:
+Conclusions live in `STATE.md` (ledger + `§` registry). Records pruned from
+`archive/` on 2026-08-18 are in git history:
 
 ```bash
 git log --oneline --diff-filter=D --name-only -- "scheds/rust/scx_cake/docs/archive/" | head -40
 git show "<deleting-commit>^:scheds/rust/scx_cake/docs/archive/<file>.md"
 ```
 
-## The vault (bulk data from 2026-08-06)
+## The vault (bulk data and untracked scratch)
 
-Both archives are under
-`~/Documents/Repo/scx_cake_bench/history/imported_from_scx_repo/scx_cake_docs_2026-08-06/`,
-following the precedent in `scx_cake_bench/COMPACTION_2026-08-01.md`.
+Under `~/Documents/Repo/scx_cake_bench/history/imported_from_scx_repo/`, following
+`scx_cake_bench/COMPACTION_2026-08-01.md`.
 
-| archive | was | now | contents |
-|---|---|---|---|
-| `docs_analysis_2026-05-23.tar.zst` | 253 MB, 122 files | **8.5 MB** (30×) | `ml_analysis_*`, `benchmark_asset_*`, `perf_helps_hurts_atlas`, `code_pattern_matrix`, `full_suite_mesh`, `positive_code_patterns`, `mixed_cache_memcpy_*`, 4× `frames_*.csv` |
-| `docs_session_notes_pre_2026-07.tar.zst` | 1.04 MB, 78 files | **228 KB** | dated session notes older than 30 days, none tracked, none cited |
+| archive | contents |
+|---|---|
+| `scx_cake_docs_2026-09-15/docs_untracked_scratch_2026-05_to_2026-06.tar.zst` (156 KB, 109 entries) | `*_2026-05-23.{tsv,json,jsonl}`, `benchmark_ml_attempts_since_2026-05-22.jsonl`, `active_path_help_hurt_synthesis_2026-05-23/`, `benchmark_help_hurt_deep_dive_2026-05-23/`, `benchmark_perf_correlation_workbook_2026-05-23/`, `research/`, `superpowers/`, `glm-5.2-findings/` |
+| `scx_cake_docs_2026-08-06/docs_analysis_2026-05-23.tar.zst`, `docs_session_notes_pre_2026-07.tar.zst` | **not found at the documented path on 2026-09-15** — the 2026-08-06 restructure recorded them here (253 MB → 8.5 MB; 1.04 MB → 228 KB). Locate before relying on them |
 
-Restore any of it:
+Restore:
 
 ```bash
-zstd -dc ~/Documents/Repo/scx_cake_bench/history/imported_from_scx_repo/scx_cake_docs_2026-08-06/docs_analysis_2026-05-23.tar.zst | tar -xf - -C /tmp
+zstd -dc <tarball> | tar -xf - -C /tmp
 ```
 
 ## Selection rule
