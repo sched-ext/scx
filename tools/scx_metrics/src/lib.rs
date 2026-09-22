@@ -87,8 +87,10 @@ mod tests {
         };
 
         assert_eq!(snapshot.to_text(), "work_conservation=75.00%(3/4)");
-        assert!(snapshot
-            .to_openmetrics()
-            .contains("scx_work_conservation_ratio 0.75"));
+        assert!(
+            snapshot
+                .to_openmetrics()
+                .contains("scx_work_conservation_ratio 0.75")
+        );
     }
 }

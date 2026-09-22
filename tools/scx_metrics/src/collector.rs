@@ -1,8 +1,8 @@
-use crate::bpf_skel::*;
 use crate::MetricsSnapshot;
-use anyhow::{ensure, Result};
+use crate::bpf_skel::*;
+use anyhow::{Result, ensure};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{ProgramInput, RingBuffer, RingBufferBuilder};
+use libbpf_rs::{Link, ProgramInput, RingBuffer, RingBufferBuilder};
 use std::cell::RefCell;
 use std::mem::{self, MaybeUninit};
 use std::rc::Rc;
@@ -23,6 +23,7 @@ struct CpuSnapshot {
 
 pub struct Collector {
     _skel: BpfSkel<'static>,
+    _links: Vec<Link>,
     ringbuf: RingBuffer<'static>,
     totals: Rc<RefCell<Totals>>,
 }
@@ -33,6 +34,12 @@ impl Collector {
         let mut open = BpfSkelBuilder::default().open(storage)?;
         open.maps.rodata_data.as_mut().unwrap().nr_cpu_ids = libbpf_rs::num_possible_cpus()? as u32;
         let skel = open.load()?;
+        let links = vec![
+            skel.progs.metrics_sched_wakeup.attach()?,
+            skel.progs.metrics_sched_wakeup_new.attach()?,
+            skel.progs.metrics_sched_switch.attach()?,
+            skel.progs.metrics_process_free.attach()?,
+        ];
         let totals = Rc::new(RefCell::new(Totals::default()));
         let callback_totals = Rc::clone(&totals);
         let mut builder = RingBufferBuilder::new();
@@ -61,6 +68,7 @@ impl Collector {
 
         Ok(Self {
             _skel: skel,
+            _links: links,
             ringbuf,
             totals,
         })

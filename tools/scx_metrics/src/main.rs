@@ -81,7 +81,8 @@ fn respond(mut stream: TcpStream, body: &str) -> Result<()> {
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/openmetrics-text; version=1.0.0; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(), body
+        body.len(),
+        body
     )?;
     Ok(())
 }
