@@ -52,8 +52,8 @@ enable_backtrace = []
 # under `cargo ktstr test`.
 ktstr-tests = ["dep:ktstr"]
 
-[lints.clippy]
-unwrap_used = "deny"
+[lints]
+workspace = true
 
 [package.metadata.veristat]
 disable = true

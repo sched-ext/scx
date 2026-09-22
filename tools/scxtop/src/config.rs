@@ -69,7 +69,7 @@ pub struct Config {
     /// Parsed keymap.
     #[serde(skip)]
     pub active_keymap: KeyMap,
-    /// Configured perf events. Must be in format <alias>:<event_config>
+    /// Configured perf events. Must be in format `<alias>:<event_config>`
     pub perf_events: Vec<String>,
     /// TUI theme.
     theme: Option<AppTheme>,
@@ -95,7 +95,7 @@ pub struct Config {
     trace_tick_warmup: Option<usize>,
     /// Duration to warmup a trace before collecting in ms.
     trace_warmup_ms: Option<u64>,
-    /// Default profiling event string, in the format <source>:<event>
+    /// Default profiling event string, in the format `<source>:<event>`
     /// where `source` is one of kprobe, perf, or cpu.
     default_profiling_event: Option<String>,
 }

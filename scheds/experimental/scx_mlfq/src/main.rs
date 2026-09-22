@@ -904,7 +904,6 @@ impl<'a> Scheduler<'a> {
     /// (MLFQ_OP_LAT_OPS x MLFQ_OP_LAT_BUCKETS entries, op-major). The
     /// map is per-CPU so the BPF charges never contend. A failed lookup
     /// or an unexpected value size yields zeros for that entry.
-    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn read_op_lat(&mut self) -> Vec<u64> {
         let nr_ops = crate::bpf_intf::mlfq_op_lat_slots_MLFQ_OP_LAT_OPS as usize;
         let buckets = crate::bpf_intf::mlfq_op_lat_consts_MLFQ_OP_LAT_BUCKETS as usize;

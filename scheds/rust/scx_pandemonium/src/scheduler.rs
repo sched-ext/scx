@@ -640,12 +640,13 @@ mod fold_tests {
     use super::*;
 
     fn cpu(dispatches: u64, sojourn: u64, longrun: u64, xdom: [u64; 8]) -> PandemoniumStats {
-        let mut s = PandemoniumStats::default();
-        s.nr_dispatches = dispatches;
-        s.batch_sojourn_ns = sojourn;
-        s.longrun_mode_active = longrun;
-        s.nr_cross_domain = xdom;
-        s
+        PandemoniumStats {
+            nr_dispatches: dispatches,
+            batch_sojourn_ns: sojourn,
+            longrun_mode_active: longrun,
+            nr_cross_domain: xdom,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -722,10 +723,11 @@ mod knob_broadcast_tests {
     use super::*;
 
     fn knobs(slice: u64, tau: u64) -> TuningKnobs {
-        let mut k = TuningKnobs::default();
-        k.slice_ns = slice;
-        k.topology_tau_ns = tau;
-        k
+        TuningKnobs {
+            slice_ns: slice,
+            topology_tau_ns: tau,
+            ..Default::default()
+        }
     }
 
     #[test]

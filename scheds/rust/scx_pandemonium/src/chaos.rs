@@ -209,10 +209,8 @@ fn hvg_degrees<const N: usize>(w: &RawWindow<N>) -> Option<([u32; N], usize)> {
     }
 
     let mut s: [f64; N] = [0.0; N];
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         s[k] = x;
-        k += 1;
     }
 
     let mut deg: [u32; N] = [0; N];
@@ -281,10 +279,8 @@ pub fn bandt_pompe_d3<const N: usize>(w: &RawWindow<N>) -> f64 {
 
     // COLLECT INTO LINEAR BUFFER ONCE; SAFE FOR N <= 128.
     let mut s: [f64; N] = [0.0; N];
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         s[k] = x;
-        k += 1;
     }
 
     for i in 0..(n - 2) {
@@ -357,10 +353,8 @@ pub fn rqa_det<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
 
     // COPY WINDOW INTO ORDER-PRESERVING SLICE FOR INDEXED ACCESS.
     let mut s: [f64; N] = [0.0; N];
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         s[k] = x;
-        k += 1;
     }
 
     // MEAN AND STANDARD DEVIATION OVER THE n FILLED SAMPLES.
@@ -396,9 +390,7 @@ pub fn rqa_det<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     }
     let mut emb: [[f64; RQA_EMBED_DIM]; N] = [[0.0; RQA_EMBED_DIM]; N];
     for i in 0..m {
-        for d in 0..RQA_EMBED_DIM {
-            emb[i][d] = s[i + d];
-        }
+        emb[i].copy_from_slice(&s[i..i + RQA_EMBED_DIM]);
     }
 
     // RECURRENCE MATRIX OVER THE m EMBEDDED POINTS.
@@ -542,10 +534,8 @@ pub fn lag1_autocorr<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
 fn lag1_autocorr_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     let n = w.filled;
     let mut s: [f64; N] = [0.0; N];
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         s[k] = x;
-        k += 1;
     }
     let nf = n as f64;
     let mut sum = 0.0;
@@ -608,10 +598,8 @@ pub fn kim_jo_burstiness<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
 fn kim_jo_burstiness_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     let n = w.filled;
     let mut s: [f64; N] = [0.0; N];
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         s[k] = x;
-        k += 1;
     }
     let nf = n as f64;
     let mut sum = 0.0;
@@ -683,10 +671,8 @@ pub fn veitch_abry_hurst<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     }
 
     let mut a: [f64; N] = [0.0; N];
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         a[k] = x;
-        k += 1;
     }
 
     // HAAR CASCADE. AT EACH OCTAVE THE APPROXIMATION HALVES IN LENGTH
@@ -782,10 +768,8 @@ fn standardize<const N: usize>(w: &RawWindow<N>, out: &mut [f64; N]) -> Option<u
     if n == 0 {
         return None;
     }
-    let mut k = 0;
-    for x in w.iter() {
+    for (k, x) in w.iter().enumerate() {
         out[k] = x;
-        k += 1;
     }
     let nf = n as f64;
     let mut sum = 0.0;

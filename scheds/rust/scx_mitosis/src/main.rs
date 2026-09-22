@@ -3,7 +3,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-#[allow(clippy::unwrap_used)]
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;

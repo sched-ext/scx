@@ -11,3 +11,6 @@ publish = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
+
+[lints]
+workspace = true

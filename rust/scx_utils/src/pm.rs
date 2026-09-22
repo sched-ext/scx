@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Updates the global idle resume latency. When the returned file is closed the request is
 /// dropped. See the following kernel docs for more details:
-/// https://www.kernel.org/doc/html/latest/admin-guide/pm/cpuidle.html#power-management-quality-of-service-for-cpus
+/// <https://www.kernel.org/doc/html/latest/admin-guide/pm/cpuidle.html#power-management-quality-of-service-for-cpus>
 pub fn update_global_idle_resume_latency(value_us: i32) -> Result<File> {
     if value_us < 0 {
         return Err(anyhow!("Latency value must be non-negative"));
