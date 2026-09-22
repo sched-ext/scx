@@ -21,16 +21,15 @@
 /*
  * Sched related globals
  */
-private(LAVD) struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
-private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
-private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
-private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-private(LAVD) struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
+struct scx_cmask __arena *turbo_cpumask; /* CPU mask for turbo CPUs */
+struct scx_cmask __arena *big_cpumask; /* CPU mask for big CPUs */
+struct scx_cmask __arena *active_cpumask; /* CPU mask for active CPUs */
+struct scx_cmask __arena *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+struct scx_cmask __arena *steady_cpumask; /* CPU mask for non-turbulent CPUs */
 
 const volatile u64	nr_llcs;	/* number of LLC domains */
 volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 
-const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT is active */
 
 /*
  * Options
@@ -52,18 +51,11 @@ const volatile u8	verbose;
  */
 UEI_DEFINE(uei);
 
-/*
- * per-CPU globals
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
-} cpu_ctx_stor SEC(".maps");
+struct cpu_ctx __arena *cpu_ctxs;
 
 __hidden
-u64 __find_task_ctx(struct task_struct __arg_trusted *p, struct cpu_ctx *cpuc, bool quiet)
+u64 __find_task_ctx(struct task_struct __arg_trusted *p,
+		      struct cpu_ctx __arena __arg_arena *cpuc, bool quiet)
 {
 	u64 raw = (u64)(quiet ? __scx_task_data(p) : scx_task_data(p));
 
@@ -76,23 +68,27 @@ u64 __find_task_ctx(struct task_struct __arg_trusted *p, struct cpu_ctx *cpuc, b
 }
 
 __hidden
-struct cpu_ctx *get_cpu_ctx(void)
+struct cpu_ctx __arena *get_cpu_ctx(void)
 {
-	const u32 idx = 0;
-	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+	return get_cpu_ctx_id(scx_bpf_this_cid());
 }
 
 __hidden
-struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
+struct cpu_ctx __arena *get_cpu_ctx_id(s32 cpu_id)
 {
-	const u32 idx = 0;
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu_id);
+	asm volatile("" :: "r"(&arena));
+	if (cpu_id < 0 || cpu_id >= nr_cids || !cpu_ctxs)
+		return NULL;
+	/* auxiliary programs can outlive the calling scheduler */
+	if (scx_bpf_cid_to_cpu(cpu_id) < 0)
+		return NULL;
+	return &cpu_ctxs[cpu_id];
 }
 
 __hidden
-struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
+struct cpu_ctx __arena *get_cpu_ctx_task(const struct task_struct *p)
 {
-	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
+	return get_cpu_ctx_id(scx_bpf_task_cid(p));
 }
 
 __hidden
@@ -196,19 +192,19 @@ void reset_task_flag(task_ctx __arg_arena *taskc, u64 flag)
 }
 
 __hidden
-inline bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+inline bool test_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
 {
 	return (cpuc->flags & flag) == flag;
 }
 
 __hidden
-inline void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+inline void set_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
 {
 	cpuc->flags |= flag;
 }
 
 __hidden
-inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+inline void reset_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
 {
 	cpuc->flags &= ~flag;
 }
@@ -226,7 +222,7 @@ bool is_lock_holder(task_ctx __arg_arena *taskc)
 }
 
 __hidden
-bool is_lock_holder_running(struct cpu_ctx *cpuc)
+bool is_lock_holder_running(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
 }
@@ -268,19 +264,19 @@ bool use_full_cpus(void)
 
 __hidden
 void set_affinity_flags(task_ctx __arg_arena *taskc,
-			const struct cpumask *cpumask)
+			const struct scx_cmask __arena __arg_arena *cpumask)
 {
 	bool is_affinitized, dom_pinned, dom_pinned_settled;
 	bool on_big = false, on_little = false;
 	s32 first_cpdom_id = -ENOENT;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	u32 weight;
 	int cpu;
 
 	if (!cpumask)
 		return;
 
-	weight = bpf_cpumask_weight(cpumask);
+	weight = cmask_weight(cpumask);
 	is_affinitized = weight != nr_cpu_ids;
 	if (weight == 1)
 		set_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
@@ -294,16 +290,10 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 		dom_pinned_settled = !is_affinitized;
 	}
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (cpu >= LAVD_CPU_ID_MAX)
-			break;
-
-		if (!bpf_cpumask_test_cpu(cpu, cpumask))
-			continue;
-
+	cmask_for_each(cpu, cpumask) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("Failed to look up cpu_ctx: %d", cpu);
+			scx_bpf_error("Failed to look up cpu_ctx for cid %d", cpu);
 			return;
 		}
 
@@ -367,23 +357,15 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 	r = bpf_get_prandom_u32() % y;
 	return r < x;
 }
-/*
- * We define the primary cpu in the physical core as the lowest logical cpu id.
- */
+/* the core's first cid is its primary; without SMT every cid is its own core */
 __hidden
 u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
-	const volatile u32 *sibling;
+	struct cpu_ctx __arena *cpuc;
 
 	if (!is_smt_active)
 		return cpu;
-
-	sibling = MEMBER_VPTR(cpu_sibling, [cpu]);
-	if (!sibling) {
-		debugln("Infeasible CPU id: %d", cpu);
-		return cpu;
-	}
-
-	return ((cpu < *sibling) ? cpu : *sibling);
+	cpuc = get_cpu_ctx_id(cpu);
+	return cpuc ? cpuc->core_cid : cpu;
 }
 
 __hidden
@@ -393,7 +375,7 @@ u32 cpu_to_dsq(u32 cpu)
 }
 
 __hidden
-bool queued_on_cpu(struct cpu_ctx *cpuc)
+bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id))
 		return true;
@@ -411,7 +393,7 @@ bool queued_on_cpu(struct cpu_ctx *cpuc)
 }
 
 __hidden
-bool is_cpu_congested(struct cpu_ctx *cpuc)
+bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	int nr;
 
@@ -459,7 +441,8 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
 }
 
 __hidden
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc)
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+		      task_ctx *taskc)
 {
 	struct cpdom_ctx __arena *cpdomc;
 
@@ -508,8 +491,8 @@ u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now)
  * restarts the clock from this slice.
  */
 __hidden
-void task_update_cpu_warmth(task_ctx __arg_arena *taskc, struct cpu_ctx *cpuc,
-			    u64 slice_used, u64 now)
+void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
+			    struct cpu_ctx __arena __arg_arena *cpuc, u64 slice_used, u64 now)
 {
 	u64 gain, w;
 

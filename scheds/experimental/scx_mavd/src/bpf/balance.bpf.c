@@ -307,34 +307,21 @@ pick_most_loaded_dsq(struct cpdom_ctx __arena __arg_arena *cpdomc)
 	 * there is no need to check per-CPU DSQs.
 	 */
 	if (is_per_cpu_dsq_migratable()) {
-		int pick_cpu = -ENOENT, cpu, i, j, k;
+		int pick_cpu = -ENOENT, cpu;
 
-		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-			u64 cpumask;
-			if ((u32)i * 64 >= nr_cpu_ids)
-				break;
-			cpumask = cpdomc->__cpumask[i];
-			bpf_for(k, 0, 64) {
-				u64 load;
+		cmask_for_each(cpu, &cpdomc->cpus) {
+			u64 load;
 
-				j = cpumask_next_set_bit(&cpumask);
-				if (j < 0)
-					break;
-				cpu = (i * 64) + j;
-				if (cpu >= nr_cpu_ids)
-					break;
-
-				if (no_fast_lb) {
-					load = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
-					       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-				} else {
-					struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
-					load = cpuc ? READ_ONCE(cpuc->qload_invr) : 0;
-				}
-				if (load > highest_load) {
-					highest_load = load;
-					pick_cpu = cpu;
-				}
+			if (no_fast_lb) {
+				load = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
+				       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+			} else {
+				struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+				load = cpuc ? READ_ONCE(cpuc->qload_invr) : 0;
+			}
+			if (load > highest_load) {
+				highest_load = load;
+				pick_cpu = cpu;
 			}
 		}
 
@@ -527,7 +514,7 @@ __hidden
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx __arena *cpdomc;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	u64 cpdom_turb_dsq_id;
 	bool turbulent;
 	struct dsq_entry dsqs[3];

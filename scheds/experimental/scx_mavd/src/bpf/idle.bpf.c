@@ -26,23 +26,28 @@ struct sticky_ctx {
 	 */
 	unsigned int i_m;
 	unsigned int i_nm;
-	struct cpu_ctx *cpuc_match[2];
-	struct cpu_ctx *cpuc_not_match[2];
+	struct cpu_ctx __arena *cpuc_match[2];
+	struct cpu_ctx __arena *cpuc_not_match[2];
 };
 
-static __always_inline
-bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
+/*
+ * The mask preparation stays out of line. Inlined, its scratch pushes the
+ * select and enqueue call chains past the verifier's 512-byte stack limit.
+ */
+static __noinline
+bool init_idle_i_mask(struct pick_ctx *ctx, const struct scx_cmask __arena *idle)
 {
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
-		ctx->i_mask = idle_cpumask;
+		ctx->i_mask = idle;
 	else {
-		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->i_mask;
+		struct scx_cmask __arena *_i_mask = ctx->cpuc_cur->i_mask;
 		if (!_i_mask)
 			return false;
-		bpf_cpumask_and(_i_mask, ctx->p->cpus_ptr, idle_cpumask);
-		ctx->i_mask = cast_mask(_i_mask);
+		cmask_copy(_i_mask, &ctx->taskc->allowed);
+		cmask_and(_i_mask, idle);
+		ctx->i_mask = _i_mask;
 	}
-	ctx->i_empty = bpf_cpumask_empty(ctx->i_mask);
+	ctx->i_empty = cmask_empty(ctx->i_mask);
 	return true;
 }
 
@@ -56,7 +61,7 @@ bool init_active_ovrflw_masks(struct pick_ctx *ctx)
 	return true;
 }
 
-static __always_inline
+static __noinline
 bool init_ao_masks(struct pick_ctx *ctx)
 {
 	ctx->cpuc_cur = get_cpu_ctx();
@@ -75,10 +80,12 @@ bool init_ao_masks(struct pick_ctx *ctx)
 	if (!ctx->a_mask || !ctx->o_mask)
 		return false;
 
-	bpf_cpumask_and(ctx->a_mask, ctx->p->cpus_ptr, cast_mask(ctx->active));
-	bpf_cpumask_and(ctx->o_mask, ctx->p->cpus_ptr, cast_mask(ctx->ovrflw));
-	ctx->a_empty = bpf_cpumask_empty(cast_mask(ctx->a_mask));
-	ctx->o_empty = bpf_cpumask_empty(cast_mask(ctx->o_mask));
+	cmask_copy(ctx->a_mask, &ctx->taskc->allowed);
+	cmask_and(ctx->a_mask, ctx->active);
+	cmask_copy(ctx->o_mask, &ctx->taskc->allowed);
+	cmask_and(ctx->o_mask, ctx->ovrflw);
+	ctx->a_empty = cmask_empty(ctx->a_mask);
+	ctx->o_empty = cmask_empty(ctx->o_mask);
 	if (ctx->a_empty)
 		ctx->a_mask = NULL;
 	if (ctx->o_empty)
@@ -104,12 +111,12 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
  * on the pre-computed steady_cpumask. Steady (non-turbulent) CPUs become
  * the active set, and turbulent CPUs become the overflow set.
  */
-static __always_inline
+static __noinline
 bool repartition_masks_for_latency(struct pick_ctx *ctx)
 {
-	struct bpf_cpumask *steady_set = ctx->cpuc_cur->a_mask;
-	struct bpf_cpumask *turb_set = ctx->cpuc_cur->o_mask;
-	struct bpf_cpumask *steady = steady_cpumask;
+	struct scx_cmask __arena *steady_set = ctx->cpuc_cur->a_mask;
+	struct scx_cmask __arena *turb_set = ctx->cpuc_cur->o_mask;
+	struct scx_cmask __arena *steady = steady_cpumask;
 
 	if (!steady_set || !turb_set || !steady)
 		return false;
@@ -123,19 +130,20 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 	 * steady_set = eligible_cpus ∩ steady
 	 * turb_set   = eligible_cpus - steady
 	 */
-	bpf_cpumask_or(steady_set, cast_mask(ctx->active), cast_mask(ctx->ovrflw));
+	cmask_copy(steady_set, ctx->active);
+	cmask_or(steady_set, ctx->ovrflw);
 
 	if (test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
-		bpf_cpumask_and(steady_set, ctx->p->cpus_ptr, cast_mask(steady_set));
+		cmask_and(steady_set, &ctx->taskc->allowed);
 
-	bpf_cpumask_copy(turb_set, cast_mask(steady_set));
-	bpf_cpumask_and(steady_set, cast_mask(steady_set), cast_mask(steady));
-	bpf_cpumask_xor(turb_set, cast_mask(turb_set), cast_mask(steady_set));
+	cmask_copy(turb_set, steady_set);
+	cmask_and(steady_set, steady);
+	cmask_andnot(turb_set, steady_set);
 
 	ctx->a_mask = steady_set;
 	ctx->o_mask = turb_set;
-	ctx->a_empty = bpf_cpumask_empty(cast_mask(steady_set));
-	ctx->o_empty = bpf_cpumask_empty(cast_mask(turb_set));
+	ctx->a_empty = cmask_empty(steady_set);
+	ctx->o_empty = cmask_empty(turb_set);
 	if (ctx->a_empty)
 		ctx->a_mask = NULL;
 	if (ctx->o_empty)
@@ -144,8 +152,8 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 	return true;
 }
 
-static __always_inline
-bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
+static __noinline
+bool init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *idle_mask)
 {
 	/*
 	 * temp_mask is also used by find_cpu_in() earlier in pick_idle_cpu(),
@@ -160,15 +168,17 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 		return false;
 
 	if (ctx->a_mask) {
-		bpf_cpumask_and(ctx->ia_mask, idle_mask, cast_mask(ctx->a_mask));
-		ctx->ia_empty = bpf_cpumask_empty(cast_mask(ctx->ia_mask));
+		cmask_copy(ctx->ia_mask, idle_mask);
+		cmask_and(ctx->ia_mask, ctx->a_mask);
+		ctx->ia_empty = cmask_empty(ctx->ia_mask);
 	}
 	else
 		ctx->ia_empty = true;
 
 	if (ctx->o_mask) {
-		bpf_cpumask_and(ctx->io_mask, idle_mask, cast_mask(ctx->o_mask));
-		ctx->io_empty = bpf_cpumask_empty(cast_mask(ctx->io_mask));
+		cmask_copy(ctx->io_mask, idle_mask);
+		cmask_and(ctx->io_mask, ctx->o_mask);
+		ctx->io_empty = cmask_empty(ctx->io_mask);
 	}
 	else
 		ctx->io_empty = true;
@@ -176,19 +186,20 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 	if (ctx->ia_empty || !have_turbo_core || !turbo_cpumask)
 		ctx->iat_empty = true;
 	else if (turbo_cpumask) {
-		bpf_cpumask_and(ctx->iat_mask, cast_mask(ctx->ia_mask),
-				cast_mask(turbo_cpumask));
-		ctx->iat_empty = bpf_cpumask_empty(cast_mask(ctx->iat_mask));
+		cmask_copy(ctx->iat_mask, ctx->ia_mask);
+		cmask_and(ctx->iat_mask, turbo_cpumask);
+		ctx->iat_empty = cmask_empty(ctx->iat_mask);
 	}
 	return true;
 }
 
 __hidden
-s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
+s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
+		struct cpu_ctx __arena __arg_arena *cpuc_cur)
 {
 	const volatile u16 __arena *cpu_order = get_cpu_order();
-	const struct cpumask *online_mask;
-	struct bpf_cpumask *online_src_mask;
+	const struct scx_cmask __arena *online_mask;
+	struct scx_cmask __arena *online_src_mask;
 	s32 cpu;
 	unsigned int i;
 
@@ -199,9 +210,9 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	if (!online_src_mask)
 		return -ENOENT;
 
-	online_mask = scx_bpf_get_online_cpumask();
-	bpf_cpumask_and(online_src_mask, src_mask, online_mask);
-	scx_bpf_put_cpumask(online_mask);
+	online_mask = online_cmask;
+	cmask_copy(online_src_mask, src_mask);
+	cmask_and(online_src_mask, online_mask);
 
 	/*
 	 * Find a proper CPU in the preferred CPU order.
@@ -211,21 +222,33 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 			break;
 
 		cpu = cpu_order[i];
-		if (bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
+		if (cmask_test(cpu, online_src_mask))
 			return cpu;
 	};
 	return -ENOENT;
 }
 
 
+/*
+ * Out of line for the stack: three inlined intersections push the picker chain
+ * past the verifier's 512-byte limit.
+ */
+static __noinline
+void init_cpdom_mask(struct scx_cmask __arena *dst, const struct scx_cmask __arena *cpdom,
+		     const struct scx_cmask __arena *eligible)
+{
+	cmask_copy(dst, cpdom);
+	cmask_and(dst, eligible);
+}
+
 static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 			   bool *is_idle)
 {
-	struct bpf_cpumask *cpd_mask;
+	struct scx_cmask __arena *cpd_mask;
 	struct cpdom_ctx __arena *cpdc;
 	s32 cpu;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
+	cpd_mask = get_cpdom_mask(cpdom);
 	cpdc = get_cpdom_ctx(cpdom);
 	if (!ctx || !cpdc || !cpd_mask || !cpdc->is_valid)
 		return -ENOENT;
@@ -235,27 +258,24 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 	 * in the order of turbo, active, and overflow.
 	 */
 	if (!ctx->iat_empty && cpdc->nr_active_cpus && cpdc->is_big) {
-		bpf_cpumask_and(ctx->temp_mask,
-				cast_mask(cpd_mask), cast_mask(ctx->iat_mask));
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
+		init_cpdom_mask(ctx->temp_mask, cpd_mask, ctx->iat_mask);
+		cpu = pick_idle_cid(ctx->temp_mask, scope);
 		if (cpu >= 0) {
 			*is_idle = true;
 			return cpu;
 		}
 	}
 	if (!ctx->ia_empty && cpdc->nr_active_cpus) {
-		bpf_cpumask_and(ctx->temp_mask,
-				cast_mask(cpd_mask), cast_mask(ctx->ia_mask));
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
+		init_cpdom_mask(ctx->temp_mask, cpd_mask, ctx->ia_mask);
+		cpu = pick_idle_cid(ctx->temp_mask, scope);
 		if (cpu >= 0) {
 			*is_idle = true;
 			return cpu;
 		}
 	}
 	if (!ctx->io_empty) {
-		bpf_cpumask_and(ctx->temp_mask,
-				cast_mask(cpd_mask), cast_mask(ctx->io_mask));
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
+		init_cpdom_mask(ctx->temp_mask, cpd_mask, ctx->io_mask);
+		cpu = pick_idle_cid(ctx->temp_mask, scope);
 		if (cpu >= 0) {
 			*is_idle = true;
 			return cpu;
@@ -267,15 +287,15 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 static __always_inline
 s32 cpumask_any_distribute(struct pick_ctx *ctx)
 {
-	const struct cpumask *mask;
+	const struct scx_cmask __arena *mask;
 	s32 cpu;
 
-	mask = cast_mask(ctx->a_mask);
-	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < nr_cpu_ids))
+	mask = ctx->a_mask;
+	if (mask && ((cpu = cmask_any_distribute(mask)) < nr_cids))
 		return cpu;
 
-	mask = cast_mask(ctx->o_mask);
-	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < nr_cpu_ids))
+	mask = ctx->o_mask;
+	if (mask && ((cpu = cmask_any_distribute(mask)) < nr_cids))
 		return cpu;
 
 	return -ENOENT;
@@ -289,7 +309,7 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 	 */
 	s32 cpu0 = cpumask_any_distribute(ctx);
 	s32 cpu1 = cpumask_any_distribute(ctx);
-	struct cpu_ctx *cpuc0, *cpuc1;
+	struct cpu_ctx __arena *cpuc0, *cpuc1;
 
 	if (cpu0 == cpu1 && cpu0 != -ENOENT)
 		return cpu0;
@@ -305,7 +325,7 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 static
 s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cpdom)
 {
-	struct bpf_cpumask *cpd_mask;
+	struct scx_cmask __arena *cpd_mask;
 	s32 cpu;
 
 	if (sticky_cpu >= 0)
@@ -314,19 +334,17 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 	if (sticky_cpdom < 0)
 		return -ENOENT;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [sticky_cpdom]);
+	cpd_mask = get_cpdom_mask(sticky_cpdom);
 	if (cpd_mask) {
 		if (ctx->a_mask) {
-			cpu = bpf_cpumask_any_and_distribute(
-				cast_mask(cpd_mask), cast_mask(ctx->a_mask));
-			if (cpu < nr_cpu_ids)
+			cpu = cmask_any_and_distribute(cpd_mask, ctx->a_mask);
+			if (cpu < nr_cids)
 					return cpu;
 		}
 
 		if (ctx->o_mask) {
-			cpu = bpf_cpumask_any_and_distribute(
-				cast_mask(cpd_mask), cast_mask(ctx->o_mask));
-			if (cpu < nr_cpu_ids)
+			cpu = cmask_any_and_distribute(cpd_mask, ctx->o_mask);
+			if (cpu < nr_cids)
 				return cpu;
 		}
 
@@ -342,19 +360,18 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 static __always_inline
 bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 {
-	struct bpf_cpumask *a_mask;
-	struct bpf_cpumask *o_mask;
+	struct scx_cmask __arena *a_mask;
+	struct scx_cmask __arena *o_mask;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
 
-	if (!bpf_cpumask_test_cpu(cpu, ctx->p->cpus_ptr))
+	if (!cmask_test(cpu, &ctx->taskc->allowed))
 		return false;
 
 	a_mask = ctx->a_mask;
 	o_mask = ctx->o_mask;
-	if ((a_mask && bpf_cpumask_test_cpu(cpu, cast_mask(a_mask))) ||
-	    (o_mask && bpf_cpumask_test_cpu(cpu, cast_mask(o_mask))))
+	if ((a_mask && cmask_test(cpu, a_mask)) || (o_mask && cmask_test(cpu, o_mask)))
 		return true;
 
 	return false;
@@ -364,24 +381,22 @@ static __always_inline
 bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 {
 	struct cpdom_ctx __arena *cpdc;
-	struct bpf_cpumask *cpd_mask, *a_mask, *o_mask;
+	struct scx_cmask __arena *cpd_mask, *a_mask, *o_mask;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
+	cpd_mask = get_cpdom_mask(cpdom);
 	cpdc = get_cpdom_ctx(cpdom);
 	if (!cpd_mask || !cpdc)
 		return false;
 
 	a_mask = ctx->a_mask;
-	if (a_mask && cpdc->nr_active_cpus &&
-	    bpf_cpumask_intersects(cast_mask(a_mask), cast_mask(cpd_mask)))
+	if (a_mask && cpdc->nr_active_cpus && cmask_intersects(a_mask, cpd_mask))
 		return true;
 
 	o_mask = ctx->o_mask;
-	if (o_mask &&
-	    bpf_cpumask_intersects(cast_mask(o_mask), cast_mask(cpd_mask)))
+	if (o_mask && cmask_intersects(o_mask, cpd_mask))
 		return true;
 
 	return false;
@@ -392,7 +407,7 @@ bool test_cpu_stickable(struct pick_ctx *ctx, struct sticky_ctx *sctx,
 			s32 cpu, bool is_task_big)
 {
 	if (can_run_on_cpu(ctx, cpu)) {
-		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 
 		if (!cpuc || sctx->i_m >= 2 || sctx->i_nm >= 2)
 			return false;
@@ -427,7 +442,7 @@ bool is_sync_wakeup(struct pick_ctx *ctx)
 static
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
-	struct cpu_ctx *p0, *p1, *cpuc;
+	struct cpu_ctx __arena *p0, *p1, *cpuc;
 	struct cpdom_ctx __arena *d0, *d1;
 	struct sticky_ctx sctx;
 
@@ -438,7 +453,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 */
 	test_cpu_stickable(ctx, &sctx, ctx->prev_cpu, ctx->is_task_big);
 	if (is_sync_wakeup(ctx)) {
-		s32 waker_cpu = bpf_get_smp_processor_id();
+		s32 waker_cpu = scx_bpf_this_cid();
 		if (waker_cpu != ctx->prev_cpu) {
 			ctx->sync_waker_cpu = waker_cpu;
 			test_cpu_stickable(ctx, &sctx, ctx->sync_waker_cpu, ctx->is_task_big);
@@ -547,7 +562,7 @@ err_out:
 static
 bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 {
-	struct cpu_ctx *cpuc_waker, *cpuc_prev;
+	struct cpu_ctx __arena *cpuc_waker, *cpuc_prev;
 
 	if (ctx->sync_waker_cpu < 0)
 		return false;
@@ -636,7 +651,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 __hidden __noinline
 s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
-	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
+	const struct scx_cmask __arena *idle = NULL, *idle_smt = NULL;
 	s32 cpu = -ENOENT, sticky_cpu;
 	s64 sticky_cpdom = -ENOENT;
 	struct cpdom_ctx __arena *cpdc;
@@ -698,20 +713,20 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/*
 	 * Use effective pinning here so we cover both permanent pinning
 	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
-	 * (cpus_ptr weight == 1, cached via ops.set_cpumask).
+	 * (cpus_ptr weight == 1, cached via ops.set_cmask).
 	 */
 	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(ctx->p)) {
 		cpu = ctx->prev_cpu;
-		if (!bpf_cpumask_test_cpu(cpu, cast_mask(ctx->active))) {
+		if (!cmask_test(cpu, ctx->active)) {
 			/*
 			 * Extend the overflow set only for permanent pinning;
 			 * migrate_disable is transient, so we don't want to
 			 * pollute the overflow set with short-lived restrictions.
 			 */
 			if (is_permanently_pinned(ctx->p))
-				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
+				cmask_test_and_set(cpu, ctx->ovrflw);
 		}
-		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+		*is_idle = claim_idle_cid(cpu) > 0;
 		goto unlock_out;
 	}
 	/* NOTE: Now task @p is not a per-CPU task. */
@@ -725,10 +740,9 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * core type matches the task type; otherwise fall through to allow a
 	 * cross-cluster migration.
 	 */
-	if (warm_cpu_ns && ctx->prev_cpu >= 0 &&
-	    bpf_cpumask_test_cpu(ctx->prev_cpu, cast_mask(ctx->active)) &&
-	    bpf_cpumask_test_cpu(ctx->prev_cpu, ctx->p->cpus_ptr)) {
-		if (scx_bpf_test_and_clear_cpu_idle(ctx->prev_cpu)) {
+	if (warm_cpu_ns && ctx->prev_cpu >= 0 && cmask_test(ctx->prev_cpu, ctx->active) &&
+	    cmask_test(ctx->prev_cpu, &ctx->taskc->allowed)) {
+		if (claim_idle_cid(ctx->prev_cpu) > 0) {
 			cpu = ctx->prev_cpu;
 			*is_idle = true;
 			goto unlock_out;
@@ -760,10 +774,10 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		goto unlock_out;
 	}
 	if (ctx->a_empty && ctx->o_empty) {
-		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
+		cpu = find_cpu_in(&ctx->taskc->allowed, ctx->cpuc_cur);
 		if (cpu >= 0) {
-			bpf_cpumask_set_cpu(cpu, ctx->ovrflw);
-			*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+			cmask_set(cpu, ctx->ovrflw);
+			*is_idle = claim_idle_cid(cpu) > 0;
 		}
 		goto unlock_out;
 	}
@@ -801,8 +815,8 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/*
 	 * If there is no idle CPU, stay on the sticky CPU or domain.
 	 */
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	if (!init_idle_i_mask(ctx, idle_cpumask))
+	idle = idle_cmask;
+	if (!init_idle_i_mask(ctx, idle))
 		goto err_out;
 	if (ctx->i_empty) {
 		cpu = sticky_cpu;
@@ -818,14 +832,13 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * If SMT is enabled and the sticky CPU is fully idle, stay on it.
 	 */
 	if (is_smt_active) {
-		idle_smtmask = scx_bpf_get_idle_smtmask();
-		i_smt_empty = bpf_cpumask_empty(idle_smtmask);
+		idle_smt = idle_smt_cmask;
+		i_smt_empty = cmask_empty(idle_smt);
 	} else
 		i_smt_empty = true;
 
-	if (!i_smt_empty && sticky_cpu >= 0 &&
-	    bpf_cpumask_test_cpu(sticky_cpu, idle_smtmask) &&
-	    scx_bpf_test_and_clear_cpu_idle(sticky_cpu)) {
+	if (!i_smt_empty && sticky_cpu >= 0 && cmask_test(sticky_cpu, idle_smt) &&
+	    claim_idle_cid(sticky_cpu) > 0) {
 		cpu = sticky_cpu;
 		*is_idle = true;
 		goto unlock_out;
@@ -836,7 +849,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * in the sticky domain, stay on it.
 	 */
 	if (!i_smt_empty) {
-		if (!init_idle_ato_masks(ctx, idle_smtmask))
+		if (!init_idle_ato_masks(ctx, idle_smt))
 			goto err_out;
 		if (!ctx->ia_empty || !ctx->io_empty) {
 			cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom,
@@ -850,7 +863,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/*
 	 * If the sticky CPU is (partially) idle, stay on it.
 	 */
-	if (sticky_cpu >= 0 && scx_bpf_test_and_clear_cpu_idle(sticky_cpu)) {
+	if (sticky_cpu >= 0 && claim_idle_cid(sticky_cpu) > 0) {
 		cpu = sticky_cpu;
 		*is_idle = true;
 		goto unlock_out;
@@ -955,13 +968,6 @@ unlock_out:
 	if (cpu < 0)
 		cpu = pick_random_cpu(ctx);
 
-	/*
-	 * Clean up.
-	 */
-	if (idle_smtmask)
-		scx_bpf_put_idle_cpumask(idle_smtmask);
-	if (idle_cpumask)
-		scx_bpf_put_idle_cpumask(idle_cpumask);
 	bpf_rcu_read_unlock();
 
 	return cpu;

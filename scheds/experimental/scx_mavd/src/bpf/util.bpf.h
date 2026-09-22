@@ -5,7 +5,6 @@
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
 extern volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 
-extern const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT is active */
 
 /*
  * Scheduler parameters
@@ -39,9 +38,22 @@ bool is_permanently_pinned(const struct task_struct *p);
 bool is_effectively_pinned(task_ctx __arg_arena *taskc);
 bool use_full_cpus(void);
 void set_affinity_flags(task_ctx __arg_arena *taskc,
-			const struct cpumask *cpumask);
+			const struct scx_cmask __arena __arg_arena *cpumask);
 bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
+
+static __always_inline bool task_allows_cid(const struct task_struct *p, s32 cid)
+{
+	return cid >= 0 && cid < nr_cids &&
+		bpf_cpumask_test_cpu(scx_bpf_cid_to_cpu(cid), p->cpus_ptr);
+}
+
+static __always_inline s32 first_allowed_cid(const struct task_struct *p)
+{
+	u32 cpu = bpf_cpumask_first(p->cpus_ptr);
+
+	return cpu < nr_cpu_ids ? scx_bpf_cpu_to_cid(cpu) : -ENOENT;
+}
 
 static inline bool rt_or_dl_task(struct task_struct *p)
 {
@@ -50,7 +62,7 @@ static inline bool rt_or_dl_task(struct task_struct *p)
 
 static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
 {
-	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	struct task_struct *curr = scx_bpf_cid_curr(cpu);
 	return curr && rt_or_dl_task(curr);
 }
 
@@ -71,18 +83,17 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
  * preemptible or sleepable caller can tear a cache entry or write another
  * CPU's. Keep the returned pointer inside one RCU read-side critical section.
  */
-struct cpu_ctx;
-u64 __find_task_ctx(struct task_struct *p, struct cpu_ctx *cpuc, bool quiet);
+u64 __find_task_ctx(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+		      bool quiet);
 
 static __always_inline u64
-__get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx *cpuc)
+__get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx __arena *cpuc)
 {
 	if (cpuc) {
 #ifdef LAVD_DEBUG
-		if (cpuc->cpu_id != bpf_get_smp_processor_id())
+		if (cpuc->raw_cpu != bpf_get_smp_processor_id())
 			scx_bpf_error("get_task_ctx_curcpu: non-local cpuc "
-				      "(cpu_id=%u, cur=%d)",
-				      cpuc->cpu_id,
+				      "(cpu_id=%u, cur=%d)", cpuc->raw_cpu,
 				      bpf_get_smp_processor_id());
 #endif
 		if (cpuc->cached_task == (u64)p &&
@@ -99,6 +110,21 @@ __get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx *cpuc)
 static __always_inline task_ctx *find_task_ctx(struct task_struct *p)
 {
 	return (task_ctx *)__find_task_ctx(p, NULL, true);
+}
+
+/*
+ * ravg_accumulate() takes a native pointer, so an arena-resident average is
+ * staged through the stack. Returns the updated average at @now.
+ */
+static __always_inline u64 update_ravg_arena(struct ravg_data __arena *ard, u64 new_val,
+					     u64 now)
+{
+	struct ravg_data rd;
+
+	ravg_from_arena(&rd, ard);
+	ravg_accumulate(&rd, new_val, now, LAVD_RAVG_HALFLIFE_NS);
+	ravg_to_arena(ard, &rd);
+	return ravg_read(&rd, now, LAVD_RAVG_HALFLIFE_NS);
 }
 
 #endif /* __UTIL_H */

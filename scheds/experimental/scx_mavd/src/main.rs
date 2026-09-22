@@ -53,11 +53,10 @@ use scx_utils::UserExitInfo;
 use scx_utils::autopower::{PowerProfile, fetch_power_profile};
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::ksym_exists;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
-use scx_utils::scx_ops_load;
-use scx_utils::scx_ops_open;
+use scx_utils::scx_ops_cid_load;
+use scx_utils::scx_ops_cid_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
@@ -502,7 +501,7 @@ impl<'a> Scheduler<'a> {
         init_libbpf_logging(Some(PrintLevel::Debug));
 
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
-        let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops, open_opts)?;
+        let mut skel = scx_ops_cid_open!(skel_builder, open_object, lavd_ops, open_opts)?;
 
         // Enable futex tracing using ftrace if available. If the ftrace is not
         // available, use tracepoint, which is known to be slower than ftrace.
@@ -543,7 +542,7 @@ impl<'a> Scheduler<'a> {
         )?;
 
         // Initialize arena
-        let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
+        let mut skel = scx_ops_cid_load!(skel, lavd_ops, uei)?;
         let task_size = std::mem::size_of::<types::task_ctx>();
         let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
         // Programs start observing the arena globals at attach, so seed them first.
@@ -625,13 +624,11 @@ impl<'a> Scheduler<'a> {
     fn init_cpus(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         debug!("{:#?}", order);
 
-        // Initialize CPU capacity and sibling
+        // Initialize CPU capacity
         for cpu in order.cpuids.iter() {
             skel.maps.rodata_data.as_mut().unwrap().cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
             skel.maps.rodata_data.as_mut().unwrap().cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
             skel.maps.rodata_data.as_mut().unwrap().cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
-            skel.maps.rodata_data.as_mut().unwrap().cpu_sibling[cpu.cpu_adx] =
-                cpu.cpu_sibling as u32;
         }
 
         // Initialize performance vs. CPU order table.
@@ -782,8 +779,6 @@ impl<'a> Scheduler<'a> {
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
-        // Replenishment wakes dispatch through the built-in idle tracking.
-        rodata.bw_kick_builtin_idle = true;
 
         // Fail hard if cpu.max was explicitly requested but the kernel lacks
         // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
@@ -797,30 +792,17 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        /*
-         * Two-way selection for "drain the local DSQ when a
-         * higher-priority class takes the CPU":
-         *
-         *   kernel >= 6.19 (call-from-anywhere reenqueue):
-         *     -> drop ops.cpu_release; enable sched_switch hook.
-         *
-         *   kernel < 6.19 (cpu_release-restricted reenqueue only):
-         *     -> keep ops.cpu_release; sched_switch stays disabled.
-         */
-        if ksym_exists("scx_bpf_reenqueue_local___v2").unwrap() {
-            skel.struct_ops.lavd_ops_mut().cpu_release = std::ptr::null_mut();
-            unsafe {
-                libbpf_rs::libbpf_sys::bpf_program__set_autoload(
-                    skel.progs.lavd_sched_switch.as_libbpf_object().as_ptr(),
-                    true,
-                );
-            }
+        // CID kernels use the sched_switch hook to drain tasks on RT/DL takeover.
+        unsafe {
+            libbpf_rs::libbpf_sys::bpf_program__set_autoload(
+                skel.progs.lavd_sched_switch.as_libbpf_object().as_ptr(),
+                true,
+            );
         }
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
 
         if opts.partial {
             skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;

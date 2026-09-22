@@ -33,7 +33,7 @@ struct {
 static __always_inline
 int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_id)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	struct cpdom_ctx __arena *cpdomc;
 	struct msg_task_ctx *m;
 	int i;
@@ -58,9 +58,9 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.stat[2] = cpuc->big_core ? 'B' : 'T';
 	m->taskc_x.stat[3] = test_task_flag(taskc, LAVD_FLAG_IS_GREEDY)? 'G' : 'E';
 	m->taskc_x.stat[4] = '\0';
-	m->taskc_x.cpu_id = taskc->cpu_id;
-	m->taskc_x.prev_cpu_id = taskc->prev_cpu_id;
-	m->taskc_x.suggested_cpu_id = taskc->suggested_cpu_id;
+	m->taskc_x.cpu_id = scx_bpf_cid_to_cpu(taskc->cpu_id);
+	m->taskc_x.prev_cpu_id = scx_bpf_cid_to_cpu(taskc->prev_cpu_id);
+	m->taskc_x.suggested_cpu_id = scx_bpf_cid_to_cpu(taskc->suggested_cpu_id);
 	m->taskc_x.waker_pid = taskc->waker_pid;
 	for (i = 0; i < sizeof(m->taskc_x.waker_comm) && can_loop; i++)
 		((char *)m->taskc_x.waker_comm)[i] = ((char __arena *)taskc->waker_comm)[i];
@@ -92,8 +92,7 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.task_util_est = taskc->util_est;
 	m->taskc_x.norm_lat_cri = taskc->normalized_lat_cri;
 	m->taskc_x.cpu_heat = taskc->cpu_heat;
-	m->taskc_x.warm_cpu_id = taskc->cpu_heat ? (u16)taskc->cpu_id :
-						   (u16)LAVD_CPU_ID_NONE;
+	m->taskc_x.warm_cpu_id = taskc->cpu_heat ? m->taskc_x.cpu_id : LAVD_CPU_ID_NONE;
 
 	bpf_ringbuf_submit(m, 0);
 
@@ -112,7 +111,7 @@ static void proc_introspec_sched_n(struct task_struct *p,
 		return;
 
 	/* introspec_arg is the number of schedules remaining */
-	cpu_id = bpf_get_smp_processor_id();
+	cpu_id = scx_bpf_this_cid();
 	cur_nr = intrspc.arg;
 
 	/*

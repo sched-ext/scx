@@ -1,8 +1,9 @@
 # scx_mavd
 
-Experimental fork of scx_lavd for an arena-native cid conversion. The initial
-patch preserves the lavd implementation; later patches perform the conversion.
-The upstream policy and source organization are retained for future ports.
+Experimental fork of scx_lavd for an arena-native CID conversion. The
+upstream policy and source organization are retained for future ports.
+[Conversion and maintenance notes](CONVERSION.md) describe CPU-ID units,
+mask ownership, documented differences and validation requirements.
 
 This is a single user-defined scheduler used within [`sched_ext`](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about `sched_ext`](https://github.com/sched-ext/scx/tree/main).
 

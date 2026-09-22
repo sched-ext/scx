@@ -102,7 +102,6 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each compute domain.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		int i, j, k;
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
@@ -131,23 +130,12 @@ static void collect_sys_stat(void)
 			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id))
 					       + scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdom_id));
 
-		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-			u64 cpumask;
-			if ((u32)i * 64 >= nr_cpu_ids)
-				break;
-			cpumask = cpdomc->__cpumask[i];
-			bpf_for(k, 0, 64) {
-				j = cpumask_next_set_bit(&cpumask);
-				if (j < 0)
-					break;
-				cpu = (i * 64) + j;
-				if (cpu >= nr_cpu_ids)
-					break;
-
-				cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-				if (use_per_cpu_dsq() && cpu == get_primary_cpu(cpu))
-					cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-			}
+		cmask_for_each(cpu, &cpdomc->cpus) {
+			cpdomc->nr_queued_task +=
+				scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+			if (use_per_cpu_dsq() && cpu == get_primary_cpu(cpu))
+				cpdomc->nr_queued_task +=
+					scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 		}
 
 		c->nr_queued_task += cpdomc->nr_queued_task;
@@ -161,13 +149,13 @@ static void collect_sys_stat(void)
 	 * when the verifier gets smarter, we can merge those phases into
 	 * one.
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_arena_for(cpu, 0, nr_cids) {
 		u64 compute_invr, cpuc_tot_task_time_invr, irq_steal_wall;
 		u64 irq_steal_invr, task_wall, rt_dl_time_invr, now_task;
 		u64 now_pelt, delta_task, delta_pelt;
 		u64 cur_idle_wall = 0, past_idle_wall;
 		u64 dom_pinned_task_time_wall, dom_pinned_task_time_invr;
-		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -292,8 +280,8 @@ static void collect_sys_stat(void)
 		cpuc->tot_task_time_wall = 0;
 		dom_pinned_task_time_wall = cpuc->tot_dom_pinned_task_time_wall;
 		cpuc->tot_dom_pinned_task_time_wall = 0;
-		now_task = scx_clock_task(cpu);
-		now_pelt = scx_clock_pelt(cpu);
+		now_task = scx_clock_task(cpuc->raw_cpu);
+		now_pelt = scx_clock_pelt(cpuc->raw_cpu);
 		delta_task = time_delta(now_task, cpuc->prev_task_clk);
 		if (CONFIG_NO_HZ_IDLE && cur_idle_wall > 0) {
 			/*
@@ -306,7 +294,7 @@ static void collect_sys_stat(void)
 			 * pre-compensates prev_pelt_clk for the wakeup bounce
 			 * (see block comment above).
 			 */
-			u64 cap = scx_bpf_cpuperf_cap(cpu);
+			u64 cap = scx_bpf_cidperf_cap(cpu);
 			u64 cur_idle_pelt = (cur_idle_wall * cap) >> LAVD_SHIFT;
 			now_pelt += cur_idle_pelt;
 		}
@@ -369,9 +357,8 @@ static void collect_sys_stat(void)
 		cpuc->avg_steal_util_invr = calc_asym_avg(cpuc->avg_steal_util_invr,
 							   cpuc->cur_steal_util_invr);
 
-		ravg_accumulate(&cpuc->avg_irq_steal_ravg, cpuc->cur_steal_util_invr, c->now,
-					LAVD_RAVG_HALFLIFE_NS);
-		u64 avg_irq_fp = ravg_read(&cpuc->avg_irq_steal_ravg, c->now, LAVD_RAVG_HALFLIFE_NS);
+		u64 avg_irq_fp = update_ravg_arena(&cpuc->avg_irq_steal_ravg,
+						   cpuc->cur_steal_util_invr, c->now);
 		u32 avg_irq_val = (u32)(avg_irq_fp >> RAVG_FRAC_BITS);
 		cpuc->lat_headroom = (avg_irq_val < LAVD_SCALE) ? (LAVD_SCALE - avg_irq_val) : 0;
 
@@ -472,8 +459,8 @@ static void collect_sys_stat(void)
 	/*
 	 * Collect statistics for each CPU (phase 2).
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	bpf_arena_for(cpu, 0, nr_cids) {
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -529,10 +516,10 @@ static void collect_sys_stat(void)
 	/*
 	 * Collect statistics for each CPU (phase 3).
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct bpf_cpumask *steady;
+	bpf_arena_for(cpu, 0, nr_cids) {
+		struct scx_cmask __arena *steady;
 		struct cpdom_ctx __arena *cpu_cpdomc;
-		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -561,9 +548,9 @@ static void collect_sys_stat(void)
 		steady = steady_cpumask;
 		if (steady) {
 			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
-				bpf_cpumask_set_cpu(cpu, steady);
+				cmask_set(cpu, steady);
 			else
-				bpf_cpumask_clear_cpu(cpu, steady);
+				cmask_clear(cpu, steady);
 		}
 		bpf_rcu_read_unlock();
 
