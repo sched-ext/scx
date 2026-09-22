@@ -105,9 +105,9 @@ void update_effective_capacity(struct cpu_ctx __arena __arg_arena *cpuc)
 	int cpu;
 
 	/* Sanity check */
-	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cids)
+	if (!cpuc || cpuc->cid < 0 || cpuc->cid >= nr_cids)
 		return;
-	cpu = cpuc->raw_cpu;
+	cpu = cpuc->cpu;
 
 	/*
 	 * Calculate the maximum capacity available at the moment which is
@@ -332,8 +332,8 @@ int do_core_compaction(void)
 	/*
 	 * Prepare cpumasks.
 	 */
-	active = active_cpumask;
-	ovrflw = ovrflw_cpumask;
+	active = active_cmask;
+	ovrflw = ovrflw_cmask;
 
 	/*
 	 * Update the PCO index that meets the required compute capacity
@@ -680,7 +680,7 @@ int reinit_active_cpumask_for_performance(void)
 {
 	struct cpu_ctx __arena *cpuc;
 	struct scx_cmask __arena *active, *ovrflw;
-	const struct scx_cmask __arena *online_cpumask;
+	const struct scx_cmask __arena *online;
 	struct cpdom_ctx __arena *cpdomc;
 	u32 cpdom_id;
 	u32 nr_active_cpdoms = 0;
@@ -691,8 +691,8 @@ int reinit_active_cpumask_for_performance(void)
 	/*
 	 * Prepare cpumasks.
 	 */
-	active  = active_cpumask;
-	ovrflw  = ovrflw_cpumask;
+	active  = active_cmask;
+	ovrflw  = ovrflw_cmask;
 
 	/*
 	 * Once core compaction becomes off in performance mode, reinitialize
@@ -728,9 +728,9 @@ int reinit_active_cpumask_for_performance(void)
 			}
 		}
 	} else {
-		online_cpumask = online_cmask;
-		nr_cpus_onln = cmask_weight(online_cpumask);
-		cmask_copy(active, online_cpumask);
+		online = online_cmask;
+		nr_cpus_onln = cmask_weight(online);
+		cmask_copy(active, online);
 
 		cmask_zero(ovrflw);
 
@@ -803,7 +803,7 @@ int calc_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
 	 * accounts for RT/DL and IRQ separately; passing the total would count
 	 * them twice.
 	 */
-	cap = scx_bpf_cidperf_cap(cpuc->cpu_id);
+	cap = scx_bpf_cidperf_cap(cpuc->cid);
 	if (no_freq_scaling) {
 		cpuperf_target = cap;
 	} else {
@@ -857,7 +857,7 @@ int update_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
 	 * from any CPU.
 	 */
 	if (cpuc->cpuperf_cur != cpuperf_target) {
-		scx_bpf_cidperf_set(cpuc->cpu_id, cpuperf_target);
+		scx_bpf_cidperf_set(cpuc->cid, cpuperf_target);
 		cpuc->cpuperf_cur = cpuperf_target;
 	}
 

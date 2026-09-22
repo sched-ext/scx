@@ -53,7 +53,7 @@ static bool can_x_kick_cpu2(struct preemption_info *prm_x, struct preemption_inf
 	/*
 	 * A CPU taken by an RT/DL task cannot be a victim.
 	 */
-	if (is_rt_or_dl_task_running(cpuc2->cpu_id))
+	if (is_rt_or_dl_task_running(cpuc2->cid))
 		return false;
 
 	/*
@@ -211,7 +211,7 @@ static void ask_cpu_yield_after(struct cpu_ctx __arena *victim_cpuc, u64 new_sli
 	 * set the victim task's time slice to zero so the victim task yields
 	 * the CPU in the next scheduling point.
 	 */
-	struct task_struct *victim_p = scx_bpf_cid_curr(victim_cpuc->cpu_id);
+	struct task_struct *victim_p = scx_bpf_cid_curr(victim_cpuc->cid);
 
 	if (victim_p) {
 		/*
@@ -289,7 +289,7 @@ int shrink_boosted_slice_remote(struct cpu_ctx __arena __arg_arena *cpuc, u64 no
 		new_slice_wall = time_delta(target_slice_wall, duration_wall);
 
 	if (!new_slice_wall)
-		scx_bpf_kick_cid(cpuc->cpu_id, SCX_KICK_PREEMPT);
+		scx_bpf_kick_cid(cpuc->cid, SCX_KICK_PREEMPT);
 	else
 		ask_cpu_yield_after(cpuc, new_slice_wall);
 
@@ -357,7 +357,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 u64 cpdom_id)
 {
 	struct preemption_info prm_t, prm_c;
-	struct scx_cmask __arena *cd_cpumask, *cpumask;
+	struct scx_cmask __arena *cd_cmask, *cpumask;
 	struct cpdom_ctx __arena *cpdomc;
 	struct cpu_ctx __arena *cpuc_victim;
 	struct cpu_ctx __arena *cpuc_cur = NULL;
@@ -422,11 +422,11 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 
 	cpumask = cpuc_cur->temp_mask;
 	cpdomc = get_cpdom_ctx(cpdom_id);
-	cd_cpumask = get_cpdom_mask(cpdom_id);
-	if (!cpdomc || !cd_cpumask)
+	cd_cmask = get_cpdom_mask(cpdom_id);
+	if (!cpdomc || !cd_cmask)
 		return;
 
-	cmask_copy(cpumask, cd_cpumask);
+	cmask_copy(cpumask, cd_cmask);
 	cmask_and(cpumask, &taskc->allowed);
 
 	/*

@@ -57,11 +57,11 @@ int init_cid_masks(void)
 	bpf_arena_for(i, 0, NR_GLOBAL_MASKS)
 		init_zeroed_mask(pool_mask(pool, mask_sz, i), nr_cids);
 
-	turbo_cpumask = pool_mask(pool, mask_sz, 0);
-	big_cpumask = pool_mask(pool, mask_sz, 1);
-	active_cpumask = pool_mask(pool, mask_sz, 2);
-	ovrflw_cpumask = pool_mask(pool, mask_sz, 3);
-	steady_cpumask = pool_mask(pool, mask_sz, 4);
+	turbo_cmask = pool_mask(pool, mask_sz, 0);
+	big_cmask = pool_mask(pool, mask_sz, 1);
+	active_cmask = pool_mask(pool, mask_sz, 2);
+	ovrflw_cmask = pool_mask(pool, mask_sz, 3);
+	steady_cmask = pool_mask(pool, mask_sz, 4);
 	online_cmask = pool_mask(pool, mask_sz, 5);
 	idle_cmask = pool_mask(pool, mask_sz, 6);
 	idle_smt_cmask = pool_mask(pool, mask_sz, 7);
@@ -73,8 +73,8 @@ int init_cid_masks(void)
 		if (cpu >= LAVD_CPU_ID_MAX)
 			return -EINVAL;
 		cpuc = &cpu_ctxs[cid];
-		cpuc->cpu_id = cid;
-		cpuc->raw_cpu = cpu;
+		cpuc->cid = cid;
+		cpuc->cpu = cpu;
 
 		i = NR_GLOBAL_MASKS + cid * NR_CPU_MASKS;
 		bpf_arena_for(j, 0, NR_CPU_MASKS)
@@ -103,7 +103,7 @@ int init_cid_masks(void)
 	if (!online)
 		return -ENOENT;
 	cmask_copy(online_cmask, online);
-	cmask_copy(active_cpumask, online_cmask);
+	cmask_copy(active_cmask, online_cmask);
 	nr_cpus_onln = cmask_weight(online_cmask);
 
 	/*
@@ -197,7 +197,7 @@ found:
 __hidden __noinline
 void update_idle_cid(struct cpu_ctx __arena __arg_arena *cpuc, bool idle)
 {
-	s32 cid = cpuc->cpu_id, sibling;
+	s32 cid = cpuc->cid, sibling;
 
 	asm volatile("" :: "r"(&arena));
 	if (idle)

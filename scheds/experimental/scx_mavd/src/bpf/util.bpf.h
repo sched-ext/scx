@@ -104,9 +104,9 @@ __get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx __arena *cpuc)
 {
 	if (cpuc) {
 #ifdef LAVD_DEBUG
-		if (cpuc->raw_cpu != bpf_get_smp_processor_id())
+		if (cpuc->cpu != bpf_get_smp_processor_id())
 			scx_bpf_error("get_task_ctx_curcpu: non-local cpuc "
-				      "(cpu_id=%u, cur=%d)", cpuc->raw_cpu,
+				      "(cpu=%u, cur=%d)", cpuc->cpu,
 				      bpf_get_smp_processor_id());
 #endif
 		if (cpuc->cached_task == (u64)p &&
@@ -124,7 +124,7 @@ __get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx __arena *cpuc)
 static __always_inline struct cpu_ctx __arena *
 reuse_current_cpu_ctx(struct cpu_ctx __arena *cpuc)
 {
-	if (cpuc->raw_cpu == bpf_get_smp_processor_id())
+	if (cpuc->cpu == bpf_get_smp_processor_id())
 		return cpuc;
 	return get_cpu_ctx_ops(scx_bpf_this_cid());
 }

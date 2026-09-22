@@ -65,7 +65,7 @@ static __inline u64 conv_wall_to_invr(u64 duration_wall, struct cpu_ctx __arena 
 	if (!cpuc)
 		return duration_wall;
 
-	cpu = cpuc->cpu_id;
+	cpu = cpuc->cid;
 	if (cpu < 0 || cpu >= nr_cids)
 		return duration_wall;
 

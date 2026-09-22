@@ -31,14 +31,14 @@ struct {
 } introspec_msg SEC(".maps");
 
 static __always_inline
-int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_id)
+int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cid)
 {
 	struct cpu_ctx __arena *cpuc;
 	struct cpdom_ctx __arena *cpdomc;
 	struct msg_task_ctx *m;
 	int i;
 
-	cpuc = get_cpu_ctx_id(cpu_id);
+	cpuc = get_cpu_ctx_id(cid);
 	if (!cpuc)
 		return -EINVAL;
 
@@ -58,9 +58,9 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.stat[2] = cpuc->big_core ? 'B' : 'T';
 	m->taskc_x.stat[3] = test_task_flag(taskc, LAVD_FLAG_IS_GREEDY)? 'G' : 'E';
 	m->taskc_x.stat[4] = '\0';
-	m->taskc_x.cpu_id = scx_bpf_cid_to_cpu(taskc->cpu_id);
-	m->taskc_x.prev_cpu_id = scx_bpf_cid_to_cpu(taskc->prev_cpu_id);
-	m->taskc_x.suggested_cpu_id = scx_bpf_cid_to_cpu(taskc->suggested_cpu_id);
+	m->taskc_x.cpu_id = scx_bpf_cid_to_cpu(taskc->cid);
+	m->taskc_x.prev_cpu_id = scx_bpf_cid_to_cpu(taskc->prev_cid);
+	m->taskc_x.suggested_cpu_id = scx_bpf_cid_to_cpu(taskc->suggested_cid);
 	m->taskc_x.waker_pid = taskc->waker_pid;
 	for (i = 0; i < sizeof(m->taskc_x.waker_comm) && can_loop; i++)
 		((char *)m->taskc_x.waker_comm)[i] = ((char __arena *)taskc->waker_comm)[i];
@@ -103,7 +103,7 @@ static void proc_introspec_sched_n(struct task_struct *p,
 				   task_ctx __arg_arena *taskc)
 {
 	u64 cur_nr, prev_nr;
-	u32 cpu_id;
+	u32 cid;
 	int i;
 
 	/* do not introspect itself */
@@ -111,7 +111,7 @@ static void proc_introspec_sched_n(struct task_struct *p,
 		return;
 
 	/* introspec_arg is the number of schedules remaining */
-	cpu_id = scx_bpf_this_cid();
+	cid = scx_bpf_this_cid();
 	cur_nr = intrspc.arg;
 
 	/*
@@ -126,7 +126,7 @@ static void proc_introspec_sched_n(struct task_struct *p,
 				&intrspc.arg, cur_nr, cur_nr - 1);
 		/* CAS success: submit a message and done */
 		if (prev_nr == cur_nr) {
-			submit_task_ctx(p, taskc, cpu_id);
+			submit_task_ctx(p, taskc, cid);
 			break;
 		}
 		/* CAS failure: retry */

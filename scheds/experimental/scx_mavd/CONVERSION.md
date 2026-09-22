@@ -36,15 +36,15 @@ when porting changes. Timer anchors and kernel association maps remain native.
 
 ## CPU identities
 
-Keep existing policy identifiers such as cpu_id and suggested_cpu_id where
-practical, but interpret scheduler-owned CPU fields as CIDs. The exceptions
-below are Linux CPU IDs. Do not infer units from a variable's spelling.
+Scheduler-owned CPU fields of the task and CPU contexts are named cid or
+*_cid. The exceptions below are Linux CPU IDs. Locals named cpu in converted
+functions still hold cids, so do not infer units from a local's spelling.
 
 | Value | Units |
 | --- | --- |
-| task_ctx CPU fields, including pinned_cpu_id and queued_on_cpu_id | CID, or the field's existing negative error |
-| cpu_ctx.cpu_id and core_cid | CID |
-| cpu_ctx.raw_cpu | Linux CPU ID |
+| task_ctx cid fields | CID, or the field's existing negative error |
+| cpu_ctx.cid and core_cid | CID |
+| cpu_ctx.cpu | Linux CPU ID |
 | Runtime policy, affinity, domain and idle mask bits | CID |
 | Runtime preference-table entries | CID |
 | Preference-table positions and raw nr_cpu_ids span | Lavd's original positions and Linux CPU ID span |
@@ -117,7 +117,7 @@ Auxiliary entry paths still require the association validation described
 above.
 
 Task callbacks may execute on a different CPU from their task. Reuse a
-checked task-CPU context for the executing CPU's cache only when its raw_cpu
+checked task-CPU context for the executing CPU's cache only when its cpu
 matches bpf_get_smp_processor_id(). Otherwise resolve the executing context
 normally. Dispatch uses the corresponding CID equality check. Idle
 notifications pass their checked context through to the mask update. These
@@ -401,7 +401,7 @@ loops.
 The loader validates nr_cpu_ids against LAVD_CPU_ID_MAX. Preference-position
 loops bounded by nr_cpu_ids need no duplicate capacity check. Keep checks
 before indexing native seed arrays and checks for invalid preference
-entries. CPU max_capacity is an immutable copy of cpu_capacity[raw_cpu],
+entries. CPU max_capacity is an immutable copy of cpu_capacity[cpu_ctx.cpu],
 initialized before statistics and scheduling. Invariant-time conversion uses
 that arena field directly.
 

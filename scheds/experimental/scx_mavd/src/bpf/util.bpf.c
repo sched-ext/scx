@@ -21,11 +21,11 @@
 /*
  * Sched related globals
  */
-struct scx_cmask __arena *turbo_cpumask; /* CPU mask for turbo CPUs */
-struct scx_cmask __arena *big_cpumask; /* CPU mask for big CPUs */
-struct scx_cmask __arena *active_cpumask; /* CPU mask for active CPUs */
-struct scx_cmask __arena *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-struct scx_cmask __arena *steady_cpumask; /* CPU mask for non-turbulent CPUs */
+struct scx_cmask __arena *turbo_cmask; /* CPU mask for turbo CPUs */
+struct scx_cmask __arena *big_cmask; /* CPU mask for big CPUs */
+struct scx_cmask __arena *active_cmask; /* CPU mask for active CPUs */
+struct scx_cmask __arena *ovrflw_cmask; /* CPU mask for overflow CPUs */
+struct scx_cmask __arena *steady_cmask; /* CPU mask for non-turbulent CPUs */
 
 const volatile u64	nr_llcs;	/* number of LLC domains */
 volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
@@ -74,15 +74,15 @@ struct cpu_ctx __arena *get_cpu_ctx(void)
 }
 
 __hidden
-struct cpu_ctx __arena *get_cpu_ctx_id(s32 cpu_id)
+struct cpu_ctx __arena *get_cpu_ctx_id(s32 cid)
 {
 	asm volatile("" :: "r"(&arena));
-	if (cpu_id < 0 || cpu_id >= nr_cids || !cpu_ctxs)
+	if (cid < 0 || cid >= nr_cids || !cpu_ctxs)
 		return NULL;
 	/* auxiliary programs can outlive the calling scheduler */
-	if (scx_bpf_cid_to_cpu(cpu_id) < 0)
+	if (scx_bpf_cid_to_cpu(cid) < 0)
 		return NULL;
-	return &cpu_ctxs[cpu_id];
+	return &cpu_ctxs[cid];
 }
 
 __hidden
@@ -377,10 +377,10 @@ u32 cpu_to_dsq(u32 cpu)
 __hidden
 bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc)
 {
-	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id))
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cid))
 		return true;
 
-	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id)))
+	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cid)))
 		return true;
 
 	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id)))
@@ -397,7 +397,7 @@ bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	int nr;
 
-	nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
+	nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cid);
 	if (nr >= LAVD_CPU_CONGESTED_THRES)
 		return true;
 
@@ -412,7 +412,7 @@ bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc)
 	}
 
 	if (use_per_cpu_dsq()) {
-		nr += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id));
+		nr += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cid));
 		if (nr >= LAVD_CPU_CONGESTED_THRES)
 			return true;
 	}
@@ -453,7 +453,7 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena 
 	 * act on them consistently.
 	 */
 	if (per_cpu_dsq || (pinned_slice_ns && is_effectively_pinned(taskc)))
-		return cpu_to_dsq(cpuc->cpu_id);
+		return cpu_to_dsq(cpuc->cid);
 
 	cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 	if (cpdomc &&
@@ -465,16 +465,16 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena 
 }
 
 /*
- * Current warmth of @cpu_id for @taskc: 0 unless @cpu_id is the CPU the task
- * last ran on (taskc->cpu_id). Heat decays linearly to 0 across
- * LAVD_CPU_WARM_LIFETIME_NS of away-time.
+ * Current warmth of @cid for @taskc: 0 unless @cid is the CPU the task last ran
+ * on (taskc->cid). Heat decays linearly to 0 across LAVD_CPU_WARM_LIFETIME_NS
+ * of away-time.
  */
 __hidden
-u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now)
+u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cid, u64 now)
 {
 	u64 away_ns, heat = taskc->cpu_heat;
 
-	if (!heat || taskc->cpu_id != cpu_id)
+	if (!heat || taskc->cid != cid)
 		return 0;
 
 	away_ns = time_delta(now, taskc->last_stopping_clk);
@@ -487,7 +487,7 @@ u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now)
 /*
  * Add the slice a task just spent on @cpuc to its warmth, saturating at full
  * heat after LAVD_CPU_WARM_SAT_NS of residence. Heat follows the CPU the task
- * last ran on (taskc->cpu_id); a migration onto @cpuc (prev_cpu_id != cpu_id)
+ * last ran on (taskc->cid); a migration onto @cpuc (prev_cid != cid)
  * restarts the clock from this slice.
  */
 __hidden
@@ -499,8 +499,8 @@ void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
 	gain = (min(slice_used, (u64)LAVD_CPU_WARM_SAT_NS) * LAVD_SCALE) /
 	       LAVD_CPU_WARM_SAT_NS;
 
-	if (taskc->prev_cpu_id == cpuc->cpu_id) {
-		w = task_cpu_warmth(taskc, cpuc->cpu_id, now) + gain;
+	if (taskc->prev_cid == cpuc->cid) {
+		w = task_cpu_warmth(taskc, cpuc->cid, now) + gain;
 		taskc->cpu_heat = min(w, (u64)LAVD_SCALE);
 	} else {
 		taskc->cpu_heat = min(gain, (u64)LAVD_SCALE);

@@ -54,8 +54,8 @@ bool init_idle_i_mask(struct pick_ctx *ctx, const struct scx_cmask __arena *idle
 static __always_inline
 bool init_active_ovrflw_masks(struct pick_ctx *ctx)
 {
-	ctx->active = active_cpumask;
-	ctx->ovrflw = ovrflw_cpumask;
+	ctx->active = active_cmask;
+	ctx->ovrflw = ovrflw_cmask;
 	if (!ctx->active || !ctx->ovrflw)
 		return false;
 	return true;
@@ -104,7 +104,7 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
 
 /*
  * For preemption-vulnerable tasks, repartition active/overflow masks based
- * on the pre-computed steady_cpumask. Steady (non-turbulent) CPUs become
+ * on the pre-computed steady_cmask. Steady (non-turbulent) CPUs become
  * the active set, and turbulent CPUs become the overflow set.
  */
 static __noinline
@@ -112,7 +112,7 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 {
 	struct scx_cmask __arena *steady_set = ctx->cpuc_cur->a_mask;
 	struct scx_cmask __arena *turb_set = ctx->cpuc_cur->o_mask;
-	struct scx_cmask __arena *steady = steady_cpumask;
+	struct scx_cmask __arena *steady = steady_cmask;
 
 	if (!steady_set || !turb_set || !steady)
 		return false;
@@ -194,11 +194,11 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *i
 	else
 		ctx->io_empty = true;
 
-	if (ctx->ia_empty || !have_turbo_core || !turbo_cpumask)
+	if (ctx->ia_empty || !have_turbo_core || !turbo_cmask)
 		ctx->iat_empty = true;
-	else if (turbo_cpumask)
+	else if (turbo_cmask)
 		ctx->iat_empty = !intersect_picker_masks(ctx->iat_mask, ctx->ia_mask,
-						       turbo_cpumask);
+						       turbo_cmask);
 	return true;
 }
 
@@ -467,7 +467,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 */
 	if (sctx.i_m == 1) {
 		*sticky_cpdom = sctx.cpuc_match[0]->cpdom_id;
-		return sctx.cpuc_match[0]->cpu_id;
+		return sctx.cpuc_match[0]->cid;
 	} else if (sctx.i_m == 2) {
 		p0 = sctx.cpuc_match[0]; /* prev_cpu */
 		p1 = sctx.cpuc_match[1]; /* sync_waker_cpu */
@@ -487,7 +487,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 			return -ENOENT;
 		} else {
 			*sticky_cpdom = p0->cpdom_id;
-			return p0->cpu_id; /* prev_cpu */
+			return p0->cid; /* prev_cpu */
 		}
 	}
 
