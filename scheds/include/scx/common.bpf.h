@@ -1193,6 +1193,27 @@ static inline u64 scx_clock_irq(u32 cpu)
 #define struct_size_t(type, member, count)	\
 	struct_size((type *)NULL, member, count)
 
+/*
+ * <linux/stddef.h>'s TRAILING_OVERLAP(): embed a struct that ends in a flexible
+ * array member together with its storage. @NAME is a complete @TYPE and the
+ * @MEMBERS declared after the array reserve the space the array grows into.
+ * Unlike the kernel's, the padding is named after @NAME so that one struct can
+ * embed several, and it is sized with __builtin_offsetof() because
+ * bpf_helpers.h redefines offsetof() as a pointer cast, which is not a constant
+ * expression.
+ */
+#define __TRAILING_OVERLAP(TYPE, NAME, FAM, ATTRS, MEMBERS)			\
+	union {									\
+		TYPE NAME;							\
+		struct {							\
+			unsigned char __offset_to_##NAME[__builtin_offsetof(TYPE, FAM)]; \
+			MEMBERS							\
+		} ATTRS;							\
+	}
+
+#define TRAILING_OVERLAP(TYPE, NAME, FAM, MEMBERS)				\
+	__TRAILING_OVERLAP(TYPE, NAME, FAM, /* no attrs */, MEMBERS)
+
 #include "compat.bpf.h"
 #include "enums.bpf.h"
 #include "cid.bpf.h"

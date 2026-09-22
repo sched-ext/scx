@@ -1032,42 +1032,6 @@ static __always_inline pack_t *task_pack(const task_ctx_t *tctx, s32 cid)
 #define util_fits_cap(util, cap)	((util) * 1280 < (cap) * 1024)
 
 /*
- * ravg_accumulate() and ravg_read() on a running average in the arena, which
- * they cannot be handed a pointer into, staged through the stack.
- *
- * Copy field by field rather than with ravg_from_arena() and ravg_to_arena():
- * LLVM 19 drops the address space cast on their word casts when @ard is a task
- * context pointer, and the verifier sees a scalar dereference.
- */
-static void ravg_accumulate_arena(struct ravg_data __arena *ard, u64 new_val, u64 now)
-{
-	struct ravg_data rd = {
-		.val = ard->val,
-		.val_at = ard->val_at,
-		.old = ard->old,
-		.cur = ard->cur,
-	};
-
-	ravg_accumulate(&rd, new_val, now, UTIL_HALF_LIFE_NS);
-	ard->val = rd.val;
-	ard->val_at = rd.val_at;
-	ard->old = rd.old;
-	ard->cur = rd.cur;
-}
-
-static u64 ravg_read_arena(struct ravg_data __arena *ard, u64 now)
-{
-	struct ravg_data rd = {
-		.val = ard->val,
-		.val_at = ard->val_at,
-		.old = ard->old,
-		.cur = ard->cur,
-	};
-
-	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS);
-}
-
-/*
  * Count a task in or out of @gq and every group above it on the cid,
  * cfs_rq->h_nr_runnable.
  */
@@ -1459,10 +1423,10 @@ __noinline int grp_decay(grp_q_t *gq __arg_arena, u64 now)
 	if (bw_enabled())
 		grp_bw_return(gq);
 
-	ravg_accumulate_arena(&gq->load_avg, 0, now);
-	ravg_accumulate_arena(&gq->nr_avg, 0, now);
-	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
-	na = ravg_read_arena(&gq->nr_avg, now);
+	ravg_accumulate_arena(&gq->load_avg, 0, now, UTIL_HALF_LIFE_NS);
+	ravg_accumulate_arena(&gq->nr_avg, 0, now, UTIL_HALF_LIFE_NS);
+	la = ravg_read_arena(&gq->load_avg, now, UTIL_HALF_LIFE_NS) >> RAVG_FRAC_BITS;
+	na = ravg_read_arena(&gq->nr_avg, now, UTIL_HALF_LIFE_NS);
 	/* A 64th of a task decays to nothing more that matters. */
 	if (na < (1ULL << RAVG_FRAC_BITS) / 64)
 		na = 0;
@@ -1666,10 +1630,10 @@ static void grp_update_shares(grp_q_t *gq, u64 now)
 	if (!grp_avg_trylock(gq))
 		return;
 
-	ravg_accumulate_arena(&gq->load_avg, load, now);
-	ravg_accumulate_arena(&gq->nr_avg, READ_ONCE(gq->nr), now);
-	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
-	na = ravg_read_arena(&gq->nr_avg, now);
+	ravg_accumulate_arena(&gq->load_avg, load, now, UTIL_HALF_LIFE_NS);
+	ravg_accumulate_arena(&gq->nr_avg, READ_ONCE(gq->nr), now, UTIL_HALF_LIFE_NS);
+	la = ravg_read_arena(&gq->load_avg, now, UTIL_HALF_LIFE_NS) >> RAVG_FRAC_BITS;
+	na = ravg_read_arena(&gq->nr_avg, now, UTIL_HALF_LIFE_NS);
 
 	if (now - gq->shares_at < GRP_SUM_NS) {
 		grp_avg_unlock(gq);
@@ -1714,7 +1678,7 @@ static void grp_update_shares(grp_q_t *gq, u64 now)
  */
 static void util_set_running(task_ctx_t *tctx, bool running, u64 now)
 {
-	ravg_accumulate_arena(&tctx->run_avg, running, now);
+	ravg_accumulate_arena(&tctx->run_avg, running, now, UTIL_HALF_LIFE_NS);
 }
 
 /*
@@ -1729,7 +1693,7 @@ static void util_set_running(task_ctx_t *tctx, bool running, u64 now)
  */
 static u64 task_util(task_ctx_t *tctx, u64 now)
 {
-	u64 util = ravg_read_arena(&tctx->run_avg, now) >> UTIL_SHIFT;
+	u64 util = ravg_read_arena(&tctx->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
 
 	return MAX(util, tctx->util_est);
 }
@@ -1751,7 +1715,7 @@ static u64 task_util(task_ctx_t *tctx, u64 now)
  */
 static void util_est_update(task_ctx_t *tctx, u64 now)
 {
-	u64 dequeued = ravg_read_arena(&tctx->run_avg, now) >> UTIL_SHIFT;
+	u64 dequeued = ravg_read_arena(&tctx->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
 
 	if (tctx->util_est <= dequeued)
 		tctx->util_est = dequeued;
@@ -1772,7 +1736,7 @@ static void cid_util_set_running(s32 cid, bool running, u64 now)
 	 */
 	if (!cid_valid(cid))
 		return;
-	ravg_accumulate_arena(&cid_ctx(cid)->run_avg, running, now);
+	ravg_accumulate_arena(&cid_ctx(cid)->run_avg, running, now, UTIL_HALF_LIFE_NS);
 }
 
 /*
@@ -1781,7 +1745,7 @@ static void cid_util_set_running(s32 cid, bool running, u64 now)
  */
 static u64 cid_util(s32 cid, u64 now)
 {
-	return ravg_read_arena(&cid_ctx(cid)->run_avg, now) >> UTIL_SHIFT;
+	return ravg_read_arena(&cid_ctx(cid)->run_avg, now, UTIL_HALF_LIFE_NS) >> UTIL_SHIFT;
 }
 
 static u64 cid_clock_task_owned(s32 cid, u64 now);
@@ -1931,7 +1895,7 @@ static void cid_load_accumulate(s32 cid, u64 now)
 		return;
 	cctx = cid_ctx(cid);
 
-	ravg_accumulate_arena(&cctx->load_avg, cctx->pack.vsum_w, now);
+	ravg_accumulate_arena(&cctx->load_avg, cctx->pack.vsum_w, now, UTIL_HALF_LIFE_NS);
 	cctx->wake_load = ravg_read_fast(&cctx->load_avg, now) >> RAVG_FRAC_BITS;
 }
 
@@ -1963,7 +1927,7 @@ static __always_inline u64 ravg_read_fast(struct ravg_data __arena *rd, u64 now)
 	old = READ_ONCE(rd->old);
 	cur = READ_ONCE(rd->cur);
 	if (now < val_at || now / UTIL_HALF_LIFE_NS != val_at / UTIL_HALF_LIFE_NS)
-		return ravg_read_arena(rd, now);
+		return ravg_read_arena(rd, now, UTIL_HALF_LIFE_NS);
 	elapsed = now % UTIL_HALF_LIFE_NS;
 	if (!elapsed)
 		return old;
@@ -1973,7 +1937,7 @@ static __always_inline u64 ravg_read_fast(struct ravg_data __arena *rd, u64 now)
 	if (val && now > val_at) {
 		add = val * ravg_normalize_dur(now - val_at,
 					       UTIL_HALF_LIFE_NS);
-		ravg_add(&cur, add);
+		cur = ravg_sat_add(cur, add);
 	}
 	return old + cur / 2;
 }
@@ -4325,7 +4289,8 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 		if (cid_idle_test(cid) && !cid_queued_test(cid)) {
 			u64 stamp = READ_ONCE(cid_ctx(cid)->idle_stamp);
 
-			load = ravg_read_arena(&cid_ctx(cid)->run_avg, now);
+			load = ravg_read_arena(&cid_ctx(cid)->run_avg, now,
+					       UTIL_HALF_LIFE_NS);
 
 			if (best_idle < 0 ||
 			    load * best_idle_cap < best_idle_load * cap ||
