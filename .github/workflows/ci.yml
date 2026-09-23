@@ -313,7 +313,7 @@ jobs:
           disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Build
-        run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium
+        run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium -p scx_eevdf
       - name: Arena selftests and scheduler tests
         uses: likewhatevs/vng-action@v0.7.0
         with:
@@ -341,7 +341,7 @@ jobs:
               results[arena_selftests]="PASS"
               passed="${passed} arena_selftests"
             fi
-            for sched in cake pandemonium; do
+            for sched in cake pandemonium eevdf; do
               echo "=== Testing ${sched} ==="
               stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
                 --affinity 1 --affinity-delay 1 --affinity-pin &
@@ -370,7 +370,7 @@ jobs:
             {
               echo "| Scheduler | Result |"
               echo "|-----------|--------|"
-              for sched in arena_selftests cake pandemonium; do
+              for sched in arena_selftests cake pandemonium eevdf; do
                 if [ "${results[$sched]}" = "PASS" ]; then
                   echo "| ${sched} | ✅ |"
                 else
