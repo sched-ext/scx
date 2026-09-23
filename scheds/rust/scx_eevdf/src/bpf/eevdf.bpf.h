@@ -523,42 +523,6 @@ static __always_inline pack_t *task_pack(const task_ctx_t *tctx, s32 cid)
 #define util_fits_cap(util, cap)	((util) * 1280 < (cap) * 1024)
 
 /*
- * ravg_accumulate() and ravg_read() on a running average in the arena, which
- * they cannot be handed a pointer into, staged through the stack.
- *
- * Copy field by field rather than with ravg_from_arena() and ravg_to_arena():
- * LLVM 19 drops the address space cast on their word casts when @ard is a task
- * context pointer, and the verifier sees a scalar dereference.
- */
-static void ravg_accumulate_arena(struct ravg_data __arena *ard, u64 new_val, u64 now)
-{
-	struct ravg_data rd = {
-		.val = ard->val,
-		.val_at = ard->val_at,
-		.old = ard->old,
-		.cur = ard->cur,
-	};
-
-	ravg_accumulate(&rd, new_val, now, UTIL_HALF_LIFE_NS);
-	ard->val = rd.val;
-	ard->val_at = rd.val_at;
-	ard->old = rd.old;
-	ard->cur = rd.cur;
-}
-
-static u64 ravg_read_arena(struct ravg_data __arena *ard, u64 now)
-{
-	struct ravg_data rd = {
-		.val = ard->val,
-		.val_at = ard->val_at,
-		.old = ard->old,
-		.cur = ard->cur,
-	};
-
-	return ravg_read(&rd, now, UTIL_HALF_LIFE_NS);
-}
-
-/*
  * rq_clock_task(): the clock update_curr() charges service in, read off
  * the runqueue behind @cid. It is rq->clock less the interrupt time and
  * the hypervisor steal time that CPU has accumulated, so a task is not

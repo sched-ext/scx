@@ -319,10 +319,10 @@ __noinline int grp_decay(grp_q_t *gq __arg_arena, u64 now)
 	if (bw_enabled())
 		grp_bw_return(gq);
 
-	ravg_accumulate_arena(&gq->load_avg, 0, now);
-	ravg_accumulate_arena(&gq->nr_avg, 0, now);
-	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
-	na = ravg_read_arena(&gq->nr_avg, now);
+	ravg_accumulate_arena(&gq->load_avg, 0, now, UTIL_HALF_LIFE_NS);
+	ravg_accumulate_arena(&gq->nr_avg, 0, now, UTIL_HALF_LIFE_NS);
+	la = ravg_read_arena(&gq->load_avg, now, UTIL_HALF_LIFE_NS) >> RAVG_FRAC_BITS;
+	na = ravg_read_arena(&gq->nr_avg, now, UTIL_HALF_LIFE_NS);
 	/* A 64th of a task decays to nothing more that matters. */
 	if (na < (1ULL << RAVG_FRAC_BITS) / 64)
 		na = 0;
@@ -526,10 +526,10 @@ static void grp_update_shares(grp_q_t *gq, u64 now)
 	if (!grp_avg_trylock(gq))
 		return;
 
-	ravg_accumulate_arena(&gq->load_avg, load, now);
-	ravg_accumulate_arena(&gq->nr_avg, READ_ONCE(gq->nr), now);
-	la = ravg_read_arena(&gq->load_avg, now) >> RAVG_FRAC_BITS;
-	na = ravg_read_arena(&gq->nr_avg, now);
+	ravg_accumulate_arena(&gq->load_avg, load, now, UTIL_HALF_LIFE_NS);
+	ravg_accumulate_arena(&gq->nr_avg, READ_ONCE(gq->nr), now, UTIL_HALF_LIFE_NS);
+	la = ravg_read_arena(&gq->load_avg, now, UTIL_HALF_LIFE_NS) >> RAVG_FRAC_BITS;
+	na = ravg_read_arena(&gq->nr_avg, now, UTIL_HALF_LIFE_NS);
 
 	if (now - gq->shares_at < GRP_SUM_NS) {
 		grp_avg_unlock(gq);

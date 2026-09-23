@@ -1071,7 +1071,8 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 		if (cid_idle_test(cid) && !cid_queued_test(cid)) {
 			u64 stamp = READ_ONCE(cid_ctx(cid)->idle_stamp);
 
-			load = ravg_read_arena(&cid_ctx(cid)->run_avg, now);
+			load = ravg_read_arena(&cid_ctx(cid)->run_avg, now,
+					       UTIL_HALF_LIFE_NS);
 
 			if (best_idle < 0 ||
 			    load * best_idle_cap < best_idle_load * cap ||
