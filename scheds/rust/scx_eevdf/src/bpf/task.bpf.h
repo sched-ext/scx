@@ -919,9 +919,15 @@ static void place_task(s32 cid, const struct task_struct *p,
 {
 	/* The pack's progress is in its own task clock. */
 	u64 tnow = cid_valid(cid) ? cid_clock_task_at(cid, now) : now;
+	pack_t *pk = cid_valid(cid) ? task_pack(tctx, cid) : NULL;
 
-	if (!scx_bpf_task_running(p) && cid_valid(cid)) {
-		pack_t *pk = task_pack(tctx, cid);
+	/*
+	 * A displaced current task keeps its position on its own cid. When
+	 * it moves to another cid, translate that position from the old
+	 * pack's reference before joining the new one.
+	 */
+	if (pk && (!scx_bpf_task_running(p) ||
+		   (tctx->se.vpack && tctx->se.vpack != pk))) {
 		u64 w = task_join_weight(p, tctx, cid);
 		u64 vruntime;
 
