@@ -899,18 +899,6 @@ int update_cpuperf_target(struct cpu_ctx *cpuc)
 	return 0;
 }
 
-u16 get_cpuperf_cap(s32 cpu)
-{
-	const volatile u16 *cap;
-
-	cap = MEMBER_VPTR(cpu_capacity, [cpu]);
-	if (cap)
-		return *cap;
-
-	debugln("Infeasible CPU id: %d", cpu);
-	return 0;
-}
-
 static void do_update_autopilot_high_cap(void)
 {
 	u64 c;
