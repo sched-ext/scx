@@ -6,6 +6,7 @@
 // GNU General Public License version 2.
 
 #include <scx/common.bpf.h>
+#include <bpf_experimental.h>
 #include <bpf/bpf_helpers.h>
 #include "defines.h"
 #include "helpers.h"
@@ -16,48 +17,83 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-static __always_inline u64 dispatch_with_fallback(u32 cpu)
+static __always_inline u64 tier_from_crit(s64 crit)
 {
-  return dispatch_dsq_per_cpu(cpu);
-}
-
-static __always_inline u64 tier_from_duty(s64 duty)
-{
-  if (duty < DUTY_EDGE_LC)
+  if (crit >= CRIT_EDGE_LC)
     return DSQ_TYPE_LC;
-  if (duty < DUTY_EDGE_INTERACTIVE)
+  if (crit >= CRIT_EDGE_INTERACTIVE)
     return DSQ_TYPE_INTERACTIVE;
-  if (duty < DUTY_EDGE_NORMAL)
+  if (crit >= CRIT_EDGE_NORMAL)
     return DSQ_TYPE_NORMAL;
   return DSQ_TYPE_GREEDY;
 }
 
-static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
+static __always_inline u64 tier_cap_from_duty(s64 duty)
 {
-  if (task_ctx->duty_samples < DUTY_SAMPLES_NEEDED)
-  {
-    task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
-    return;
-  }
-
-  u64 cur = task_ctx->current_dsq_type;
-  u64 pessimistic = tier_from_duty(task_ctx->duty + DUTY_HYST);
-  u64 optimistic = tier_from_duty(task_ctx->duty - DUTY_HYST);
-
-  if (pessimistic < cur)
-    task_ctx->current_dsq_type = pessimistic;
-  else if (optimistic > cur)
-    task_ctx->current_dsq_type = optimistic;
+  if (duty < DUTY_CAP_LC)
+    return DSQ_TYPE_LC;
+  if (duty < DUTY_CAP_INTERACTIVE)
+    return DSQ_TYPE_INTERACTIVE;
+  if (duty < DUTY_CAP_NORMAL)
+    return DSQ_TYPE_NORMAL;
+  return DSQ_TYPE_GREEDY;
 }
 
-static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, u64 used_ns, bool runnable)
+static __always_inline u64 target_tier(s64 crit, s64 duty)
+{
+  u64 wanted = tier_from_crit(crit);
+  u64 allowed = tier_cap_from_duty(duty);
+  return wanted > allowed ? wanted : allowed;
+}
+
+static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* tctx, u64 now)
+{
+  u64 old = tctx->current_dsq_type;
+
+  tctx->crit = calc_crit(tctx, now);
+
+  if (tctx->duty_samples < DUTY_SAMPLES_NEEDED)
+  {
+    tctx->current_dsq_type = DSQ_TYPE_GREEDY;
+  }
+  else
+  {
+    s64 crit = tctx->crit;
+    u64 pessimistic = target_tier(crit - CRIT_HYST, tctx->duty + DUTY_HYST);
+    u64 optimistic = target_tier(crit + CRIT_HYST, tctx->duty - DUTY_HYST);
+
+    if (pessimistic < old)
+      tctx->current_dsq_type = pessimistic;
+    else if (optimistic > old)
+      tctx->current_dsq_type = optimistic;
+  }
+}
+
+static __always_inline void record_waker(struct task_struct* p, u64 now)
+{
+  if (bpf_in_interrupt())
+    return;
+
+  struct task_struct* waker = bpf_get_current_task_btf();
+  if (waker->pid == p->pid)
+    return;
+
+  struct task_ctx* wctx = get_task_ctx(waker);
+  if (!wctx)
+    return;
+
+  wctx->wake_interval = exponentially_weighted_moving_avg(wctx->wake_interval, clamp_interval(elapsed(now, wctx->last_wake_at)));
+  wctx->last_wake_at = now;
+}
+
+static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, u64 used_ns, bool runnable, u64 now)
 {
   if (!task_ctx)
   {
     return;
   }
 
-  update_task_dsq_type(task, task_ctx);
+  update_task_dsq_type(task, task_ctx, now);
 }
 
 // callbacks
@@ -67,6 +103,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   s32 ret;
 
   u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
   u32 cpu;
   bpf_for(cpu, 0, nr_cpu_ids)
   {
@@ -92,13 +129,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
       return -ENOMEM;
 
     dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+
+    u64 now = bpf_ktime_get_ns();
+    dispatch_ctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
+    dispatch_ctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
+    dispatch_ctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
+    dispatch_ctx->last_override_ts = now;
   }
 
   return 0;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_init_task_args* args)
-{  
+{
   struct task_ctx* tctx;
   u64 now = bpf_ktime_get_ns();
 
@@ -112,36 +155,42 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->sleep_acc = 0;
   tctx->duty_samples = 0;
 
-  if (args->fork)
-  {
-    struct task_struct* cur = bpf_get_current_task_btf();
-    struct task_struct* parent = p->real_parent;
+  tctx->wait_interval = CRIT_INTERVAL_REF;
+  tctx->wake_interval = CRIT_INTERVAL_REF;
+  tctx->last_woken_at = now;
+  tctx->last_wake_at = now;
+  tctx->crit = 0;
+  tctx->duty = DUTY_RANGE / 2;
 
-    bool from_creator = cur && ((parent && cur->pid == parent->pid) || cur->tgid == p->tgid);
-    if (from_creator)
-    {
-      struct task_ctx* pctx = bpf_task_storage_get(&task_ctx_store, cur, NULL, 0);
-      if (pctx && pctx->duty_samples >= DUTY_SAMPLES_NEEDED)
-      {
-        tctx->run_acc = pctx->run_acc >> 1;
-        tctx->sleep_acc = pctx->sleep_acc >> 1;
-        tctx->current_dsq_type = pctx->current_dsq_type;
-        tctx->duty_samples = DUTY_SAMPLES_NEEDED;
-      }
-    }
-  }
+  // if (args->fork)
+  // {
+  //   struct task_struct* cur = bpf_get_current_task_btf();
+  //   struct task_struct* parent = p->real_parent;
+
+  //   bool is_thread = cur && cur->tgid == p->tgid;
+
+  //   if (is_thread)
+  //   {
+  //     struct task_ctx* pctx = bpf_task_storage_get(&task_ctx_store, cur, NULL, 0);
+  //     if (pctx && pctx->duty_samples >= DUTY_SAMPLES_NEEDED)
+  //     {
+  //       tctx->run_acc = pctx->run_acc >> 1;
+  //       tctx->sleep_acc = pctx->sleep_acc >> 1;
+  //       tctx->duty = task_duty(tctx);
+  //       tctx->wait_ivl = pctx->wait_ivl;
+  //       tctx->wake_ivl = pctx->wake_ivl;
+  //       tctx->current_dsq_type = pctx->current_dsq_type < DSQ_TYPE_NORMAL ? DSQ_TYPE_NORMAL : pctx->current_dsq_type;
+  //       tctx->duty_samples = DUTY_SAMPLES_NEEDED;
+  //       tctx->isFork = true;
+  //     }
+  //   }
+  // }
   return 0;
 }
 
-void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
-{
-}
+void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args) { }
 
-s32 BPF_STRUCT_OPS(
-  lunar_select_cpu,
-  struct task_struct* p,
-  s32 prev_cpu,
-  u64 wake_flags)
+s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wake_flags)
 {
   struct task_ctx* context = get_task_ctx(p);
   if (!context)
@@ -158,40 +207,36 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
   u32 cpu = scx_bpf_task_cpu(p);
 
-  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
-
-  u64 slice = get_dsq_task_slice(dsqType);
-
-  if (context)
-    context->last_run_granted_slice = slice;
-
-  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
-
   u32 key = 0;
   struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
   if (!dispatch_ctx)
     return;
 
-  if (enq_flags & SCX_ENQ_WAKEUP && dispatch_ctx->current_task_dsq_type > dsqType)
+  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
+  u64 slice = get_dsq_task_slice(dsqType);
+
+  u64 now = bpf_ktime_get_ns();
+
+  if (dsqType != DSQ_TYPE_LC && scx_bpf_dsq_nr_queued(dsq) == 0)
   {
-    u64 now = bpf_ktime_get_ns();
-    dispatch_ctx->last_kick_timestamp = now;
-    scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+    stamp_tier_head_ts(dispatch_ctx, dsqType, now);
   }
+
+  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
+
+  // if ((enq_flags & SCX_ENQ_WAKEUP) && dispatch_ctx->current_task_dsq_type > dsqType && (now - dispatch_ctx->current_task_run_started) >= MIN_RUN_BEFORE_PREEMPT)
+  // {
+  //   dispatch_ctx->last_kick_timestamp = now;
+  //   scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+  // }
 }
 
-void BPF_STRUCT_OPS(
-  lunar_dispatch,
-  s32 cpu,
-  struct task_struct* prev)
+void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
 {
-  dispatch_with_fallback(cpu);
+  dispatch_dsq_per_cpu(cpu);
 }
 
-void BPF_STRUCT_OPS(
-  lunar_stopping,
-  struct task_struct* task,
-  bool runnable)
+void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
 {
   u64 now = bpf_ktime_get_ns();
   if (!task)
@@ -205,9 +250,9 @@ void BPF_STRUCT_OPS(
   u64 used_ns = now - tctx->started_at;
 
   duty_account(tctx, used_ns, 0);
-
   tctx->duty = task_duty(tctx);
-  update_task_prio(task, tctx, used_ns, runnable);
+
+  update_task_prio(task, tctx, used_ns, runnable, now);
 
   u32 key = 0;
   struct dispatch_ctx* dctx = bpf_map_lookup_elem(&dispatch_state, &key);
@@ -215,9 +260,7 @@ void BPF_STRUCT_OPS(
     dctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
 }
 
-void BPF_STRUCT_OPS(
-  lunar_exit,
-  struct scx_exit_info* ei)
+void BPF_STRUCT_OPS(lunar_exit, struct scx_exit_info* ei)
 {
   UEI_RECORD(uei, ei);
 }
@@ -245,8 +288,12 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   u64 now = bpf_ktime_get_ns();
   context->started_at = now;
 
-  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu greedy=%d dsq_id=%llu slice=%llu duty=%llu", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm,
-  //            context->current_dsq_type, context->counted_in_greedy_group, context->counted_greedy_dsq, context->last_run_granted_slice, context->duty);
+  dispatch_ctx->current_task_run_started = now;
+  dispatch_ctx->current_task_is_override = dispatch_ctx->pending_override;
+  dispatch_ctx->pending_override = false;
+
+  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu duty=%lld crit=%d fork=%d", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm, context->current_dsq_type,
+  //            context->duty, context->crit, context->isFork);
 }
 
 void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)
@@ -266,6 +313,13 @@ void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
   if (!tctx)
     return;
 
+  if (enq_flags & SCX_ENQ_WAKEUP)
+  {
+    tctx->wait_interval = exponentially_weighted_moving_avg(tctx->wait_interval, clamp_interval(elapsed(now, tctx->last_woken_at)));
+    tctx->last_woken_at = now;
+    record_waker(p, now);
+  }
+
   if (tctx->blocked_at)
   {
     duty_account(tctx, 0, now - tctx->blocked_at);
@@ -276,7 +330,7 @@ void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
     }
     tctx->blocked_at = 0;
     tctx->duty = task_duty(tctx);
-    update_task_dsq_type(p, tctx);
+    update_task_dsq_type(p, tctx, now);
   }
   tctx->runnable_at = now;
 }

@@ -42,6 +42,22 @@ static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
   return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
 }
 
+static __always_inline void stamp_tier_head_ts(struct dispatch_ctx* dctx, u64 dsqType, u64 now)
+{
+  switch (dsqType)
+  {
+    case DSQ_TYPE_INTERACTIVE:
+      dctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
+      return;
+    case DSQ_TYPE_NORMAL:
+      dctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
+      return;
+    case DSQ_TYPE_GREEDY:
+      dctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
+      return;
+  }
+}
+
 static __always_inline bool is_kthread(const struct task_struct* p)
 {
   return p->flags & PF_KTHREAD;
@@ -93,4 +109,47 @@ static __always_inline u64 getTickInterval_ns(void)
 {
   return 1000000000ULL / CONFIG_HZ;
 }
+
+// ---------------------------------------------------------------------------
+// Latency criticality
+// ---------------------------------------------------------------------------
+
+static __always_inline u64 exponentially_weighted_moving_avg(u64 old, u64 sample)
+{
+  return old - (old >> 2) + (sample >> 2);
+}
+
+static __always_inline u32 ilog2(u64 v)
+{
+  return v ? log2_u64(v) - 1 : 0;
+}
+
+static __always_inline u64 elapsed(u64 now, u64 last)
+{
+  return now > last ? now - last : 0;
+}
+
+static __always_inline u64 clamp_interval(u64 interval)
+{
+  if (interval < CRIT_INTERVAL_MIN)
+    return CRIT_INTERVAL_MIN;
+  if (interval > CRIT_INTERVAL_REF)
+    return CRIT_INTERVAL_REF;
+  return interval;
+}
+
+static __always_inline u64 effective_interval(u64 avg, u64 last, u64 now)
+{
+  u64 since = elapsed(now, last);
+  return clamp_interval(since > (avg * 8) ? since : avg);
+}
+
+static __always_inline u32 calc_crit(struct task_ctx* tctx, u64 now)
+{
+  u32 crit = ilog2(CRIT_INTERVAL_REF / effective_interval(tctx->wait_interval, tctx->last_woken_at, now)) +
+             ilog2(CRIT_INTERVAL_REF / effective_interval(tctx->wake_interval, tctx->last_wake_at, now));
+
+  return crit > CRIT_MAX ? CRIT_MAX : crit;
+}
+
 #endif  // HELPERS_H

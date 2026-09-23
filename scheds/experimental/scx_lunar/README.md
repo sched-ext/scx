@@ -4,15 +4,12 @@
 ## Introduction
 
 Scx_lunar is a multipurpose scheduler which was originally invented with the goal to make frametimes in games as smooth as possible
-But then it grew a little and changed to a desktop usage focused scheduler which focuses on IO bound threads.
-
-Which makes the scheduler one of the best when it comes to responsiveness.
 
 This scheduler uses only FIFO queues.
 
 ## Explanation
 
-The scheduler works with accounting of duty.
+The scheduler works with accounting of duty and crit score.
 
 Duty goes from 0 to 1023.
 
@@ -27,19 +24,26 @@ duty = sleep_time * 1024 /(run_time + sleep_time + 1)
 
 The Tier are calculated as Percent of the 1024 max duty value.
 
+crit score goes from 0 to 32.
+
+It is based on the waker and wakee frequency of a task.
+
+it is calculated from 
+log2(1s/ wakee interval) + log2(1s/ waker interval)
+
 It has 5 tiers. Which are: 
 
-1. LC with duty <= 13%
-2. INTERACTIVE with duty <= 25%
-3. NORMAL with duty <= 50%
-5. GREEDY with duty <= 100%
+1. LC with duty <= 5% and crit score of >= 5
+2. INTERACTIVE with duty <= 10% and crit score of >= 3
+3. NORMAL with duty <= 80% and crit score of >= 1
+5. GREEDY with duty > 80% or crit score under 1
 
-All new tasks get thrown into greedy. And start with duty of 1023.
+All new tasks get thrown into greedy. And start with duty of 512.
 There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers. 
 
-Each tier also has a slice time of 500us.
+Each tier also has a slice time of 1s.
 
-When a lower tier task is running at the moment a higher tier gets enqueued then the current task gets kicked and preempted.
+At the moment the scheduler does not use preemption.
 
 ## Dispatch
 
