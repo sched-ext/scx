@@ -1018,6 +1018,54 @@ void BPF_STRUCT_OPS(eevdf_exit, struct scx_exit_info *ei)
 }
 
 /*
+ * Show whether a stalled task is still in its EDQ and whether it is
+ * eligible at the queue's reference. The kernel dump shows BPF custody,
+ * but cannot distinguish a queued task from one whose EDQ node was lost.
+ */
+void BPF_STRUCT_OPS(eevdf_dump_task, struct scx_dump_ctx *dctx,
+		    struct task_struct *p)
+{
+	task_ctx_t *tctx;
+	cid_edq_task_t *at;
+	pack_t *pk;
+	u64 now;
+	s32 cid;
+
+	/* Keep the dump small: the watchdog is interested in old waiters. */
+	if (dctx->at_jiffies < p->scx.runnable_at ||
+	    (dctx->at_jiffies - p->scx.runnable_at) * tick_ns <
+		    NSEC_PER_SEC)
+		return;
+	TOUCH_ARENA();
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	at = cid_edq_task(tctx);
+	cid = READ_ONCE(at->cid);
+	if (!cid_valid(cid)) {
+		scx_bpf_dump("eevdf pid=%d cid=%d state=%u hold=%d\n",
+			     p->pid, cid, READ_ONCE(at->state),
+			     READ_ONCE(at->common.holdcnt));
+		return;
+	}
+	pk = cid_pack(cid);
+	now = cid_clock_task_at(cid, dctx->at_ns);
+	scx_bpf_dump("eevdf pid=%d cid=%d state=%u linked=%d hold=%d nr=%llu\n",
+		     p->pid, cid, READ_ONCE(at->state),
+		     READ_ONCE(at->common.edq) == &pk->edq,
+		     READ_ONCE(at->common.holdcnt), READ_ONCE(pk->edq.nr));
+	scx_bpf_dump("eevdf v=%llu d=%llu key=%llu elig=%llu V=%llu w=%llu\n",
+		     READ_ONCE(tctx->se.vruntime),
+		     READ_ONCE(tctx->se.deadline),
+		     READ_ONCE(at->common.node.deadline),
+		     READ_ONCE(at->common.node.eligibility),
+		     pack_vref_place(pk, now), READ_ONCE(tctx->se.vw));
+	scx_bpf_dump("eevdf head=%llu W=%llu request=%llu vlag=%lld\n",
+		     READ_ONCE(pk->edq.first_deadline), READ_ONCE(pk->vsum_w),
+		     READ_ONCE(tctx->se.request), READ_ONCE(tctx->se.vlag));
+}
+
+/*
  * The ops, with the prefix the running kernel names the cgroup callbacks
  * with: cpuctl_*, or cgroup_* on a kernel from before the cid form renamed
  * them.
@@ -1047,6 +1095,7 @@ void BPF_STRUCT_OPS(eevdf_exit, struct scx_exit_info *ei)
 	.__cg##_move		= (void *)eevdf_cpuctl_move,		\
 	.init			= (void *)eevdf_init,			\
 	.exit			= (void *)eevdf_exit,			\
+	.dump_task		= (void *)eevdf_dump_task,		\
 	.timeout_ms		= 5000,					\
 	.name			= "eevdf"
 
