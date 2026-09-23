@@ -207,9 +207,10 @@ const volatile bool no_wakeup_preempt;
  * Send a wakee to the waking cid when both it and its previous cid are
  * busy and the loads say that leaves the two better balanced, the
  * effective-load comparison of wake_affine_weight(), see
- * wake_affine_weight_cid(). The cid load is sampled from the tick and task
- * load reuses its execution-utilization estimate, so the comparison adds no
- * runnable-state accounting. Enabled by default and disabled with
+ * wake_affine_weight_cid(). The cid load uses the larger of its tick sample
+ * and current runnable weight. Task load reuses its execution-utilization
+ * estimate, so the comparison adds no runnable-state accounting. Enabled by
+ * default and disabled with
  * --no-wa-weight on systems where its placement decisions perform worse.
  */
 const volatile bool wa_weight;

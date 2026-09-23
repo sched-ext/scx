@@ -344,7 +344,8 @@ struct core_sched_state {
 struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
-	u64 fork_place_at;	/* last fork selection, meaningful at core_base */
+	u64 fork_place_at;	/* last fork selection in this core, at core_base */
+	u64 fork_cid_place_at;	/* last fork selection of this cid */
 	u64 smt_busy_since;	/* first tick that found the sibling busy with our queue empty, see idle_balance_cid() */
 	struct pack pack;	/* the tasks of this cid */
 	u64 hrtick_at;		/* when its hrtick is armed for, see hrtick_start() */

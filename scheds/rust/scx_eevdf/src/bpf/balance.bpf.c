@@ -1074,16 +1074,15 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	 * periodic balance pass, falling back to group_balance_cpu() when the
 	 * group is busy. scx_eevdf's periodic pass runs from ops.tick(), so an
 	 * idle cid cannot be its owner; newly-idle balance handles that case.
-	 * Use the fixed group leader here, which is the fair.c choice once all
-	 * CPUs in the group are busy, and let it drain the calculated imbalance
-	 * over successive dispatch callbacks below.
+	 * For wider domains use the fixed group leader. Within an LLC, let the
+	 * lightest CPU of each core run the pass: the leader can have a deep
+	 * queue while its SMT sibling has only one running task. Rejecting the
+	 * leader as too busy must not prevent that sibling from pulling work.
 	 */
 	if ((level == BUSY_BALANCE_SYSTEM &&
 	     dst_cid != cid_topo(dst_cid)->node_base) ||
 	    (level == BUSY_BALANCE_NODE &&
-	     dst_cid != cid_topo(dst_cid)->llc_base) ||
-	    (level == BUSY_BALANCE_LLC &&
-	     dst_cid != cid_topo(dst_cid)->core_base))
+	     dst_cid != cid_topo(dst_cid)->llc_base))
 		return false;
 	/* A fair-style detach pass is still draining through dispatch. */
 	if (READ_ONCE(dst->busy_balance_cid) != -1)
@@ -1104,6 +1103,22 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 			   now + (u64)(1 + (dst_cid - base) % min_ms) *
 				 NSEC_PER_MSEC);
 		return false;
+	}
+	if (level == BUSY_BALANCE_LLC) {
+		struct cid_topo __arena *topo = cid_topo(dst_cid);
+		u64 load = cid_load(dst_cid, now);
+		u32 i;
+
+		bpf_arena_for(i, topo->core_base,
+			      topo->core_base + topo->core_nr) {
+			u64 other;
+
+			if (i == (u32)dst_cid)
+				continue;
+			other = cid_load(i, now);
+			if (other < load || (other == load && i < (u32)dst_cid))
+				return false;
+		}
 	}
 	if (time_before(now, READ_ONCE(dst->busy_balance_next[level])) ||
 	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL))

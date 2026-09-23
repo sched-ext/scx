@@ -250,7 +250,8 @@ be turned off on the command line to compare the two rules against each other.
    the waker that is about to sleep. When the waking CPU and the previous one
    are both busy `wake_affine_weight()` sends a wakee to whichever of its
    previous CPU and the waking CPU the loads say ends up lighter. The load of
-   a CPU is the tick-sampled averaged weight of what is runnable on it. A
+   a CPU is the larger of the tick-sampled average and the current runnable
+   weight, so a burst that fills a queue between ticks is visible. A
    task's load approximates `task_h_load()` with the larger of two estimates
    it already keeps, its execution utilization and the fraction of wall time
    it spends runnable, the latter folded in once per sleep from the span
@@ -270,14 +271,13 @@ be turned off on the command line to compare the two rules against each other.
    they descend the kernel's live `SD_BALANCE_FORK` span through its NUMA,
    LLC and core groups, selecting the child group with the most completely
    idle CPUs at each level, then, when all are busy, the least runnable weight
-   per unit of CPU capacity, and keeping the local group on an exact tie.
-   Equal-idle, equal-load remote cores prefer the one least recently selected
-   for a fork; the stamp expires after the utilization half-life, preserving
-   fair.c's recent-use bias without recomputing every CPU's average in the fork
-   path.
-   The final CPU is selected using averaged, capacity-normalized per-CPU
-   utilization, preferring an idle CPU. For an affinity-restricted task, every
-   level accumulates runnable load and idle CPUs only over the intersection of
+   per unit of CPU capacity. When unrestricted children block before the next
+   fork, their instantaneous weight disappears; exact load ties use the core
+   and CPU least recently selected for a fork instead of repeatedly taking
+   the parent's CPU. The core stamp expires after the utilization half-life.
+   The final CPU prefers an idle one, then the least loaded allowed CPU. For an
+   affinity-restricted task, every level accumulates runnable load and idle
+   CPUs only over the intersection of
    the child group and the task's allowed mask, while retaining the capacity
    and topological span of the whole group. Usable spare capacity is bounded by
    the allowed intersection, so a disallowed SMT sibling does not make a busy
@@ -301,7 +301,8 @@ be turned off on the command line to compare the two rules against each other.
    the tick at a separate, backing-off interval for each LLC, NUMA node and
    system domain. It averages capacity-normalized runnable load, classifies
    the local and busiest groups, computes the excess load, and moves only that
-   budget, with one elected destination per local group, following
+   budget, with the lightest CPU in each core eligible as the LLC pass's
+   destination and one elected destination per wider local group, following
    `sched_balance_domains()`, `update_sd_lb_stats()` and
    `calculate_imbalance()`. An idle CPU that keeps finding nothing it is
    allowed to take eventually stops honoring cache hotness,

@@ -41,7 +41,7 @@
  *                               -> here
  *            WA_WEIGHT          -> the effective-load comparison: which of
  *                                  the two cids is left better balanced by
- *                                  taking the wakee, on tick-sampled loads
+ *                                  taking the wakee, on averaged and live loads
  *                 |
  *                 v
  *          select_idle_sibling_cid()       the search itself
@@ -602,8 +602,10 @@ static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
  *		prev_eff_load += 1;
  *	return this_eff_load < prev_eff_load ? this_cpu : nr_cpumask_bits;
  *
- * The cid loads are tick-sampled averaged runnable weights. task_load()
- * approximates task_h_load() from the task's already-maintained execution
+ * The cid load is the larger of its tick-sampled average and its current
+ * runnable weight. A burst of wakeups can build a deep queue between ticks;
+ * using only the old sample would keep treating that cid as lightly loaded.
+ * task_load() approximates task_h_load() from the task's maintained execution
  * utilization, decayed cheaply over sleep. A waker that runs a little and
  * sleeps a lot therefore weighs little on its cid, so its wakee lands behind
  * a task about to sleep instead of behind a fresh slice on the previous cid.
@@ -621,7 +623,8 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	u64 load;
 	u32 pct;
 
-	this_eff = cid_wake_load(this_cid);
+	this_eff = MAX(cid_wake_load(this_cid),
+		       READ_ONCE(cid_pack(this_cid)->vsum_w));
 	if (sync) {
 		u64 current_load = wctx ? task_load(waker, wctx, now) : 0;
 
@@ -637,7 +640,8 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 
 	pct = smt_enabled && cid_topo(prev_cid)->core_base == cid_topo(this_cid)->core_base ?
 	      100 + (110 - 100) / 2 : 100 + (117 - 100) / 2;
-	prev_eff = (s64)cid_wake_load(prev_cid) - (s64)load;
+	prev_eff = (s64)MAX(cid_wake_load(prev_cid),
+			    READ_ONCE(cid_pack(prev_cid)->vsum_w)) - (s64)load;
 	prev_eff *= pct;
 	prev_eff *= cid_topo(this_cid)->cap;
 	if (sync)
@@ -884,6 +888,13 @@ static __always_inline void fork_pick_commit(struct fork_pick_env *env)
 				if (env->load * env->best_cap <
 				    env->best_load * env->cap)
 					goto commit;
+				/* Recent forks leave no instantaneous load after they block. */
+				if (!env->restricted && env->level == FORK_CHILD_CORE &&
+				    env->group_recent != env->best_recent) {
+					if (env->group_recent < env->best_recent)
+						goto commit;
+					return;
+				}
 				if (env->best_local)
 					return;
 				if (local)
@@ -1029,6 +1040,7 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 	u32 base = range, nr = range >> 32;
 	u64 best_idle_load = 0, best_idle_cap = 1, best_idle_stamp = 0;
 	u64 best_load = 0, best_cap = 1;
+	u64 best_recent = 0;
 	s32 best_idle = -EBUSY, best = -EBUSY;
 	u32 off;
 
@@ -1074,10 +1086,14 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 		}
 		load = restricted ? cid_load(cid, now) :
 			READ_ONCE(cid_pack(cid)->vsum_w);
-		if (best < 0 || load * best_cap < best_load * cap) {
+		/* A short-lived child leaves vsum_w before the next fork. */
+		if (best < 0 || load * best_cap < best_load * cap ||
+		    (!restricted && load * best_cap == best_load * cap &&
+		     READ_ONCE(cid_ctx(cid)->fork_cid_place_at) < best_recent)) {
 			best = cid;
 			best_load = load;
 			best_cap = cap;
+			best_recent = READ_ONCE(cid_ctx(cid)->fork_cid_place_at);
 		}
 	}
 
@@ -1118,8 +1134,10 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 		anchor = (u32)range;
 
 	cid = fork_pick_cid(p, range, now);
-	if (cid >= 0)
+	if (cid >= 0) {
 		WRITE_ONCE(cid_ctx(cid_topo(cid)->core_base)->fork_place_at, now);
+		WRITE_ONCE(cid_ctx(cid)->fork_cid_place_at, now);
+	}
 	return cid;
 }
 
