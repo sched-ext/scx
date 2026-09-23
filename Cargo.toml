@@ -29,6 +29,7 @@ members = [
     "scheds/experimental/scx_nitosis",
     "scheds/experimental/scx_rlfifo",
     "scheds/experimental/scx_mlfq",
+    "scheds/experimental/scx_priority",
     "tools/scx_characterize",
     "tools/scxtop",
     "tools/scx_forge_agent",
