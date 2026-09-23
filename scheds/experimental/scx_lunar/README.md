@@ -41,7 +41,7 @@ It has 5 tiers. Which are:
 All new tasks get thrown into greedy. And start with duty of 512.
 There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers. 
 
-Each tier also has a slice time of 1s.
+Each tier also has a slice time of 1ms.
 
 At the moment the scheduler does not use preemption.
 
