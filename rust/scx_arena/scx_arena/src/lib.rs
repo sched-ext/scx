@@ -374,6 +374,15 @@ fn urcu_daemon(
 /// driver programs. Called from ArenaLib::setup(), the daemon is owned by
 /// the returned ArenaLib.
 pub(crate) fn urcu_spawn(obj: &libbpf_rs::Object) -> Result<Option<Daemon>> {
+    /*
+     * With bpf_call_rcu() the BPF side drives reclaim from an RCU callback and
+     * never rings the doorbell. Both sides test the same symbol, so they cannot
+     * disagree over which one is in charge.
+     */
+    if scx_utils::compat::ksym_exists("bpf_call_rcu").unwrap_or(false) {
+        return Ok(None);
+    }
+
     let Some(doorbell) = obj.maps().find(|m| m.name() == URCU_DOORBELL) else {
         return Ok(None);
     };

@@ -1514,7 +1514,7 @@ int scx_userspace_arena_free_pages(struct scx_userspace_arena_free_pages_args *c
 }
 
 /*
- * Poor man's userspace-driven RCU, standing in until BPF grows bpf_call_rcu().
+ * Userspace-driven RCU, used on kernels without bpf_call_rcu().
  * scx_urcu_free() pushes freed nodes onto the active side of a two-sided list.
  * Userspace waits for an RCU grace period, see rust/scx_arena, and then runs a
  * BPF program which calls scx_urcu_reclaim() to return the draining side to the
@@ -1528,9 +1528,6 @@ int scx_userspace_arena_free_pages(struct scx_userspace_arena_free_pages_args *c
 
 /* sized so that exhaustion means seconds of spinning */
 #define SCX_URCU_CAS_TRIES	(1U << 23)
-
-/* per-call reclaim cap to bound the verifier walk */
-#define SCX_URCU_RECLAIM_BATCH	4096
 
 /*
  * Doorbell waking userspace when a free makes the lists go empty to non-empty,
@@ -1549,7 +1546,7 @@ int scx_urcu_pending(struct scx_urcu *urcu)
 }
 
 __hidden
-void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __arena *payload)
+int scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __arena *payload)
 {
 	struct sdt_data __arena *data = sdt_tailer(alloc, payload);
 	u32 side, i;
@@ -1565,7 +1562,9 @@ void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __ar
 			continue;
 
 		/*
-		 * Ring on this side's empty to non-empty transition.
+		 * Ring on this side's empty to non-empty transition. With
+		 * bpf_call_rcu() there is no userspace side to wake, and the
+		 * caller arms off the return value instead.
 		 *
 		 * No wakeup is lost: userspace sleeps only after seeing both
 		 * sides empty, so the first free afterwards lands on an empty
@@ -1576,17 +1575,21 @@ void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __ar
 		 * after, and each can see the other's node and stay quiet.
 		 */
 		if (!head) {
-			u32 *e = bpf_ringbuf_reserve(&scx_urcu_doorbell, sizeof(*e), 0);
+			if (!bpf_ksym_exists(bpf_call_rcu)) {
+				u32 *e = bpf_ringbuf_reserve(&scx_urcu_doorbell, sizeof(*e), 0);
 
-			/* a full doorbell already has wakeups pending */
-			if (e) {
-				*e = 0;
-				bpf_ringbuf_submit(e, 0);
+				/* a full doorbell already has wakeups pending */
+				if (e) {
+					*e = 0;
+					bpf_ringbuf_submit(e, 0);
+				}
 			}
+			return 1;
 		}
-		return;
+		return 0;
 	}
 	scx_bpf_error("urcu free CAS exhausted");
+	return 0;
 }
 
 /*
