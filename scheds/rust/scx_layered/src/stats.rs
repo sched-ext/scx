@@ -238,6 +238,10 @@ pub struct LayerStats {
     pub llc_lats: Vec<f64>,
     #[stat(desc = "Layer memory bandwidth as a % of total allowed (0 for \"no limit\"")]
     pub membw_pct: f64,
+    #[stat(desc = "Per-node attributed memory bandwidth utilization")]
+    pub node_membw_util: Vec<f64>,
+    #[stat(desc = "Per-node memory-bandwidth pressure state (0/1)")]
+    pub node_membw_pressured: Vec<u32>,
     #[stat(desc = "DSQ insertion ratio EWMA (10s window)")]
     pub dsq_insert_ewma: f64,
     #[stat(desc = "Per-node layer utilization (100% = one full CPU)")]
@@ -262,7 +266,9 @@ impl LayerStats {
         bstats: &BpfStats,
         nr_cpus_range: (usize, usize),
         xnuma_active: bool,
+        membw: (&[f64], &[bool]),
     ) -> Self {
+        let (node_membw_capacity, node_membw_pressured) = membw;
         let lstat = |sidx| bstats.lstats[lidx][sidx];
         let ltotal = lstat(LSTAT_SEL_LOCAL)
             + lstat(LSTAT_ENQ_LOCAL)
@@ -298,7 +304,7 @@ impl LayerStats {
                         .iter()
                         .take(LAYER_USAGE_SUM_UPTO + 1)
                         .sum::<f64>()
-                        / (*membw_limit_gb * (1024_u64.pow(3) as f64))
+                        / *membw_limit_gb
                 } else {
                     0.0
                 }
@@ -376,6 +382,26 @@ impl LayerStats {
                 .map(|lstats| lstats[LLC_LSTAT_LAT] as f64 / 1_000_000_000.0)
                 .collect(),
             membw_pct: membw_frac * 100.0,
+            node_membw_util: if layer.kind.common().membw_limit.is_some() {
+                stats.layer_node_membws[lidx]
+                    .iter()
+                    .enumerate()
+                    .map(|(node, bandwidth)| {
+                        let capacity = node_membw_capacity.get(node).copied().unwrap_or(0.0);
+                        if capacity.is_finite() && capacity > 0.0 {
+                            bandwidth / capacity
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![0.0; stats.topo.nodes.len()]
+            },
+            node_membw_pressured: node_membw_pressured
+                .iter()
+                .map(|&pressured| u32::from(pressured))
+                .collect(),
             dsq_insert_ewma: stats.layer_dsq_insert_ewma[lidx] * 100.0,
             node_utils: stats.layer_node_utils[lidx]
                 .iter()

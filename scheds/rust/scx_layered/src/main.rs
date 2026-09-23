@@ -14,6 +14,9 @@ use std::fs;
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::ops::Sub;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +27,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use inotify::{Inotify, WatchMask};
-use std::os::unix::io::AsRawFd;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -45,7 +47,7 @@ use nvml_wrapper::Nvml;
 use nvml_wrapper::error::NvmlError;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use scx_layered::alloc::{LayerAlloc, LayerDemand, unified_alloc};
+use scx_layered::alloc::{LayerAlloc, LayerDemand, WaterFillEntry, unified_alloc, water_fill};
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
@@ -664,6 +666,11 @@ struct Opts {
     #[clap(long, default_value = "")]
     hi_fb_thread_name: String,
 
+    /// Per-NUMA-node peak memory bandwidth in GiB/s. When specified, the
+    /// value is used uniformly for all nodes instead of HMAT bandwidth data.
+    #[clap(long)]
+    node_membw_capacity_gb: Option<f64>,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     topology: TopologyArgs,
 
@@ -683,6 +690,29 @@ enum CgroupEvent {
         path: String,
         cgroup_id: u64, // inode number
     },
+}
+
+/// Read HMAT-declared read plus write bandwidth for a NUMA node in GiB/s.
+fn hmat_read_node_bandwidth(nid: usize) -> Option<f64> {
+    let read_mib = fs::read_to_string(format!(
+        "/sys/devices/system/node/node{nid}/access0/initiators/read_bandwidth"
+    ))
+    .ok()?
+    .trim()
+    .parse::<f64>()
+    .ok()?;
+    let write_mib = fs::read_to_string(format!(
+        "/sys/devices/system/node/node{nid}/access0/initiators/write_bandwidth"
+    ))
+    .ok()?
+    .trim()
+    .parse::<f64>()
+    .ok()?;
+    let capacity = (read_mib + write_mib) / 1024.0;
+    capacity
+        .is_finite()
+        .then_some(capacity)
+        .filter(|value| *value > 0.0)
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -739,6 +769,43 @@ fn calc_util(curr: &fb_procfs::CpuStat, prev: &fb_procfs::CpuStat) -> Result<f64
         }
         _ => bail!("Missing stats in cpustat"),
     }
+}
+
+/// Attribute each topology domain's shared bandwidth counter to layers in
+/// proportion to their task-attributed PMU proxy deltas.
+fn pss_membw_rates(
+    proxy_cur: &[Vec<u64>],
+    proxy_prev: &[Vec<u64>],
+    total_cur: &[u64],
+    total_prev: &[u64],
+    elapsed_secs: f64,
+) -> Vec<Vec<f64>> {
+    let nr_layers = proxy_cur.len();
+    let nr_nodes = total_cur.len();
+    let mut rates = vec![vec![0.0; nr_nodes]; nr_layers];
+
+    if !elapsed_secs.is_finite() || elapsed_secs <= 0.0 {
+        return rates;
+    }
+
+    for node in 0..nr_nodes {
+        let total_delta = total_cur[node].saturating_sub(total_prev[node]);
+        let proxy_deltas: Vec<u64> = (0..nr_layers)
+            .map(|layer| proxy_cur[layer][node].saturating_sub(proxy_prev[layer][node]))
+            .collect();
+        let proxy_total = proxy_deltas.iter().copied().fold(0u64, u64::saturating_add);
+        if proxy_total == 0 {
+            continue;
+        }
+
+        let total_gib_per_sec = total_delta as f64 / 1024_f64.powi(3) / elapsed_secs;
+        for layer in 0..nr_layers {
+            rates[layer][node] =
+                total_gib_per_sec * proxy_deltas[layer] as f64 / proxy_total as f64;
+        }
+    }
+
+    rates
 }
 
 fn copy_into_cstr(dst: &mut [i8], src: &str) {
@@ -886,6 +953,10 @@ struct Stats {
 
     layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
+    layer_node_membws: Vec<Vec<f64>>, // PSS-attributed per-layer/node bandwidth in GiB/s
+    prev_layer_node_membw_agg: Vec<Vec<u64>>, // Previous per-layer/node PMU proxies
+    prev_resctrl_node_membw: Vec<u64>, // Previous per-node resctrl byte counters
+    membw_tracking: bool,
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
@@ -925,6 +996,27 @@ impl Stats {
         }
 
         layer_membw_agg
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn read_layer_node_membw_agg(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+    ) -> Vec<Vec<u64>> {
+        let mut agg = vec![vec![0u64; topo.nodes.len()]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |cpu| cpu.node_id);
+            for layer in 0..nr_layers {
+                // OPEN and OWNED are disjoint. Protected counters are subsets
+                // of OWNED and would count the same traffic twice.
+                agg[layer][node] += cpu_ctxs[cpu].layer_membw_agg[layer][LAYER_USAGE_OPEN]
+                    + cpu_ctxs[cpu].layer_membw_agg[layer][LAYER_USAGE_OWNED];
+            }
+        }
+
+        agg
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -1015,20 +1107,64 @@ impl Stats {
     ///
     /// Approximate per-task memory bandwidth using perf counters to measure _relative_ memory
     /// bandwidth usage.
-    fn resctrl_read_total_membw() -> Result<u64> {
-        let mut total_membw = 0u64;
-        for entry in WalkDir::new("/sys/fs/resctrl/mon_data")
-            .min_depth(1)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|x| x.path().is_dir())
-        {
-            let mut path = entry.path().to_path_buf();
-            path.push("mbm_total_bytes");
-            total_membw += fs::read_to_string(path)?.trim().parse::<u64>()?;
+    /// Read root resctrl MBM counters and aggregate cache-monitoring domains
+    /// into NUMA nodes. These totals are split among layers using their local
+    /// task-attributed PMU proxy counts, analogous to proportional set size.
+    fn resctrl_read_node_membw(topo: &Topology) -> Result<Vec<u64>> {
+        let mut totals = vec![0u64; topo.nodes.len()];
+        let mut found_domain = vec![false; topo.nodes.len()];
+
+        let mon_data = Path::new("/sys/fs/resctrl/mon_data");
+        if !mon_data.is_dir() {
+            bail!(
+                "resctrl MBM is unavailable: {} is not a directory",
+                mon_data.display()
+            );
         }
 
-        Ok(total_membw)
+        for entry in WalkDir::new(mon_data)
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+        {
+            let Some(name) = entry.file_name().to_str() else {
+                continue;
+            };
+            let Some(domain) = name.strip_prefix("mon_L3_") else {
+                continue;
+            };
+            let domain = usize::from_str_radix(domain, 16)
+                .with_context(|| format!("invalid resctrl monitor domain {name}"))?;
+            let node = if topo.nodes.len() == 1 {
+                0
+            } else {
+                topo.nodes
+                    .iter()
+                    .find_map(|(&node_id, node)| {
+                        node.llcs
+                            .values()
+                            .any(|llc| llc.kernel_id == domain)
+                            .then_some(node_id)
+                    })
+                    .with_context(|| {
+                        format!("resctrl monitor domain {name} does not map to a NUMA node")
+                    })?
+            };
+
+            let value = fs::read_to_string(entry.path().join("mbm_total_bytes"))?
+                .trim()
+                .parse::<u64>()?;
+            totals[node] = totals[node].saturating_add(value);
+            found_domain[node] = true;
+        }
+
+        if let Some(node) = found_domain.iter().position(|found| !found) {
+            bail!("resctrl MBM has no monitoring domain for NUMA node {node}");
+        }
+
+        Ok(totals)
     }
 
     fn new(
@@ -1037,12 +1173,24 @@ impl Stats {
         topo: Arc<Topology>,
         gpu_task_affinitizer: &GpuTaskAffinitizer,
         util_compensation: bool,
+        membw_tracking: bool,
     ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
         let nr_nodes = topo.nodes.len();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
+        let pmu_total = pmu_membw
+            .iter()
+            .map(|membw| membw[LAYER_USAGE_OPEN] + membw[LAYER_USAGE_OWNED])
+            .sum();
+        let layer_node_membw = Self::read_layer_node_membw_agg(&cpu_ctxs, &topo, nr_layers);
+        let resctrl_node_membw = if membw_tracking {
+            Self::resctrl_read_node_membw(&topo)?
+        } else {
+            vec![0; nr_nodes]
+        };
+        let resctrl_total = resctrl_node_membw.iter().sum();
 
         Ok(Self {
             at: Instant::now(),
@@ -1072,7 +1220,11 @@ impl Stats {
             // It should not matter too much, since the value is dropped on the first
             // iteration.
             prev_layer_membw_agg: pmu_membw,
-            prev_pmu_resctrl_membw: (0, 0),
+            layer_node_membws: vec![vec![0.0; nr_nodes]; nr_layers],
+            prev_layer_node_membw_agg: layer_node_membw,
+            prev_resctrl_node_membw: resctrl_node_membw,
+            prev_pmu_resctrl_membw: (pmu_total, resctrl_total),
+            membw_tracking,
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
@@ -1148,6 +1300,8 @@ impl Stats {
             self.topo.nodes.len(),
         );
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
+        let cur_layer_node_membw_agg =
+            Self::read_layer_node_membw_agg(&cpu_ctxs, &self.topo, self.nr_layers);
 
         // Memory BW normalization. It requires finding the delta according to perf, the delta
         // according to resctl, and finding the factor between them. This also helps in
@@ -1161,8 +1315,19 @@ impl Stats {
             .iter()
             .map(|membw_agg| membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED])
             .sum();
-        let resctrl_cur = Self::resctrl_read_total_membw()?;
-        let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
+        let resctrl_node_cur = if self.membw_tracking {
+            Self::resctrl_read_node_membw(&self.topo)?
+        } else {
+            self.prev_resctrl_node_membw.clone()
+        };
+        let resctrl_cur: u64 = resctrl_node_cur.iter().sum();
+        let pmu_delta = pmu_cur.saturating_sub(pmu_prev);
+        let resctrl_delta = resctrl_cur.saturating_sub(resctrl_prev);
+        let factor = if pmu_delta > 0 {
+            resctrl_delta as f64 / pmu_delta as f64
+        } else {
+            0.0
+        };
 
         // Computes the runtime deltas and converts them from ns to s.
         let compute_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
@@ -1178,8 +1343,7 @@ impl Stats {
                 .collect()
         };
 
-        // Computes the total memory traffic done since last computation and normalizes to GBs.
-        // We derive the rate of consumption elsewhere.
+        // Compute memory traffic rates since the last sample in GiB/s.
         let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
                 .iter()
@@ -1187,7 +1351,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| (*c as i64 - *p as i64) as f64 / 1024_f64.powf(3.0))
+                        .map(|(c, p)| c.saturating_sub(*p) as f64 / 1024_f64.powi(3) / elapsed_f64)
                         .collect()
                 })
                 .collect()
@@ -1201,6 +1365,19 @@ impl Stats {
             .iter()
             .map(|x| x.iter().map(|x| *x * factor).collect())
             .collect();
+
+        // Attribute each node's resctrl bandwidth among all layers in
+        // proportion to their task-attributed PMU proxy deltas. This is the
+        // bandwidth analogue of proportional set size: each shared node total
+        // is accounted exactly once instead of being charged in full to every
+        // layer using that node.
+        let layer_node_membws = pss_membw_rates(
+            &cur_layer_node_membw_agg,
+            &self.prev_layer_node_membw_agg,
+            &resctrl_node_cur,
+            &self.prev_resctrl_node_membw,
+            elapsed_f64,
+        );
 
         let metric_decay =
             |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>, decay_rate: f64| {
@@ -1238,6 +1415,8 @@ impl Stats {
             metric_decay(cur_node_duty, &self.layer_node_duty_sums, *USAGE_DECAY);
 
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
+        let layer_node_membws =
+            metric_decay(layer_node_membws, &self.layer_node_membws, *USAGE_DECAY);
 
         let proc_stat = proc_reader
             .read_stat()
@@ -1403,6 +1582,10 @@ impl Stats {
 
             layer_membws,
             prev_layer_membw_agg: cur_layer_membw_agg,
+            layer_node_membws,
+            prev_layer_node_membw_agg: cur_layer_node_membw_agg,
+            prev_resctrl_node_membw: resctrl_node_cur,
+            membw_tracking: self.membw_tracking,
             // Was updated during normalization.
             prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
 
@@ -1838,6 +2021,8 @@ struct Scheduler<'a> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     xnuma_mig_src: Vec<Vec<bool>>,
     growth_denied: Vec<Vec<bool>>,
+    node_membw_capacity: Vec<f64>,
+    layer_node_membw_pressured: Vec<Vec<bool>>,
     processing_dur: Duration,
 
     topo: Arc<Topology>,
@@ -1848,6 +2033,69 @@ struct Scheduler<'a> {
 
 const DUTY_CYCLE_SCALE: f64 = (1u64 << 20) as f64;
 const XNUMA_RATE_DAMPEN: f64 = 0.5;
+
+fn membw_pressure_active(
+    bandwidth: f64,
+    capacity: f64,
+    range: (f64, f64),
+    currently_active: bool,
+) -> bool {
+    if !bandwidth.is_finite() || !capacity.is_finite() || capacity <= 0.0 {
+        return false;
+    }
+
+    let utilization = bandwidth / capacity;
+    if utilization >= range.1 {
+        true
+    } else if utilization <= range.0 {
+        false
+    } else {
+        currently_active
+    }
+}
+
+fn membw_shrink_target(
+    node_cpus: usize,
+    bandwidth: f64,
+    capacity: f64,
+    high: f64,
+    allocation_unit: usize,
+) -> usize {
+    if node_cpus == 0 || !bandwidth.is_finite() || !capacity.is_finite() || capacity <= 0.0 {
+        return node_cpus;
+    }
+
+    let ratio = if bandwidth > 0.0 {
+        (high * capacity / bandwidth).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let proportional = (node_cpus as f64 * ratio).floor() as usize;
+    proportional.min(node_cpus.saturating_sub(allocation_unit.max(1)))
+}
+
+/// Cap one node of an allocation while preserving the layer-wide minimum.
+/// Flexible (unpinned) allocation is removed before pinned allocation.
+fn cap_layer_node_alloc(
+    alloc: &mut LayerAlloc,
+    node: usize,
+    cap: usize,
+    min_total: usize,
+) -> usize {
+    let requested = alloc.node_target(node).saturating_sub(cap);
+    let mut to_remove = requested.min(alloc.total().saturating_sub(min_total));
+    let removed = to_remove;
+
+    let unpinned = to_remove.min(alloc.unpinned[node]);
+    alloc.unpinned[node] -= unpinned;
+    alloc.unpinned_budget = alloc.unpinned_budget.saturating_sub(unpinned);
+    to_remove -= unpinned;
+
+    let pinned = to_remove.min(alloc.pinned[node]);
+    alloc.pinned[node] -= pinned;
+
+    removed
+}
 
 /// Result of xnuma water-fill computation for a single layer.
 struct XnumaRates {
@@ -2619,7 +2867,7 @@ impl<'a> Scheduler<'a> {
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
         hint_to_layer_map: &HashMap<u64, HintLayerInfo>,
-        membw_tracking: bool,
+        mut membw_tracking: bool,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let mut disable_topology = opts.disable_topology.unwrap_or(false);
@@ -2782,6 +3030,50 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        let nr_nodes = topo.nodes.len();
+        let membw_limit_enabled = layer_specs
+            .iter()
+            .any(|spec| spec.kind.common().membw_limit.is_some());
+        let membw_gb_enabled = layer_specs.iter().any(|spec| match spec.kind {
+            LayerKind::Confined { membw_gb, .. } | LayerKind::Grouped { membw_gb, .. } => {
+                membw_gb.is_some()
+            }
+            LayerKind::Open { .. } => false,
+        });
+        let mut node_membw_capacity = if membw_limit_enabled {
+            let mut capacities = Vec::with_capacity(nr_nodes);
+            for node in 0..nr_nodes {
+                let (capacity, source) = if let Some(capacity) = opts.node_membw_capacity_gb {
+                    (capacity, "cli")
+                } else if let Some(capacity) = hmat_read_node_bandwidth(node) {
+                    (capacity, "hmat")
+                } else {
+                    warn!(
+                        "membw_limit disabled: no --node-membw-capacity-gb or valid HMAT bandwidth data for NUMA node {node}"
+                    );
+                    capacities.clear();
+                    break;
+                };
+                capacities.push(capacity);
+                info!(
+                    "node {} memory-bandwidth capacity: {:.1} GiB/s ({})",
+                    node, capacity, source
+                );
+            }
+            capacities
+        } else {
+            Vec::new()
+        };
+
+        if membw_limit_enabled && node_membw_capacity.is_empty() && !membw_gb_enabled {
+            membw_tracking = false;
+        }
+        if membw_tracking && let Err(err) = Stats::resctrl_read_node_membw(&topo) {
+            warn!("memory-bandwidth limits disabled: resctrl MBM is unavailable: {err:#}");
+            membw_tracking = false;
+            node_membw_capacity.clear();
+        }
+
         // Check kernel features
         init_libbpf_logging(None);
         let kfuncs_in_syscall = scx_bpf_compat::kfuncs_supported_in_syscall()?;
@@ -2807,7 +3099,22 @@ impl<'a> Scheduler<'a> {
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
-        // No memory BW tracking by default
+        let membw_perf_fds = if membw_tracking {
+            match setup_membw_tracking(&mut skel).and_then(|event| open_perf_fds(event, &topo)) {
+                Ok(perf_fds) => perf_fds,
+                Err(err) => {
+                    warn!("memory-bandwidth limits disabled: PMU tracking is unavailable: {err:#}");
+                    membw_tracking = false;
+                    node_membw_capacity.clear();
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Memory-bandwidth PMU tracking is opt-in because the sched_switch
+        // hook has a cost.
         skel.progs.scx_pmu_switch_tc.set_autoload(membw_tracking);
         skel.progs.scx_pmu_tick_tc.set_autoload(membw_tracking);
 
@@ -2836,12 +3143,6 @@ impl<'a> Scheduler<'a> {
 
         let ext_sched_class_addr = get_kallsyms_addr("ext_sched_class");
         let idle_sched_class_addr = get_kallsyms_addr("idle_sched_class");
-
-        let event = if membw_tracking {
-            setup_membw_tracking(&mut skel)?
-        } else {
-            0
-        };
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
@@ -3001,8 +3302,10 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        if membw_tracking {
-            create_perf_fds(&mut skel, event)?;
+        if membw_tracking && let Err(err) = install_perf_fds(&mut skel, &membw_perf_fds) {
+            warn!("memory-bandwidth limits disabled: failed to install PMU counters: {err:#}");
+            membw_tracking = false;
+            node_membw_capacity.clear();
         }
 
         let mut layers = vec![];
@@ -3095,6 +3398,7 @@ impl<'a> Scheduler<'a> {
                 topo.clone(),
                 &gpu_task_handler,
                 opts.util_compensation,
+                membw_tracking,
             )?,
             layer_peak_utils: vec![0.0; nr_layers],
 
@@ -3102,6 +3406,8 @@ impl<'a> Scheduler<'a> {
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             xnuma_mig_src: vec![vec![false; topo.nodes.len()]; nr_layers],
             growth_denied: vec![vec![false; topo.nodes.len()]; nr_layers],
+            node_membw_capacity,
+            layer_node_membw_pressured: vec![vec![false; nr_nodes]; nr_layers],
             processing_dur: Default::default(),
 
             proc_reader,
@@ -3811,7 +4117,83 @@ impl<'a> Scheduler<'a> {
                 )
             })
             .collect();
-        let layer_allocs = unified_alloc(total_cpus / au, &node_caps, &demands, &node_groups);
+        let mut layer_allocs = unified_alloc(total_cpus / au, &node_caps, &demands, &node_groups);
+
+        // Apply memory-bandwidth limits to the allocator's per-node targets.
+        // This makes the policy topology-aware for every growth algorithm,
+        // including StickyDynamic, and lets unpressured nodes retain their
+        // independently computed allocations.
+        let mut membw_freed = vec![0usize; nr_nodes];
+        for (idx, alloc) in layer_allocs.iter_mut().enumerate() {
+            let Some(limit) = self.layer_specs[idx].kind.common().membw_limit.as_ref() else {
+                continue;
+            };
+            let min_units = targets[idx].1.div_ceil(au);
+            for (node, freed) in membw_freed.iter_mut().enumerate() {
+                if !self.layer_node_membw_pressured[idx][node] {
+                    continue;
+                }
+
+                let current = self.layers[idx].nr_node_cpus[node];
+                let cap_cpus = match limit.action {
+                    LayerMembwLimitAction::Hold => current,
+                    LayerMembwLimitAction::Shrink => membw_shrink_target(
+                        current,
+                        self.sched_stats.layer_node_membws[idx][node],
+                        self.node_membw_capacity[node],
+                        limit.utilization_range.1,
+                        au,
+                    ),
+                };
+                *freed += cap_layer_node_alloc(alloc, node, cap_cpus / au, min_units);
+            }
+        }
+
+        // Reassign released units on each node to other layers which still
+        // have demand there. The pressured layer is excluded on that node, so
+        // the cap does not get undone on the next allocation pass.
+        for (node, &freed) in membw_freed.iter().enumerate() {
+            if freed == 0 {
+                continue;
+            }
+
+            let mut indices = Vec::new();
+            let mut entries = Vec::new();
+            for idx in 0..layer_allocs.len() {
+                if demands[idx].spread || self.layer_node_membw_pressured[idx][node] {
+                    continue;
+                }
+                let pinned_left =
+                    demands[idx].raw_pinned[node].saturating_sub(layer_allocs[idx].pinned[node]);
+                let unpinned_left = if node_groups[idx].iter().any(|tier| tier.contains(&node)) {
+                    demands[idx]
+                        .raw_unpinned
+                        .saturating_sub(layer_allocs[idx].unpinned_budget)
+                } else {
+                    0
+                };
+                let demand = pinned_left + unpinned_left;
+                if demand == 0 {
+                    continue;
+                }
+                indices.push(idx);
+                entries.push(WaterFillEntry {
+                    weight: demands[idx].weight,
+                    demand,
+                });
+            }
+
+            for (position, share) in water_fill(freed, &entries).into_iter().enumerate() {
+                let idx = indices[position];
+                let pinned_left =
+                    demands[idx].raw_pinned[node].saturating_sub(layer_allocs[idx].pinned[node]);
+                let pinned = share.min(pinned_left);
+                layer_allocs[idx].pinned[node] += pinned;
+                let unpinned = share - pinned;
+                layer_allocs[idx].unpinned[node] += unpinned;
+                layer_allocs[idx].unpinned_budget += unpinned;
+            }
+        }
 
         // Convert allocations back to CPU counts. Shrink dampening is
         // already applied to the targets fed into unified_alloc above.
@@ -4240,12 +4622,49 @@ impl<'a> Scheduler<'a> {
                 (self.sched_stats.layer_dsq_insert_ewma[layer_id] * 10000.0) as u64;
         }
 
+        self.refresh_membw_pressure();
         self.refresh_cpumasks()?;
         self.refresh_xnuma();
         self.refresh_idle_qos()?;
         self.gpu_task_handler.maybe_affinitize();
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
+    }
+
+    fn refresh_membw_pressure(&mut self) {
+        if self.node_membw_capacity.is_empty() {
+            return;
+        }
+
+        for (idx, spec) in self.layer_specs.iter().enumerate() {
+            let Some(limit) = spec.kind.common().membw_limit.as_ref() else {
+                self.layer_node_membw_pressured[idx].fill(false);
+                continue;
+            };
+
+            for node in 0..self.topo.nodes.len() {
+                let previous = self.layer_node_membw_pressured[idx][node];
+                let bandwidth = self.sched_stats.layer_node_membws[idx][node];
+                let capacity = self.node_membw_capacity[node];
+                let pressured =
+                    membw_pressure_active(bandwidth, capacity, limit.utilization_range, previous);
+                if pressured != previous {
+                    info!(
+                        "[{}] node {} memory-bandwidth pressure -> {} (attributed={:.2} GiB/s capacity={:.2} GiB/s utilization={:.3} range=[{:.3}, {:.3}] action={:?})",
+                        spec.name,
+                        node,
+                        if pressured { "ON" } else { "OFF" },
+                        bandwidth,
+                        capacity,
+                        bandwidth / capacity.max(f64::EPSILON),
+                        limit.utilization_range.0,
+                        limit.utilization_range.1,
+                        limit.action,
+                    );
+                }
+                self.layer_node_membw_pressured[idx][node] = pressured;
+            }
+        }
     }
 
     fn generate_sys_stats(
@@ -4264,6 +4683,10 @@ impl<'a> Scheduler<'a> {
                 bstats,
                 cpus_ranges[lidx],
                 self.xnuma_mig_src[lidx].iter().any(|&a| a),
+                (
+                    &self.node_membw_capacity,
+                    &self.layer_node_membw_pressured[lidx],
+                ),
             );
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
@@ -4550,8 +4973,14 @@ impl<'a> Scheduler<'a> {
                             tid,
                             self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
                         );
-                        let stats =
-                            Stats::new(&mut self.skel, &self.proc_reader, self.topo.clone(), &self.gpu_task_handler, self.sched_stats.util_compensation)?;
+                        let stats = Stats::new(
+                            &mut self.skel,
+                            &self.proc_reader,
+                            self.topo.clone(),
+                            &self.gpu_task_handler,
+                            self.sched_stats.util_compensation,
+                            self.sched_stats.membw_tracking,
+                        )?;
                         res_ch.send(StatsRes::Hello(Box::new(stats)))?;
                     }
                     Ok(StatsReq::Refresh(tid, mut stats)) => {
@@ -4938,59 +5367,75 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
     }
 }
 
-fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
+fn open_perf_fds(event: u64, topo: &Topology) -> Result<Vec<(u32, OwnedFd)>> {
     let mut attr = perf::bindings::perf_event_attr {
         size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
         type_: perf::bindings::PERF_TYPE_RAW,
         config: event,
-        sample_type: 0u64,
+        sample_type: 0,
         ..Default::default()
     };
-    attr.__bindgen_anon_1.sample_period = 0u64;
+    attr.__bindgen_anon_1.sample_period = 0;
     attr.set_disabled(0);
+    // A bandwidth control signal must not silently undercount when perf
+    // multiplexes it. Requiring a pinned counter makes contention explicit.
+    attr.set_pinned(1);
 
+    let mut perf_fds = Vec::with_capacity(topo.all_cpus.len());
+    for &cpu in topo.all_cpus.keys() {
+        let fd = unsafe { perf::perf_event_open(&mut attr, -1, cpu as i32, -1, 0) };
+        if fd < 0 {
+            bail!(
+                "memory-bandwidth perf_event_open failed on CPU {}: {}",
+                cpu,
+                std::io::Error::last_os_error()
+            );
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+        // A pinned event enters an error state when the PMU cannot schedule
+        // it; read(2) then returns zero bytes. Detect that before handing the
+        // fd to BPF so multiplexing cannot silently bias attribution.
+        let mut initial = 0u64;
+        let read_len = unsafe {
+            libc::read(
+                fd.as_raw_fd(),
+                &mut initial as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
+            )
+        };
+        if read_len != std::mem::size_of::<u64>() as isize {
+            bail!("pinned memory-bandwidth event could not run on CPU {cpu}");
+        }
+        perf_fds.push((cpu as u32, fd));
+    }
+
+    Ok(perf_fds)
+}
+
+fn install_perf_fds(skel: &mut BpfSkel, perf_fds: &[(u32, OwnedFd)]) -> Result<()> {
     let perf_events_map = &skel.maps.scx_pmu_map;
     let map_fd = unsafe { libbpf_sys::bpf_map__fd(perf_events_map.as_libbpf_object().as_ptr()) };
 
-    let mut failures = 0u64;
-
-    for cpu in 0..*NR_CPUS_POSSIBLE {
-        let fd = unsafe { perf::perf_event_open(&mut attr as *mut _, -1, cpu as i32, -1, 0) };
-        if fd < 0 {
-            failures += 1;
-            trace!(
-                "perf_event_open failed cpu={cpu} errno={}",
-                std::io::Error::last_os_error()
-            );
-            continue;
-        }
-
-        let key = cpu as u32;
-        let val = fd as u32;
+    for (cpu, fd) in perf_fds {
+        let value = fd.as_raw_fd() as u32;
         let ret = unsafe {
             libbpf_sys::bpf_map_update_elem(
                 map_fd,
-                &key as *const _ as *const _,
-                &val as *const _ as *const _,
+                cpu as *const _ as *const _,
+                &value as *const _ as *const _,
                 0,
             )
         };
         if ret != 0 {
-            trace!("bpf_map_update_elem failed cpu={cpu} fd={fd} ret={ret}");
-        } else {
-            trace!("mapped cpu={cpu} -> fd={fd}");
+            bail!("failed to map memory-bandwidth event on CPU {cpu}: {ret}");
         }
-    }
-
-    if failures > 0 {
-        println!("membw tracking: failed to install {failures} counters");
-        // Keep going, do not fail the scheduler for this
     }
 
     Ok(())
 }
 
-// Set up the counters
+// Set up the counters.
 fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     let pmumanager = PMUManager::new()?;
     let codename = &pmumanager.codename as &str;
@@ -5018,7 +5463,9 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
         }
     };
 
-    let spec = pmuspec.ok_or("not_found").unwrap();
+    let spec = pmuspec.with_context(|| {
+        format!("memory-bandwidth PMU event is not supported on CPU codename {codename}")
+    })?;
     let config = (spec.umask << 8) | spec.event[0];
 
     // Install the counter in the BPF map
@@ -5040,6 +5487,11 @@ fn main(opts: Opts) -> Result<()> {
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
+    }
+    if let Some(capacity) = opts.node_membw_capacity_gb
+        && (!capacity.is_finite() || capacity <= 0.0)
+    {
+        bail!("--node-membw-capacity-gb must be finite and positive");
     }
 
     let env_filter = EnvFilter::try_from_default_env()
@@ -5223,13 +5675,35 @@ fn main(opts: Opts) -> Result<()> {
                 &spec.name
             );
         }
+
+        if let Some(limit) = common.membw_limit.as_ref() {
+            let (low, high) = limit.utilization_range;
+            if !(low.is_finite() && high.is_finite() && 0.0 <= low && low < high && high <= 1.0) {
+                bail!(
+                    "Layer {} has invalid membw_limit.utilization_range [{}, {}]: require 0 <= low < high <= 1",
+                    &spec.name,
+                    low,
+                    high
+                );
+            }
+            if matches!(spec.kind, LayerKind::Open { .. }) {
+                bail!(
+                    "Layer {} is Open; membw_limit is only valid on Confined or Grouped layers",
+                    &spec.name
+                );
+            }
+        }
     }
 
-    let membw_required = layer_config.specs.iter().any(|spec| match spec.kind {
-        LayerKind::Confined { membw_gb, .. } | LayerKind::Grouped { membw_gb, .. } => {
-            membw_gb.is_some()
-        }
-        LayerKind::Open { .. } => false,
+    let membw_required = layer_config.specs.iter().any(|spec| {
+        let limit = spec.kind.common().membw_limit.is_some();
+        let absolute = match spec.kind {
+            LayerKind::Confined { membw_gb, .. } | LayerKind::Grouped { membw_gb, .. } => {
+                membw_gb.is_some()
+            }
+            LayerKind::Open { .. } => false,
+        };
+        limit || absolute
     });
 
     if opts.print_and_exit {
@@ -5255,6 +5729,88 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod membw_limit_tests {
+    use super::*;
+
+    const RANGE: (f64, f64) = (0.30, 0.40);
+
+    #[test]
+    fn pressure_uses_hysteresis() {
+        assert!(membw_pressure_active(40.0, 100.0, RANGE, false));
+        assert!(membw_pressure_active(35.0, 100.0, RANGE, true));
+        assert!(!membw_pressure_active(30.0, 100.0, RANGE, true));
+        assert!(!membw_pressure_active(35.0, 100.0, RANGE, false));
+    }
+
+    #[test]
+    fn invalid_capacity_disables_pressure() {
+        assert!(!membw_pressure_active(40.0, 0.0, RANGE, true));
+        assert!(!membw_pressure_active(f64::NAN, 100.0, RANGE, true));
+    }
+
+    #[test]
+    fn shrink_is_proportional_beyond_high_watermark() {
+        assert_eq!(membw_shrink_target(8, 80.0, 100.0, 0.40, 1), 4);
+    }
+
+    #[test]
+    fn shrink_makes_progress_inside_hysteresis_band() {
+        assert_eq!(membw_shrink_target(8, 35.0, 100.0, 0.40, 2), 6);
+    }
+
+    #[test]
+    fn pss_splits_each_node_independently() {
+        let gib = 1024_u64.pow(3);
+        let rates = pss_membw_rates(
+            &[vec![10, 0], vec![30, 20]],
+            &[vec![0, 0], vec![0, 0]],
+            &[gib, 2 * gib],
+            &[0, 0],
+            1.0,
+        );
+
+        assert!((rates[0][0] - 0.25).abs() < f64::EPSILON);
+        assert!((rates[1][0] - 0.75).abs() < f64::EPSILON);
+        assert_eq!(rates[0][1], 0.0);
+        assert_eq!(rates[1][1], 2.0);
+    }
+
+    #[test]
+    fn pss_does_not_attribute_without_a_proxy() {
+        let gib = 1024_u64.pow(3);
+        assert_eq!(
+            pss_membw_rates(&[vec![0]], &[vec![0]], &[gib], &[0], 1.0),
+            vec![vec![0.0]]
+        );
+    }
+
+    #[test]
+    fn node_cap_removes_unpinned_before_pinned() {
+        let mut alloc = LayerAlloc {
+            pinned: vec![2, 1],
+            unpinned_budget: 3,
+            unpinned: vec![2, 1],
+        };
+        assert_eq!(cap_layer_node_alloc(&mut alloc, 0, 2, 0), 2);
+        assert_eq!(alloc.pinned, vec![2, 1]);
+        assert_eq!(alloc.unpinned, vec![0, 1]);
+        assert_eq!(alloc.unpinned_budget, 1);
+    }
+
+    #[test]
+    fn node_cap_preserves_global_minimum() {
+        let mut alloc = LayerAlloc {
+            pinned: vec![2, 1],
+            unpinned_budget: 3,
+            unpinned: vec![2, 1],
+        };
+        assert_eq!(cap_layer_node_alloc(&mut alloc, 0, 0, 5), 1);
+        assert_eq!(alloc.total(), 5);
+        assert_eq!(alloc.node_target(0), 3);
+    }
 }
 
 #[cfg(test)]
