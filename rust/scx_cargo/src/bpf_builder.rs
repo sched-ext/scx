@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
+use libbpf_rs::btf::{Btf, BtfKind, BtfType, types::DataSec};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
@@ -168,6 +169,10 @@ use tracing_subscriber::{Layer, filter, layer::SubscriberExt};
 ///
 /// - `RUSTFLAGS`: This is a generic `cargo` flag and can be useful for
 ///   specifying extra linker flags.
+///
+/// - `SCX_ALLOW_OLD_CLANG`: Build a cid-form scheduler with a clang older
+///   than 22 anyway. clang before 22 mishandles arena memory, so such a build
+///   fails by default; setting this turns the failure into a warning.
 ///
 /// A common case for using the above flags is using the latest `libbpf`
 /// from the kernel tree. Let's say the kernel tree is at `$KERNEL` and
@@ -370,6 +375,7 @@ impl BpfBuilder {
 
         linker.link()?;
         fixup_arena_datasec(&linkobj)?;
+        self.check_cid_clang(&linkobj)?;
 
         self.bindgen_bpf_intf()?;
 
@@ -438,8 +444,35 @@ impl BpfBuilder {
         Ok(())
     }
 
+    /// clang before 22 mishandles arena memory: memset() on it is lowered
+    /// without the address space cast. cid-form schedulers are arena based, so
+    /// refuse to build one with such a clang unless SCX_ALLOW_OLD_CLANG turns
+    /// the refusal into a warning.
+    fn check_cid_clang(&self, linkobj: &Path) -> Result<()> {
+        if version_compare::compare(&self.clang.ver, "22") != Ok(version_compare::Cmp::Lt) {
+            return Ok(());
+        }
+        let Some(ops) = cid_struct_ops_type(linkobj)? else {
+            return Ok(());
+        };
+        let msg = format!(
+            "{} registers cid-form struct_ops {ops} but is built with clang {}, and \
+             clang before 22 mishandles arena memory (memset() on it is lowered without \
+             the address space cast), which cid-form schedulers depend on. Use clang >= 22, \
+             or set SCX_ALLOW_OLD_CLANG=1 to build anyway.",
+            env::var("CARGO_PKG_NAME").unwrap_or_default(),
+            self.clang.ver
+        );
+        if env::var_os("SCX_ALLOW_OLD_CLANG").is_some_and(|v| !v.is_empty()) {
+            println!("cargo:warning={msg}");
+            return Ok(());
+        }
+        bail!(msg)
+    }
+
     fn gen_cargo_reruns(&self, dependencies: Option<&BTreeSet<String>>) -> Result<()> {
         println!("cargo:rerun-if-env-changed=BPF_CLANG");
+        println!("cargo:rerun-if-env-changed=SCX_ALLOW_OLD_CLANG");
         println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
         println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
         println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
@@ -468,6 +501,37 @@ impl BpfBuilder {
         self.gen_cargo_reruns(Some(&deps))?;
         Ok(())
     }
+}
+
+/// The cid-form struct_ops type the linked object registers, if any. The
+/// struct_ops DATASECs list the ops variables; a cid-form one has type struct
+/// sched_ext_ops_cid or a CO-RE variant of it.
+fn cid_struct_ops_type(linkobj: &Path) -> Result<Option<String>> {
+    let btf = Btf::from_path(linkobj)
+        .with_context(|| format!("Failed to parse BTF from {}", linkobj.display()))?;
+
+    for sec in [".struct_ops", ".struct_ops.link"] {
+        let Some(datasec) = btf.type_by_name::<DataSec>(sec) else {
+            continue;
+        };
+        for vsi in datasec.iter() {
+            let Some(ty) = btf
+                .type_by_id::<BtfType>(vsi.ty)
+                .and_then(|var| var.next_type())
+                .map(|ty| ty.skip_mods_and_typedefs())
+            else {
+                continue;
+            };
+            if ty.kind() != BtfKind::Struct {
+                continue;
+            }
+            let name = ty.name().unwrap_or_default().to_string_lossy();
+            if name == "sched_ext_ops_cid" || name.starts_with("sched_ext_ops_cid___") {
+                return Ok(Some(name.into_owned()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 // libbpf's static linker (libbpf 1.7 and 1.8) mishandles an arena global that

@@ -168,6 +168,7 @@ See: [CARGO BUILD](CARGO_BUILD.md)
 - `BPF_BASE_CFLAGS`: Override base compiler flags (non-include)
 - `BPF_EXTRA_CFLAGS_PRE_INCL`: Extra flags before include paths
 - `BPF_EXTRA_CFLAGS_POST_INCL`: Extra flags after include paths
+- `SCX_ALLOW_OLD_CLANG`: Build cid-form schedulers with clang older than 22 anyway, with a warning instead of a build failure
 
 **Examples:**
 
