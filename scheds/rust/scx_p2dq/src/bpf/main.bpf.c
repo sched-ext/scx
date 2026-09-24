@@ -347,6 +347,43 @@ static __always_inline u32 pelt_decay(u32 val, u32 periods)
 	return val;
 }
 
+/*
+ * Scale runtime without multiplying a nanosecond-sized value by both
+ * capacity and frequency. The quotient/remainder split keeps every
+ * intermediate below u64 while preserving the integer reference result.
+ */
+static __always_inline u64 pelt_scale_runtime(u64 runtime_ns, u32 capacity,
+						      u32 freq)
+{
+	u64 whole_ms, remainder_ns;
+	u64 scale, scale_q, scale_r;
+	u64 scaled, whole_remainder, fractional_numerator;
+	u64 scale_mask = PELT_UTIL_SCALE - 1;
+
+	if (capacity > PELT_UTIL_SCALE)
+		capacity = PELT_UTIL_SCALE;
+	if (freq > PELT_UTIL_SCALE)
+		freq = PELT_UTIL_SCALE;
+
+	whole_ms = runtime_ns / NSEC_PER_MSEC;
+	remainder_ns = runtime_ns % NSEC_PER_MSEC;
+	scale = (u64)capacity * freq;
+	scale_q = scale >> PELT_UTIL_SHIFT;
+	scale_r = scale & scale_mask;
+
+	/* floor(whole_ms * scale / PELT_UTIL_SCALE). */
+	scaled = whole_ms * scale_q +
+		(whole_ms * scale_r) / PELT_UTIL_SCALE;
+
+	/* Add the fractional nanosecond part without losing the carry. */
+	whole_remainder = ((whole_ms & scale_mask) * scale_r) & scale_mask;
+	fractional_numerator = whole_remainder * NSEC_PER_MSEC +
+			remainder_ns * scale;
+
+	return scaled + fractional_numerator /
+		(NSEC_PER_MSEC * PELT_UTIL_SCALE);
+}
+
 /* Forward declarations for energy-aware scheduling helpers */
 static __always_inline u32 get_cpu_capacity(s32 cpu);
 static __always_inline u32 get_cpu_energy_cost(s32 cpu);
@@ -365,10 +402,10 @@ static __always_inline bool prefer_big_core(struct task_struct *p);
  */
 static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta_ns, s32 task_cpu)
 {
-	u64 elapsed_ns, elapsed_ms;
-	u32 periods, delta_ms;
+	u64 elapsed_ns, runtime_ns;
+	u32 periods;
 	u32 capacity, freq;
-	u64 scaled_delta_ms, scaled_period_contrib;
+	u64 scaled_runtime;
 
 	if (!p2dq_config.pelt_enabled)
 		return;
@@ -383,19 +420,21 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 	}
 
 	elapsed_ns = now - taskc->pelt_last_update_time;
-	elapsed_ms = elapsed_ns / NSEC_PER_MSEC;
 
 	/**
 	 * If less than 1ms has passed, accumulate in period_contrib and don't
 	 * update timestamp until a full period has passed.
 	 */
-	if (elapsed_ms == 0) {
-		delta_ms = delta_ns / NSEC_PER_MSEC;
-		taskc->period_contrib += delta_ms;
+	if (elapsed_ns < NSEC_PER_MSEC) {
+		if (taskc->period_contrib >= NSEC_PER_MSEC - 1 ||
+		    delta_ns > NSEC_PER_MSEC - 1 - taskc->period_contrib)
+			taskc->period_contrib = NSEC_PER_MSEC - 1;
+		else
+			taskc->period_contrib += delta_ns;
 		return;
 	}
 
-	periods = (u32)elapsed_ms;
+	periods = elapsed_ns / NSEC_PER_MSEC;
 	if (periods > 256)
 		periods = 256;  /* Cap for verifier */
 
@@ -412,18 +451,20 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 	 * Scale period contribution by capacity and frequency
 	 * This makes the PELT metric represent "work done at max CPU capacity at max freq"
 	 *
-	 * Formula: scaled_time = wall_time * (capacity / 1024) * (freq / 1024)
-	 *         = wall_time * capacity * freq / (1024 * 1024)
+	 * Formula: scaled_time = wall_time * (capacity / 1024) * freq
+	 *         = wall_time * capacity * freq / 1024.
+	 * The result is in PELT utilization units per millisecond.
 	 */
-	if (taskc->period_contrib > 0) {
-		scaled_period_contrib = (taskc->period_contrib * capacity * freq) / (1024ULL * 1024ULL);
-		taskc->util_sum += scaled_period_contrib;
-		taskc->period_contrib = 0;
-	}
-
-	delta_ms = delta_ns / NSEC_PER_MSEC;
-	scaled_delta_ms = (delta_ms * capacity * freq) / (1024ULL * 1024ULL);
-	taskc->util_sum += scaled_delta_ms;
+	if (delta_ns > ~0ULL - taskc->period_contrib)
+		runtime_ns = ~0ULL;
+	else
+		runtime_ns = taskc->period_contrib + delta_ns;
+	scaled_runtime = pelt_scale_runtime(runtime_ns, capacity, freq);
+	if (scaled_runtime > (u64)PELT_SUM_MAX - taskc->util_sum)
+		taskc->util_sum = PELT_SUM_MAX;
+	else
+		taskc->util_sum += (u32)scaled_runtime;
+	taskc->period_contrib = 0;
 
 	if (unlikely(taskc->util_sum > PELT_SUM_MAX))
 		taskc->util_sum = PELT_SUM_MAX;
@@ -434,7 +475,10 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 	if (taskc->util_avg > PELT_MAX_UTIL)
 		taskc->util_avg = PELT_MAX_UTIL;
 
-	taskc->pelt_last_update_time = now;
+	if (periods == 256 && elapsed_ns >= 256ULL * NSEC_PER_MSEC)
+		taskc->pelt_last_update_time = now;
+	else
+		taskc->pelt_last_update_time += periods * NSEC_PER_MSEC;
 }
 
 static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
