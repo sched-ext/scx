@@ -50,8 +50,8 @@ void init_ao_masks(struct pick_ctx *ctx)
 	ctx->cpuc_cur = get_cpu_ctx();
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
-		ctx->a_mask = active_cpumask;
-		ctx->o_mask = ovrflw_cpumask;
+		ctx->a_mask = active_cmask;
+		ctx->o_mask = ovrflw_cmask;
 		ctx->a_empty = ctx->o_empty = false;
 		return;
 	}
@@ -59,8 +59,8 @@ void init_ao_masks(struct pick_ctx *ctx)
 	ctx->a_mask = ctx->cpuc_cur->a_mask;
 	ctx->o_mask = ctx->cpuc_cur->o_mask;
 
-	ctx->a_empty = !cmask_and(ctx->a_mask, &ctx->taskc->allowed, active_cpumask);
-	ctx->o_empty = !cmask_and(ctx->o_mask, &ctx->taskc->allowed, ovrflw_cpumask);
+	ctx->a_empty = !cmask_and(ctx->a_mask, &ctx->taskc->allowed, active_cmask);
+	ctx->o_empty = !cmask_and(ctx->o_mask, &ctx->taskc->allowed, ovrflw_cmask);
 	if (ctx->a_empty)
 		ctx->a_mask = NULL;
 	if (ctx->o_empty)
@@ -78,7 +78,7 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
 
 /*
  * For preemption-vulnerable tasks, repartition active/overflow masks based
- * on the pre-computed steady_cpumask. Steady (non-turbulent) CPUs become
+ * on the pre-computed steady_cmask. Steady (non-turbulent) CPUs become
  * the active set, and turbulent CPUs become the overflow set.
  */
 static __always_inline
@@ -96,15 +96,15 @@ void repartition_masks_for_latency(struct pick_ctx *ctx)
 	 * steady_set = eligible_cpus ∩ steady
 	 * turb_set   = eligible_cpus - steady
 	 */
-	cmask_or(steady_set, active_cpumask, ovrflw_cpumask);
+	cmask_or(steady_set, active_cmask, ovrflw_cmask);
 
 	if (test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		cmask_and(steady_set, steady_set, &ctx->taskc->allowed);
 
 	ctx->a_mask = steady_set;
 	ctx->o_mask = turb_set;
-	ctx->o_empty = !cmask_andnot(turb_set, steady_set, steady_cpumask);
-	ctx->a_empty = !cmask_and(steady_set, steady_set, steady_cpumask);
+	ctx->o_empty = !cmask_andnot(turb_set, steady_set, steady_cmask);
+	ctx->a_empty = !cmask_and(steady_set, steady_set, steady_cmask);
 	if (ctx->a_empty)
 		ctx->a_mask = NULL;
 	if (ctx->o_empty)
@@ -137,7 +137,7 @@ void init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *i
 	if (ctx->ia_empty || !have_turbo_core)
 		ctx->iat_empty = true;
 	else
-		ctx->iat_empty = !cmask_and(ctx->iat_mask, ctx->ia_mask, turbo_cpumask);
+		ctx->iat_empty = !cmask_and(ctx->iat_mask, ctx->ia_mask, turbo_cmask);
 }
 
 __hidden
@@ -215,7 +215,7 @@ static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 		if (!cmask_test(cpu, online_src_mask))
 			continue;
 		/* Skip CPUs already in overflow. */
-		if (cmask_test(cpu, ovrflw_cpumask))
+		if (cmask_test(cpu, ovrflw_cmask))
 			continue;
 		if (topo_cpu_to_llc_id(scx_bpf_cid_to_cpu(cpu)) != prev_llc)
 			continue;
@@ -450,7 +450,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 	 */
 	if (sctx.i_m == 1) {
 		*sticky_cpdom = sctx.cpuc_match[0]->cpdom_id;
-		return sctx.cpuc_match[0]->cpu_id;
+		return sctx.cpuc_match[0]->cid;
 	} else if (sctx.i_m == 2) {
 		p0 = sctx.cpuc_match[0]; /* prev_cpu */
 		p1 = sctx.cpuc_match[1]; /* sync_waker_cpu */
@@ -470,7 +470,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 			return -ENOENT;
 		} else {
 			*sticky_cpdom = p0->cpdom_id;
-			return p0->cpu_id; /* prev_cpu */
+			return p0->cid; /* prev_cpu */
 		}
 	}
 
@@ -676,14 +676,14 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 */
 	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(p)) {
 		cpu = ctx->prev_cpu;
-		if (!cmask_test(cpu, active_cpumask)) {
+		if (!cmask_test(cpu, active_cmask)) {
 			/*
 			 * Extend the overflow set only for permanent pinning;
 			 * migrate_disable is transient, so we don't want to
 			 * pollute the overflow set with short-lived restrictions.
 			 */
 			if (is_permanently_pinned(p))
-				ovrflw_test_and_set(ovrflw_cpumask, cpu);
+				ovrflw_test_and_set(ovrflw_cmask, cpu);
 		}
 		*is_idle = claim_idle_cid(cpu) > 0;
 		goto out;
@@ -699,7 +699,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * core type matches the task type; otherwise fall through to allow a
 	 * cross-cluster migration.
 	 */
-	if (warm_cpu_ns && ctx->prev_cpu >= 0 && cmask_test(ctx->prev_cpu, active_cpumask) &&
+	if (warm_cpu_ns && ctx->prev_cpu >= 0 && cmask_test(ctx->prev_cpu, active_cmask) &&
 	    cmask_test(ctx->prev_cpu, &ctx->taskc->allowed)) {
 		if (claim_idle_cid(ctx->prev_cpu) > 0) {
 			cpu = ctx->prev_cpu;
@@ -727,7 +727,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(&ctx->taskc->allowed, ctx->cpuc_cur);
 		if (cpu >= 0) {
-			ovrflw_test_and_set(ovrflw_cpumask, cpu);
+			ovrflw_test_and_set(ovrflw_cmask, cpu);
 			*is_idle = claim_idle_cid(cpu) > 0;
 		}
 		goto out;
@@ -846,7 +846,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 		if (extend_ovrflw) {
 			s32 new_cpu = find_cpu_for_ovrflw_extend(ctx);
 			if (new_cpu >= 0 && claim_idle_cid(new_cpu) > 0) {
-				ovrflw_test_and_set(ovrflw_cpumask, new_cpu);
+				ovrflw_test_and_set(ovrflw_cmask, new_cpu);
 				debugln("migrate: ovrflw_extend %s[pid%d] prev_cid=%d new_cid=%d",
 					p->comm, p->pid, ctx->prev_cpu, new_cpu);
 				cpu = new_cpu;

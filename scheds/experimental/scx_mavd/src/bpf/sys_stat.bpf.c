@@ -168,7 +168,7 @@ static void collect_sys_stat(void)
 		 * of slice-boosted tasks.
 		 */
 		if (cpuc->nr_pinned_tasks || !can_boost_slice() ||
-		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id)) {
+		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cid)) {
 			shrink_boosted_slice_remote(cpuc, c->now);
 		}
 
@@ -543,7 +543,7 @@ static void collect_sys_stat(void)
 		/*
 		 * Update the global steady (non-turbulent) CPU mask.
 		 */
-		steady = steady_cpumask;
+		steady = steady_cmask;
 		if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
 			cmask_set(cpu, steady);
 		else

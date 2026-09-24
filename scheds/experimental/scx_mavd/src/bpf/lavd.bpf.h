@@ -220,8 +220,8 @@ struct task_ctx {
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
 	volatile u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
-	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
+	volatile u32	suggested_cid;		/* suggested cid at ops.enqueue() and ops.select_cid() */
+	volatile s32	pinned_cid;		/* pinned cid. -ENOENT if not pinned or not runnable. */
 	u32	__pad0;
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
@@ -244,10 +244,10 @@ struct task_ctx {
 	u64	cgrp_id;		/* cgroup id of this task */
 	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
-	u32	cpu_id;			/* where a task is running now */
-	u32	prev_cpu_id;		/* where a task ran last time */
+	u32	cid;			/* where a task is running now */
+	u32	prev_cid;		/* where a task ran last time */
 	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
-	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
+	s16	queued_on_cid;		/* primary cid this task's load is counted on; -1 = not queued */
 	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
@@ -261,7 +261,7 @@ struct task_ctx {
 
 	/* --- per-CPU warmth (cache/TLB state) --- */
 	u64	last_stopping_clk;	/* when cpu_heat was last integrated (task stopped) */
-	u16	cpu_heat;		/* residence-integrated heat for cpu_id [0, LAVD_SCALE] */
+	u16	cpu_heat;		/* residence-integrated heat for cid [0, LAVD_SCALE] */
 
 	TRAILING_OVERLAP(struct scx_cmask, allowed, bits,
 			 u64 allowed_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
@@ -381,7 +381,7 @@ void update_idle_cid(s32 cid, bool idle);
 extern struct cpu_ctx __arena *cpu_ctxs;
 
 struct cpu_ctx __arena *get_cpu_ctx(void);
-struct cpu_ctx __arena *get_cpu_ctx_id(s32 cpu_id);
+struct cpu_ctx __arena *get_cpu_ctx_id(s32 cid);
 struct cpu_ctx __arena *get_cpu_ctx_task(const struct task_struct *p);
 
 /*
@@ -401,7 +401,7 @@ struct cpu_ctx {
 	volatile u64	running_clk;	/* when a task starts running */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u16	effective_capacity;/* the capacity that CPU can do right now */
-	u16		cpu_id;		/* cpu id */
+	u16		cid;		/* cid */
 	u16		max_capacity;	/* the maximum capacity that CPU can do */
 	volatile u64	sum_lat_cri;	/* sum of latency criticality */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
@@ -705,7 +705,7 @@ bool test_task_flag_mask(task_ctx __arg_arena *taskc, u64 flag);
 extern const volatile u64	warm_cpu_ns;	/* warm-CPU wait budget (ns) */
 
 /* Per-CPU warmth clock (util.bpf.c). */
-u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now);
+u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cid, u64 now);
 void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
 			    struct cpu_ctx __arena __arg_arena *cpuc, u64 slice_used,
 			    u64 now);
@@ -830,11 +830,11 @@ static __always_inline u32 task_load_metric(task_ctx *taskc)
 	return taskc->util_est;
 }
 
-extern struct scx_cmask __arena *turbo_cpumask; /* CPU mask for turbo CPUs */
-extern struct scx_cmask __arena *big_cpumask; /* CPU mask for big CPUs */
-extern struct scx_cmask __arena *active_cpumask; /* CPU mask for active CPUs */
-extern struct scx_cmask __arena *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-extern struct scx_cmask __arena *steady_cpumask; /* CPU mask for non-turbulent CPUs */
+extern struct scx_cmask __arena *turbo_cmask; /* CPU mask for turbo CPUs */
+extern struct scx_cmask __arena *big_cmask; /* CPU mask for big CPUs */
+extern struct scx_cmask __arena *active_cmask; /* CPU mask for active CPUs */
+extern struct scx_cmask __arena *ovrflw_cmask; /* CPU mask for overflow CPUs */
+extern struct scx_cmask __arena *steady_cmask; /* CPU mask for non-turbulent CPUs */
 
 /* DSQ helpers. */
 

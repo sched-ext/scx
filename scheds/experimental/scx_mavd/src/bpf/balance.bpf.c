@@ -481,7 +481,7 @@ bool consume_task(u64 cpdom_id)
 	struct dsq_entry dsqs[3];
 	int i;
 
-	cpu_dsq_id        = cpu_to_dsq(get_cpu_ctx()->cpu_id);
+	cpu_dsq_id        = cpu_to_dsq(get_cpu_ctx()->cid);
 	cpdom_dsq_id      = cpdom_to_dsq(cpdom_id);
 	cpdom_turb_dsq_id = cpdom_to_turb_dsq(cpdom_id);
 
