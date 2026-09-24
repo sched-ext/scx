@@ -90,9 +90,9 @@ bool init_ao_masks(struct pick_ctx *ctx)
 static __always_inline
 bool is_preemption_vulnerable(struct pick_ctx *ctx)
 {
-	struct cpdom_ctx *cpdc;
+	struct cpdom_ctx __arena *cpdc;
 
-	cpdc = MEMBER_VPTR(cpdom_ctxs, [ctx->cpuc_cur->cpdom_id]);
+	cpdc = get_cpdom_ctx(ctx->cpuc_cur->cpdom_id);
 	if (!cpdc)
 		return false;
 
@@ -187,7 +187,7 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 __hidden
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 {
-	const volatile u16 *cpu_order = get_cpu_order();
+	const volatile u16 __arena *cpu_order = get_cpu_order();
 	const struct cpumask *online_mask;
 	struct bpf_cpumask *online_src_mask;
 	s32 cpu;
@@ -229,7 +229,7 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
  */
 static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 {
-	const volatile u16 *cpu_order;
+	const volatile u16 __arena *cpu_order;
 	const struct cpumask *online_mask;
 	struct bpf_cpumask *online_src_mask, *ovrflw;
 	s32 cpu, prev_llc;
@@ -288,11 +288,11 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 			   bool *is_idle)
 {
 	struct bpf_cpumask *cpd_mask;
-	struct cpdom_ctx *cpdc;
+	struct cpdom_ctx __arena *cpdc;
 	s32 cpu;
 
 	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
-	cpdc = MEMBER_VPTR(cpdom_ctxs, [cpdom]);
+	cpdc = get_cpdom_ctx(cpdom);
 	if (!ctx || !cpdc || !cpd_mask || !cpdc->is_valid)
 		return -ENOENT;
 
@@ -429,14 +429,14 @@ bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 static __always_inline
 bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 {
-	struct cpdom_ctx *cpdc;
+	struct cpdom_ctx __arena *cpdc;
 	struct bpf_cpumask *cpd_mask, *a_mask, *o_mask;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
 
 	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
-	cpdc = MEMBER_VPTR(cpdom_ctxs, [cpdom]);
+	cpdc = get_cpdom_ctx(cpdom);
 	if (!cpd_mask || !cpdc)
 		return false;
 
@@ -494,7 +494,7 @@ static
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
 	struct cpu_ctx *p0, *p1, *cpuc;
-	struct cpdom_ctx *d0, *d1;
+	struct cpdom_ctx __arena *d0, *d1;
 	struct sticky_ctx sctx;
 
 	__builtin_memset(&sctx, 0, sizeof(sctx));
@@ -522,8 +522,8 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	} else if (sctx.i_m == 2) {
 		p0 = sctx.cpuc_match[0]; /* prev_cpu */
 		p1 = sctx.cpuc_match[1]; /* sync_waker_cpu */
-		d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
-		d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
+		d0 = get_cpdom_ctx(p0->cpdom_id);
+		d1 = get_cpdom_ctx(p1->cpdom_id);
 
 		if ((p0 != p1) && (d0 && d1) && (d0->load_invr > d1->load_invr)) {
 			/*
@@ -559,8 +559,8 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 
 		if ((p0 != p1) && can_run_on_domain(ctx, p0->cpdom_id) &&
 		    can_run_on_domain(ctx, p1->cpdom_id)) {
-			d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
-			d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
+			d0 = get_cpdom_ctx(p0->cpdom_id);
+			d1 = get_cpdom_ctx(p1->cpdom_id);
 			if (d0 && d1) {
 				if (d0->load_invr > d1->load_invr) {
 					*sticky_cpdom = p1->cpdom_id;
@@ -643,10 +643,10 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 }
 
 static
-s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
-			u64 scope, s64 *sticky_cpdom, bool *is_idle)
+s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u64 scope,
+			s64 *sticky_cpdom, bool *is_idle)
 {
-	struct cpdom_ctx *mig_cpdc;
+	struct cpdom_ctx __arena *mig_cpdc;
 	s64 mig_cpdom, nr_nbr;
 	s32 cpu = -ENOENT;
 	int i, j;
@@ -672,7 +672,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			if (mig_cpdom < 0)
 				continue;
 
-			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
+			mig_cpdc = get_cpdom_ctx(mig_cpdom);
 			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
 				continue;
 
@@ -705,7 +705,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
 	s32 cpu = -ENOENT, sticky_cpu;
 	s64 sticky_cpdom = -ENOENT;
-	struct cpdom_ctx *cpdc;
+	struct cpdom_ctx __arena *cpdc;
 	bool i_smt_empty;
 
 	/*
@@ -985,8 +985,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 * If there is a fully idle core in the system (i.e., !is_smt_empty),
 	 * let's try to migrate a task to another domain.
 	 */
-	if (!i_smt_empty && (nr_cpdoms > 1) &&
-	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
+	if (!i_smt_empty && (nr_cpdoms > 1) && (cpdc = get_cpdom_ctx(sticky_cpdom)) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		cpu = migrate_to_neighbor(ctx, cpdc, SCX_PICK_IDLE_CORE,
 					  &sticky_cpdom, is_idle);
@@ -1011,7 +1010,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 */
 	if ((nr_cpdoms > 1) &&
 	    test_task_flag(ctx->taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE) &&
-	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
+	    (cpdc = get_cpdom_ctx(sticky_cpdom)) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		cpu = migrate_to_neighbor(ctx, cpdc, 0, &sticky_cpdom, is_idle);
 		if (cpu >= 0)

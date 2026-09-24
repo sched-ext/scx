@@ -3,17 +3,17 @@
 #define __UTIL_H
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
-extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
+extern volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 
 extern const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT is active */
 
 /*
  * Scheduler parameters
  */
-extern volatile bool		reinit_cpumask_for_performance;
-extern volatile bool		no_preemption;
-extern volatile bool		no_core_compaction;
-extern volatile bool		no_freq_scaling;
+extern volatile bool __arena_global	reinit_cpumask_for_performance;
+extern volatile bool __arena_global	no_preemption;
+extern volatile bool __arena_global	no_core_compaction;
+extern volatile bool __arena_global	no_freq_scaling;
 
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;

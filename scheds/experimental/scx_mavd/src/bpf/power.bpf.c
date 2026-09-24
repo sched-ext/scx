@@ -17,8 +17,8 @@
 /*
  * System-wide properties of CPUs
  */
-bool			have_turbo_core;
-bool			have_little_core;
+bool __arena_global	have_turbo_core;
+bool __arena_global	have_little_core;
 const volatile bool	is_smt_active;
 
 /*
@@ -38,10 +38,10 @@ const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
  * Compute domain properties
  */
 /* number of compute domains */
-int			nr_cpdoms;
+int __arena_global	nr_cpdoms;
 
 /* contexts for compute domains */
-struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 
 /* online CPU mask for each compute domain */
 private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
@@ -63,35 +63,35 @@ const volatile u32	pco_bounds[LAVD_PCO_STATE_MAX];
 const volatile u16	pco_nr_primary[LAVD_PCO_STATE_MAX];
 
 /* The PCO table */
-const volatile u16	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];
+u16 __arena_global	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];
 
 /* The index for current PCO state */
-volatile static int	pco_idx;
+volatile static int __arena_global	pco_idx;
 
 /*
  * Big & LITTLE core's capacities
  */
 /* Total compute capacity of online CPUs. */
-u64		total_max_capacity;
+u64 __arena_global	total_max_capacity;
 
 /* Capacity of one LITTLEst CPU. */
-u64		one_little_max_capacity;
+u64 __arena_global	one_little_max_capacity;
 
 /* Big core's compute ratio among currently active cores scaled by 1024. */
-u32		cur_big_core_scale;
+u32 __arena_global	cur_big_core_scale;
 
 /* Big core's compute ratio when all cores are active scaled by 1024. */
-u32		default_big_core_scale;
+u32 __arena_global	default_big_core_scale;
 
 
 /*
  * Power mode
  */
-static u64		LAVD_AP_LOW_CAP;
-static u64		LAVD_AP_HIGH_CAP;
-volatile int		power_mode;
-volatile u64		last_power_mode_clk;
-volatile bool		is_powersave_mode;
+static u64 __arena_global	LAVD_AP_LOW_CAP;
+static u64 __arena_global	LAVD_AP_HIGH_CAP;
+volatile int __arena_global	power_mode;
+volatile u64 __arena_global	last_power_mode_clk;
+volatile bool __arena_global	is_powersave_mode;
 
 __hidden
 void update_effective_capacity(struct cpu_ctx *cpuc)
@@ -193,7 +193,7 @@ bool is_perf_cri(task_ctx __arg_arena *taskc)
 }
 
 __hidden
-const volatile u16 *get_cpu_order(void)
+const volatile u16 __arena *get_cpu_order(void)
 {
 	int i = READ_ONCE(pco_idx);
 
@@ -262,7 +262,7 @@ static int calc_nr_active_cpus(void)
 		else
 			WRITE_ONCE(pco_idx, nr_pco_states - 1);
 
-		const volatile u16 *cpu_order = get_cpu_order();
+		const volatile u16 __arena *cpu_order = get_cpu_order();
 		sum_eff_cap = 0;
 		bpf_for(i, 0, nr_cpu_ids) {
 			if (i >= LAVD_CPU_ID_MAX)
@@ -293,7 +293,7 @@ static int calc_nr_active_cpus(void)
 				break;
 
 			if (pco_bounds[i] >= req_cap) {
-				const volatile u16 *cpu_order = pco_table[i];
+				const volatile u16 __arena *cpu_order = pco_table[i];
 				sum_eff_cap = 0;
 
 				bpf_for(j, 0, pco_nr_primary[i]) {
@@ -329,8 +329,8 @@ int do_core_compaction(void)
 {
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
 	struct bpf_cpumask *active, *ovrflw;
-	const volatile u16 *cpu_order;
-	struct cpdom_ctx *cpdomc;
+	const volatile u16 __arena *cpu_order;
+	struct cpdom_ctx __arena *cpdomc;
 	int nr_active, cpu, i;
 	u64 cpdom_id;
 
@@ -386,7 +386,7 @@ int do_core_compaction(void)
 			 * Accumulate the capacity of active CPUs and
 			 * increase the number of active CPUs.
 			 */
-			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 			if (cpdomc) {
 				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 				cpdomc->nr_acpus_temp++;
@@ -454,7 +454,7 @@ int do_core_compaction(void)
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpdom_id);
 		if (!cpdomc)
 			continue;
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
@@ -701,7 +701,7 @@ int reinit_active_cpumask_for_performance(void)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	const struct cpumask *online_cpumask;
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	u64 cpdom_id;
 	u32 nr_active_cpdoms = 0;
 	int cpu, err = 0;
@@ -748,7 +748,7 @@ int reinit_active_cpumask_for_performance(void)
 			}
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
-			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
 				cpdomc->cap_sum_temp += cpuc->effective_capacity;
@@ -769,7 +769,7 @@ int reinit_active_cpumask_for_performance(void)
 
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
-			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
 				cpdomc->cap_sum_temp += cpuc->effective_capacity;
@@ -785,7 +785,7 @@ int reinit_active_cpumask_for_performance(void)
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpdom_id);
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
 		WRITE_ONCE(cpdomc->cap_sum_active_cpus, cpdomc->cap_sum_temp);

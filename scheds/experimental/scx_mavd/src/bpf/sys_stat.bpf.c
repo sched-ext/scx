@@ -17,16 +17,16 @@
 
 extern bool CONFIG_NO_HZ_IDLE __kconfig __weak;
 
-struct sys_stat		__weak	sys_stat;
+struct sys_stat		__weak __arena_global sys_stat;
 const volatile u16	__weak lat_load_target_pct;
 const volatile u8	__weak preempt_shift;
-volatile u64		__weak performance_mode_ns;
-volatile u64		__weak balanced_mode_ns;
-volatile u64		__weak powersave_mode_ns;
+volatile u64		__weak __arena_global performance_mode_ns;
+volatile u64		__weak __arena_global balanced_mode_ns;
+volatile u64		__weak __arena_global powersave_mode_ns;
 extern const volatile u64	slice_min_ns;
 extern const volatile u64	slice_max_ns;
-extern volatile bool		__weak no_core_compaction;
-extern volatile bool		__weak reinit_cpumask_for_performance;
+extern volatile bool		__weak __arena_global no_core_compaction;
+extern volatile bool		__weak __arena_global reinit_cpumask_for_performance;
 
 int do_autopilot(void);
 u32 calc_avg32(u32 old_val, u32 new_val);
@@ -77,11 +77,11 @@ struct sys_stat_ctx {
 	u32		cur_util_invr;
 };
 
-static struct sys_stat_ctx ctx;
+static struct sys_stat_ctx __arena_global ctx;
 
 static void init_sys_stat_ctx(void)
 {
-	struct sys_stat_ctx *c = &ctx;
+	struct sys_stat_ctx __arena *c = &ctx;
 
 	__builtin_memset(c, 0, sizeof(*c));
 
@@ -93,8 +93,8 @@ static void init_sys_stat_ctx(void)
 
 static void collect_sys_stat(void)
 {
-	struct sys_stat_ctx *c = &ctx;
-	struct cpdom_ctx *cpdomc;
+	struct sys_stat_ctx __arena *c = &ctx;
+	struct cpdom_ctx __arena *cpdomc;
 	u64 cpdom_id, compute_wall = 1;
 	int cpu;
 
@@ -106,7 +106,7 @@ static void collect_sys_stat(void)
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpdom_id);
 		cpdomc->cur_util_wall_sum = 0;
 		cpdomc->avg_util_wall_sum = 0;
 		cpdomc->cur_util_invr_sum = 0;
@@ -434,7 +434,7 @@ static void collect_sys_stat(void)
 			calc_asym_avg(cpuc->avg_dom_pinned_util_invr,
 				      cpuc->cur_dom_pinned_util_invr);
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 		if (cpdomc) {
 			cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
 			cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
@@ -531,7 +531,7 @@ static void collect_sys_stat(void)
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct bpf_cpumask *steady;
-		struct cpdom_ctx *cpu_cpdomc;
+		struct cpdom_ctx __arena *cpu_cpdomc;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -571,7 +571,7 @@ static void collect_sys_stat(void)
 		 * Collect per-CPU tier stats for preemption vulnerability
 		 * threshold into the CPU's compute domain.
 		 */
-		cpu_cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+		cpu_cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 		if (cpu_cpdomc) {
 			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH) {
 				cpu_cpdomc->util_sum_steady += cpuc->util_est;
@@ -594,8 +594,8 @@ static void collect_sys_stat(void)
 
 static void calc_sys_stat(void)
 {
-	struct sys_stat_ctx *c = &ctx;
-	static int cnt = 0;
+	struct sys_stat_ctx __arena *c = &ctx;
+	static int __arena_global cnt = 0;
 	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr, cpdom_id;
 
 	/*
@@ -730,12 +730,12 @@ static void calc_sys_stat(void)
 	 * tasks qualify, pushing more to the turbulent DSQ.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx *cpdomc;
+		struct cpdom_ctx __arena *cpdomc;
 
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpdom_id);
 		if (!cpdomc)
 			continue;
 
@@ -843,7 +843,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 __weak
 s32 init_sys_stat(u64 now)
 {
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	struct bpf_timer *timer;
 	u64 cpdom_id;
 	u32 key = 0;
@@ -856,7 +856,7 @@ s32 init_sys_stat(u64 now)
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cpdomc = get_cpdom_ctx(cpdom_id);
 		if (cpdomc->nr_active_cpus)
 			sys_stat.nr_active_cpdoms++;
 	}

@@ -34,7 +34,7 @@ static __always_inline
 int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_id)
 {
 	struct cpu_ctx *cpuc;
-	struct cpdom_ctx *cpdomc;
+	struct cpdom_ctx __arena *cpdomc;
 	struct msg_task_ctx *m;
 	int i;
 
@@ -42,7 +42,7 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	if (!cpuc)
 		return -EINVAL;
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 	if (!cpdomc)
 		return -EINVAL;
 

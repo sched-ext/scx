@@ -10,14 +10,14 @@ int update_thr_perf_cri(void);
 int reinit_active_cpumask_for_performance(void);
 bool is_perf_cri(task_ctx *taskc);
 
-extern bool			have_little_core;
-extern bool			have_turbo_core;
+extern bool __arena_global	have_little_core;
+extern bool __arena_global	have_turbo_core;
 extern const volatile bool	is_smt_active;
 
-extern u64			total_max_capacity;
-extern u64			one_little_max_capacity;
-extern u32			cur_big_core_scale;
-extern u32			default_big_core_scale;
+extern u64 __arena_global	total_max_capacity;
+extern u64 __arena_global	one_little_max_capacity;
+extern u32 __arena_global	cur_big_core_scale;
+extern u32 __arena_global	default_big_core_scale;
 
 int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
@@ -25,7 +25,11 @@ int update_autopilot_high_cap(void);
 int calc_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);
 
-const volatile u16 *get_cpu_order(void);
+extern volatile int __arena_global	power_mode;
+extern volatile bool __arena_global	is_powersave_mode;
+extern u16 __arena_global	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];
+
+const volatile u16 __arena *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);
 
 /*
