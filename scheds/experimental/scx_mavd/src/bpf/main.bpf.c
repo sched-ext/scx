@@ -275,6 +275,11 @@ struct mavd_uptrs {
 	u64	powersave_mode_ns;
 	u64	cpdom_ctxs;
 	u64	pco_table;
+	u64	pco_bounds;
+	u64	pco_nr_primary;
+	u64	cpu_capacity;
+	u64	cpu_big;
+	u64	cpu_turbo;
 	u64	no_preemption;
 	u64	no_core_compaction;
 	u64	no_freq_scaling;
@@ -293,6 +298,11 @@ int mavd_publish_uptrs(void *ctx)
 	mavd_uptrs.powersave_mode_ns = (u64)&powersave_mode_ns;
 	mavd_uptrs.cpdom_ctxs = (u64)cpdom_ctxs;
 	mavd_uptrs.pco_table = (u64)pco_table;
+	mavd_uptrs.pco_bounds = (u64)pco_bounds;
+	mavd_uptrs.pco_nr_primary = (u64)pco_nr_primary;
+	mavd_uptrs.cpu_capacity = (u64)cpu_capacity;
+	mavd_uptrs.cpu_big = (u64)cpu_big;
+	mavd_uptrs.cpu_turbo = (u64)cpu_turbo;
 	mavd_uptrs.no_preemption = (u64)&no_preemption;
 	mavd_uptrs.no_core_compaction = (u64)&no_core_compaction;
 	mavd_uptrs.no_freq_scaling = (u64)&no_freq_scaling;

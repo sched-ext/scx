@@ -25,13 +25,13 @@ const volatile bool	is_smt_active;
  * CPU properties
  */
 /* CPU capacity based on 1024 */
-const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
+u16 __arena_global	cpu_capacity[LAVD_CPU_ID_MAX];
 
 /* Is a CPU a big core? */
-const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
+u8 __arena_global	cpu_big[LAVD_CPU_ID_MAX];
 
 /* Is a CPU a turbo core? */
-const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
+u8 __arena_global	cpu_turbo[LAVD_CPU_ID_MAX];
 
 
 /*
@@ -57,10 +57,10 @@ const volatile u8	no_use_em;
 const volatile u8	nr_pco_states;
 
 /* The upper bounds of performance capacity for each PCO state. */
-const volatile u32	pco_bounds[LAVD_PCO_STATE_MAX];
+u32 __arena_global	pco_bounds[LAVD_PCO_STATE_MAX];
 
 /* The number of CPUs in a primary domain for each PCO state. */
-const volatile u16	pco_nr_primary[LAVD_PCO_STATE_MAX];
+u16 __arena_global	pco_nr_primary[LAVD_PCO_STATE_MAX];
 
 /* The PCO table */
 u16 __arena_global	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];

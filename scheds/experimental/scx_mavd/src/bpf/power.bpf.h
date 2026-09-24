@@ -28,6 +28,8 @@ int update_cpuperf_target(struct cpu_ctx *cpuc);
 extern volatile int __arena_global	power_mode;
 extern volatile bool __arena_global	is_powersave_mode;
 extern u16 __arena_global	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];
+extern u32 __arena_global	pco_bounds[LAVD_PCO_STATE_MAX];
+extern u16 __arena_global	pco_nr_primary[LAVD_PCO_STATE_MAX];
 
 const volatile u16 __arena *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);

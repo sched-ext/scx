@@ -637,11 +637,8 @@ impl<'a> Scheduler<'a> {
     fn init_cpus(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         debug!("{:#?}", order);
 
-        // Initialize CPU capacity and sibling
+        // Initialize CPU sibling
         for cpu in order.cpuids.iter() {
-            skel.maps.rodata_data.as_mut().unwrap().cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
-            skel.maps.rodata_data.as_mut().unwrap().cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
-            skel.maps.rodata_data.as_mut().unwrap().cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
             skel.maps.rodata_data.as_mut().unwrap().cpu_sibling[cpu.cpu_adx] =
                 cpu.cpu_sibling as u32;
         }
@@ -655,30 +652,36 @@ impl<'a> Scheduler<'a> {
         }
 
         skel.maps.rodata_data.as_mut().unwrap().nr_pco_states = nr_pco_states;
-        for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {
-            Self::init_pco_tuple(skel, i, pco);
+        for (_, pco) in order.perf_cpu_order.iter() {
             info!("{:#}", pco);
-        }
-
-        let (_, last_pco) = order.perf_cpu_order.last_key_value().unwrap();
-        for i in nr_pco_states..LAVD_PCO_STATE_MAX as u8 {
-            Self::init_pco_tuple(skel, i as usize, last_pco);
         }
     }
 
-    fn init_pco_tuple(skel: &mut OpenBpfSkel, i: usize, pco: &PerfCpuOrder) {
-        let pco_nr_primary = pco.cpus_perf.borrow().len();
+    fn write_cpu_tables(uptrs: &types::mavd_uptrs, order: &CpuOrder) {
+        let cpu_capacity =
+            unsafe { &mut *(uptrs.cpu_capacity as *mut [u16; LAVD_CPU_ID_MAX as usize]) };
+        let cpu_big = unsafe { &mut *(uptrs.cpu_big as *mut [u8; LAVD_CPU_ID_MAX as usize]) };
+        let cpu_turbo = unsafe { &mut *(uptrs.cpu_turbo as *mut [u8; LAVD_CPU_ID_MAX as usize]) };
 
-        skel.maps.rodata_data.as_mut().unwrap().pco_bounds[i] = pco.perf_cap as u32;
-        skel.maps.rodata_data.as_mut().unwrap().pco_nr_primary[i] = pco_nr_primary as u16;
+        for cpu in order.cpuids.iter() {
+            cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
+            cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
+            cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
+        }
     }
 
     fn write_pco_order(uptrs: &types::mavd_uptrs, i: usize, pco: &PerfCpuOrder) {
         let cpus_perf = pco.cpus_perf.borrow();
         let cpus_ovflw = pco.cpus_ovflw.borrow();
         let pco_nr_primary = cpus_perf.len();
+        let bounds = unsafe { &mut *(uptrs.pco_bounds as *mut [u32; LAVD_PCO_STATE_MAX as usize]) };
+        let nr_primary =
+            unsafe { &mut *(uptrs.pco_nr_primary as *mut [u16; LAVD_PCO_STATE_MAX as usize]) };
         let table = uptrs.pco_table as *mut [u16; LAVD_CPU_ID_MAX as usize];
         let cpu_order = unsafe { &mut *table.add(i) };
+
+        bounds[i] = pco.perf_cap as u32;
+        nr_primary[i] = pco_nr_primary as u16;
 
         for (j, &cpu_adx) in cpus_perf.iter().enumerate() {
             cpu_order[j] = cpu_adx as u16;
@@ -742,6 +745,8 @@ impl<'a> Scheduler<'a> {
     // between load and attach through the addresses BPF publishes.
     fn init_arena_globals(skel: &mut BpfSkel, order: &CpuOrder, opts: &Opts) -> Result<()> {
         let uptrs = Self::fetch_uptrs(skel)?;
+
+        Self::write_cpu_tables(&uptrs, order);
 
         let nr_pco_states = order.perf_cpu_order.len();
         for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {

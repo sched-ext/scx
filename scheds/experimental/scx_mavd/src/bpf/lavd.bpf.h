@@ -577,9 +577,9 @@ extern const volatile u64	nr_llcs;	/* number of LLC domains */
 const extern volatile u32	nr_cpu_ids;
 extern volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 
-extern const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
-extern const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
-extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
+extern u16 __arena_global	cpu_capacity[LAVD_CPU_ID_MAX];
+extern u8 __arena_global	cpu_big[LAVD_CPU_ID_MAX];
+extern u8 __arena_global	cpu_turbo[LAVD_CPU_ID_MAX];
 
 /* Logging helpers. */
 
