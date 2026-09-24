@@ -73,17 +73,11 @@ impl ClangInfo {
             arch.ok_or(anyhow!("Failed to read clang target arch"))?,
         );
 
-        if version_compare::compare(&ver, "16") == Ok(version_compare::Cmp::Lt) {
+        if version_compare::compare(&ver, "18") == Ok(version_compare::Cmp::Lt) {
             bail!(
-                "clang < 16 loses high 32 bits of 64 bit enums when compiling BPF ({:?} ver={:?})",
+                "clang < 18 does not support -mcpu=v4 for BPF ({:?} ver={:?})",
                 clang,
                 ver
-            );
-        }
-        if version_compare::compare(&ver, "17") == Ok(version_compare::Cmp::Lt) {
-            println!(
-                "cargo:warning=clang >= 17 recommended ({:?} ver={:?})",
-                clang, ver
             );
         }
 
@@ -166,7 +160,23 @@ impl ClangInfo {
             .map(|x| x.into())
             .collect();
         cflags.push(format!("-D__TARGET_ARCH_{}", kernel_target));
-        cflags.push("-mcpu=v3".into());
+        cflags.push("-mcpu=v4".into());
+        // Two v4 lowerings outrun the kernel baseline and stay off until the
+        // minimum supported kernel reaches the release that added them.
+        //
+        // Sign-extending loads (ldsx) from arena memory need JIT support,
+        // which x86 and arm64 gained in v6.18. Drop -disable-ldsx once the
+        // minimum kernel is v6.18.
+        cflags.extend(["-mllvm".into(), "-disable-ldsx".into()]);
+        // clang 22+ lowers large switches to jump tables and gotox, which
+        // x86 and arm64 gained in v6.19. Drop -disable-gotox once the
+        // minimum kernel is v6.19.
+        if matches!(
+            version_compare::compare(&self.ver, "22"),
+            Ok(version_compare::Cmp::Eq | version_compare::Cmp::Gt)
+        ) {
+            cflags.extend(["-mllvm".into(), "-disable-gotox".into()]);
+        }
         cflags.push(format!("-m{endian}-endian"));
         cflags.append(
             &mut sys_incls

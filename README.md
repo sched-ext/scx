@@ -117,7 +117,7 @@ scx
 
 **Dependencies:**
 
-- `clang`: >=16 required, >=17 recommended
+- `clang`: >=18 required, >=22 for cid-form schedulers
 - `libbpf`: >=1.2.2 required, >=1.3 recommended
 - `bpftool`: Usually available in `linux-tools-common` or similar packages
 - `libelf`, `libz`, `libzstd`: For linking against libbpf

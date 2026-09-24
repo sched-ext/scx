@@ -18,7 +18,9 @@ LIBBPF_DIR=$(KERNEL)/tools/bpf/bpftool/libbpf/
 
 INCLUDES=-I$(LIBBPF_DIR)/include -I$(INCLUDEDIR) -I$(INCLUDEDIR)/arch -I$(INCLUDEDIR)/arch/bpf-compat -I$(INCLUDEDIR)/lib
 
-BPF_CFLAGS=--target=bpf -g -O2 -D__TARGET_ARCH_x86 -mcpu=v3 -mlittle-endian
+# Sign-extending loads from arena memory need v6.18+. Drop -disable-ldsx once
+# that is the minimum supported kernel (see scx_cargo's clang_info.rs).
+BPF_CFLAGS=--target=bpf -g -O2 -D__TARGET_ARCH_x86 -mcpu=v4 -mllvm -disable-ldsx -mlittle-endian
 BPF_CFLAGS+=-Wall -Wno-compare-distinct-pointer-types -Wno-incompatible-pointer-types-discards-qualifiers
 # XXX Remove when moving to the kernel
 BPF_CFLAGS+=-D__BPF_FEATURE_ADDR_SPACE_CAST -DENABLE_ATOMICS_TESTS
