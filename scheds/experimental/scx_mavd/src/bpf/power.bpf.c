@@ -43,8 +43,6 @@ int __arena_global	nr_cpdoms;
 /* contexts for compute domains */
 struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 
-/* online CPU mask for each compute domain */
-private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 
 
 /*
@@ -94,7 +92,7 @@ volatile u64 __arena_global	last_power_mode_clk;
 volatile bool __arena_global	is_powersave_mode;
 
 __hidden
-void update_effective_capacity(struct cpu_ctx *cpuc)
+void update_effective_capacity(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	/* WARNING: This should be called after updating cpuc->cur_util. */
 	extern struct cpufreq_policy *cpufreq_cpu_data __ksym;
@@ -107,9 +105,9 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	int cpu;
 
 	/* Sanity check */
-	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cpu_ids)
+	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cids)
 		return;
-	cpu = cpuc->cpu_id;
+	cpu = cpuc->kernel_cpu;
 
 	/*
 	 * Calculate the maximum capacity available at the moment which is
@@ -235,7 +233,7 @@ static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
 static int calc_nr_active_cpus(void)
 {
 	u64 req_cap, eff_cap, sum_eff_cap;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	int i, j;
 	u16 cpu;
 
@@ -328,7 +326,7 @@ __weak
 int do_core_compaction(void)
 {
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
-	struct bpf_cpumask *active, *ovrflw;
+	struct scx_cmask __arena *active, *ovrflw;
 	const volatile u16 __arena *cpu_order;
 	struct cpdom_ctx __arena *cpdomc;
 	int nr_active, cpu, i;
@@ -359,7 +357,7 @@ int do_core_compaction(void)
 	 * Assign active and overflow cores.
 	 */
 	bpf_for(i, 0, nr_cpu_ids) {
-		struct cpu_ctx *cpuc;
+		struct cpu_ctx __arena *cpuc;
 
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
@@ -370,7 +368,7 @@ int do_core_compaction(void)
 		cpu = cpu_order[i];
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc || !cpuc->is_online) {
-			bpf_cpumask_clear_cpu(cpu, active);
+			cmask_clear(cpu, active);
 			ovrflw_test_and_clear(ovrflw, cpu);
 			continue;
 		}
@@ -379,7 +377,7 @@ int do_core_compaction(void)
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
 		if (i < nr_active) {
-			bpf_cpumask_set_cpu(cpu, active);
+			cmask_set(cpu, active);
 			ovrflw_test_and_clear(ovrflw, cpu);
 
 			/*
@@ -393,7 +391,7 @@ int do_core_compaction(void)
 			}
 
 		} else {
-			bpf_cpumask_clear_cpu(cpu, active);
+			cmask_clear(cpu, active);
 
 			if (cpuc->nr_pinned_tasks ||
 			    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
@@ -405,7 +403,7 @@ int do_core_compaction(void)
 				 */
 				ovrflw_test_and_set(ovrflw, cpu);
 			} else {
-				if (!bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
+				if (!cmask_test(cpu, ovrflw))
 					continue;
 				/* This CPU is in the overflow set. */
 
@@ -434,7 +432,7 @@ int do_core_compaction(void)
 		/*
 		 * When the CPU is in either an active or overflow set, kick it.
 		 */
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 
 		/*
 		 * Calculate big capacity ratio if a CPU is on.
@@ -525,13 +523,9 @@ static int do_set_power_profile(s32 pm)
 		is_powersave_mode = false;
 
 		/*
-		 * Since the core compaction becomes off, we need to
-		 * reinitialize the active and overflow cpumask for performance
-		 * mode.
-		 *
-		 * Note that a verifier in an old kernel does not allow calling
-		 * bpf_cpumask_set_cpu(), so we defer the actual update to our
-		 * timer handler, update_sys_stat().
+		 * Core compaction is off. Reinitialize the active and overflow
+		 * masks at the next statistics update, preserving lavd's
+		 * transition timing.
 		 */
 		reinit_cpumask_for_performance = true;
 		debugln("Set the scheduler's power profile to performance mode: %d",
@@ -698,9 +692,9 @@ int update_thr_perf_cri(void)
 __weak
 int reinit_active_cpumask_for_performance(void)
 {
-	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *active, *ovrflw;
-	const struct cpumask *online_cpumask;
+	struct cpu_ctx __arena *cpuc;
+	struct scx_cmask __arena *active, *ovrflw;
+	const struct scx_cmask __arena *online_cpumask;
 	struct cpdom_ctx __arena *cpdomc;
 	u64 cpdom_id;
 	u32 nr_active_cpdoms = 0;
@@ -729,24 +723,24 @@ int reinit_active_cpumask_for_performance(void)
 	 * In a symmetric system, all online CPUs belong to the active set.
 	 */
 	if (have_little_core) {
-		bpf_for(cpu, 0, nr_cpu_ids) {
+		bpf_arena_for(cpu, 0, nr_cids) {
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc)
 				continue;
 			if (!cpuc->is_online) {
-				bpf_cpumask_clear_cpu(cpu, active);
+				cmask_clear(cpu, active);
 				ovrflw_test_and_clear(ovrflw, cpu);
 				continue;
 			}
 
 			if (cpuc->big_core) {
-				bpf_cpumask_set_cpu(cpu, active);
+				cmask_set(cpu, active);
 				ovrflw_test_and_clear(ovrflw, cpu);
 			} else {
 				ovrflw_test_and_set(ovrflw, cpu);
-				bpf_cpumask_clear_cpu(cpu, active);
+				cmask_clear(cpu, active);
 			}
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 
 			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 			if (cpdomc) {
@@ -755,19 +749,18 @@ int reinit_active_cpumask_for_performance(void)
 			}
 		}
 	} else {
-		online_cpumask = scx_bpf_get_online_cpumask();
-		nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
-		bpf_cpumask_copy(active, online_cpumask);
-		scx_bpf_put_cpumask(online_cpumask);
+		online_cpumask = online_cmask;
+		nr_cpus_onln = cmask_weight(online_cpumask);
+		cmask_copy(active, online_cpumask);
 
-		bpf_cpumask_clear(ovrflw);
+		cmask_zero(ovrflw);
 
-		bpf_for(cpu, 0, nr_cpu_ids) {
+		bpf_arena_for(cpu, 0, nr_cids) {
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
 				continue;
 
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 
 			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 			if (cpdomc) {
@@ -814,7 +807,7 @@ static __always_inline u32 scx_only_util(u32 total, u32 steal)
 }
 
 __hidden
-int calc_cpuperf_target(struct cpu_ctx *cpuc)
+int calc_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
 	u32 step, cur;
@@ -831,14 +824,14 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc)
 	 * uses the capacity- and frequency-invariant utilization, which does
 	 * not depend on the frequency we end up picking.
 	 *
-	 * Note that we should use scx_bpf_cpuperf_cap() because that is
+	 * Note that we should use scx_bpf_cidperf_cap() because that is
 	 * what actually schedutil takes care of.
 	 *
 	 * Both utilizations are taken net of the stolen time, since schedutil
 	 * accounts for RT/DL and IRQ separately; passing the total would count
 	 * them twice.
 	 */
-	cap = scx_bpf_cpuperf_cap(cpuc->cpu_id);
+	cap = scx_bpf_cidperf_cap(cpuc->cpu_id);
 	if (no_freq_scaling) {
 		cpuperf_target = cap;
 	} else {
@@ -881,7 +874,7 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc)
 }
 
 __hidden
-int update_cpuperf_target(struct cpu_ctx *cpuc)
+int update_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	u32 cpuperf_target = cpuc->cpuperf_target;
 
@@ -892,7 +885,7 @@ int update_cpuperf_target(struct cpu_ctx *cpuc)
 	 * from any CPU.
 	 */
 	if (cpuc->cpuperf_cur != cpuperf_target) {
-		scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
+		scx_bpf_cidperf_set(cpuc->cpu_id, cpuperf_target);
 		cpuc->cpuperf_cur = cpuperf_target;
 	}
 

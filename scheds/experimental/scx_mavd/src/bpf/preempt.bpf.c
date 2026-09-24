@@ -16,7 +16,7 @@
 struct preemption_info {
 	u64		est_stopping_clk;
 	u64		lat_cri;
-	struct cpu_ctx	*cpuc;
+	struct cpu_ctx __arena *cpuc;
 };
 
 __hidden
@@ -47,9 +47,8 @@ static bool can_x_kick_y(struct preemption_info *prm_x,
 	return false;
 }
 
-static bool can_x_kick_cpu2(struct preemption_info *prm_x,
-			    struct preemption_info *prm_cpu2,
-			    struct cpu_ctx *cpuc2)
+static bool can_x_kick_cpu2(struct preemption_info *prm_x, struct preemption_info *prm_cpu2,
+			    struct cpu_ctx __arena *cpuc2)
 {
 	/*
 	 * A CPU taken by an RT/DL task cannot be a victim.
@@ -95,9 +94,8 @@ static bool is_worth_kick_other_task(task_ctx *taskc)
 	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
 
-static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
-				       s32 preferred_cpu,
-				       task_ctx *taskc, u64 now)
+static struct cpu_ctx __arena *find_victim_cpu(const struct scx_cmask __arena *cpumask,
+					       s32 preferred_cpu, task_ctx *taskc, u64 now)
 {
 	/*
 	 * We see preemption as a load-balancing problem. In a system with N
@@ -108,7 +106,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
 	int i, v = 0;
@@ -139,14 +137,14 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * be too expensive to perform every task queue. We need to revisit
 	 * this if the traversal cost becomes problematic.
 	 */
-	nr_cpus = bpf_cpumask_weight(cpumask);
+	nr_cpus = cmask_weight(cpumask);
 	bpf_for(i, 0, nr_cpus) {
 
 		/*
 		 * Decide a CPU ID to examine.
 		 */
-		cpu = bpf_cpumask_any_distribute(cpumask);
-		if (cpu >= nr_cpu_ids || cpu == preferred_cpu)
+		cpu = cmask_any_distribute(cpumask);
+		if (cpu >= nr_cids || cpu == preferred_cpu)
 			continue;
 
 		/*
@@ -154,7 +152,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 */
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 			goto null_out;
 		}
 
@@ -197,20 +195,20 @@ null_out:
 	return NULL;
 }
 
-static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
+static void ask_cpu_yield_after(struct cpu_ctx __arena *victim_cpuc, u64 new_slice)
 {
 	bpf_rcu_read_lock();
 	/*
-	 * Note that we avoid using scx_bpf_kick_cpu() on purpose.
-	 * While scx_bpf_kick_cpu() can trigger a task preemption immediately,
-	 * it incurs an expensive IPI operation. Furthermore, an IPI operation
-	 * is more costly in certain processor architectures or in older
+	 * Note that we avoid using scx_bpf_kick_cid() on purpose. While
+	 * scx_bpf_kick_cid() can trigger a task preemption immediately, it
+	 * incurs an expensive IPI operation. Furthermore, an IPI operation is
+	 * more costly in certain processor architectures or in older
 	 * generations of processors, causing performance variations among
-	 * processors. Thus, let's avoid using the IPI, scx_bpf_kick_cpu(), and
+	 * processors. Thus, let's avoid using the IPI, scx_bpf_kick_cid(), and
 	 * set the victim task's time slice to zero so the victim task yields
 	 * the CPU in the next scheduling point.
 	 */
-	struct task_struct *victim_p = __COMPAT_scx_bpf_cpu_curr(victim_cpuc->cpu_id);
+	struct task_struct *victim_p = scx_bpf_cid_curr(victim_cpuc->cpu_id);
 
 	if (victim_p) {
 		/*
@@ -248,17 +246,17 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 			bool ret = __sync_bool_compare_and_swap(
 				&victim_cpuc->est_stopping_clk, old, 0);
 			if (ret)
-				WRITE_ONCE(victim_p->scx.slice, new_slice);
+				scx_bpf_task_set_slice(victim_p, new_slice);
 		} else {
 			if (victim_p->scx.slice > new_slice)
-				WRITE_ONCE(victim_p->scx.slice, new_slice);
+				scx_bpf_task_set_slice(victim_p, new_slice);
 		}
 	}
 	bpf_rcu_read_unlock();
 }
 
 __hidden
-int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
+int shrink_boosted_slice_remote(struct cpu_ctx __arena __arg_arena *cpuc, u64 now)
 {
 	u64 duration_wall, new_slice_wall = 0;
 	u64 target_slice_wall, slice_wall;
@@ -288,7 +286,7 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 		new_slice_wall = time_delta(target_slice_wall, duration_wall);
 
 	if (!new_slice_wall)
-		scx_bpf_kick_cpu(cpuc->cpu_id, SCX_KICK_PREEMPT);
+		scx_bpf_kick_cid(cpuc->cpu_id, SCX_KICK_PREEMPT);
 	else
 		ask_cpu_yield_after(cpuc, new_slice_wall);
 
@@ -298,7 +296,8 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 }
 
 __hidden
-void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
+void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+			  u64 now)
 {
 	u64 ub_wall, duration_wall, new_slice_wall;
 
@@ -340,7 +339,7 @@ void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
 }
 
 __hidden
-void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc)
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 	scx_bpf_task_set_slice(p, 0);
@@ -355,10 +354,10 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 u64 cpdom_id)
 {
 	struct preemption_info prm_t, prm_c;
-	struct bpf_cpumask *cd_cpumask, *cpumask;
+	struct scx_cmask __arena *cd_cpumask, *cpumask;
 	struct cpdom_ctx __arena *cpdomc;
-	struct cpu_ctx *cpuc_victim;
-	struct cpu_ctx *cpuc_cur = NULL;
+	struct cpu_ctx __arena *cpuc_victim;
+	struct cpu_ctx __arena *cpuc_cur = NULL;
 	u64 now, duration_wall, new_slice_wall = 0;
 
 	/*
@@ -420,16 +419,16 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 
 	cpumask = cpuc_cur->temp_mask;
 	cpdomc = get_cpdom_ctx(cpdom_id);
-	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+	cd_cpumask = get_cpdom_mask(cpdom_id);
 	if (!cpdomc || !cd_cpumask || !cpumask)
 		return;
 
-	bpf_cpumask_and(cpumask, cast_mask(cd_cpumask), p->cpus_ptr);
+	cmask_and(cpumask, cd_cpumask, &taskc->allowed);
 
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
-	cpuc_victim = find_victim_cpu(cast_mask(cpumask), preferred_cpu, taskc, now);
+	cpuc_victim = find_victim_cpu(cpumask, preferred_cpu, taskc, now);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
@@ -444,7 +443,7 @@ kick_out:
 }
 
 __hidden
-void reset_cpu_preemption_info(struct cpu_ctx *cpuc)
+void reset_cpu_preemption_info(struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	/*
 	 * When the CPU is idle, set things easy to preempt.

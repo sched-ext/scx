@@ -14,7 +14,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-static void __inc_futex_boost(struct cpu_ctx *cpuc)
+static void __inc_futex_boost(struct cpu_ctx __arena *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
 	task_ctx *taskc;
@@ -42,7 +42,7 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 	 */
 }
 
-static void __dec_futex_boost(struct cpu_ctx *cpuc)
+static void __dec_futex_boost(struct cpu_ctx __arena *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
 	task_ctx *taskc;
@@ -81,7 +81,7 @@ static void dec_futex_boost(void)
 }
 
 __hidden
-void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc)
+void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	if (is_lock_holder(taskc))
 		set_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
@@ -300,7 +300,7 @@ struct tp_syscall_exit {
 SEC("?tracepoint/syscalls/sys_enter_futex")
 int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
 {
-	struct cpu_ctx *cpuc = get_cpu_ctx();
+	struct cpu_ctx __arena *cpuc = get_cpu_ctx();
 
 	if (cpuc)
 		cpuc->futex_op = ctx->op;
@@ -310,7 +310,7 @@ int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
 SEC("?tracepoint/syscalls/sys_exit_futex")
 int rtp_sys_exit_futex(struct tp_syscall_exit *ctx)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	int cmd;
 
 	if (ctx->ret < 0)

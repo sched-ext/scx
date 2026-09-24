@@ -345,7 +345,7 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	}
 }
 
-static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
+static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx __arena *cpuc)
 {
 	/*
 	 * Calculate the time slice of @taskc to run on @cpuc.
@@ -434,13 +434,12 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	return taskc->slice_wall;
 }
 
-static void update_stat_for_running(struct task_struct *p,
-				    task_ctx *taskc,
-				    struct cpu_ctx *cpuc, u64 now)
+static void update_stat_for_running(struct task_struct *p, task_ctx *taskc,
+				    struct cpu_ctx __arena *cpuc, u64 now)
 {
 	u64 wait_period, interval;
 	u64 task_clk = 0, pelt_clk = 0;
-	struct cpu_ctx *prev_cpuc;
+	struct cpu_ctx __arena *prev_cpuc;
 
 	/* mark the task as running in the duty-cycle ravg */
 	ravg_accumulate_arena(&taskc->avg_util_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
@@ -507,9 +506,9 @@ static void update_stat_for_running(struct task_struct *p,
 	 * measurement is bounded to at most one tick (or the task's run length,
 	 * whichever is shorter).
 	 */
-	if (bpf_get_smp_processor_id() == cpuc->cpu_id) {
-		task_clk = scx_clock_task(cpuc->cpu_id);
-		pelt_clk = scx_clock_pelt(cpuc->cpu_id);
+	if (bpf_get_smp_processor_id() == cpuc->kernel_cpu) {
+		task_clk = scx_clock_task(cpuc->kernel_cpu);
+		pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 	}
 	taskc->last_measured_task_clk = task_clk;
 	taskc->last_measured_pelt_clk = pelt_clk;
@@ -517,11 +516,9 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Mark this CPU as busy in the duty-cycle ravg.
 	 */
-	ravg_accumulate(&cpuc->avg_util_ravg, LAVD_SCALE,
-			now, LAVD_RAVG_HALFLIFE_NS);
-	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg,
-				now, LAVD_RAVG_HALFLIFE_NS) >>
-				RAVG_FRAC_BITS);
+	ravg_accumulate_arena(&cpuc->avg_util_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
+	cpuc->util_est = (u32)(ravg_read_arena(&cpuc->avg_util_ravg, now,
+					       LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -572,11 +569,8 @@ static void update_stat_for_running(struct task_struct *p,
 		cpuc->nr_x_migration++;
 }
 
-static void account_task_runtime(struct task_struct *p,
-				 task_ctx *taskc,
-				 struct cpu_ctx *cpuc,
-				 u64 now,
-				 bool may_resolve)
+static void account_task_runtime(struct task_struct *p, task_ctx *taskc,
+				 struct cpu_ctx __arena *cpuc, u64 now, bool may_resolve)
 {
 	u64 task_time_wall, task_time_iwgt, task_time_invr, exec_now, exec_delta;
 	u64 now_task, now_pelt;
@@ -588,8 +582,8 @@ static void account_task_runtime(struct task_struct *p,
 	 * the load of long-running tasks properly. So, we add up only the
 	 * execution duration since the last measured time.
 	 */
-	now_task = scx_clock_task(cpuc->cpu_id);
-	now_pelt = scx_clock_pelt(cpuc->cpu_id);
+	now_task = scx_clock_task(cpuc->kernel_cpu);
+	now_pelt = scx_clock_pelt(cpuc->kernel_cpu);
 
 	/*
 	 * When last_measured_*_clk == 0, it means that ops.running() was
@@ -649,9 +643,8 @@ static void account_task_runtime(struct task_struct *p,
 	taskc->last_measured_exec = exec_now;
 }
 
-static void update_stat_for_stopping(struct task_struct *p,
-				     task_ctx *taskc,
-				     struct cpu_ctx *cpuc)
+static void update_stat_for_stopping(struct task_struct *p, task_ctx *taskc,
+				     struct cpu_ctx __arena *cpuc)
 {
 	u64 now = scx_bpf_now();
 
@@ -668,10 +661,9 @@ static void update_stat_for_stopping(struct task_struct *p,
 	/*
 	 * Mark this CPU as idle in the duty-cycle ravg.
 	 */
-	ravg_accumulate(&cpuc->avg_util_ravg, 0, now,
-			LAVD_RAVG_HALFLIFE_NS);
-	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg, now,
-				  LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
+	ravg_accumulate_arena(&cpuc->avg_util_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
+	cpuc->util_est = (u32)(ravg_read_arena(&cpuc->avg_util_ravg, now,
+					       LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * Account for how much of the slice was used for this instance.
@@ -694,9 +686,8 @@ static void update_stat_for_stopping(struct task_struct *p,
 	reset_lock_futex_boost(taskc, cpuc);
 }
 
-static void update_stat_for_refill(struct task_struct *p,
-				   task_ctx *taskc,
-				   struct cpu_ctx *cpuc)
+static void update_stat_for_refill(struct task_struct *p, task_ctx *taskc,
+				   struct cpu_ctx __arena *cpuc)
 {
 	u64 now = scx_bpf_now();
 
@@ -719,7 +710,7 @@ static void update_stat_for_refill(struct task_struct *p,
 					   taskc->acc_runtime_invr);
 }
 
-static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
+static bool can_direct_dispatch(struct cpu_ctx __arena *cpuc, bool is_cpu_idle)
 {
 	/*
 	 * An idle CPU with nothing queued cannot be congested --
@@ -800,7 +791,7 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 						     s32 primary_cpu)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	u32 load;
 
 	if (primary_cpu < 0 || primary_cpu >= LAVD_CPU_ID_MAX)
@@ -819,7 +810,7 @@ static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 
 static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	s16 primary_cpu = READ_ONCE(taskc->queued_on_cpu_id);
 
 	if (primary_cpu < 0)
@@ -858,10 +849,9 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	return ret;
 }
 
-s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
-		   u64 wake_flags)
+s32 BPF_STRUCT_OPS(lavd_select_cid, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
+	struct cpu_ctx __arena *cpuc_cur = get_cpu_ctx();
 	struct pick_ctx ictx = {
 		.p = p,
 		.taskc = get_task_ctx_curcpu(p, cpuc_cur),
@@ -916,7 +906,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	ictx.taskc->suggested_cpu_id = cpu_id;
 
 	if (found_idle) {
-		struct cpu_ctx *cpuc;
+		struct cpu_ctx __arena *cpuc;
 
 		set_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 
@@ -926,7 +916,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
+			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu_id);
 			goto out;
 		}
 
@@ -957,7 +947,7 @@ out:
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct cpu_ctx *cpuc, *cpuc_cur;
+	struct cpu_ctx __arena *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
 	bool is_idle = false;
 	task_ctx *taskc;
@@ -966,16 +956,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	cpuc_cur = get_cpu_ctx();
 	taskc = get_task_ctx_curcpu(p, cpuc_cur);
 	if (!taskc || !cpuc_cur) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return;
 	}
-	task_cpu = scx_bpf_task_cpu(p);
+	task_cpu = scx_bpf_task_cid(p);
 
 	/*
-	 * A reenqueue (SCX_ENQ_REENQ) means the task was already placed once
-	 * but bounced -- a higher-priority class (RT/DL) took the CPU and the
-	 * local DSQ was drained via scx_bpf_reenqueue_local() (from the
-	 * sched_switch hook, or ops.cpu_release on older kernels).
+	 * SCX_ENQ_REENQ returns a previously placed task after RT/DL takes the
+	 * CPU. The sched_switch hook drains its local DSQ.
 	 */
 	if (unlikely(enq_flags & SCX_ENQ_REENQ)) {
 		/*
@@ -1012,17 +1000,16 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 *     task's affinity mask; if task_cpu is still allowed,
 		 *     the task is not re-enqueued, leaving the cache stale
 		 *   - CPU hotplug removes an offline CPU from cpus_ptr
-		 * Clamp to cpus_ptr to prevent routing the task to the
-		 * per-CPU DSQ of a CPU that cannot run it.
+		 * Clamp to the task's allowed mask to prevent routing the task
+		 * to the per-CPU DSQ of a CPU that cannot run it.
 		 */
-		if (cpu < 0 || cpu >= nr_cpu_ids ||
-		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			cpu = bpf_cpumask_first(p->cpus_ptr);
+		if (!cmask_test(cpu, &taskc->allowed)) {
+			cpu = cmask_first_set(&taskc->allowed);
 			taskc->suggested_cpu_id = cpu;
 		}
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 			return;
 		}
 
@@ -1032,7 +1019,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * deadline would over-prioritize it. Re-anchor to the current
 		 * clock.
 		 */
-		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+		scx_bpf_task_set_dsq_vtime(p, calc_when_to_run(p, taskc));
 
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
@@ -1060,10 +1047,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * p->cpus_ptr depends on how we reached ops.enqueue():
 	 *
 	 * 1. Within this ops.enqueue(), task_cpu and p->cpus_ptr are stable:
-	 *    enqueue and set_cpumask() are both serialized by the rq lock, so
+	 *    enqueue and set_cmask() are both serialized by the rq lock, so
 	 *    neither changes between here and the dispatch below.
-	 * 2. If ops.select_cpu() already chose the CPU (is_enq_cpu_selected),
-	 *    the kernel validated it and pi_lock spans select_cpu()->enqueue(),
+	 * 2. If ops.select_cid() already chose the CPU (is_enq_cpu_selected),
+	 *    the kernel validated it and pi_lock spans select_cid()->enqueue(),
 	 *    so task_cpu is guaranteed to be within p->cpus_ptr.
 	 * 3. Otherwise (pure enqueue), task_cpu may lag a cpumask change --
 	 *    e.g. set_cpus_allowed()'s DEQUEUE_SAVE/ENQUEUE_RESTORE updates the
@@ -1079,9 +1066,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			.wake_flags = 0,
 		};
 
-		/* Case 3: task_cpu may be stale; clamp the pick input to cpus_ptr. */
-		if (!bpf_cpumask_test_cpu(ictx.prev_cpu, p->cpus_ptr))
-			ictx.prev_cpu = bpf_cpumask_first(p->cpus_ptr);
+		/* case 3: clamp a stale task_cpu to the allowed mask */
+		if (!cmask_test(ictx.prev_cpu, &taskc->allowed))
+			ictx.prev_cpu = cmask_first_set(&taskc->allowed);
 
 		cpu = pick_idle_cpu(&ictx, false, &is_idle);
 	} else {
@@ -1092,7 +1079,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return;
 	}
 	taskc->suggested_cpu_id = cpu;
@@ -1128,9 +1115,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 
-		debugln("cpu%d [%d] -- %s:%d -- %s:%d", cpuc->cpu_id,
-			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__,
-			__LINE__);
+		debugln("cpu%d [%d] -- %s:%d -- %s:%d", cpuc->kernel_cpu,
+			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__, __LINE__);
 	}
 
 	/*
@@ -1169,7 +1155,7 @@ kick_cpu_out:
 	 * Kick @cpu so an idle CPU picks up the task.
 	 */
 	if (is_idle) {
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 		return;
 	}
 
@@ -1185,7 +1171,7 @@ kick_cpu_out:
 static
 int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	u64 dsq_id;
 	s32 cpu;
 
@@ -1209,9 +1195,8 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 *      scx_cgroup_bw_cancel clears taskc->atq.
 	 *   2. set_cpus_allowed_common() writes p->cpus_mask, so the
 	 *      contents of *p->cpus_ptr now reflect the new affinity.
-	 *   3. ops.set_cpumask (lavd_set_cpumask) fires, but any refresh
-	 *      path would gate on atq != NULL, which is now false after
-	 *      step 1.
+	 *   3. ops.set_cmask (lavd_set_cmask) fires, but any refresh path would
+	 *      gate on atq != NULL, which is now false after step 1.
 	 *   4. ops.enqueue (lavd_enqueue) recomputes
 	 *      taskc->suggested_cpu_id against the new mask and put_aside
 	 *      the task back into the BTQ.
@@ -1220,11 +1205,11 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * scx_cgroup_bw_enqueue_cb) holding only the atq spinlock, NOT
 	 * the task's rq lock. If the drain has already popped this taskc
 	 * (clearing atq) and a sched_setaffinity() on another CPU
-	 * interleaves, p->cpus_ptr (updated at step 2) may already be
+	 * interleaves, taskc->allowed (updated at step 3) may already be
 	 * the new mask while taskc->suggested_cpu_id (only refreshed at
 	 * step 4) is still the stale pre-change pick.
 	 *
-	 * Fall back to the first CPU of p->cpus_ptr when the cached pick
+	 * Fall back to the first cid of the allowed mask when the cached pick
 	 * is no longer valid. A full pick_idle_cpu() refresh would be more
 	 * accurate but extends the call chain (lavd_dispatch ->
 	 * scx_cgroup_bw_reenqueue -> cbw_reenqueue_cgroup ->
@@ -1232,13 +1217,12 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * BPF verifier's combined-stack budget.
 	 */
 	cpu = taskc->suggested_cpu_id;
-	if (cpu < 0 || cpu >= nr_cpu_ids ||
-	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		cpu = bpf_cpumask_first(p->cpus_ptr);
+	if (!cmask_test(cpu, &taskc->allowed))
+		cpu = cmask_first_set(&taskc->allowed);
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return 0;
 	}
 	taskc->suggested_cpu_id = cpu;
@@ -1280,8 +1264,8 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * waking a CPU that is already busy with another task and
 	 * generating a spurious reschedule IPI.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(cpu))
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (claim_idle_cid(cpu) > 0)
+		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 	return 0;
 }
 
@@ -1301,7 +1285,7 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	 * in lavd_running(). Skip for non-running dequeues only
 	 * (SCX_DEQ_CORE_SCHED_EXEC, migration, etc.).
 	 */
-	if (p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p))) {
+	if (p != scx_bpf_cid_curr(scx_bpf_task_cid(p))) {
 		unaccount_queued_load(taskc);
 		unaccount_queued_load_pcpu(taskc);
 	}
@@ -1318,7 +1302,8 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 
 
 __hidden __attribute__ ((noinline))
-void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx *cpuc)
+void consume_prev(struct task_struct *prev, task_ctx *taskc_prev,
+		  struct cpu_ctx __arena __arg_arena *cpuc)
 {
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
 		return;
@@ -1361,9 +1346,9 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 
 __hidden __attribute__ ((noinline))
 bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
-			    struct cpu_ctx *cpuc,
-			    struct bpf_cpumask *active,
-			    struct bpf_cpumask *ovrflw)
+			    struct cpu_ctx __arena __arg_arena *cpuc,
+			    struct scx_cmask __arena __arg_arena *active,
+			    struct scx_cmask __arena __arg_arena *ovrflw)
 {
 	struct task_struct *p;
 	task_ctx *taskc;
@@ -1407,36 +1392,35 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 		 * into the else-if below.
 		 */
 		if (is_permanently_pinned(p)) {
-			new_cpu = scx_bpf_task_cpu(p);
+			new_cpu = scx_bpf_task_cid(p);
 			if (new_cpu == cpu) {
 				ovrflw_test_and_set(ovrflw, new_cpu);
 				bpf_task_release(p);
 				return true;
 			}
 			if (!ovrflw_test_and_set(ovrflw, new_cpu))
-				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+				scx_bpf_kick_cid(new_cpu, SCX_KICK_IDLE);
 			bpf_task_release(p);
 			continue;
 		} else if (is_migration_disabled(p)) {
-			new_cpu = scx_bpf_task_cpu(p);
+			new_cpu = scx_bpf_task_cid(p);
 			if (new_cpu == cpu) {
 				bpf_task_release(p);
 				return true;
 			}
-			scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			scx_bpf_kick_cid(new_cpu, SCX_KICK_IDLE);
 			bpf_task_release(p);
 			continue;
 		}
 
 		/*
-		 * if the task can run on either active or overflow set,
-		 * try another task.
+		 * if the task can run on either active or overflow set, or has
+		 * no context to tell, try another task.
 		 */
 		taskc = find_task_ctx(p);
-		if(taskc &&
-		(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
-		bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+		if (!taskc || !test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		    cmask_intersects(active, &taskc->allowed) ||
+		    cmask_intersects(ovrflw, &taskc->allowed)) {
 			bpf_task_release(p);
 			continue;
 		}
@@ -1446,7 +1430,7 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 		 * or overflow set. then, let's consider to extend the
 		 * overflow set.
 		 */
-		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
+		new_cpu = find_cpu_in(&taskc->allowed, cpuc);
 		if (new_cpu >= 0) {
 			if (new_cpu == cpu) {
 				ovrflw_test_and_set(ovrflw, new_cpu);
@@ -1454,7 +1438,7 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 				return true;
 			}
 			else if (!ovrflw_test_and_set(ovrflw, new_cpu))
-				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+				scx_bpf_kick_cid(new_cpu, SCX_KICK_IDLE);
 		}
 		bpf_task_release(p);
 	}
@@ -1464,15 +1448,15 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
-	struct bpf_cpumask *active, *ovrflw;
+	struct scx_cmask __arena *active, *ovrflw;
 	task_ctx *taskc_prev = NULL;
 	bool try_consume = false;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc, *cpuc_cur = get_cpu_ctx();
 	int ret;
 
 	cpuc = get_cpu_ctx_id(cpu);
-	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+	if (!cpuc || !cpuc_cur) {
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return;
 	}
 
@@ -1519,8 +1503,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the current CPU belonges to either active or overflow set,
 	 * dispatch a task and go.
 	 */
-	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
-	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
+	if (cmask_test(cpu, active) || cmask_test(cpu, ovrflw)) {
 		bpf_rcu_read_unlock();
 		goto consume_out;
 	}
@@ -1564,9 +1547,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		taskc_prev = get_task_ctx(prev);
 		if (taskc_prev &&
 		    test_task_flag(taskc_prev, LAVD_FLAG_IS_AFFINITIZED) &&
-		    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
-		    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
-		    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
+		    cmask_test(cpu, &taskc_prev->allowed) &&
+		    !cmask_intersects(active, &taskc_prev->allowed) &&
+		    !cmask_intersects(ovrflw, &taskc_prev->allowed)) {
 			ovrflw_test_and_set(ovrflw, cpu);
 			bpf_rcu_read_unlock();
 			goto consume_out;
@@ -1579,7 +1562,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (!use_cpdom_dsq()) {
 		bpf_rcu_read_unlock();
-		return;
+		goto idle;
 	}
 
 	/* NOTE: We use per-domain DSQ. */
@@ -1600,20 +1583,20 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * handled by the fast path above.
 	 */
 	try_consume = scan_dsq_for_ovflw_ext(cpdom_to_dsq(cpuc->cpdom_id),
-					     cpu, cpuc, active, ovrflw);
+					     cpu, cpuc_cur, active, ovrflw);
 	if (!try_consume) {
 		try_consume = scan_dsq_for_ovflw_ext(
 				cpdom_to_turb_dsq(cpuc->cpdom_id),
-				cpu, cpuc, active, ovrflw);
+				cpu, cpuc_cur, active, ovrflw);
 	}
 
 	bpf_rcu_read_unlock();
 
 	/*
-	 * If this CPU should go idle, do nothing.
+	 * If this CPU should go idle, don't consume.
 	 */
 	if (!try_consume)
-		return;
+		goto idle;
 
 consume_out:
 	/*
@@ -1626,6 +1609,14 @@ consume_out:
 	 * If nothing to run, continue running the previous task.
 	 */
 	consume_prev(prev, taskc_prev, cpuc);
+idle:
+	/*
+	 * No task and no @prev means the CPU is going idle. A cid claimed by an
+	 * idle pick and kicked but never dispatched to gets no idle
+	 * notification, so restore the claim here.
+	 */
+	if (!prev)
+		update_idle_cid(cpu, true);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1747,7 +1738,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	task_ctx *taskc;
 	u64 now = scx_bpf_now();
 
@@ -1810,7 +1801,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	task_ctx *taskc;
 	u64 now;
 
@@ -1852,7 +1843,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 
 void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	task_ctx *taskc;
 
 	/*
@@ -1877,7 +1868,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	task_ctx *taskc;
 	u64 now, interval;
 
@@ -1906,12 +1897,11 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 * pinned_cpu_id keeps the per-CPU nr_pinned_tasks exact.
 	 */
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id != -ENOENT)) {
-		struct cpu_ctx *cpuc_pinned =
-			get_cpu_ctx_id(taskc->pinned_cpu_id);
+		struct cpu_ctx __arena *cpuc_pinned = get_cpu_ctx_id(taskc->pinned_cpu_id);
 
 		if (cpuc_pinned) {
 			__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
-			debugln("%d [%d] -- %s:%d -- %s:%d", cpuc_pinned->cpu_id,
+			debugln("%d [%d] -- %s:%d -- %s:%d", cpuc_pinned->kernel_cpu,
 				cpuc_pinned->nr_pinned_tasks, p->comm, p->pid,
 				__func__, __LINE__);
 		}
@@ -1947,15 +1937,16 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id)
+static void cpu_ctx_init_online(struct cpu_ctx __arena *cpuc, u32 cpu_id)
 {
-	struct bpf_cpumask *cd_cpumask;
+	struct scx_cmask __arena *cd_cpumask;
 
 	bpf_rcu_read_lock();
-	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	cd_cpumask = get_cpdom_mask(cpuc->cpdom_id);
 	if (!cd_cpumask)
 		goto unlock_out;
-	bpf_cpumask_set_cpu(cpu_id, cd_cpumask);
+	cmask_set(cpu_id, cd_cpumask);
+	cmask_set(cpu_id, online_cmask);
 unlock_out:
 	bpf_rcu_read_unlock();
 
@@ -1964,23 +1955,25 @@ unlock_out:
 	cpuc->lat_cri = 0;
 	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
-	cpuc->prev_task_clk = scx_clock_task(cpu_id);
-	cpuc->prev_pelt_clk = scx_clock_pelt(cpu_id);
+	cpuc->prev_task_clk = scx_clock_task(cpuc->kernel_cpu);
+	cpuc->prev_pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 	cpuc->avg_perf_factor = LAVD_SCALE;
 	barrier();
 
 	cpuc->is_online = true;
 }
 
-static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id)
+static void cpu_ctx_init_offline(struct cpu_ctx __arena *cpuc, u32 cpu_id)
 {
-	struct bpf_cpumask *cd_cpumask;
+	struct scx_cmask __arena *cd_cpumask;
 
 	bpf_rcu_read_lock();
-	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	cd_cpumask = get_cpdom_mask(cpuc->cpdom_id);
 	if (!cd_cpumask)
 		goto unlock_out;
-	bpf_cpumask_clear_cpu(cpu_id, cd_cpumask);
+	cmask_clear(cpu_id, cd_cpumask);
+	cmask_clear(cpu_id, online_cmask);
+	update_idle_cid(cpu_id, false);
 unlock_out:
 	bpf_rcu_read_unlock();
 
@@ -1994,17 +1987,17 @@ unlock_out:
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
 }
 
-void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
+void BPF_STRUCT_OPS(lavd_cid_online, s32 cpu)
 {
 	/*
 	 * When a cpu becomes online, reset its cpu context and trigger the
 	 * recalculation of the global cpu load.
 	 */
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return;
 	}
 
@@ -2017,7 +2010,7 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	if (cpuc->max_capacity == 0) {
 		scx_bpf_exit(SCX_ECODE_ACT_RESTART,
 			"RESTART: cpu %d becomes online. Restart the scheduler.",
-			cpu);
+			cpuc->kernel_cpu);
 		return;
 	}
 
@@ -2029,17 +2022,17 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	update_sys_stat();
 }
 
-void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
+void BPF_STRUCT_OPS(lavd_cid_offline, s32 cpu)
 {
 	/*
 	 * When a cpu becomes offline, trigger the recalculation of the global
 	 * cpu load.
 	 */
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return;
 	}
 
@@ -2053,21 +2046,16 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 
 void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 {
-	/*
-	 * The idle duration is accumulated to calculate the CPU utilization.
-	 * Since SCX_OPS_KEEP_BUILTIN_IDLE is specified, we still rely on the
-	 * default idle core tracking and core selection algorithm.
-	 */
-
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	u64 now;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 		return;
 	}
 
+	update_idle_cid(cpu, idle);
 	now = scx_bpf_now();
 
 	/*
@@ -2123,8 +2111,8 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	}
 }
 
-void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
-		    const struct cpumask *cpumask)
+void BPF_STRUCT_OPS(lavd_set_cmask, struct task_struct *p,
+		    const struct scx_cmask __arena *cpumask)
 {
 	task_ctx *taskc;
 
@@ -2134,22 +2122,8 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	set_affinity_flags(taskc, cpumask);
-}
-
-void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
-		    struct scx_cpu_release_args *args)
-{
-	/*
-	 * Requeue tasks stranded on the local DSQ when a higher-priority
-	 * scheduling class takes the CPU, so the BPF scheduler can
-	 * redispatch them. Registered only on kernels where the
-	 * scx_bpf_reenqueue_local() kfunc is restricted to ops.cpu_release
-	 * context and cannot be called from a tracepoint hook. Rust nulls
-	 * this slot out on newer kernels (>= 6.19) where the v2 kfunc lifts
-	 * the restriction and the sched_switch hook takes over.
-	 */
-	scx_bpf_reenqueue_local();
+	cmask_copy(&taskc->allowed, cpumask);
+	set_affinity_flags(taskc, &taskc->allowed);
 }
 
 SEC("?tp_btf/sched_switch")
@@ -2257,11 +2231,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		taskc->avg_runtime_wall = sys_stat.slice_wall;
 		taskc->avg_runtime_invr = sys_stat.slice_wall;
 		taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt;
+		taskc->cpu_id = scx_bpf_cpu_to_cid(0);
+		taskc->prev_cpu_id = taskc->cpu_id;
 	}
 
 	bpf_rcu_read_unlock();
 
-	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
+	taskc->suggested_cpu_id = scx_bpf_task_cid(p);
 	taskc->pinned_cpu_id = -ENOENT;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
@@ -2272,9 +2248,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->cpu_heat = 0;
 	taskc->last_stopping_clk = scx_bpf_now();
 
-	bpf_rcu_read_lock();
-	set_affinity_flags(taskc, p->cpus_ptr);
-	bpf_rcu_read_unlock();
+	/* the initial set_cmask() right after enable() fills the bits */
+	cmask_init(&taskc->allowed, 0, nr_cids);
 
 	if (is_ksoftirqd(p))
 		set_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
@@ -2287,7 +2262,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 		   struct scx_exit_task_args *args)
 {
-	struct cpu_ctx *cpuc = get_cpu_ctx();
+	struct cpu_ctx __arena *cpuc = get_cpu_ctx();
 	task_ctx *taskc = get_task_ctx(p);
 
 	/*
@@ -2304,7 +2279,7 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	 * still be queued. Unaccount its load. If running,
 	 * lavd_running() already unaccounted it.
 	 */
-	if (taskc && p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p))) {
+	if (taskc && p != scx_bpf_cid_curr(scx_bpf_task_cid(p))) {
 		unaccount_queued_load(taskc);
 		unaccount_queued_load_pcpu(taskc);
 	}
@@ -2363,9 +2338,8 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		     taskc->perf_cri, sys_stat.avg_perf_cri);
 
 	scx_bpf_dump("  \\_ cpdom_id: %d   scpu: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
-		     taskc->cpdom_id, taskc->suggested_cpu_id,
-		     cgrp_name, taskc->cgrp_id,
-		     (cgroup_throttled) ? "throttled" : "not throttled",
+		     taskc->cpdom_id, scx_bpf_cid_to_cpu(taskc->suggested_cpu_id), cgrp_name,
+		     taskc->cgrp_id, (cgroup_throttled) ? "throttled" : "not throttled",
 		     (task_throttled) ? "throttled" : "not throttled");
 
 	/*
@@ -2431,75 +2405,18 @@ static s32 init_cpdoms(u64 now)
 	return 0;
 }
 
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
-
-static int init_cpumasks(void)
-{
-	const struct cpumask *online_cpumask;
-	struct bpf_cpumask *active;
-	int err = 0;
-
-	bpf_rcu_read_lock();
-	/*
-	 * Allocate active cpumask and initialize it with all online CPUs.
-	 */
-	err = calloc_cpumask(&active_cpumask);
-	active = active_cpumask;
-	if (err || !active)
-		goto out;
-
-	online_cpumask = scx_bpf_get_online_cpumask();
-	nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
-	bpf_cpumask_copy(active, online_cpumask);
-	scx_bpf_put_cpumask(online_cpumask);
-
-	/*
-	 * Allocate the other cpumasks.
-	 */
-	err = calloc_cpumask(&ovrflw_cpumask);
-	if (err)
-		goto out;
-
-	err = calloc_cpumask(&turbo_cpumask);
-	if (err)
-		goto out;
-
-	err = calloc_cpumask(&big_cpumask);
-	if (err)
-		goto out;
-
-	err = calloc_cpumask(&steady_cpumask);
-	if (err)
-		goto out;
-out:
-	bpf_rcu_read_unlock();
-	return err;
-}
-
 static s32 init_per_cpu_ctx(u64 now)
 {
-	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *turbo, *big, *active, *ovrflw, *cd_cpumask;
-	const struct cpumask *online_cpumask;
+	struct cpu_ctx __arena *cpuc;
+	struct scx_cmask __arena *turbo, *big, *active, *ovrflw, *cd_cpumask;
+	const struct scx_cmask __arena *online_cpumask;
 	struct cpdom_ctx __arena *cpdomc;
-	int cpu, i, j, k, err = 0;
+	int cpu, err = 0;
 	u64 cpdom_id;
-	u32 sum_capacity = 0, big_capacity = 0;
+	u32 kernel_cpu, sum_capacity = 0, big_capacity = 0;
 
 	bpf_rcu_read_lock();
-	online_cpumask = scx_bpf_get_online_cpumask();
+	online_cpumask = online_cmask;
 
 	/*
 	 * Prepare cpumasks.
@@ -2518,44 +2435,16 @@ static s32 init_per_cpu_ctx(u64 now)
 	 * Initialize CPU info
 	 */
 	one_little_max_capacity = LAVD_SCALE;
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_arena_for(cpu, 0, nr_cids) {
 		if (cpu >= LAVD_CPU_ID_MAX)
 			break;
 
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 			err = -ESRCH;
 			goto unlock_out;
 		}
-
-		err = calloc_cpumask(&cpuc->a_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->o_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->temp_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->i_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->ia_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->io_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->iat_mask);
-		if (err)
-			goto unlock_out;
 
 		cpuc->cpu_id = cpu;
 		cpuc->idle_start_clk = 0;
@@ -2563,11 +2452,12 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->running_clk = 0;
 		cpuc->qload_invr = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
-		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
-		cpuc->max_capacity = cpu_capacity[cpu];
+		cpuc->is_online = cmask_test(cpu, online_cpumask);
+		kernel_cpu = cpuc->kernel_cpu;
+		cpuc->max_capacity = cpu_capacity[kernel_cpu];
 		cpuc->effective_capacity = cpuc->max_capacity;
-		cpuc->big_core = cpu_big[cpu];
-		cpuc->turbo_core = cpu_turbo[cpu];
+		cpuc->big_core = cpu_big[kernel_cpu];
+		cpuc->turbo_core = cpu_turbo[kernel_cpu];
 		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->max_freq = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
@@ -2580,8 +2470,8 @@ static s32 init_per_cpu_ctx(u64 now)
 		 * collect_sys_stat() interval, and any slight staleness is
 		 * harmless.
 		 */
-		cpuc->prev_task_clk = scx_clock_task(cpu);
-		cpuc->prev_pelt_clk = scx_clock_pelt(cpu);
+		cpuc->prev_task_clk = scx_clock_task(cpuc->kernel_cpu);
+		cpuc->prev_pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 		cpuc->avg_perf_factor = LAVD_SCALE;
 		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
 
@@ -2590,14 +2480,14 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (cpuc->big_core) {
 			nr_cpus_big++;
 			big_capacity += cpuc->max_capacity;
-			bpf_cpumask_set_cpu(cpu, big);
+			cmask_set(cpu, big);
 		}
 		else {
 			have_little_core = true;
 		}
 
 		if (cpuc->turbo_core) {
-			bpf_cpumask_set_cpu(cpu, turbo);
+			cmask_set(cpu, turbo);
 			have_turbo_core = true;
 		}
 
@@ -2615,7 +2505,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			break;
 
 		cpdomc = get_cpdom_ctx(cpdom_id);
-		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+		cd_cpumask = get_cpdom_mask(cpdom_id);
 		if (!cpdomc || !cd_cpumask) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
 			err = -ESRCH;
@@ -2624,31 +2514,21 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (!cpdomc->is_valid)
 			continue;
 
-		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-			u64 cpumask;
-			if ((u32)i * 64 >= nr_cpu_ids)
-				break;
-			cpumask = cpdomc->__cpumask[i];
-			bpf_for(k, 0, 64) {
-				j = cpumask_next_set_bit(&cpumask);
-				if (j < 0)
-					break;
-				cpu = (i * 64) + j;
-				cpuc = get_cpu_ctx_id(cpu);
-				if (!cpuc) {
-					scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-					err = -ESRCH;
-					goto unlock_out;
-				}
-				cpuc->llc_id = cpdomc->llc_id;
-				cpuc->cpdom_id = cpdomc->id;
-				cpuc->cpdom_alt_id = cpdomc->alt_id;
+		cmask_for_each(cpu, &cpdomc->cpus) {
+			cpuc = get_cpu_ctx_id(cpu);
+			if (!cpuc) {
+				scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
+				err = -ESRCH;
+				goto unlock_out;
+			}
+			cpuc->llc_id = cpdomc->llc_id;
+			cpuc->cpdom_id = cpdomc->id;
+			cpuc->cpdom_alt_id = cpdomc->alt_id;
 
-				if (bpf_cpumask_test_cpu(cpu, online_cpumask)) {
-					bpf_cpumask_set_cpu(cpu, cd_cpumask);
-					cpdomc->nr_active_cpus++;
-					cpdomc->cap_sum_active_cpus += cpuc->effective_capacity;
-				}
+			if (cmask_test(cpu, online_cpumask)) {
+				cmask_set(cpu, cd_cpumask);
+				cpdomc->nr_active_cpus++;
+				cpdomc->cap_sum_active_cpus += cpuc->effective_capacity;
 			}
 		}
 	}
@@ -2656,21 +2536,19 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Print some useful information for debugging.
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_arena_for(cpu, 0, nr_cids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 			err = -ESRCH;
 			goto unlock_out;
 		}
 		debugln("cpu[%d] max_capacity: %d, big_core: %d, turbo_core: %d, "
-			"cpdom_id: %llu, alt_id: %llu",
-			cpu, cpuc->max_capacity, cpuc->big_core, cpuc->turbo_core,
-			cpuc->cpdom_id, cpuc->cpdom_alt_id);
+			"cpdom_id: %llu, alt_id: %llu", cpuc->kernel_cpu, cpuc->max_capacity,
+			cpuc->big_core, cpuc->turbo_core, cpuc->cpdom_id, cpuc->cpdom_alt_id);
 	}
 
 unlock_out:
-	scx_bpf_put_cpumask(online_cpumask);
 	bpf_rcu_read_unlock();
 	return err;
 }
@@ -2679,16 +2557,16 @@ unlock_out:
 static int init_per_cpu_dsqs(void)
 {
 	struct cpdom_ctx __arena *cpdomc;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	int cpu, err = 0;
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_arena_for(cpu, 0, nr_cids) {
 		/*
 		 * Create Per-CPU DSQs on its associated NUMA domain.
 		 */
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
 			return -ESRCH;
 		}
 
@@ -2704,7 +2582,7 @@ static int init_per_cpu_dsqs(void)
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->numa_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpu %d on NUMA node %d",
-				      cpu, cpdomc->numa_id);
+				      cpuc->kernel_cpu, cpdomc->numa_id);
 			return err;
 		}
 	}
@@ -2806,7 +2684,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 *  - overflow CPUs: a pair of hyper-twin which will be used when there
 	 *    is no idle active CPUs.
 	 */
-	err = init_cpumasks();
+	err = init_cid_masks();
 	if (err)
 		return err;
 
@@ -2875,9 +2753,9 @@ int set_aggressive_migration(void)
 {
 	struct task_struct *curr;
 	struct cpdom_ctx __arena *cpdc;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx __arena *cpuc;
 	task_ctx *taskc;
-	u32 cpu;
+	s32 cpu;
 
 	/*
 	 * When a task is about to call execv() and the current CPU is
@@ -2892,7 +2770,9 @@ int set_aggressive_migration(void)
 	if (nr_cpdoms == 1)
 		return 0;
 
-	cpu = bpf_get_smp_processor_id();
+	cpu = scx_bpf_this_cid();
+	if (cpu < 0)
+		return 0;
 	cpuc = get_cpu_ctx();
 	if (cpuc &&
 	    (curr = bpf_get_current_task_btf()) &&
@@ -2900,7 +2780,7 @@ int set_aggressive_migration(void)
 	    (cpdc = get_cpdom_ctx(cpuc->cpdom_id)) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		set_task_flag(taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		scx_bpf_kick_cid(cpu, SCX_KICK_PREEMPT);
 	}
 	return 0;
 }
@@ -2919,8 +2799,8 @@ int BPF_PROG(cond_hook_sys_enter_execveat)
 	return 0;
 }
 
-SCX_OPS_DEFINE(lavd_ops,
-	       .select_cpu		= (void *)lavd_select_cpu,
+SCX_OPS_CID_DEFINE(lavd_ops,
+	       .select_cid		= (void *)lavd_select_cid,
 	       .enqueue			= (void *)lavd_enqueue,
 	       .dequeue			= (void *)lavd_dequeue,
 	       .dispatch		= (void *)lavd_dispatch,
@@ -2929,20 +2809,19 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .tick			= (void *)lavd_tick,
 	       .stopping		= (void *)lavd_stopping,
 	       .quiescent		= (void *)lavd_quiescent,
-	       .cpu_online		= (void *)lavd_cpu_online,
-	       .cpu_offline		= (void *)lavd_cpu_offline,
+	       .cid_online		= (void *)lavd_cid_online,
+	       .cid_offline		= (void *)lavd_cid_offline,
 	       .update_idle		= (void *)lavd_update_idle,
-	       .set_cpumask		= (void *)lavd_set_cpumask,
-	       .cpu_release		= (void *)lavd_cpu_release,
+	       .set_cmask		= (void *)lavd_set_cmask,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .exit_task		= (void *)lavd_exit_task,
 	       .dump			= (void *)lavd_dump,
 	       .dump_task		= (void *)lavd_dump_task,
-	       .cgroup_init		= (void *)lavd_cgroup_init,
-	       .cgroup_exit		= (void *)lavd_cgroup_exit,
-	       .cgroup_move		= (void *)lavd_cgroup_move,
-	       .cgroup_set_bandwidth	= (void *)lavd_cgroup_set_bandwidth,
+	       .cpuctl_init		= (void *)lavd_cgroup_init,
+	       .cpuctl_exit		= (void *)lavd_cgroup_exit,
+	       .cpuctl_move		= (void *)lavd_cgroup_move,
+	       .cpuctl_set_bandwidth	= (void *)lavd_cgroup_set_bandwidth,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
 	       .timeout_ms		= 30000U,

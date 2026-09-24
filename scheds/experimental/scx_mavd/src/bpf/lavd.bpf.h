@@ -8,6 +8,7 @@
 
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <lib/arena_map.h>
 #include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
@@ -173,7 +174,8 @@ enum consts_flags {
  */
 
 /*
- * Task context
+ * Task context. CPU identifiers in scheduler contexts are cids. Raw CPU IDs
+ * stay at kernel and userspace boundaries.
  */
 struct task_ctx {
 	/* --- cacheline 0 boundary (0 bytes) --- */
@@ -260,6 +262,9 @@ struct task_ctx {
 	/* --- per-CPU warmth (cache/TLB state) --- */
 	u64	last_stopping_clk;	/* when cpu_heat was last integrated (task stopped) */
 	u16	cpu_heat;		/* residence-integrated heat for cpu_id [0, LAVD_SCALE] */
+
+	TRAILING_OVERLAP(struct scx_cmask, allowed, bits,
+			 u64 allowed_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
@@ -313,6 +318,11 @@ struct cpdom_ctx {
 
 	s64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
 	s64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
+
+	TRAILING_OVERLAP(struct scx_cmask, cpus, bits,
+			 u64 cpus_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
+	TRAILING_OVERLAP(struct scx_cmask, online, bits,
+			 u64 online_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
@@ -349,7 +359,6 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx __arena *c
 }
 
 extern struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
-extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern int __arena_global		nr_cpdoms;
 
 /* queued_in_cpdom_id uses LAVD_CPDOM_MAX_NR for no domain and must get NULL */
@@ -362,9 +371,21 @@ static __always_inline struct cpdom_ctx __arena *get_cpdom_ctx(s64 id)
 
 typedef struct task_ctx __arena task_ctx;
 
-struct cpu_ctx *get_cpu_ctx(void);
-struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id);
-struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
+extern u32 nr_cids;
+extern struct scx_cmask __arena *online_cmask;
+extern struct scx_cmask __arena *idle_cmask;
+extern struct scx_cmask __arena *idle_smt_cmask;
+
+int init_cid_masks(void);
+s32 claim_idle_cid(s32 cid);
+s32 pick_idle_cid(const struct scx_cmask __arena __arg_arena *allowed, u64 flags);
+void update_idle_cid(s32 cid, bool idle);
+
+extern struct cpu_ctx __arena *cpu_ctxs;
+
+struct cpu_ctx __arena *get_cpu_ctx(void);
+struct cpu_ctx __arena *get_cpu_ctx_id(s32 cpu_id);
+struct cpu_ctx __arena *get_cpu_ctx_task(const struct task_struct *p);
 
 /*
  * CPU context
@@ -394,7 +415,7 @@ struct cpu_ctx {
 	u8		llc_id;		/* llc domain id */
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
-	u8		__pad0[2];
+	u16		kernel_cpu;	/* Linux CPU ID for per-CPU kernel data */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -552,13 +573,16 @@ struct cpu_ctx {
 	u64		prev_pelt_clk;
 
 	/* --- cacheline 4 boundary (256 bytes): cpumask scratch --- */
-	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
-	struct bpf_cpumask __kptr *o_mask;	/* scratch: task & overflow */
-	struct bpf_cpumask __kptr *temp_mask;	/* scratch: general-purpose */
-	struct bpf_cpumask __kptr *i_mask;	/* scratch: task & idle */
-	struct bpf_cpumask __kptr *ia_mask;	/* scratch: idle & active */
-	struct bpf_cpumask __kptr *io_mask;	/* scratch: idle & overflow */
-	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
+	struct scx_cmask __arena *a_mask;	/* scratch: task & active */
+	struct scx_cmask __arena *o_mask;	/* scratch: task & overflow */
+	struct scx_cmask __arena *temp_mask;	/* scratch: general-purpose */
+	struct scx_cmask __arena *i_mask;	/* scratch: task & idle */
+	struct scx_cmask __arena *ia_mask;	/* scratch: idle & active */
+	struct scx_cmask __arena *io_mask;	/* scratch: idle & overflow */
+	struct scx_cmask __arena *iat_mask;	/* scratch: idle & active & turbo */
+
+	u16 core_cid;		/* first cid of this cid's core, which names the core's DSQ */
+	u16 core_nr_cids;	/* cids in the core */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
@@ -566,9 +590,9 @@ struct cpu_ctx {
 
 	/* --- cacheline 7 boundary (448 bytes): cross-CPU write-heavy accumulator --- */
 	/*
-	 * qload_invr is incremented from any CPU on enqueue (remote write
-	 * via bpf_map_lookup_percpu_elem + __sync_fetch_and_add) and
-	 * decremented likewise on dispatch/dequeue/exit.
+	 * qload_invr is incremented from any CPU on enqueue and decremented on
+	 * dispatch, dequeue and exit. Keep its atomic updates isolated from the
+	 * other fields.
 	 */
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE)));
@@ -663,14 +687,14 @@ extern volatile bool __arena_global	no_preemption;
 extern volatile bool __arena_global	no_core_compaction;
 extern volatile bool __arena_global	no_freq_scaling;
 
-bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
-void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
-void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
+bool test_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag);
+void set_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag);
+void reset_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag);
 
 bool is_lock_holder(task_ctx *taskc);
-bool is_lock_holder_running(struct cpu_ctx *cpuc);
+bool is_lock_holder_running(struct cpu_ctx __arena __arg_arena *cpuc);
 bool have_scheduled(task_ctx *taskc);
-bool have_pending_tasks(struct cpu_ctx *cpuc);
+bool have_pending_tasks(struct cpu_ctx __arena __arg_arena *cpuc);
 bool can_boost_slice(void);
 bool is_lat_cri(task_ctx *taskc);
 u16 get_nice_prio(struct task_struct *p);
@@ -685,8 +709,9 @@ extern const volatile u64	warm_cpu_ns;	/* warm-CPU wait budget (ns) */
 
 /* Per-CPU warmth clock (util.bpf.c). */
 u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now);
-void task_update_cpu_warmth(task_ctx __arg_arena *taskc, struct cpu_ctx *cpuc,
-			    u64 slice_used, u64 now);
+void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
+			    struct cpu_ctx __arena __arg_arena *cpuc, u64 slice_used,
+			    u64 now);
 
 static __always_inline bool use_per_cpu_dsq(void)
 {
@@ -710,7 +735,7 @@ static __always_inline bool use_cpdom_dsq(void)
 	return !per_cpu_dsq;
 }
 
-static __always_inline bool is_turbulent_cpu(struct cpu_ctx *cpuc)
+static __always_inline bool is_turbulent_cpu(struct cpu_ctx __arena *cpuc)
 {
 	/*
 	 * A CPU is turbulent when its latency headroom (inversely related
@@ -721,7 +746,7 @@ static __always_inline bool is_turbulent_cpu(struct cpu_ctx *cpuc)
 	return cpuc->lat_headroom < LAVD_LC_LATENCY_SENSITIVE_THRESH;
 }
 
-static __always_inline bool is_steady_cpu(struct cpu_ctx *cpuc)
+static __always_inline bool is_steady_cpu(struct cpu_ctx __arena *cpuc)
 {
 	return !is_turbulent_cpu(cpuc);
 }
@@ -729,7 +754,7 @@ static __always_inline bool is_steady_cpu(struct cpu_ctx *cpuc)
 static __always_inline bool
 can_consume_steady_dsq(struct cpdom_ctx __arena *cpdomc)
 {
-	struct cpu_ctx *cpuc = get_cpu_ctx();
+	struct cpu_ctx __arena *cpuc = get_cpu_ctx();
 	bool turbulent = cpuc && is_turbulent_cpu(cpuc);
 
 	/*
@@ -746,9 +771,10 @@ can_consume_steady_dsq(struct cpdom_ctx __arena *cpdomc)
 	       cpdomc->nr_steady_cpus == 0;
 }
 
-bool queued_on_cpu(struct cpu_ctx *cpuc);
-bool is_cpu_congested(struct cpu_ctx *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
+bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc);
+bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+		      task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
 
 /*
@@ -776,7 +802,7 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
 static __always_inline
 bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 {
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 	u64 heat, budget, est, wait;
 
 	if (!cpuc)
@@ -811,11 +837,11 @@ static __always_inline u32 task_load_metric(task_ctx *taskc)
 	return taskc->util_est;
 }
 
-extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
-extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
-extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
-extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-extern struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
+extern struct scx_cmask __arena *turbo_cpumask; /* CPU mask for turbo CPUs */
+extern struct scx_cmask __arena *big_cpumask; /* CPU mask for big CPUs */
+extern struct scx_cmask __arena *active_cpumask; /* CPU mask for active CPUs */
+extern struct scx_cmask __arena *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+extern struct scx_cmask __arena *steady_cpumask; /* CPU mask for non-turbulent CPUs */
 
 /* DSQ helpers. */
 
@@ -832,24 +858,24 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 
 /*
  * Atomically add @cpu to the global overflow cpumask. Mirrors the return
- * semantics of bpf_cpumask_test_and_set_cpu(): true if the bit was
- * already set, false if it was newly set.
+ * semantics of cmask_test_and_set(): true if the bit was already set, false if
+ * it was newly set.
  */
 static __always_inline bool
-ovrflw_test_and_set(struct bpf_cpumask *ovrflw, s32 cpu)
+ovrflw_test_and_set(struct scx_cmask __arena *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+	return cmask_test_and_set(cpu, ovrflw);
 }
 
 /*
- * Atomically remove @cpu from the global overflow cpumask. Mirrors the
- * return semantics of bpf_cpumask_test_and_clear_cpu(): true if the bit
- * was set before this call, false if it was already clear.
+ * Atomically remove @cpu from the global overflow cpumask. Mirrors the return
+ * semantics of cmask_test_and_clear(): true if the bit was set before this
+ * call, false if it was already clear.
  */
 static __always_inline bool
-ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
+ovrflw_test_and_clear(struct scx_cmask __arena *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+	return cmask_test_and_clear(cpu, ovrflw);
 }
 
 /* Load balancer helpers. */
@@ -857,21 +883,22 @@ ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
 int plan_x_cpdom_migration(void);
 
 /* Preemption management helpers. */
-void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now);
+void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+			  u64 now);
 
 /* Futex lock-related helpers. */
 
-void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc);
+void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx __arena __arg_arena *cpuc);
 
 /* Scheduler introspection-related helpers. */
 
 u64 get_est_stopping_clk(task_ctx *taskc, u64 now);
 void try_proc_introspec_cmd(struct task_struct *p, task_ctx *taskc);
-void reset_cpu_preemption_info(struct cpu_ctx *cpuc);
-int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+void reset_cpu_preemption_info(struct cpu_ctx __arena __arg_arena *cpuc);
+int shrink_boosted_slice_remote(struct cpu_ctx __arena __arg_arena *cpuc, u64 now);
 void shrink_boosted_slice_at_tick(struct task_struct *p,
-					 struct cpu_ctx *cpuc, u64 now);
-void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc);
+				  struct cpu_ctx __arena __arg_arena *cpuc, u64 now);
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc);
 void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 task_ctx *taskc,
 					 s32 preferred_cpu,
@@ -895,29 +922,24 @@ struct pick_ctx {
 	 */
 	s32 sync_waker_cpu;
 	/*
-	 * Additional output arguments for init_active_ovrflw_masks().
-	 */
-	struct bpf_cpumask *active; /* global active mask */
-	struct bpf_cpumask *ovrflw; /* global overflow mask */
-	/*
 	 * Additional output arguments for init_ao_masks().
 	 * Additional input arguments for find_sticky_cpu_and_cpdom().
 	 */
-	struct cpu_ctx *cpuc_cur;
-	struct bpf_cpumask *a_mask; /* task's active mask */
-	struct bpf_cpumask *o_mask; /* task's overflow mask */
+	struct cpu_ctx __arena *cpuc_cur;
+	struct scx_cmask __arena *a_mask; /* task's active mask */
+	struct scx_cmask __arena *o_mask; /* task's overflow mask */
 	/*
 	 * Additional input arguments for init_idle_i_mask().
 	 */
-	const struct cpumask *i_mask;
+	const struct scx_cmask __arena *i_mask;
 	/*
 	 * Additional input arguments for init_idle_ato_masks().
 	 * Additional input arguments for pick_idle_cpu_at_cpdom().
 	 */
-	struct bpf_cpumask *ia_mask;
-	struct bpf_cpumask *iat_mask;
-	struct bpf_cpumask *io_mask;
-	struct bpf_cpumask *temp_mask;
+	struct scx_cmask __arena *ia_mask;
+	struct scx_cmask __arena *iat_mask;
+	struct scx_cmask __arena *io_mask;
+	struct scx_cmask __arena *temp_mask;
 	/*
 	 * Flags.
 	 */
@@ -931,12 +953,20 @@ struct pick_ctx {
 };
 
 
-s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
+s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
+		struct cpu_ctx __arena __arg_arena *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
 
 bool consume_task(u64 cpdom_id);
 
 extern u64 __arena_global cur_logical_clk;
 u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
+
+static __always_inline struct scx_cmask __arena *get_cpdom_mask(s64 id)
+{
+	struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(id);
+
+	return cpdomc ? &cpdomc->online : NULL;
+}
 
 #endif /* __LAVD_H */
