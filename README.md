@@ -117,7 +117,7 @@ scx
 
 **Dependencies:**
 
-- `clang`: >=16 required, >=17 recommended
+- `clang`: >=18 required, >=22 for cid-form schedulers
 - `libbpf`: >=1.2.2 required, >=1.3 recommended
 - `bpftool`: Usually available in `linux-tools-common` or similar packages
 - `libelf`, `libz`, `libzstd`: For linking against libbpf
@@ -168,6 +168,7 @@ See: [CARGO BUILD](CARGO_BUILD.md)
 - `BPF_BASE_CFLAGS`: Override base compiler flags (non-include)
 - `BPF_EXTRA_CFLAGS_PRE_INCL`: Extra flags before include paths
 - `BPF_EXTRA_CFLAGS_POST_INCL`: Extra flags after include paths
+- `SCX_ALLOW_OLD_CLANG`: Build cid-form schedulers with clang older than 22 anyway, with a warning instead of a build failure
 
 **Examples:**
 

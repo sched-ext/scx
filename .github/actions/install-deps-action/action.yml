@@ -23,6 +23,13 @@ runs:
     - name: Install build dependencies
       run: |
         if sudo -n true 2>/dev/null; then
+          # The Ubuntu archive has no clang-22 yet. Take it from apt.llvm.org.
+          . /etc/os-release
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL --retry 3 https://apt.llvm.org/llvm-snapshot.gpg.key | \
+            sudo gpg --dearmor --yes -o /etc/apt/keyrings/apt.llvm.org.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.gpg] http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-22 main" | \
+            sudo tee /etc/apt/sources.list.d/apt.llvm.org.list >/dev/null
           read -ra pkgs <<< "$SCX_PACKAGES"
           ok=false
           for attempt in 1 2 3; do
@@ -38,5 +45,5 @@ runs:
             exit 1
           fi
         fi
-        echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
+        echo /usr/lib/llvm-22/bin >> $GITHUB_PATH
       shell: bash

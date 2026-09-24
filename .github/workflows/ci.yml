@@ -16,8 +16,8 @@ defaults:
 
 env:
   PS4: '+ $(date "+%H:%M:%S") '
-  BPF_CLANG: clang-19
-  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libbpf-dev libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold"
+  BPF_CLANG: clang-22
+  SCX_PACKAGES: "pkg-config lld clang clang-22 llvm-22 libbpf-dev libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
