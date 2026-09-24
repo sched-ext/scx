@@ -94,13 +94,14 @@ static void init_sys_stat_ctx(void)
 static void collect_sys_stat(void)
 {
 	struct sys_stat_ctx __arena *c = &ctx;
-	u64 cpdom_id, compute_wall = 1;
+	u64 compute_wall = 1;
+	u32 cpdom_id;
 	int cpu;
 
 	/*
 	 * Collect statistics for each compute domain.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		cpdomc->cur_util_wall_sum = 0;
@@ -575,7 +576,8 @@ static void calc_sys_stat(void)
 {
 	struct sys_stat_ctx __arena *c = &ctx;
 	static int __arena_global cnt = 0;
-	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr, cpdom_id;
+	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr;
+	u32 cpdom_id;
 
 	/*
 	 * Calculate the CPU utilization that includes everything
@@ -708,7 +710,7 @@ static void calc_sys_stat(void)
 	 * turbulent CPU load. When under the target, raise it so fewer
 	 * tasks qualify, pushing more to the turbulent DSQ.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		if (cpdomc->nr_turb_cpus == 0 || cpdomc->cap_sum_turb == 0) {
@@ -816,14 +818,14 @@ __weak
 s32 init_sys_stat(u64 now)
 {
 	struct bpf_timer *timer;
-	u64 cpdom_id;
+	u32 cpdom_id;
 	u32 key = 0;
 	int err;
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
 	sys_stat.slice_wall = slice_max_ns;
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		if (get_cpdom_ctx(cpdom_id)->nr_active_cpus)
 			sys_stat.nr_active_cpdoms++;
 	}

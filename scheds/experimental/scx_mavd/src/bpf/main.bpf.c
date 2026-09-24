@@ -319,7 +319,7 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	vlc = READ_ONCE(p->scx.dsq_vtime);
 	clc = READ_ONCE(cur_logical_clk);
 
-	bpf_for(i, 0, LAVD_MAX_RETRY) {
+	bpf_arena_for(i, 0, LAVD_MAX_RETRY) {
 		/*
 		 * The clock should not go backward, so do nothing.
 		 */
@@ -2308,7 +2308,7 @@ static s32 init_per_cpu_ctx(u64 now)
 {
 	const struct scx_cmask __arena *online_cpumask = online_cmask;
 	int cpu;
-	u64 cpdom_id;
+	u32 cpdom_id;
 	u32 kernel_cpu, sum_capacity = 0, big_capacity = 0;
 
 	/*
@@ -2372,7 +2372,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initialize compute domain id.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		if (!cpdomc->is_valid)

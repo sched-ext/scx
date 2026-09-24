@@ -21,11 +21,10 @@ extern const volatile u8	mig_delta_pct;
 extern const volatile u8	no_fast_lb;
 extern const volatile u64	lb_low_util_wall;
 
-u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
-					      u64 mig_delta_factor)
+static __always_inline u64 calc_mig_delta(u64 avg_load_invr, int nz_qlen,
+					  u64 mig_delta_factor)
 {
 	/*
-	 * Note that added "noinline" to make the verifier happy.
 	 * When mig_delta_factor > 0, the user specified a fixed
 	 * migration delta percentage; otherwise use the dynamic
 	 * shift-based heuristic.
@@ -139,7 +138,7 @@ reset_role:
 __weak
 int plan_x_cpdom_migration(void)
 {
-	u64 cpdom_id;
+	u32 cpdom_id;
 	u32 nr_stealee = 0;
 	u64 max_avg_util_wall = 0;
 	u64 util;
@@ -151,7 +150,7 @@ int plan_x_cpdom_migration(void)
 	/*
 	 * Calculate load for each active compute domain.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		if (!cpdomc->nr_active_cpus) {
@@ -204,7 +203,7 @@ int plan_x_cpdom_migration(void)
 	if (mig_delta_pct > 0)
 		mig_delta_factor = (mig_delta_pct << LAVD_SHIFT) / 100;
 
-	bpf_for(cpdom_id, 0, nr_cpdoms)
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms)
 		nr_stealee += classify_cpdom(get_cpdom_ctx(cpdom_id), total_load_invr,
 					     total_cap_sum, nz_qlen, mig_delta_factor);
 
@@ -217,7 +216,7 @@ int plan_x_cpdom_migration(void)
 
 reset_and_skip_lb:
 	if (sys_stat.nr_stealee > 0) {
-		bpf_for(cpdom_id, 0, nr_cpdoms) {
+		bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 			struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);

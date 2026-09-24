@@ -259,7 +259,7 @@ static int calc_nr_active_cpus(void)
 
 		const volatile u16 __arena *cpu_order = get_cpu_order();
 		sum_eff_cap = 0;
-		bpf_for(i, 0, nr_cpu_ids) {
+		bpf_arena_for(i, 0, nr_cpu_ids) {
 			cpu = cpu_order[i];
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
@@ -277,12 +277,12 @@ static int calc_nr_active_cpus(void)
 		 * capacity. Then, choose the number of primary CPUs for the
 		 * PCO state.
 		 */
-		bpf_for(i, 0, nr_pco_states) {
+		bpf_arena_for(i, 0, nr_pco_states) {
 			if (pco_bounds[i] >= req_cap) {
 				const volatile u16 __arena *cpu_order = pco_table[i];
 				sum_eff_cap = 0;
 
-				bpf_for(j, 0, pco_nr_primary[i]) {
+				bpf_arena_for(j, 0, pco_nr_primary[i]) {
 					cpu = cpu_order[j];
 					cpuc = get_cpu_ctx_id(cpu);
 					if (!cpuc || !cpuc->is_online)
@@ -312,7 +312,7 @@ int do_core_compaction(void)
 	struct scx_cmask __arena *ovrflw = ovrflw_cpumask;
 	const volatile u16 __arena *cpu_order;
 	int nr_active, cpu, i;
-	u64 cpdom_id;
+	u32 cpdom_id;
 
 	/*
 	 * Update the PCO index that meets the required compute capacity
@@ -326,7 +326,7 @@ int do_core_compaction(void)
 	/*
 	 * Assign active and overflow cores.
 	 */
-	bpf_for(i, 0, nr_cpu_ids) {
+	bpf_arena_for(i, 0, nr_cpu_ids) {
 		struct cpu_ctx __arena *cpuc;
 
 		/*
@@ -415,7 +415,7 @@ int do_core_compaction(void)
 	/*
 	 * Update nr_active_cpus and cap_sum_active_cpus.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
@@ -655,7 +655,7 @@ int reinit_active_cpumask_for_performance(void)
 	struct cpu_ctx __arena *cpuc;
 	struct scx_cmask __arena *active, *ovrflw;
 	const struct scx_cmask __arena *online_cpumask;
-	u64 cpdom_id;
+	u32 cpdom_id;
 	u32 nr_active_cpdoms = 0;
 	int cpu;
 
@@ -727,7 +727,7 @@ int reinit_active_cpumask_for_performance(void)
 	/*
 	 * Update nr_active_cpus, cap_sum_active_cpus, and pco_idx.
 	 */
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
+	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
 		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);

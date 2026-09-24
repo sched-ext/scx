@@ -159,7 +159,7 @@ s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
 	/*
 	 * Find a proper CPU in the preferred CPU order.
 	 */
-	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
+	bpf_arena_for(i, sys_stat.nr_active, nr_cpu_ids) {
 		cpu = cpu_order[i];
 		if (cmask_test(cpu, online_src_mask))
 			return cpu;
@@ -209,7 +209,7 @@ static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 	cmask_and(online_src_mask, &ctx->taskc->allowed, online_cmask);
 
 	cpu_order = get_cpu_order();
-	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
+	bpf_arena_for(i, sys_stat.nr_active, nr_cpu_ids) {
 		cpu = cpu_order[i];
 		/* Cheaper cpumask bit test first; LLC lookup is multi-load. */
 		if (!cmask_test(cpu, online_src_mask))
@@ -587,11 +587,11 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 	 * than task stealing because DSQs are mostly empty (i.e., it is hard
 	 * to steal from a DSQ).
 	 */
-	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
+	bpf_arena_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = cpdc->nr_neighbors[i];
 		if (nr_nbr == 0)
 			break;
-		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
+		bpf_arena_for(j, 0, LAVD_CPDOM_MAX_NR) {
 			if (j >= nr_nbr)
 				break;
 			mig_cpdom = get_neighbor_id(cpdc, i, j);

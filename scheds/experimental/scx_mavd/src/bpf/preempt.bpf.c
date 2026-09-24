@@ -138,7 +138,7 @@ static struct cpu_ctx __arena *find_victim_cpu(const struct scx_cmask __arena *c
 	 * this if the traversal cost becomes problematic.
 	 */
 	nr_cpus = cmask_weight(cpumask);
-	bpf_for(i, 0, nr_cpus) {
+	bpf_arena_for(i, 0, nr_cpus) {
 
 		/*
 		 * Decide a CPU ID to examine.
