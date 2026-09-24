@@ -751,15 +751,16 @@ diff -r --no-dereference /tmp/lavd/scheds/rust/scx_lavd \
     scheds/experimental/scx_mavd
 ```
 
-Beyond the conversion itself the differences are the crate name, description
-and `publish = false` in Cargo.toml, the README, build.rs naming the shared
-library sources by relative path instead of through the src/bpf/lib symlink,
-adding cid.bpf.c and dropping the library's cpumask.bpf.c, whose helpers
-nothing in the scheduler references, LICENSE as a regular file, the
-scheduler name in main.rs, the ops name in main.bpf.c and the introspection
-comm filter in introspec.bpf.c, cpu_order.rs without the sibling field and
-table that the kernel's cid topology replaces, this file and tools/.
-Everything else in that diff must be explained by a section of this file.
+Beyond the conversion itself the differences are the crate name,
+description, `publish = false` and the veristat opt-out in Cargo.toml, the
+README, build.rs naming the shared library sources by relative path instead
+of through the src/bpf/lib symlink, adding cid.bpf.c and dropping the
+library's cpumask.bpf.c, whose helpers nothing in the scheduler references,
+LICENSE as a regular file, the scheduler name in main.rs, the ops name in
+main.bpf.c and the introspection comm filter in introspec.bpf.c,
+cpu_order.rs without the sibling field and table that the kernel's cid
+topology replaces, this file and tools/. Everything else in that diff must
+be explained by a section of this file.
 
 ## Validation obligations
 
