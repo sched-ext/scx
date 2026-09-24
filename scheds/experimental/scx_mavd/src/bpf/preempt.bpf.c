@@ -151,11 +151,6 @@ static struct cpu_ctx __arena *find_victim_cpu(const struct scx_cmask __arena *c
 		 * Check whether that CPU is qualified to run @p.
 		 */
 		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
-			goto null_out;
-		}
-
 		if (!cpuc->is_online)
 			continue;
 
@@ -354,8 +349,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 u64 cpdom_id)
 {
 	struct preemption_info prm_t, prm_c;
-	struct scx_cmask __arena *cd_cpumask, *cpumask;
-	struct cpdom_ctx __arena *cpdomc;
+	struct scx_cmask __arena *cpumask;
 	struct cpu_ctx __arena *cpuc_victim;
 	struct cpu_ctx __arena *cpuc_cur = NULL;
 	u64 now, duration_wall, new_slice_wall = 0;
@@ -414,16 +408,9 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * Prepare a cpumak so we find a victim in @p's compute domain.
 	 */
 	cpuc_cur = get_cpu_ctx();
-	if (!cpuc_cur)
-		return;
-
 	cpumask = cpuc_cur->temp_mask;
-	cpdomc = get_cpdom_ctx(cpdom_id);
-	cd_cpumask = get_cpdom_mask(cpdom_id);
-	if (!cpdomc || !cd_cpumask || !cpumask)
-		return;
 
-	cmask_and(cpumask, cd_cpumask, &taskc->allowed);
+	cmask_and(cpumask, get_cpdom_mask(cpdom_id), &taskc->allowed);
 
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
@@ -437,8 +424,9 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 kick_out:
 		ask_cpu_yield_after(cpuc_victim, new_slice_wall);
 
-		if (cpuc_cur || (cpuc_cur = get_cpu_ctx()))
-			cpuc_cur->nr_preempt++;
+		if (!cpuc_cur)
+			cpuc_cur = get_cpu_ctx();
+		cpuc_cur->nr_preempt++;
 	}
 }
 

@@ -361,11 +361,8 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx __arena *c
 extern struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern int __arena_global		nr_cpdoms;
 
-/* queued_in_cpdom_id uses LAVD_CPDOM_MAX_NR for no domain and must get NULL */
 static __always_inline struct cpdom_ctx __arena *get_cpdom_ctx(s64 id)
 {
-	if (id < 0 || id >= LAVD_CPDOM_MAX_NR)
-		return NULL;
 	return &cpdom_ctxs[id];
 }
 
@@ -754,8 +751,7 @@ static __always_inline bool is_steady_cpu(struct cpu_ctx __arena *cpuc)
 static __always_inline bool
 can_consume_steady_dsq(struct cpdom_ctx __arena *cpdomc)
 {
-	struct cpu_ctx __arena *cpuc = get_cpu_ctx();
-	bool turbulent = cpuc && is_turbulent_cpu(cpuc);
+	bool turbulent = is_turbulent_cpu(get_cpu_ctx());
 
 	/*
 	 * Whether the current CPU should consume or steal from a cpdom's
@@ -804,9 +800,6 @@ bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 {
 	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 	u64 heat, budget, est, wait;
-
-	if (!cpuc)
-		return false;
 
 	heat = task_cpu_warmth(taskc, cpu, now);
 	budget = (warm_cpu_ns * (LAVD_SCALE + heat)) >> LAVD_SHIFT;
@@ -970,9 +963,7 @@ u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
 
 static __always_inline struct scx_cmask __arena *get_cpdom_mask(s64 id)
 {
-	struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(id);
-
-	return cpdomc ? &cpdomc->online : NULL;
+	return &get_cpdom_ctx(id)->online;
 }
 
 #endif /* __LAVD_H */

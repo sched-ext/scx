@@ -104,9 +104,6 @@ void update_effective_capacity(struct cpu_ctx __arena __arg_arena *cpuc)
 	u32 mfo;
 	int cpu;
 
-	/* Sanity check */
-	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cids)
-		return;
 	cpu = cpuc->kernel_cpu;
 
 	/*
@@ -263,13 +260,7 @@ static int calc_nr_active_cpus(void)
 		const volatile u16 __arena *cpu_order = get_cpu_order();
 		sum_eff_cap = 0;
 		bpf_for(i, 0, nr_cpu_ids) {
-			if (i >= LAVD_CPU_ID_MAX)
-				break;
-
 			cpu = cpu_order[i];
-			if (cpu >= LAVD_CPU_ID_MAX)
-				break;
-
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
 				continue;
@@ -287,21 +278,12 @@ static int calc_nr_active_cpus(void)
 		 * PCO state.
 		 */
 		bpf_for(i, 0, nr_pco_states) {
-			if (i >= LAVD_PCO_STATE_MAX)
-				break;
-
 			if (pco_bounds[i] >= req_cap) {
 				const volatile u16 __arena *cpu_order = pco_table[i];
 				sum_eff_cap = 0;
 
 				bpf_for(j, 0, pco_nr_primary[i]) {
-					if (j >= LAVD_CPU_ID_MAX)
-						break;
-
 					cpu = cpu_order[j];
-					if (cpu >= LAVD_CPU_ID_MAX)
-						break;
-
 					cpuc = get_cpu_ctx_id(cpu);
 					if (!cpuc || !cpuc->is_online)
 						continue;
@@ -326,23 +308,11 @@ __weak
 int do_core_compaction(void)
 {
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
-	struct scx_cmask __arena *active, *ovrflw;
+	struct scx_cmask __arena *active = active_cpumask;
+	struct scx_cmask __arena *ovrflw = ovrflw_cpumask;
 	const volatile u16 __arena *cpu_order;
-	struct cpdom_ctx __arena *cpdomc;
 	int nr_active, cpu, i;
 	u64 cpdom_id;
-
-	bpf_rcu_read_lock();
-
-	/*
-	 * Prepare cpumasks.
-	 */
-	active = active_cpumask;
-	ovrflw = ovrflw_cpumask;
-	if (!active || !ovrflw) {
-		scx_bpf_error("Failed to prepare cpumasks.");
-		goto unlock_out;
-	}
 
 	/*
 	 * Update the PCO index that meets the required compute capacity
@@ -359,9 +329,6 @@ int do_core_compaction(void)
 	bpf_for(i, 0, nr_cpu_ids) {
 		struct cpu_ctx __arena *cpuc;
 
-		if (i >= LAVD_CPU_ID_MAX)
-			break;
-
 		/*
 		 * Skip offline cpu
 		 */
@@ -377,6 +344,8 @@ int do_core_compaction(void)
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
 		if (i < nr_active) {
+			struct cpdom_ctx __arena *cpdomc;
+
 			cmask_set(cpu, active);
 			ovrflw_test_and_clear(ovrflw, cpu);
 
@@ -385,10 +354,8 @@ int do_core_compaction(void)
 			 * increase the number of active CPUs.
 			 */
 			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-			if (cpdomc) {
-				cpdomc->cap_sum_temp += cpuc->effective_capacity;
-				cpdomc->nr_acpus_temp++;
-			}
+			cpdomc->cap_sum_temp += cpuc->effective_capacity;
+			cpdomc->nr_acpus_temp++;
 
 		} else {
 			cmask_clear(cpu, active);
@@ -449,12 +416,8 @@ int do_core_compaction(void)
 	 * Update nr_active_cpus and cap_sum_active_cpus.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
+		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
-		cpdomc = get_cpdom_ctx(cpdom_id);
-		if (!cpdomc)
-			continue;
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
 		WRITE_ONCE(cpdomc->cap_sum_active_cpus, cpdomc->cap_sum_temp);
@@ -464,9 +427,6 @@ int do_core_compaction(void)
 			nr_active_cpdoms++;
 	}
 	sys_stat.nr_active_cpdoms = nr_active_cpdoms;
-
-unlock_out:
-	bpf_rcu_read_unlock();
 
 	return 0;
 }
@@ -695,24 +655,17 @@ int reinit_active_cpumask_for_performance(void)
 	struct cpu_ctx __arena *cpuc;
 	struct scx_cmask __arena *active, *ovrflw;
 	const struct scx_cmask __arena *online_cpumask;
-	struct cpdom_ctx __arena *cpdomc;
 	u64 cpdom_id;
 	u32 nr_active_cpdoms = 0;
-	int cpu, err = 0;
+	int cpu;
 
 	barrier();
-	bpf_rcu_read_lock();
 
 	/*
 	 * Prepare cpumasks.
 	 */
 	active  = active_cpumask;
 	ovrflw  = ovrflw_cpumask;
-	if (!active || !ovrflw) {
-		scx_bpf_error("Failed to prepare cpumasks.");
-		err = -ENOMEM;
-		goto unlock_out;
-	}
 
 
 	/*
@@ -724,6 +677,8 @@ int reinit_active_cpumask_for_performance(void)
 	 */
 	if (have_little_core) {
 		bpf_arena_for(cpu, 0, nr_cids) {
+			struct cpdom_ctx __arena *cpdomc;
+
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc)
 				continue;
@@ -743,10 +698,8 @@ int reinit_active_cpumask_for_performance(void)
 			scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 
 			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-			if (cpdomc) {
-				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->effective_capacity;
-			}
+			cpdomc->nr_acpus_temp++;
+			cpdomc->cap_sum_temp += cpuc->effective_capacity;
 		}
 	} else {
 		online_cpumask = online_cmask;
@@ -756,6 +709,8 @@ int reinit_active_cpumask_for_performance(void)
 		cmask_zero(ovrflw);
 
 		bpf_arena_for(cpu, 0, nr_cids) {
+			struct cpdom_ctx __arena *cpdomc;
+
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
 				continue;
@@ -763,10 +718,8 @@ int reinit_active_cpumask_for_performance(void)
 			scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 
 			cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-			if (cpdomc) {
-				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->effective_capacity;
-			}
+			cpdomc->nr_acpus_temp++;
+			cpdomc->cap_sum_temp += cpuc->effective_capacity;
 		}
 
 	}
@@ -775,10 +728,8 @@ int reinit_active_cpumask_for_performance(void)
 	 * Update nr_active_cpus, cap_sum_active_cpus, and pco_idx.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
+		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
-		cpdomc = get_cpdom_ctx(cpdom_id);
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
 		WRITE_ONCE(cpdomc->cap_sum_active_cpus, cpdomc->cap_sum_temp);
@@ -791,9 +742,7 @@ int reinit_active_cpumask_for_performance(void)
 	sys_stat.nr_active_cpdoms = nr_active_cpdoms;
 	pco_idx = nr_pco_states - 1;
 
-unlock_out:
-	bpf_rcu_read_unlock();
-	return err;
+	return 0;
 }
 
 /*

@@ -269,12 +269,8 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 	bool is_affinitized, dom_pinned, dom_pinned_settled;
 	bool on_big = false, on_little = false;
 	s32 first_cpdom_id = -ENOENT;
-	struct cpu_ctx __arena *cpuc;
 	u32 weight;
 	int cpu;
-
-	if (!cpumask)
-		return;
 
 	weight = cmask_weight(cpumask);
 	is_affinitized = weight != nr_cids;
@@ -291,11 +287,7 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 	}
 
 	cmask_for_each(cpu, cpumask) {
-		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to look up cpu_ctx for cid %d", cpu);
-			return;
-		}
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 
 		if (cpuc->big_core)
 			on_big = true;
@@ -456,9 +448,8 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena 
 		return cpu_to_dsq(cpuc->cpu_id);
 
 	cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-	if (cpdomc &&
-	    preemption_vulnerability(taskc->normalized_lat_cri,
-				    taskc->util_est) >= cpdomc->vuln_thresh)
+	if (preemption_vulnerability(taskc->normalized_lat_cri,
+				     taskc->util_est) >= cpdomc->vuln_thresh)
 		return cpdom_to_dsq(cpuc->cpdom_id);
 
 	return cpdom_to_turb_dsq(cpuc->cpdom_id);

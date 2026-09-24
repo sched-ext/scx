@@ -54,9 +54,6 @@ classify_cpdom(struct cpdom_ctx __arena __arg_arena *cpdomc, u64 total_load_invr
 	u64 stealer_threshold = 0;
 	u64 stealee_threshold = 0;
 
-	if (!cpdomc)
-		return 0;
-
 	if (no_fast_lb && sys_stat.nr_active_cpdoms) {
 		u64 avg = total_load_invr / sys_stat.nr_active_cpdoms;
 		x_mig_delta = calc_mig_delta(avg, nz_qlen, mig_delta_factor);
@@ -142,7 +139,6 @@ reset_role:
 __weak
 int plan_x_cpdom_migration(void)
 {
-	struct cpdom_ctx __arena *cpdomc;
 	u64 cpdom_id;
 	u32 nr_stealee = 0;
 	u64 max_avg_util_wall = 0;
@@ -156,10 +152,8 @@ int plan_x_cpdom_migration(void)
 	 * Calculate load for each active compute domain.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
+		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
-		cpdomc = get_cpdom_ctx(cpdom_id);
 		if (!cpdomc->nr_active_cpus) {
 			if (cpdomc->cur_util_wall_sum > 0)
 				overflow_running = true;
@@ -210,16 +204,9 @@ int plan_x_cpdom_migration(void)
 	if (mig_delta_pct > 0)
 		mig_delta_factor = (mig_delta_pct << LAVD_SHIFT) / 100;
 
-	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
-
-		nr_stealee += classify_cpdom(cpdomc, total_load_invr,
-					     total_cap_sum, nz_qlen,
-					     mig_delta_factor);
-	}
+	bpf_for(cpdom_id, 0, nr_cpdoms)
+		nr_stealee += classify_cpdom(get_cpdom_ctx(cpdom_id), total_load_invr,
+					     total_cap_sum, nz_qlen, mig_delta_factor);
 
 	if (nr_stealee == 0 && !overflow_running)
 		goto reset_and_skip_lb;
@@ -231,10 +218,8 @@ int plan_x_cpdom_migration(void)
 reset_and_skip_lb:
 	if (sys_stat.nr_stealee > 0) {
 		bpf_for(cpdom_id, 0, nr_cpdoms) {
-			if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-				break;
+			struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
-			cpdomc = get_cpdom_ctx(cpdom_id);
 			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
@@ -284,11 +269,6 @@ pick_most_loaded_dsq(struct cpdom_ctx __arena __arg_arena *cpdomc)
 	u64 pick_dsq_id = -ENOENT;
 	u64 highest_load = 0;
 
-	if (!cpdomc) {
-		scx_bpf_error("Invalid cpdom context");
-		return -ENOENT;
-	}
-
 	/*
 	 * Pick the (per-CPU or per-domain) DSQ in this compute domain
 	 * with the highest RAVG-weighted queued load.
@@ -312,13 +292,11 @@ pick_most_loaded_dsq(struct cpdom_ctx __arena __arg_arena *cpdomc)
 		cmask_for_each(cpu, &cpdomc->cpus) {
 			u64 load;
 
-			if (no_fast_lb) {
+			if (no_fast_lb)
 				load = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
 				       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-			} else {
-				struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
-				load = cpuc ? READ_ONCE(cpuc->qload_invr) : 0;
-			}
+			else
+				load = READ_ONCE(get_cpu_ctx_id(cpu)->qload_invr);
 			if (load > highest_load) {
 				highest_load = load;
 				pick_cpu = cpu;
@@ -351,7 +329,7 @@ static bool try_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 	 * Traverse neighbor compute domains in distance order.
 	 */
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
-		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		nr_nbr = cpdomc->nr_neighbors[i];
 		if (nr_nbr == 0)
 			break;
 
@@ -364,14 +342,7 @@ static bool try_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 				break;
 
 			cpdom_id = get_neighbor_id(cpdomc, i, j);
-			if (cpdom_id < 0)
-				continue;
-
 			cpdomc_pick = get_cpdom_ctx(cpdom_id);
-			if (!cpdomc_pick) {
-				scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
-				return false;
-			}
 
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
@@ -451,7 +422,7 @@ static bool force_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 	 * Traverse neighbor compute domains in distance order.
 	 */
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
-		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		nr_nbr = cpdomc->nr_neighbors[i];
 		if (nr_nbr == 0)
 			break;
 
@@ -464,14 +435,7 @@ static bool force_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 				break;
 
 			cpdom_id = get_neighbor_id(cpdomc, i, j);
-			if (cpdom_id < 0)
-				continue;
-
 			cpdomc_pick = get_cpdom_ctx(cpdom_id);
-			if (!cpdomc_pick) {
-				scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
-				return false;
-			}
 
 			if (!cpdomc_pick->is_valid)
 				continue;
@@ -513,24 +477,12 @@ static bool force_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 __hidden
 bool consume_task(u64 cpdom_id)
 {
-	struct cpdom_ctx __arena *cpdomc;
-	struct cpu_ctx __arena *cpuc;
+	struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 	u64 cpu_dsq_id, cpdom_dsq_id, cpdom_turb_dsq_id;
 	struct dsq_entry dsqs[3];
 	int i;
 
-	cpdomc = get_cpdom_ctx(cpdom_id);
-	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
-		return false;
-	}
-
-	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		return false;
-	}
-
-	cpu_dsq_id        = cpu_to_dsq(cpuc->cpu_id);
+	cpu_dsq_id        = cpu_to_dsq(get_cpu_ctx()->cpu_id);
 	cpdom_dsq_id      = cpdom_to_dsq(cpdom_id);
 	cpdom_turb_dsq_id = cpdom_to_turb_dsq(cpdom_id);
 

@@ -32,39 +32,32 @@ struct sticky_ctx {
 };
 
 static __always_inline
-bool init_idle_i_mask(struct pick_ctx *ctx, const struct scx_cmask __arena *idle)
+void init_idle_i_mask(struct pick_ctx *ctx, const struct scx_cmask __arena *idle)
 {
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		ctx->i_mask = idle;
 	else {
 		struct scx_cmask __arena *_i_mask = ctx->cpuc_cur->i_mask;
-		if (!_i_mask)
-			return false;
 		cmask_and(_i_mask, &ctx->taskc->allowed, idle);
 		ctx->i_mask = _i_mask;
 	}
 	ctx->i_empty = cmask_empty(ctx->i_mask);
-	return true;
 }
 
 static __always_inline
-bool init_ao_masks(struct pick_ctx *ctx)
+void init_ao_masks(struct pick_ctx *ctx)
 {
 	ctx->cpuc_cur = get_cpu_ctx();
-	if (!ctx->cpuc_cur)
-		return false;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
 		ctx->a_mask = active_cpumask;
 		ctx->o_mask = ovrflw_cpumask;
 		ctx->a_empty = ctx->o_empty = false;
-		return true;
+		return;
 	}
 
 	ctx->a_mask = ctx->cpuc_cur->a_mask;
 	ctx->o_mask = ctx->cpuc_cur->o_mask;
-	if (!ctx->a_mask || !ctx->o_mask)
-		return false;
 
 	ctx->a_empty = !cmask_and(ctx->a_mask, &ctx->taskc->allowed, active_cpumask);
 	ctx->o_empty = !cmask_and(ctx->o_mask, &ctx->taskc->allowed, ovrflw_cpumask);
@@ -72,17 +65,12 @@ bool init_ao_masks(struct pick_ctx *ctx)
 		ctx->a_mask = NULL;
 	if (ctx->o_empty)
 		ctx->o_mask = NULL;
-	return true;
 }
 
 static __always_inline
 bool is_preemption_vulnerable(struct pick_ctx *ctx)
 {
-	struct cpdom_ctx __arena *cpdc;
-
-	cpdc = get_cpdom_ctx(ctx->cpuc_cur->cpdom_id);
-	if (!cpdc)
-		return false;
+	struct cpdom_ctx __arena *cpdc = get_cpdom_ctx(ctx->cpuc_cur->cpdom_id);
 
 	return preemption_vulnerability(ctx->taskc->normalized_lat_cri,
 				       ctx->taskc->util_est) >= cpdc->vuln_thresh;
@@ -94,14 +82,10 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
  * the active set, and turbulent CPUs become the overflow set.
  */
 static __always_inline
-bool repartition_masks_for_latency(struct pick_ctx *ctx)
+void repartition_masks_for_latency(struct pick_ctx *ctx)
 {
 	struct scx_cmask __arena *steady_set = ctx->cpuc_cur->a_mask;
 	struct scx_cmask __arena *turb_set = ctx->cpuc_cur->o_mask;
-	struct scx_cmask __arena *steady = steady_cpumask;
-
-	if (!steady_set || !turb_set || !steady)
-		return false;
 
 	/*
 	 * Start from the unfiltered active/overflow masks and apply
@@ -119,30 +103,26 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 
 	ctx->a_mask = steady_set;
 	ctx->o_mask = turb_set;
-	ctx->o_empty = !cmask_andnot(turb_set, steady_set, steady);
-	ctx->a_empty = !cmask_and(steady_set, steady_set, steady);
+	ctx->o_empty = !cmask_andnot(turb_set, steady_set, steady_cpumask);
+	ctx->a_empty = !cmask_and(steady_set, steady_set, steady_cpumask);
 	if (ctx->a_empty)
 		ctx->a_mask = NULL;
 	if (ctx->o_empty)
 		ctx->o_mask = NULL;
-
-	return true;
 }
 
 static __always_inline
-bool init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *idle_mask)
+void init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *idle_mask)
 {
 	/*
 	 * temp_mask is also used by find_cpu_in() earlier in pick_idle_cpu(),
-	 * but find_cpu_in()'s caller goes straight to unlock_out, so the
+	 * but find_cpu_in()'s caller goes straight to the exit, so the
 	 * scratch is free by the time we reach here.
 	 */
 	ctx->ia_mask = ctx->cpuc_cur->ia_mask;
 	ctx->io_mask = ctx->cpuc_cur->io_mask;
 	ctx->iat_mask = ctx->cpuc_cur->iat_mask;
 	ctx->temp_mask = ctx->cpuc_cur->temp_mask;
-	if (!ctx->ia_mask || !ctx->io_mask || !ctx->iat_mask || !ctx->temp_mask)
-		return false;
 
 	if (ctx->a_mask)
 		ctx->ia_empty = !cmask_and(ctx->ia_mask, idle_mask, ctx->a_mask);
@@ -154,11 +134,10 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *i
 	else
 		ctx->io_empty = true;
 
-	if (ctx->ia_empty || !have_turbo_core || !turbo_cpumask)
+	if (ctx->ia_empty || !have_turbo_core)
 		ctx->iat_empty = true;
-	else if (turbo_cpumask)
+	else
 		ctx->iat_empty = !cmask_and(ctx->iat_mask, ctx->ia_mask, turbo_cpumask);
-	return true;
 }
 
 __hidden
@@ -167,17 +146,13 @@ s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
 {
 	const volatile u16 __arena *cpu_order = get_cpu_order();
 	const struct scx_cmask __arena *online_mask;
-	struct scx_cmask __arena *online_src_mask;
+	struct scx_cmask __arena *online_src_mask = cpuc_cur->temp_mask;
 	s32 cpu;
 	unsigned int i;
 
 	/*
 	 * online_src_mask = src_mask ∩ online_mask
 	 */
-	online_src_mask = cpuc_cur->temp_mask;
-	if (!online_src_mask)
-		return -ENOENT;
-
 	online_mask = online_cmask;
 	cmask_and(online_src_mask, src_mask, online_mask);
 
@@ -185,9 +160,6 @@ s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
 	 * Find a proper CPU in the preferred CPU order.
 	 */
 	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
-		if (i >= LAVD_CPU_ID_MAX)
-			break;
-
 		cpu = cpu_order[i];
 		if (cmask_test(cpu, online_src_mask))
 			return cpu;
@@ -207,7 +179,7 @@ s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
 static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 {
 	const volatile u16 __arena *cpu_order;
-	struct scx_cmask __arena *online_src_mask, *ovrflw;
+	struct scx_cmask __arena *online_src_mask;
 	s32 cpu, prev_llc;
 	unsigned int i;
 
@@ -228,9 +200,6 @@ static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 		return -ENOENT;
 
 	online_src_mask = ctx->cpuc_cur->temp_mask;
-	ovrflw = ovrflw_cpumask;
-	if (!online_src_mask || !ovrflw)
-		return -ENOENT;
 
 	/*
 	 * Candidate pool = the task's allowed mask, online only. Active is
@@ -241,14 +210,12 @@ static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 
 	cpu_order = get_cpu_order();
 	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
-		if (i >= LAVD_CPU_ID_MAX)
-			break;
 		cpu = cpu_order[i];
 		/* Cheaper cpumask bit test first; LLC lookup is multi-load. */
 		if (!cmask_test(cpu, online_src_mask))
 			continue;
 		/* Skip CPUs already in overflow. */
-		if (cmask_test(cpu, ovrflw))
+		if (cmask_test(cpu, ovrflw_cpumask))
 			continue;
 		if (topo_cpu_to_llc_id(scx_bpf_cid_to_cpu(cpu)) != prev_llc)
 			continue;
@@ -265,13 +232,11 @@ __noinline
 s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx __arg_nonnull, s64 cpdom, u64 scope,
 			   bool *is_idle __arg_nonnull)
 {
-	struct scx_cmask __arena *cpd_mask;
-	struct cpdom_ctx __arena *cpdc;
+	struct scx_cmask __arena *cpd_mask = get_cpdom_mask(cpdom);
+	struct cpdom_ctx __arena *cpdc = get_cpdom_ctx(cpdom);
 	s32 cpu;
 
-	cpd_mask = get_cpdom_mask(cpdom);
-	cpdc = get_cpdom_ctx(cpdom);
-	if (!cpdc || !cpd_mask || !cpdc->is_valid)
+	if (!cpdc->is_valid)
 		return -ENOENT;
 
 	/*
@@ -356,25 +321,22 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 		return -ENOENT;
 
 	cpd_mask = get_cpdom_mask(sticky_cpdom);
-	if (cpd_mask) {
-		if (ctx->a_mask) {
-			cpu = cmask_any_and_distribute(cpd_mask, ctx->a_mask);
-			if (cpu < nr_cids)
-					return cpu;
-		}
-
-		if (ctx->o_mask) {
-			cpu = cmask_any_and_distribute(cpd_mask, ctx->o_mask);
-			if (cpu < nr_cids)
-				return cpu;
-		}
-
-		/*
-		 * We should not reach here since a sticky compute
-		 * domain should have CPU(s) where a task can run on.
-		 */
+	if (ctx->a_mask) {
+		cpu = cmask_any_and_distribute(cpd_mask, ctx->a_mask);
+		if (cpu < nr_cids)
+			return cpu;
 	}
 
+	if (ctx->o_mask) {
+		cpu = cmask_any_and_distribute(cpd_mask, ctx->o_mask);
+		if (cpu < nr_cids)
+			return cpu;
+	}
+
+	/*
+	 * We should not reach here since a sticky compute
+	 * domain should have CPU(s) where a task can run on.
+	 */
 	return -ENOENT;
 }
 
@@ -409,8 +371,6 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 
 	cpd_mask = get_cpdom_mask(cpdom);
 	cpdc = get_cpdom_ctx(cpdom);
-	if (!cpd_mask || !cpdc)
-		return false;
 
 	a_mask = ctx->a_mask;
 	if (a_mask && cpdc->nr_active_cpus && cmask_intersects(a_mask, cpd_mask))
@@ -430,7 +390,7 @@ bool test_cpu_stickable(struct pick_ctx *ctx, struct sticky_ctx *sctx,
 	if (can_run_on_cpu(ctx, cpu)) {
 		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 
-		if (!cpuc || sctx->i_m >= 2 || sctx->i_nm >= 2)
+		if (sctx->i_m >= 2 || sctx->i_nm >= 2)
 			return false;
 
 		if (is_task_big == cpuc->big_core)
@@ -497,7 +457,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 		d0 = get_cpdom_ctx(p0->cpdom_id);
 		d1 = get_cpdom_ctx(p1->cpdom_id);
 
-		if ((p0 != p1) && (d0 && d1) && (d0->load_invr > d1->load_invr)) {
+		if ((p0 != p1) && (d0->load_invr > d1->load_invr)) {
 			/*
 			 * When a waker's compute domain is chosen, let's just
 			 * stick to the waker's domain. Let's not decide to
@@ -533,15 +493,13 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 		    can_run_on_domain(ctx, p1->cpdom_id)) {
 			d0 = get_cpdom_ctx(p0->cpdom_id);
 			d1 = get_cpdom_ctx(p1->cpdom_id);
-			if (d0 && d1) {
-				if (d0->load_invr > d1->load_invr) {
-					*sticky_cpdom = p1->cpdom_id;
-					return -ENOENT;
-				}
-				else {
-					*sticky_cpdom = p0->cpdom_id;
-					return -ENOENT;
-				}
+			if (d0->load_invr > d1->load_invr) {
+				*sticky_cpdom = p1->cpdom_id;
+				return -ENOENT;
+			}
+			else {
+				*sticky_cpdom = p0->cpdom_id;
+				return -ENOENT;
 			}
 		} else if (can_run_on_domain(ctx, p0->cpdom_id)) {
 			*sticky_cpdom = p0->cpdom_id;
@@ -560,7 +518,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 	 * migration.
 	 */
 	cpuc = get_cpu_ctx_id(ctx->prev_cpu);
-	if (cpuc && can_run_on_domain(ctx, cpuc->cpdom_id)) {
+	if (can_run_on_domain(ctx, cpuc->cpdom_id)) {
 		*sticky_cpdom = cpuc->cpdom_id;
 		return -ENOENT;
 	}
@@ -568,7 +526,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 	if (ctx->sync_waker_cpu < 0)
 		goto err_out;
 	cpuc = get_cpu_ctx_id(ctx->sync_waker_cpu);
-	if (cpuc && can_run_on_domain(ctx, cpuc->cpdom_id)) {
+	if (can_run_on_domain(ctx, cpuc->cpdom_id)) {
 		*sticky_cpdom = cpuc->cpdom_id;
 		return -ENOENT;
 	}
@@ -585,7 +543,7 @@ err_out:
 static
 bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 {
-	struct cpu_ctx __arena *cpuc_waker, *cpuc_prev;
+	struct cpu_ctx __arena *cpuc_waker;
 
 	if (ctx->sync_waker_cpu < 0)
 		return false;
@@ -600,15 +558,11 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 		return false;
 
 	cpuc_waker = get_cpu_ctx_id(ctx->sync_waker_cpu);
-	if (!cpuc_waker || queued_on_cpu(cpuc_waker))
+	if (queued_on_cpu(cpuc_waker))
 		return false;
 
-	if (nr_cpdoms > 1) {
-		cpuc_prev = get_cpu_ctx_id(ctx->prev_cpu);
-		if (!cpuc_prev ||
-		    cpuc_prev->cpdom_id != cpuc_waker->cpdom_id)
-			return false;
-	}
+	if (nr_cpdoms > 1 && get_cpu_ctx_id(ctx->prev_cpu)->cpdom_id != cpuc_waker->cpdom_id)
+		return false;
 
 	*cpdom_id = cpuc_waker->cpdom_id;
 	return true;
@@ -634,18 +588,15 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 	 * to steal from a DSQ).
 	 */
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
-		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		nr_nbr = cpdc->nr_neighbors[i];
 		if (nr_nbr == 0)
 			break;
 		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
 			if (j >= nr_nbr)
 				break;
 			mig_cpdom = get_neighbor_id(cpdc, i, j);
-			if (mig_cpdom < 0)
-				continue;
-
 			mig_cpdc = get_cpdom_ctx(mig_cpdom);
-			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+			if (!READ_ONCE(mig_cpdc->is_stealer))
 				continue;
 
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
@@ -715,27 +666,11 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 *    previous CPU for cache locality, hoping that the load imbalance
 	 *    (if it exists) will be resolved by the load balancing mechanism.
 	 */
-	bpf_rcu_read_lock();
 	ctx->a_mask = ctx->o_mask = NULL;
 
 	/*
-	 * If a task can run only on a single CPU (e.g., per-CPU kworker),
-	 * we just go with that CPU and set the overflow set if needed.
-	 * Note that do not extend the overflow set for a unpinned,
-	 * non-migratable task since disabling task migration is temporary.
-	 */
-	if (!active_cpumask || !ovrflw_cpumask) {
-		/*
-		 * ctx->a_mask and ctx->o_mask haven't been initialized yet,
-		 * so we cannot rely on pick_random_cpu(). Hence, fall back to
-		 * the prev_cpu and go out.
-		 */
-		cpu = ctx->prev_cpu;
-		goto unlock_out;
-	}
-
-	/*
-	 * Use effective pinning here so we cover both permanent pinning
+	 * A task that can run on a single CPU, such as a per-CPU kworker, stays
+	 * there. Effective pinning covers both permanent pinning
 	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
 	 * (cpus_ptr weight == 1, cached via ops.set_cmask).
 	 */
@@ -751,7 +686,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 				ovrflw_test_and_set(ovrflw_cpumask, cpu);
 		}
 		*is_idle = claim_idle_cid(cpu) > 0;
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: Now task @p is not a per-CPU task. */
 
@@ -769,7 +704,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 		if (claim_idle_cid(ctx->prev_cpu) > 0) {
 			cpu = ctx->prev_cpu;
 			*is_idle = true;
-			goto unlock_out;
+			goto out;
 		}
 
 		if (ctx->taskc->lat_cri < sys_stat.thr_lat_cri &&
@@ -780,7 +715,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 			 * Per-core DSQ.
 			 */
 			set_task_flag(ctx->taskc, LAVD_FLAG_WARM_CPU);
-			goto unlock_out;
+			goto out;
 		}
 	}
 
@@ -788,22 +723,14 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * If @p cannot run on either active or overflow set, extend the
 	 * overflow set, respecting the cpu preference order.
 	 */
-	if (!init_ao_masks(ctx)) {
-		/*
-		 * ctx->a_mask and ctx->o_mask haven't been initialized yet,
-		 * so we cannot rely on pick_random_cpu(). Hence, fall back to
-		 * the prev_cpu and go out.
-		 */
-		cpu = ctx->prev_cpu;
-		goto unlock_out;
-	}
+	init_ao_masks(ctx);
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(&ctx->taskc->allowed, ctx->cpuc_cur);
 		if (cpu >= 0) {
 			ovrflw_test_and_set(ovrflw_cpumask, cpu);
 			*is_idle = claim_idle_cid(cpu) > 0;
 		}
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: Now task @p can run on either active or overflow set. */
 
@@ -812,10 +739,8 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * masks so the idle CPU search prefers non-turbulent CPUs with
 	 * sufficient latency headroom.
 	 */
-	if (is_preemption_vulnerable(ctx)) {
-		if (!repartition_masks_for_latency(ctx))
-			goto err_out;
-	}
+	if (is_preemption_vulnerable(ctx))
+		repartition_masks_for_latency(ctx);
 
 	/*
 	 * Find a sticky cpu and domain considering the core & task type
@@ -832,7 +757,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 */
 	if (sticky_cpdom < 0) {
 		cpu = pick_random_cpu(ctx);
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: There is a sticky domain. */
 
@@ -840,15 +765,14 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * If there is no idle CPU, stay on the sticky CPU or domain.
 	 */
 	idle = idle_cmask;
-	if (!init_idle_i_mask(ctx, idle))
-		goto err_out;
+	init_idle_i_mask(ctx, idle);
 	if (ctx->i_empty) {
 		cpu = sticky_cpu;
 		if (cpu == -ENOENT) {
 			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
 						       sticky_cpdom);
 		}
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: There is at least one idle CPU. */
 
@@ -865,7 +789,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	    claim_idle_cid(sticky_cpu) > 0) {
 		cpu = sticky_cpu;
 		*is_idle = true;
-		goto unlock_out;
+		goto out;
 	}
 
 	/*
@@ -873,13 +797,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * in the sticky domain, stay on it.
 	 */
 	if (!i_smt_empty) {
-		if (!init_idle_ato_masks(ctx, idle_smt))
-			goto err_out;
+		init_idle_ato_masks(ctx, idle_smt);
 		if (!ctx->ia_empty || !ctx->io_empty) {
 			cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom,
 				SCX_PICK_IDLE_CORE, is_idle);
 			if (cpu >= 0)
-				goto unlock_out;
+				goto out;
 		}
 	}
 	/* NOTE: There is no fully idle CPU in the sticky domain. */
@@ -890,7 +813,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	if (sticky_cpu >= 0 && claim_idle_cid(sticky_cpu) > 0) {
 		cpu = sticky_cpu;
 		*is_idle = true;
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: The sticky CPU is not (even partially) idle. */
 
@@ -901,7 +824,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 */
 	if (!no_wake_sync && is_sync_waker_idle(ctx, &sticky_cpdom)) {
 		cpu = ctx->sync_waker_cpu;
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: The waker CPU is not (even partially) idle if there is. */
 
@@ -909,8 +832,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * If there is no idle CPU in the active and overflow set,
 	 * stay on the sticky CPU or domain.
 	 */
-	if (!init_idle_ato_masks(ctx, ctx->i_mask))
-		goto err_out;
+	init_idle_ato_masks(ctx, ctx->i_mask);
 	if (ctx->ia_empty && ctx->io_empty) {
 		/*
 		 * Bursty wake-up adaptation: when called from
@@ -929,7 +851,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 					p->comm, p->pid, ctx->prev_cpu, new_cpu);
 				cpu = new_cpu;
 				*is_idle = true;
-				goto unlock_out;
+				goto out;
 			}
 		}
 		cpu = sticky_cpu;
@@ -937,7 +859,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
 						       sticky_cpdom);
 		}
-		goto unlock_out;
+		goto out;
 	}
 	/* NOTE: There is at least one idle CPU in either active or overflow set. */
 
@@ -954,12 +876,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * If there is a fully idle core in the system (i.e., !is_smt_empty),
 	 * let's try to migrate a task to another domain.
 	 */
-	if (!i_smt_empty && (nr_cpdoms > 1) && (cpdc = get_cpdom_ctx(sticky_cpdom)) &&
-	    READ_ONCE(cpdc->is_stealee)) {
+	cpdc = get_cpdom_ctx(sticky_cpdom);
+	if (!i_smt_empty && (nr_cpdoms > 1) && READ_ONCE(cpdc->is_stealee)) {
 		cpu = migrate_to_neighbor(ctx, cpdc, SCX_PICK_IDLE_CORE,
 					  &sticky_cpdom, is_idle);
 		if (cpu >= 0)
-			goto unlock_out;
+			goto out;
 	}
 	/* NOTE: There is no fully idle CPU in the neighboring domain. */
 
@@ -969,7 +891,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 */
 	cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom, 0, is_idle);
 	if (cpu >= 0)
-		goto unlock_out;
+		goto out;
 	/* NOTE: There is no even partially idle CPU in the sticky domain. */
 
 	/*
@@ -977,13 +899,13 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * execv()-ed task), find a partially idle CPU from the sticky
 	 * domain’s neighbor.
 	 */
+	cpdc = get_cpdom_ctx(sticky_cpdom);
 	if ((nr_cpdoms > 1) &&
 	    test_task_flag(ctx->taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE) &&
-	    (cpdc = get_cpdom_ctx(sticky_cpdom)) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		cpu = migrate_to_neighbor(ctx, cpdc, 0, &sticky_cpdom, is_idle);
 		if (cpu >= 0)
-			goto unlock_out;
+			goto out;
 	}
 
 	/*
@@ -995,24 +917,21 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	if (can_run_on_cpu(ctx, ctx->prev_cpu)) {
 		cpu = ctx->prev_cpu;
 		sticky_cpdom = -ENOENT;
-		goto unlock_out;
+		goto out;
 	}
 
 	/*
 	 * We should not reach here because there is an idle CPU in either
 	 * active or overflow sets, but we failed find it. That is impossible.
 	 */
-err_out:
 	cpu = -ENOENT;
 
-unlock_out:
+out:
 	/*
 	 * For non-error cases, cpu should be chosen, so it cannot be negative.
 	 */
 	if (cpu < 0)
 		cpu = pick_random_cpu(ctx);
-
-	bpf_rcu_read_unlock();
 
 	return cpu;
 }

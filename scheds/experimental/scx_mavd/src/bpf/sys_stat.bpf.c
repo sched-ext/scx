@@ -94,7 +94,6 @@ static void init_sys_stat_ctx(void)
 static void collect_sys_stat(void)
 {
 	struct sys_stat_ctx __arena *c = &ctx;
-	struct cpdom_ctx __arena *cpdomc;
 	u64 cpdom_id, compute_wall = 1;
 	int cpu;
 
@@ -102,10 +101,8 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each compute domain.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
+		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
-		cpdomc = get_cpdom_ctx(cpdom_id);
 		cpdomc->cur_util_wall_sum = 0;
 		cpdomc->avg_util_wall_sum = 0;
 		cpdomc->cur_util_invr_sum = 0;
@@ -156,6 +153,7 @@ static void collect_sys_stat(void)
 		u64 cur_idle_wall = 0, past_idle_wall;
 		u64 dom_pinned_task_time_wall, dom_pinned_task_time_invr;
 		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+		struct cpdom_ctx __arena *cpdomc;
 
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -424,22 +422,20 @@ static void collect_sys_stat(void)
 				      cpuc->cur_dom_pinned_util_invr);
 
 		cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-		if (cpdomc) {
-			cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
-			cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
-			cpdomc->cur_util_invr_sum += cpuc->cur_util_invr;
-			cpdomc->avg_util_invr_sum += cpuc->avg_util_invr;
+		cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
+		cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
+		cpdomc->cur_util_invr_sum += cpuc->cur_util_invr;
+		cpdomc->avg_util_invr_sum += cpuc->avg_util_invr;
 
-			cpdomc->cur_steal_util_wall_sum += cpuc->cur_steal_util_wall;
-			cpdomc->avg_steal_util_wall_sum += cpuc->avg_steal_util_wall;
-			cpdomc->cur_steal_util_invr_sum += cpuc->cur_steal_util_invr;
-			cpdomc->avg_steal_util_invr_sum += cpuc->avg_steal_util_invr;
+		cpdomc->cur_steal_util_wall_sum += cpuc->cur_steal_util_wall;
+		cpdomc->avg_steal_util_wall_sum += cpuc->avg_steal_util_wall;
+		cpdomc->cur_steal_util_invr_sum += cpuc->cur_steal_util_invr;
+		cpdomc->avg_steal_util_invr_sum += cpuc->avg_steal_util_invr;
 
-			cpdomc->cur_dom_pinned_util_wall_sum += cpuc->cur_dom_pinned_util_wall;
-			cpdomc->avg_dom_pinned_util_wall_sum += cpuc->avg_dom_pinned_util_wall;
-			cpdomc->cur_dom_pinned_util_invr_sum += cpuc->cur_dom_pinned_util_invr;
-			cpdomc->avg_dom_pinned_util_invr_sum += cpuc->avg_dom_pinned_util_invr;
-		}
+		cpdomc->cur_dom_pinned_util_wall_sum += cpuc->cur_dom_pinned_util_wall;
+		cpdomc->avg_dom_pinned_util_wall_sum += cpuc->avg_dom_pinned_util_wall;
+		cpdomc->cur_dom_pinned_util_invr_sum += cpuc->cur_dom_pinned_util_invr;
+		cpdomc->avg_dom_pinned_util_invr_sum += cpuc->avg_dom_pinned_util_invr;
 
 		cpuc->prev_task_clk = now_task;
 		cpuc->prev_pelt_clk = now_pelt;
@@ -546,31 +542,25 @@ static void collect_sys_stat(void)
 		/*
 		 * Update the global steady (non-turbulent) CPU mask.
 		 */
-		bpf_rcu_read_lock();
 		steady = steady_cpumask;
-		if (steady) {
-			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
-				cmask_set(cpu, steady);
-			else
-				cmask_clear(cpu, steady);
-		}
-		bpf_rcu_read_unlock();
+		if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
+			cmask_set(cpu, steady);
+		else
+			cmask_clear(cpu, steady);
 
 		/*
 		 * Collect per-CPU tier stats for preemption vulnerability
 		 * threshold into the CPU's compute domain.
 		 */
 		cpu_cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-		if (cpu_cpdomc) {
-			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH) {
-				cpu_cpdomc->util_sum_steady += cpuc->util_est;
-				cpu_cpdomc->cap_sum_steady += cpuc->max_capacity;
-				cpu_cpdomc->nr_steady_cpus++;
-			} else {
-				cpu_cpdomc->util_sum_turb += cpuc->util_est;
-				cpu_cpdomc->cap_sum_turb += cpuc->max_capacity;
-				cpu_cpdomc->nr_turb_cpus++;
-			}
+		if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH) {
+			cpu_cpdomc->util_sum_steady += cpuc->util_est;
+			cpu_cpdomc->cap_sum_steady += cpuc->max_capacity;
+			cpu_cpdomc->nr_steady_cpus++;
+		} else {
+			cpu_cpdomc->util_sum_turb += cpuc->util_est;
+			cpu_cpdomc->cap_sum_turb += cpuc->max_capacity;
+			cpu_cpdomc->nr_turb_cpus++;
 		}
 
 		/*
@@ -719,14 +709,7 @@ static void calc_sys_stat(void)
 	 * tasks qualify, pushing more to the turbulent DSQ.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx __arena *cpdomc;
-
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
-		if (!cpdomc)
-			continue;
+		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		if (cpdomc->nr_turb_cpus == 0 || cpdomc->cap_sum_turb == 0) {
 			cpdomc->vuln_thresh = 0;
@@ -832,7 +815,6 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 __weak
 s32 init_sys_stat(u64 now)
 {
-	struct cpdom_ctx __arena *cpdomc;
 	struct bpf_timer *timer;
 	u64 cpdom_id;
 	u32 key = 0;
@@ -842,11 +824,7 @@ s32 init_sys_stat(u64 now)
 	sys_stat.nr_active = nr_cpus_onln;
 	sys_stat.slice_wall = slice_max_ns;
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		cpdomc = get_cpdom_ctx(cpdom_id);
-		if (cpdomc->nr_active_cpus)
+		if (get_cpdom_ctx(cpdom_id)->nr_active_cpus)
 			sys_stat.nr_active_cpdoms++;
 	}
 

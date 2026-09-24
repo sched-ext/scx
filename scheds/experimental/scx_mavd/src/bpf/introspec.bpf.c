@@ -33,18 +33,10 @@ struct {
 static __always_inline
 int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_id)
 {
-	struct cpu_ctx __arena *cpuc;
-	struct cpdom_ctx __arena *cpdomc;
+	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu_id);
+	struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 	struct msg_task_ctx *m;
 	int i;
-
-	cpuc = get_cpu_ctx_id(cpu_id);
-	if (!cpuc)
-		return -EINVAL;
-
-	cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
-	if (!cpdomc)
-		return -EINVAL;
 
 	m = bpf_ringbuf_reserve(&introspec_msg, sizeof(*m), 0);
 	if (!m)

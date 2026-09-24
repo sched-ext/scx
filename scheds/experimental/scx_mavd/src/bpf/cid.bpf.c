@@ -25,9 +25,7 @@ __hidden
 int init_cid_masks(void)
 {
 	const struct scx_cmask __arena *online;
-	struct cpu_ctx __arena *cpuc;
 	struct scx_cid_topo topo;
-	struct cpdom_ctx __arena *cpdomc;
 	u8 __arena *pool;
 	u32 pages, mask_sz;
 	s32 cid, cpu, i, j;
@@ -59,12 +57,9 @@ int init_cid_masks(void)
 	idle_smt_cmask = pool_mask(pool, mask_sz, 7);
 
 	bpf_arena_for(cid, 0, nr_cids) {
-		cpuc = get_cpu_ctx_id(cid);
-		if (!cpuc)
-			return -ESRCH;
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cid);
+
 		cpu = scx_bpf_cid_to_cpu(cid);
-		if (cpu < 0 || cpu >= LAVD_CPU_ID_MAX)
-			return -EINVAL;
 		cpuc->cpu_id = cid;
 		cpuc->kernel_cpu = cpu;
 
@@ -88,7 +83,8 @@ int init_cid_masks(void)
 		cpu_ctxs[cpuc->core_cid].core_nr_cids++;
 	}
 	bpf_arena_for(cid, 0, nr_cids) {
-		cpuc = &cpu_ctxs[cid];
+		struct cpu_ctx __arena *cpuc = &cpu_ctxs[cid];
+
 		cpuc->core_nr_cids = cpu_ctxs[cpuc->core_cid].core_nr_cids;
 	}
 	online = scx_bpf_online_cmask();
@@ -111,7 +107,8 @@ int init_cid_masks(void)
 		}
 	}
 	bpf_arena_for(i, 0, LAVD_CPDOM_MAX_NR) {
-		cpdomc = get_cpdom_ctx(i);
+		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(i);
+
 		cmask_init(&cpdomc->cpus, 0, nr_cids);
 		cmask_init(&cpdomc->online, 0, nr_cids);
 		if (!cpdomc->is_valid)
@@ -180,8 +177,6 @@ void update_idle_cid(s32 cid, bool idle)
 	s32 sibling;
 
 	asm volatile("" :: "r"(&arena));
-	if (!cpuc)
-		return;
 	if (idle)
 		cmask_set(cid, idle_cmask);
 	else
