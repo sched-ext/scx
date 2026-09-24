@@ -853,7 +853,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cid, struct task_struct *p, s32 prev_cpu, u64 wak
 {
 	struct cpu_ctx __arena *cpuc_cur = get_cpu_ctx();
 	struct pick_ctx ictx = {
-		.p = p,
 		.taskc = get_task_ctx_curcpu(p, cpuc_cur),
 		.prev_cpu = prev_cpu,
 		.cpuc_cur = cpuc_cur,
@@ -901,7 +900,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cid, struct task_struct *p, s32 prev_cpu, u64 wak
 	 * on the idle cpu. Even if there is no idle cpu, still respect
 	 * the chosen cpu.
 	 */
-	cpu_id = pick_idle_cpu(&ictx, true, &found_idle);
+	cpu_id = pick_idle_cpu(&ictx, p, true, &found_idle);
 	cpu_id = cpu_id >= 0 ? cpu_id : prev_cpu;
 	ictx.taskc->suggested_cpu_id = cpu_id;
 
@@ -1059,7 +1058,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (likely(!__COMPAT_is_enq_cpu_selected(enq_flags))) {
 		struct pick_ctx ictx = {
-			.p = p,
 			.taskc = taskc,
 			.prev_cpu = task_cpu,
 			.cpuc_cur = cpuc_cur,
@@ -1070,7 +1068,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!cmask_test(ictx.prev_cpu, &taskc->allowed))
 			ictx.prev_cpu = cmask_first_set(&taskc->allowed);
 
-		cpu = pick_idle_cpu(&ictx, false, &is_idle);
+		cpu = pick_idle_cpu(&ictx, p, false, &is_idle);
 	} else {
 		cpu = task_cpu;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);

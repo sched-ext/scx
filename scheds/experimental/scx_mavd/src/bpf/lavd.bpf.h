@@ -909,11 +909,16 @@ extern volatile bool is_monitored;
 
 /* Idle CPU pick helpers */
 
+/*
+ * Passed to global functions, which cannot use a kernel pointer stored in it:
+ * the verifier sees such a field as a plain scalar. The task is therefore
+ * passed as a separate argument alongside the context, and the fields here are
+ * scalars and arena pointers only.
+ */
 struct pick_ctx {
 	/*
 	 * Input arguments for pick_idle_cpu().
 	 */
-	const struct task_struct *p;
 	task_ctx *taskc;
 	u64 wake_flags;
 	s32 prev_cpu;
@@ -955,7 +960,8 @@ struct pick_ctx {
 
 s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
 		struct cpu_ctx __arena __arg_arena *cpuc_cur);
-s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
+s32  pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrflw,
+		   bool *is_idle);
 
 bool consume_task(u64 cpdom_id);
 

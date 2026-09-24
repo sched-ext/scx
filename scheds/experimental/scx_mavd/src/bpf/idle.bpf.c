@@ -257,8 +257,13 @@ static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 	return -ENOENT;
 }
 
-static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
-			   bool *is_idle)
+/*
+ * Global, so the verifier checks the body once rather than on every caller
+ * path. The picker's paths multiply through here and the sticky-domain search.
+ */
+__noinline
+s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx __arg_nonnull, s64 cpdom, u64 scope,
+			   bool *is_idle __arg_nonnull)
 {
 	struct scx_cmask __arena *cpd_mask;
 	struct cpdom_ctx __arena *cpdc;
@@ -266,7 +271,7 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 
 	cpd_mask = get_cpdom_mask(cpdom);
 	cpdc = get_cpdom_ctx(cpdom);
-	if (!ctx || !cpdc || !cpd_mask || !cpdc->is_valid)
+	if (!cpdc || !cpd_mask || !cpdc->is_valid)
 		return -ENOENT;
 
 	/*
@@ -455,8 +460,10 @@ bool is_sync_wakeup(struct pick_ctx *ctx)
 	return true;
 }
 
-static
-s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
+/* global for the same reason as pick_idle_cpu_at_cpdom() */
+__noinline
+s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
+			      s64 *sticky_cpdom __arg_nonnull)
 {
 	struct cpu_ctx __arena *p0, *p1, *cpuc;
 	struct cpdom_ctx __arena *d0, *d1;
@@ -665,7 +672,8 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u6
 }
 
 __hidden __noinline
-s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
+s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrflw,
+		  bool *is_idle)
 {
 	const struct scx_cmask __arena *idle = NULL, *idle_smt = NULL;
 	s32 cpu = -ENOENT, sticky_cpu;
@@ -731,7 +739,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
 	 * (cpus_ptr weight == 1, cached via ops.set_cmask).
 	 */
-	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(ctx->p)) {
+	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(p)) {
 		cpu = ctx->prev_cpu;
 		if (!cmask_test(cpu, active_cpumask)) {
 			/*
@@ -739,7 +747,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 			 * migrate_disable is transient, so we don't want to
 			 * pollute the overflow set with short-lived restrictions.
 			 */
-			if (is_permanently_pinned(ctx->p))
+			if (is_permanently_pinned(p))
 				ovrflw_test_and_set(ovrflw_cpumask, cpu);
 		}
 		*is_idle = claim_idle_cid(cpu) > 0;
@@ -918,7 +926,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 			if (new_cpu >= 0 && claim_idle_cid(new_cpu) > 0) {
 				ovrflw_test_and_set(ovrflw_cpumask, new_cpu);
 				debugln("migrate: ovrflw_extend %s[pid%d] prev_cid=%d new_cid=%d",
-					ctx->p->comm, ctx->p->pid, ctx->prev_cpu, new_cpu);
+					p->comm, p->pid, ctx->prev_cpu, new_cpu);
 				cpu = new_cpu;
 				*is_idle = true;
 				goto unlock_out;
