@@ -3340,6 +3340,26 @@ static int init_llc(u32 llc_index)
 	return 0;
 }
 
+/* Populate LLC NUMA ids before init_llc() creates node-aware resources. */
+static int init_llc_nodes(void)
+{
+	struct llc_ctx *llcx;
+	int cpu;
+
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
+		llcx = lookup_llc_ctx(cpu_llc_ids[cpu]);
+		if (!llcx) {
+			scx_bpf_error("No llc %llu for cpu %u", cpu_llc_ids[cpu], cpu);
+			return -ENOENT;
+		}
+		llcx->node_id = cpu_node_ids[cpu];
+	}
+
+	return 0;
+}
+
 static int init_node(u32 node_id)
 {
 	struct node_ctx *nodec;
@@ -3668,6 +3688,10 @@ static s32 p2dq_init_impl()
 		scx_bpf_error("invalid init_dsq_index");
 		return -EINVAL;
 	}
+
+	ret = init_llc_nodes();
+	if (ret)
+		return ret;
 
 	// First we initialize LLCs because DSQs are created at the LLC level.
 	bpf_for(i, 0, topo_config.nr_llcs) {
