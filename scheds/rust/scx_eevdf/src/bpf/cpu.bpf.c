@@ -51,8 +51,7 @@
  *                        idle-pull state
  *   core_sched_states[]  the virtual-time origin core scheduling compares
  *   newidle_stats[]      the success and call rates the idle pull samples
- *   idle_cids            one bit per idle cid
- *   idle_core_llcs       one bit per LLC known to have a fully idle core
+ *   eevdf_idle masks      idle cids and LLCs with a fully idle core
  *   queued_cids          one bit per cid with something in its EDQ
  *   place/capacity tiers one mask per tier, for the ordered scans
  *   cpu_*_in[]           what user space reported, in cpu space
@@ -95,13 +94,6 @@
 #include <scx/percpu.bpf.h>
 
 /*
- * Scratch space for scx_bpf_cid_topo(), only used by ops.init(). It has
- * to be readable as a whole at the call, which stack slots that are never
- * read back are not.
- */
-static struct scx_cid_topo init_topo;
-
-/*
  * Fill the topology of every cid.
  *
  * Cids are assigned in topological order (node, then LLC, then core), so
@@ -112,12 +104,11 @@ static struct scx_cid_topo init_topo;
  */
 static void init_topology(void)
 {
-	s32 cur_core = -1, cur_llc = -1, cur_node = -1;
-	u32 core_nr = 0, llc_nr = 0, node_nr = 0;
+	struct scx_cid_range_builder builder = SCX_CID_RANGE_BUILDER_INIT;
 	u32 i;
 
 	bpf_arena_for(i, 0, nr_cids) {
-		struct scx_cid_topo *ct = &init_topo;
+		struct scx_cid_topo *ct = &eevdf_idle.topo_buf;
 		s32 cid = nr_cids - 1 - i;
 		struct cid_topo __arena *topo = cid_topo(cid);
 		s32 cpu = scx_bpf_cid_to_cpu(cid);
@@ -128,6 +119,11 @@ static void init_topology(void)
 		cid_ctx(cid)->active_balance_cid = -1;
 
 		scx_bpf_cid_topo(cid, ct);
+		scx_cid_ranges_build(&topo->ranges, &builder, ct, cid);
+		if (!smt_enabled) {
+			topo->ranges.core_base = cid;
+			topo->ranges.core_nr = 1;
+		}
 
 		topo->cpu = cpu >= 0 ? cpu : 0;
 		if (cpu >= 0 && (u32)cpu < nr_cpu_ids) {
@@ -148,12 +144,6 @@ static void init_topology(void)
 		 * own.
 		 */
 		if (ct->core_cid < 0 || ct->llc_cid < 0 || ct->node_cid < 0) {
-			topo->core_base = cid;
-			topo->core_nr = 1;
-			topo->llc_base = cid;
-			topo->llc_nr = 1;
-			topo->node_base = cid;
-			topo->node_nr = 1;
 			topo->fork_base = cid;
 			topo->fork_nr = 1;
 			topo->wake_affine_base = cid;
@@ -162,26 +152,6 @@ static void init_topology(void)
 			topo->asym_capacity_nr = 1;
 			continue;
 		}
-
-		if (ct->core_cid != cur_core) {
-			cur_core = ct->core_cid;
-			core_nr = cid + 1 - ct->core_cid;
-		}
-		if (ct->llc_cid != cur_llc) {
-			cur_llc = ct->llc_cid;
-			llc_nr = cid + 1 - ct->llc_cid;
-		}
-		if (ct->node_cid != cur_node) {
-			cur_node = ct->node_cid;
-			node_nr = cid + 1 - ct->node_cid;
-		}
-
-		topo->core_base = smt_enabled ? ct->core_cid : cid;
-		topo->core_nr = smt_enabled ? core_nr : 1;
-		topo->llc_base = ct->llc_cid;
-		topo->llc_nr = llc_nr;
-		topo->node_base = ct->node_cid;
-		topo->node_nr = node_nr;
 
 		{
 			u32 fork_span = 0, wake_span = 0, asym_span = 0;
@@ -192,17 +162,17 @@ static void init_topology(void)
 				wake_span = cpu_wake_span_in[cpu];
 				asym_span = cpu_asym_span_in[cpu];
 			}
-			range = topo_domain_range(topo, fork_span,
-						  topo->node_nr);
+			range = scx_cid_domain_range(&topo->ranges, fork_span,
+						     topo->ranges.node_nr, nr_cids);
 			topo->fork_base = range;
 			topo->fork_nr = range >> 32;
-			range = topo_domain_range(topo, wake_span,
-						  topo->llc_nr);
+			range = scx_cid_domain_range(&topo->ranges, wake_span,
+						     topo->ranges.llc_nr, nr_cids);
 			topo->wake_affine_base = range;
 			topo->wake_affine_nr = range >> 32;
 			if (asym_span || force_asym_capacity) {
-				range = topo_domain_range(topo, asym_span,
-						  nr_cids);
+				range = scx_cid_domain_range(&topo->ranges, asym_span,
+						     nr_cids, nr_cids);
 				topo->asym_capacity_base = range;
 				topo->asym_capacity_nr = range >> 32;
 			} else {
@@ -278,8 +248,9 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
 	core_sched_states = arena_carve(nr * sizeof(struct core_sched_state), 64);
 	newidle_stats = arena_carve(nr * sizeof(struct newidle_stats), 64);
-	idle_cids = arena_carve(mask, 64);
-	idle_core_llcs = arena_carve(mask, 64);
+	eevdf_idle.idle = arena_carve(mask, 64);
+	eevdf_idle.core_llcs = arena_carve(mask, 64);
+	eevdf_idle.nr_cids_max = nr;
 	queued_cids = arena_carve(mask, 64);
 	place_tier_stride = mask;
 	place_tier_cids = arena_carve(args->nr_place_tiers * mask, 64);
@@ -292,8 +263,8 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	cpu_fork_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_wake_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_asym_span_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !core_sched_states || !newidle_stats || !idle_cids ||
-	    !idle_core_llcs || !queued_cids ||
+	if (!topos || !cctxs || !core_sched_states || !newidle_stats || !eevdf_idle.idle ||
+	    !eevdf_idle.core_llcs || !queued_cids ||
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)

@@ -17,6 +17,8 @@
 
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
+#include <lib/cid_topology.h>
+#include <lib/cid_idle.h>
 #include <lib/edq.h>
 #include <lib/ravg.h>
 #include <lib/arena_loop.h>
@@ -248,13 +250,8 @@ struct cid_topo {
 	u32 capacity_tier;	/* CPU capacity tier */
 	u32 smt_asym_packing;	/* SMT domain follows SD_ASYM_PACKING */
 	u64 cap;		/* capacity, 1024 = fastest */
-	u32 core_base;		/* first cid of the core */
-	u32 core_nr;		/* cids in the core (SMT siblings) */
-	u32 llc_base;		/* first cid of the LLC */
-	u32 llc_nr;		/* cids in the LLC */
+	struct scx_cid_ranges ranges; /* core, LLC and node CID ranges */
 	u32 llc_place_tier;	/* best SD_ASYM_PACKING tier in the LLC */
-	u32 node_base;		/* first cid of the node */
-	u32 node_nr;		/* cids in the node */
 	u32 fork_base;		/* highest SD_BALANCE_FORK domain */
 	u32 fork_nr;
 	u32 wake_affine_base;	/* highest SD_WAKE_AFFINE domain */
@@ -414,8 +411,7 @@ static struct cid_topo __arena *topos;
 static struct cid_ctx __arena *cctxs;
 static struct core_sched_state __arena *core_sched_states;
 static struct newidle_stats __arena *newidle_stats;
-static struct scx_cmask __arena *idle_cids;	/* one bit per idle cid */
-static struct scx_cmask __arena *idle_core_llcs; /* LLCs known to have an idle core */
+struct scx_cid_idle_state eevdf_idle;
 static struct scx_cmask __arena *queued_cids;	/* one bit per cid with a queued task */
 static struct scx_cmask __arena *place_tier_cids; /* one mask per placement tier */
 static struct scx_cmask __arena *capacity_tier_cids; /* one mask per capacity tier */
@@ -448,26 +444,6 @@ static u32 __arena *cpu_smt_asym_in;	/* cpu space: SMT SD_ASYM_PACKING */
 static u32 __arena *cpu_fork_span_in;	/* cpu space: SD_BALANCE_FORK span */
 static u32 __arena *cpu_wake_span_in;	/* cpu space: SD_WAKE_AFFINE span */
 static u32 __arena *cpu_asym_span_in;	/* cpu space: asym-capacity span */
-
-/*
- * Translate a kernel sched-domain weight into the smallest enclosing topology
- * range scx_eevdf represents. The cid topology has core, LLC, node and system
- * levels; an intermediate kernel level (for example, a cluster) is therefore
- * conservatively represented by its containing LLC.
- */
-static __always_inline u64 topo_domain_range(struct cid_topo __arena *topo,
-					      u32 span, u32 fallback)
-{
-	if (!span)
-		span = fallback;
-	if (span <= topo->core_nr)
-		return (u64)topo->core_nr << 32 | topo->core_base;
-	if (span <= topo->llc_nr)
-		return (u64)topo->llc_nr << 32 | topo->llc_base;
-	if (span <= topo->node_nr)
-		return (u64)topo->node_nr << 32 | topo->node_base;
-	return (u64)nr_cids << 32;
-}
 
 /*
  * Return true if @cid is one this scheduler can address. The tables above

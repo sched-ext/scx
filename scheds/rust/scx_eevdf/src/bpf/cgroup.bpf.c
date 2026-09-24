@@ -652,7 +652,7 @@ static void bw_kick_idle(void)
 	u32 words = (nr_cids + 63) / 64, k;
 
 	bpf_for(k, 0, words) {
-		u64 w = cmask_word(idle_cids, k);
+		u64 w = scx_cid_idle_word(&eevdf_idle, k);
 
 		if (!w)
 			continue;

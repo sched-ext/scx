@@ -24,7 +24,7 @@ static bool task_hot(const task_ctx_t *tctx, s32 src_cid, s32 dst_cid,
 		     u64 now)
 {
 	if (smt_enabled &&
-	    cid_topo(src_cid)->core_base == cid_topo(dst_cid)->core_base)
+	    cid_topo(src_cid)->ranges.core_base == cid_topo(dst_cid)->ranges.core_base)
 		return false;
 
 	return time_before(now, tctx->last_stop_at + migration_cost_ns);
