@@ -904,10 +904,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 	}
 
 	/*
-	 * Frame the masks over the cid space, with the helpers, before any
-	 * bit is set.
+	 * Set the active cid space before building LLC masks or setting bits.
 	 */
-	err = scx_cid_idle_init_masks(&eevdf_idle, nr_cids, smt_enabled);
+	err = scx_cid_idle_init_state(&eevdf_idle, nr_cids, smt_enabled);
 	if (err)
 		return err;
 	cmask_init(queued_cids, 0, nr_cids);
@@ -919,6 +918,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 	nr_words = scx_cid_idle_nr_words(&eevdf_idle);
 
 	init_topology();
+	bpf_arena_for(cid, 0, nr_cids) {
+		const struct scx_cid_ranges __arena *ranges = &cid_topo(cid)->ranges;
+
+		err = scx_cid_idle_add_segment(&eevdf_idle, &arena, cid,
+					     ranges->llc_nr, ranges->node_base,
+					     ranges->node_nr, NUMA_NO_NODE);
+		if (err)
+			return err;
+		cid += ranges->llc_nr - 1;
+	}
 	now = bpf_ktime_get_ns();
 
 	/* sched_init(): the idle pull budget starts open by a migration cost. */
