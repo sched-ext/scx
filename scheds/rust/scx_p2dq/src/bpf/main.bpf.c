@@ -2963,7 +2963,8 @@ check_llc_dsq:
 			u32 shard_idx;
 			bpf_for(shard_idx, 0, llcx->nr_shards) {
 				u32 offset = cpuc->id % llcx->nr_shards;
-				shard_idx = wrap_index(offset + shard_idx, 0, llcx->nr_shards);
+				shard_idx = wrap_index(offset + shard_idx, 0,
+						       llcx->nr_shards - 1);
 				// TODO: should probably take min vtime to be fair
 				if (shard_idx < MAX_LLC_SHARDS && shard_idx < llcx->nr_shards) {
 					u64 shard_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_idx]);
@@ -3248,7 +3249,7 @@ static int init_llc(u32 llc_index)
 {
 	struct llc_ctx *llcx;
 	u32 llc_id = llc_ids[llc_index];
-	int i, ret;
+	int ret;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
 	if (!llcx) {
@@ -3317,23 +3318,40 @@ static int init_llc(u32 llc_index)
 		return ret;
 	}
 
-	// Initialize CPU sharding fields
-	llcx->nr_shards = p2dq_config.llc_shards;
+	/* Shards are initialized after init_cpu() populates nr_cpus. */
+	llcx->nr_shards = 0;
 
-	if (p2dq_config.llc_shards > 1) {
-		llcx->nr_shards = min(min(p2dq_config.llc_shards, llcx->nr_cpus), MAX_LLC_SHARDS);
+	return 0;
+}
 
-		bpf_for(i, 0, llcx->nr_shards) {
-			u64 shard_dsq = shard_dsq_id(llc_id, i);
-			if (i < MAX_LLC_SHARDS) // verifier
-				llcx->shard_dsqs[i] = shard_dsq;
+static int init_llc_shards(u32 llc_index)
+{
+	struct llc_ctx *llcx;
+	u32 llc_id = llc_ids[llc_index];
+	int i, ret;
 
-			ret = scx_bpf_create_dsq(shard_dsq, llcx->node_id);
-			if (ret) {
-				scx_bpf_error("failed to create shard DSQ %llu for LLC %u shard %u",
-					      shard_dsq, llc_id, i);
-				return ret;
-			}
+	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
+	if (!llcx) {
+		scx_bpf_error("No llc %u", llc_id);
+		return -ENOENT;
+	}
+
+	if (p2dq_config.llc_shards <= 1)
+		return 0;
+
+	llcx->nr_shards = min(min(p2dq_config.llc_shards, llcx->nr_cpus),
+				      MAX_LLC_SHARDS);
+
+	bpf_for(i, 0, llcx->nr_shards) {
+		u64 shard_dsq = shard_dsq_id(llc_id, i);
+		if (i < MAX_LLC_SHARDS) // verifier
+			llcx->shard_dsqs[i] = shard_dsq;
+
+		ret = scx_bpf_create_dsq(shard_dsq, llcx->node_id);
+		if (ret) {
+			scx_bpf_error("failed to create shard DSQ %llu for LLC %u shard %u",
+				      shard_dsq, llc_id, i);
+			return ret;
 		}
 	}
 
@@ -3407,6 +3425,7 @@ static s32 init_cpu(int cpu)
 	cpuc->id = cpu;
 	cpuc->llc_id = cpu_llc_ids[cpu];
 	cpuc->node_id = cpu_node_ids[cpu];
+	cpuc->core_id = cpu_core_ids[cpu];
 	if (big_core_ids[cpu] == 1)
 		cpu_ctx_set_flag(cpuc, CPU_CTX_F_IS_BIG);
 	else
@@ -3714,6 +3733,12 @@ static s32 p2dq_init_impl()
 			return ret;
 	}
 
+	bpf_for(i, 0, topo_config.nr_llcs) {
+		ret = init_llc_shards(i);
+		if (ret)
+			return ret;
+	}
+
 	// Create DSQs for the LLCs
 	bpf_for(i, 0, topo_config.nr_cpus) {
 		if (!cpu_is_online(i))
@@ -3742,7 +3767,6 @@ static s32 p2dq_init_impl()
 			    shard_id < llcx->nr_shards)
 				cpuc->llc_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_id]);
 		}
-
 		dsq_id = cpu_dsq_id(i);
 		dbg("CFG creating affn CPU[%d]DSQ[%llu]", i, dsq_id);
 		ret = scx_bpf_create_dsq(dsq_id, llcx->node_id);
