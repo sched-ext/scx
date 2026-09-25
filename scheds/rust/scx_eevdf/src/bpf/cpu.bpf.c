@@ -30,17 +30,18 @@
  *   "an idle cid in my LLC?"   -> scan the words of [llc_base, llc_nr)
  *   "anything queued nearby?"  -> the same, over the queued bitmap
  *
- * That is the whole reason this scheduler is in cid form: the answers cost
- * a load and a mask instead of a cpumask allocation and a walk of the
- * kernel's topology masks, on a path that runs on every wakeup.
+ * That is the whole reason this scheduler is in cid form: the answers use
+ * contiguous ranges instead of allocating cpumasks and walking the kernel's
+ * topology masks on every wakeup.
  *
  *
  * The arena
  * ---------
  *
- * Everything sized by the machine is carved out of one BPF arena
- * allocation, so nothing here has a compile-time bound on CPUs, cores,
- * LLCs, nodes or tiers:
+ * Everything sized by the machine lives in one BPF arena map. The main
+ * tables are carved out of one allocation, while the idle masks use a
+ * separate NUMA-local allocation per node. Nothing here has a compile-time
+ * bound on CPUs, cores, LLCs, nodes or tiers:
  *
  *   topos[]              struct cid_topo per cid: the (base, nr) of its
  *                        core, LLC and node, its capacity, its packing and
@@ -195,7 +196,7 @@ static u64 arena_off, arena_size;
  * there: a short budget makes the last carve fail and the init return
  * -ENOMEM.
  */
-#define ARENA_CARVES 16
+#define ARENA_CARVES 15
 
 static void __arena *arena_carve(u64 bytes, u64 align)
 {
@@ -232,7 +233,7 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	 */
 	mask = (sizeof(struct scx_cmask) + (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = nr * sizeof(struct cid_topo) + nr * sizeof(struct cid_ctx) +
-		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
+		(1 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
 		nr * (sizeof(struct core_sched_state) + sizeof(struct newidle_stats) +
 		      sizeof(u64) +
 		      6 * sizeof(u32)) + ARENA_CARVES * 64;
@@ -248,8 +249,6 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
 	core_sched_states = arena_carve(nr * sizeof(struct core_sched_state), 64);
 	newidle_stats = arena_carve(nr * sizeof(struct newidle_stats), 64);
-	eevdf_idle.idle = arena_carve(mask, 64);
-	eevdf_idle.core_llcs = arena_carve(mask, 64);
 	eevdf_idle.nr_cids_max = nr;
 	queued_cids = arena_carve(mask, 64);
 	place_tier_stride = mask;
@@ -263,8 +262,8 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	cpu_fork_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_wake_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_asym_span_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !core_sched_states || !newidle_stats || !eevdf_idle.idle ||
-	    !eevdf_idle.core_llcs || !queued_cids ||
+	if (!topos || !cctxs || !core_sched_states || !newidle_stats ||
+	    !queued_cids ||
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)

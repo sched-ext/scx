@@ -149,23 +149,15 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 	bpf_for(seg, 0, 2) {
 		u32 sbase = seg ? base : start;
 		u32 snr = seg ? nr - head : head;
-		u32 k, last;
+		s32 cid;
 
 		if (!snr)
 			continue;
-		last = (sbase + snr - 1) / 64;
-		bpf_arena_for(k, sbase / 64, last + 1) {
-			u64 w = scx_cid_idle_scan_word(&eevdf_idle,
-							capacity_tier_mask(t),
-							k, sbase, snr);
-			s32 cid;
-
-			if (!w)
-				continue;
-			cid = first_idle_cid(p, w, k, restricted, whole_core);
-			if (cid >= 0)
-				return cid;
-		}
+		cid = scan_idle_tier_range(p, capacity_tier_mask(t),
+					  sbase, snr,
+					  restricted | (whole_core << 1));
+		if (cid >= 0)
+			return cid;
 	}
 
 	return -EBUSY;
@@ -1342,7 +1334,7 @@ void BPF_STRUCT_OPS(eevdf_update_idle, s32 cid, bool idle)
 		 * that is bringing the cid back; the period ends here
 		 * either way.
 		 */
-		cid_idle_claim(cid);
+		scx_cid_idle_clear(&eevdf_idle, cid);
 		if (cctx->idle_stamp)
 			update_avg_idle(cctx, scx_bpf_now());
 	}

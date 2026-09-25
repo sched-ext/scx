@@ -649,15 +649,27 @@ arm:
  */
 static void bw_kick_idle(void)
 {
-	u32 words = (nr_cids + 63) / 64, k;
+	u32 pos;
 
-	bpf_for(k, 0, words) {
-		u64 w = scx_cid_idle_word(&eevdf_idle, k);
+	bpf_arena_for(pos, 0, nr_cids) {
+		struct scx_cid_idle_segment __arena *seg =
+			eevdf_idle.segments[pos];
+		u32 end = seg->base + seg->nr;
+		u32 k;
 
-		if (!w)
-			continue;
-		scx_bpf_kick_cid(k * 64 + __builtin_ctzll(w), SCX_KICK_IDLE);
-		return;
+		if (__cmask_test(seg->base, seg->summary->idle)) {
+			bpf_arena_for(k, pos / 64, (end - 1) / 64 + 1) {
+				u64 w = scx_cid_idle_segment_word(seg, NULL, k,
+							      pos, end - pos);
+
+				if (!w)
+					continue;
+				scx_bpf_kick_cid(k * 64 + __builtin_ctzll(w),
+						 SCX_KICK_IDLE);
+				return;
+			}
+		}
+		pos = end - 1;
 	}
 }
 

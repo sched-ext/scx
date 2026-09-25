@@ -8,24 +8,33 @@
 struct scx_cid_ranges {
 	u32 core_base;
 	u32 core_nr;
+	u32 core_idx;
+	u32 shard_base;
+	u32 shard_nr;
+	u32 shard_idx;
 	u32 llc_base;
 	u32 llc_nr;
+	u32 llc_idx;
 	u32 node_base;
 	u32 node_nr;
+	u32 node_idx;
 };
 
 /* State for a walk from the highest CID to the lowest. */
 struct scx_cid_range_builder {
 	s32 last_core;
+	s32 last_shard;
 	s32 last_llc;
 	s32 last_node;
 	u32 core_nr;
+	u32 shard_nr;
 	u32 llc_nr;
 	u32 node_nr;
 };
 
 #define SCX_CID_RANGE_BUILDER_INIT { \
-	.last_core = -1, .last_llc = -1, .last_node = -1 \
+	.last_core = -1, .last_shard = -1, .last_llc = -1, \
+	.last_node = -1 \
 }
 
 /*
@@ -39,19 +48,39 @@ scx_cid_ranges_build(struct scx_cid_ranges __arena *out,
 		     struct scx_cid_range_builder *builder,
 		     const struct scx_cid_topo *topo, u32 cid)
 {
-	if (topo->core_cid < 0 || topo->llc_cid < 0 || topo->node_cid < 0) {
+	s32 shard_cid = topo->llc_cid;
+	s32 shard_idx = topo->llc_idx;
+
+	/* Kernels without CID shards use one segment per LLC. */
+	if (bpf_core_field_exists(topo->shard_cid)) {
+		shard_cid = topo->shard_cid;
+		shard_idx = topo->shard_idx;
+	}
+
+	if (topo->core_cid < 0 || shard_cid < 0 ||
+	    topo->llc_cid < 0 || topo->node_cid < 0) {
 		out->core_base = cid;
 		out->core_nr = 1;
+		out->core_idx = cid;
+		out->shard_base = cid;
+		out->shard_nr = 1;
+		out->shard_idx = cid;
 		out->llc_base = cid;
 		out->llc_nr = 1;
+		out->llc_idx = cid;
 		out->node_base = cid;
 		out->node_nr = 1;
+		out->node_idx = cid;
 		return;
 	}
 
 	if (topo->core_cid != builder->last_core) {
 		builder->last_core = topo->core_cid;
 		builder->core_nr = cid + 1 - topo->core_cid;
+	}
+	if (shard_cid != builder->last_shard) {
+		builder->last_shard = shard_cid;
+		builder->shard_nr = cid + 1 - shard_cid;
 	}
 	if (topo->llc_cid != builder->last_llc) {
 		builder->last_llc = topo->llc_cid;
@@ -64,10 +93,16 @@ scx_cid_ranges_build(struct scx_cid_ranges __arena *out,
 
 	out->core_base = topo->core_cid;
 	out->core_nr = builder->core_nr;
+	out->core_idx = topo->core_idx;
+	out->shard_base = shard_cid;
+	out->shard_nr = builder->shard_nr;
+	out->shard_idx = shard_idx;
 	out->llc_base = topo->llc_cid;
 	out->llc_nr = builder->llc_nr;
+	out->llc_idx = topo->llc_idx;
 	out->node_base = topo->node_cid;
 	out->node_nr = builder->node_nr;
+	out->node_idx = topo->node_idx;
 }
 
 /*

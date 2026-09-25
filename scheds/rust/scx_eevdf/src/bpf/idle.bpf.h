@@ -98,7 +98,8 @@ static bool test_idle_cores(s32 cid)
 		return false;
 	topo = cid_topo(cid);
 
-	return scx_cid_idle_has_core(&eevdf_idle, topo->ranges.llc_base);
+	return scx_cid_idle_has_core(&eevdf_idle, topo->ranges.llc_base,
+				      topo->ranges.node_base);
 }
 
 static void set_idle_cores(s32 cid, bool has_idle_core)
@@ -109,6 +110,7 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
 		return;
 	topo = cid_topo(cid);
 	scx_cid_idle_set_core_hint(&eevdf_idle, topo->ranges.llc_base,
+				    topo->ranges.node_base,
 				    has_idle_core);
 }
 
@@ -191,28 +193,50 @@ static __always_inline s32 first_idle_cid(const struct task_struct *p, u64 w,
 	return -EBUSY;
 }
 
+/* Walk segments in CID order, skipping empty ones in wide ranges. */
+static __noinline s32
+scan_idle_tier_range(const struct task_struct *p,
+		     const struct scx_cmask __arena *tier, u32 base, u32 nr,
+		     u32 flags)
+{
+	u32 pos;
+
+	if (!nr)
+		return -EBUSY;
+	bpf_arena_for(pos, base, base + nr) {
+		struct scx_cid_idle_segment __arena *seg =
+			eevdf_idle.segments[pos];
+		u32 end = MIN(base + nr, seg->base + seg->nr);
+		u32 k;
+
+		if ((pos == base && end == base + nr) ||
+		    __cmask_test(seg->base, seg->summary->idle)) {
+			bpf_arena_for(k, pos / 64, (end - 1) / 64 + 1) {
+				u64 w = scx_cid_idle_segment_word(seg, tier, k,
+							      pos, end - pos);
+				s32 cid;
+
+				if (!w)
+					continue;
+				cid = first_idle_cid(p, w, k, flags & 1,
+						     flags & 2);
+				if (cid >= 0)
+					return cid;
+			}
+		}
+		pos = end - 1;
+	}
+
+	return -EBUSY;
+}
+
 /* Scan idle cids without an asymmetric-packing tier restriction. */
 static __always_inline s32
 scan_idle_unranked_range(const struct task_struct *p, u32 base, u32 nr,
 			 bool restricted, bool whole_core)
 {
-	u32 k, last;
-
-	if (!nr)
-		return -EBUSY;
-	last = (base + nr - 1) / 64;
-	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = scx_cid_idle_scan_word(&eevdf_idle, NULL, k, base, nr);
-		s32 cid;
-
-		if (!w)
-			continue;
-		cid = first_idle_cid(p, w, k, restricted, whole_core);
-		if (cid >= 0)
-			return cid;
-	}
-
-	return -EBUSY;
+	return scan_idle_tier_range(p, NULL, base, nr,
+				    restricted | (whole_core << 1));
 }
 
 /* scan_idle_range() restricted by CPU capacity rather than packing priority. */
@@ -220,24 +244,8 @@ static __always_inline s32
 scan_idle_capacity_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 			 bool restricted, bool whole_core)
 {
-	u32 k, last;
-
-	if (!nr)
-		return -EBUSY;
-	last = (base + nr - 1) / 64;
-	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = scx_cid_idle_scan_word(&eevdf_idle, capacity_tier_mask(t),
-					    k, base, nr);
-		s32 cid;
-
-		if (!w)
-			continue;
-		cid = first_idle_cid(p, w, k, restricted, whole_core);
-		if (cid >= 0)
-			return cid;
-	}
-
-	return -EBUSY;
+	return scan_idle_tier_range(p, capacity_tier_mask(t), base, nr,
+				    restricted | (whole_core << 1));
 }
 
 static __always_inline u32 sis_idle_scan_nr(s32 cid)

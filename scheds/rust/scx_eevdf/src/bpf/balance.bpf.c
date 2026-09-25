@@ -237,26 +237,37 @@ static __always_inline s32
 balance_scan_range(const struct task_struct *p, s32 t, u32 base, u32 nr,
 		   bool restricted, u64 now)
 {
-	u32 k, last;
+	u32 pos;
 
 	if (!nr)
 		return -EBUSY;
-	last = (base + nr - 1) / 64;
-	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = scx_cid_idle_scan_word(&eevdf_idle,
-					      t >= 0 ? place_tier_mask(t) : NULL,
-					      k, base, nr);
+	bpf_arena_for(pos, base, base + nr) {
+		struct scx_cid_idle_segment __arena *seg =
+			eevdf_idle.segments[pos];
+		u32 end = MIN(base + nr, seg->base + seg->nr);
+		u32 k;
 
-		while (w && can_loop) {
-			s32 cid = scx_cid_idle_next(&eevdf_idle, &w, k);
+		if ((pos == base && end == base + nr) ||
+		    __cmask_test(seg->base, seg->summary->idle)) {
+			bpf_arena_for(k, pos / 64, (end - 1) / 64 + 1) {
+				u64 w = scx_cid_idle_segment_word(seg,
+					t >= 0 ? place_tier_mask(t) : NULL,
+					k, pos, end - pos);
 
-			if (cid < 0 ||
-			    (smt_enabled && !core_is_idle(cid)) ||
-			    (restricted && !cid_allowed(p, cid)) ||
-			    !active_balance_due(cid, now))
-				continue;
-			return cid;
+				while (w && can_loop) {
+					s32 cid = scx_cid_idle_next(&eevdf_idle,
+							      &w, k);
+
+					if (cid < 0 ||
+					    (smt_enabled && !core_is_idle(cid)) ||
+					    (restricted && !cid_allowed(p, cid)) ||
+					    !active_balance_due(cid, now))
+						continue;
+					return cid;
+				}
+			}
 		}
+		pos = end - 1;
 	}
 
 	return -EBUSY;
