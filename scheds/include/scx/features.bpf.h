@@ -14,6 +14,11 @@
 #ifndef __SCX_FEATURES_BPF_H
 #define __SCX_FEATURES_BPF_H
 
+enum scx_lib_feature {
+	/* the JIT lowers fetching AND, OR and XOR on arena pointers */
+	SCX_LIB_FEAT_ARENA_FETCH_BITOPS		= 1ULL << 0,
+};
+
 const volatile u64 scx_lib_features __weak;
 
 static __always_inline bool scx_lib_has(u64 feat)

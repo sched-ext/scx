@@ -16,6 +16,9 @@ use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::mem::size_of;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::slice::from_raw_parts;
 
 const PROCFS_MOUNTS: &str = "/proc/mounts";
@@ -288,12 +291,130 @@ pub fn ksym_exists(ksym: &str) -> Result<bool> {
     Ok(tid >= 0)
 }
 
+/// A raw BPF instruction for the load probes below, laid out as the kernel
+/// reads it: the two register nibbles follow the host's bitfield order.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProbeInsn {
+    code: u8,
+    regs: u8,
+    off: i16,
+    imm: i32,
+}
+
+const fn probe_insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> ProbeInsn {
+    #[cfg(target_endian = "little")]
+    let regs = (src << 4) | dst;
+    #[cfg(target_endian = "big")]
+    let regs = (dst << 4) | src;
+    ProbeInsn {
+        code,
+        regs,
+        off,
+        imm,
+    }
+}
+
+// Opcodes composed from linux/bpf_common.h and linux/bpf.h.
+const PROBE_LD_IMM64: u8 = 0x18; // BPF_LD | BPF_DW | BPF_IMM
+const PROBE_MOV64_REG: u8 = 0xbf; // BPF_ALU64 | BPF_MOV | BPF_X
+const PROBE_MOV64_IMM: u8 = 0xb7; // BPF_ALU64 | BPF_MOV | BPF_K
+const PROBE_ATOMIC_DW: u8 = 0xdb; // BPF_STX | BPF_ATOMIC | BPF_DW
+const PROBE_EXIT: u8 = 0x95; // BPF_JMP | BPF_EXIT
+const PROBE_ATOMIC_OR_FETCH: i32 = 0x41; // BPF_OR | BPF_FETCH
+const PROBE_ADDR_SPACE_CAST: i16 = 1;
+
+/// Load `insns` as a GPL program of `prog_type` with the BPF_F_* `flags`.
+fn probe_prog_load(
+    prog_type: bpf_prog_type,
+    flags: u32,
+    insns: &[ProbeInsn],
+) -> io::Result<OwnedFd> {
+    let mut opts = bpf_prog_load_opts {
+        sz: size_of::<bpf_prog_load_opts>() as _,
+        prog_flags: flags,
+        ..Default::default()
+    };
+    let fd = unsafe {
+        bpf_prog_load(
+            prog_type,
+            std::ptr::null(),
+            c"GPL".as_ptr(),
+            insns.as_ptr() as *const bpf_insn,
+            insns.len() as _,
+            &mut opts,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::from_raw_os_error(-fd));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// A fetching OR on arena memory, which the verifier rejects where the JIT has
+/// no lowering for it. The JITs accept the fetching AND, OR and XOR as a
+/// group, so one probe covers all three. The arena has to be mapped before
+/// the load because the verifier requires its user address to be known.
+fn probe_arena_fetch_bitops() -> bool {
+    let opts = bpf_map_create_opts {
+        sz: size_of::<bpf_map_create_opts>() as _,
+        map_flags: BPF_F_MMAPABLE,
+        ..Default::default()
+    };
+    let map_fd = unsafe { bpf_map_create(BPF_MAP_TYPE_ARENA, std::ptr::null(), 0, 0, 1, &opts) };
+    if map_fd < 0 {
+        return false;
+    }
+    let map = unsafe { OwnedFd::from_raw_fd(map_fd) };
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            page,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            map.as_raw_fd(),
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        return false;
+    }
+
+    let insns = [
+        probe_insn(
+            PROBE_LD_IMM64,
+            1,
+            BPF_PSEUDO_MAP_VALUE as u8,
+            0,
+            map.as_raw_fd(),
+        ),
+        probe_insn(0, 0, 0, 0, 0),
+        probe_insn(PROBE_MOV64_REG, 1, 1, PROBE_ADDR_SPACE_CAST, 1),
+        probe_insn(PROBE_MOV64_IMM, 2, 0, 0, 1),
+        probe_insn(PROBE_ATOMIC_DW, 1, 2, 0, PROBE_ATOMIC_OR_FETCH),
+        probe_insn(PROBE_MOV64_IMM, 0, 0, 0, 0),
+        probe_insn(PROBE_EXIT, 0, 0, 0, 0),
+    ];
+    let loaded = probe_prog_load(BPF_PROG_TYPE_SYSCALL, BPF_F_SLEEPABLE, &insns).is_ok();
+    unsafe { libc::munmap(addr, page) };
+    loaded
+}
+
+// Bits of the scx_lib_features rodata word, mirroring enum scx_lib_feature in
+// scheds/include/scx/features.bpf.h.
+pub const SCX_LIB_FEAT_ARENA_FETCH_BITOPS: u64 = 1 << 0;
+
 lazy_static::lazy_static! {
+    /// The JIT lowers fetching AND, OR and XOR on arena pointers.
+    pub static ref ARENA_FETCH_BITOPS: bool = probe_arena_fetch_bitops();
+
     /// Every probed kernel feature: its name, its bit in the scx_lib_features
     /// rodata word or zero when only userspace consults it, and whether the
-    /// running kernel has it. The bits mirror enum scx_lib_feature in
-    /// scheds/include/scx/features.bpf.h.
-    pub static ref LIB_FEATURES: Vec<(&'static str, u64, bool)> = vec![];
+    /// running kernel has it.
+    pub static ref LIB_FEATURES: Vec<(&'static str, u64, bool)> = vec![
+        ("arena_fetch_bitops", SCX_LIB_FEAT_ARENA_FETCH_BITOPS, *ARENA_FETCH_BITOPS),
+    ];
 }
 
 /// Write `value` over the rodata variable `name` of an open object. Returns
