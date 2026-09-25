@@ -57,7 +57,9 @@ UEI_DEFINE(uei);
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
 const volatile struct {
+	/* nr_cpus is the CPU ID span; it is not the online CPU count. */
 	u32 nr_cpus;
+	u32 nr_online_cpus;
 	u32 nr_llcs;
 	u32 nr_nodes;
 
@@ -65,6 +67,7 @@ const volatile struct {
 	bool has_little_cores;
 } topo_config = {
 	.nr_cpus = 64,
+	.nr_online_cpus = 64,
 	.nr_llcs = 32,
 	.nr_nodes = 32,
 
@@ -190,6 +193,8 @@ u64 llc_ids[MAX_LLCS];
 u32 cpu_core_ids[MAX_CPUS];
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
+/* Set by userspace for CPUs present in Topology::all_cpus. */
+u8 cpu_online[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
 u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 
@@ -439,7 +444,7 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 
 static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
 {
-	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_cpus;
+	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_online_cpus;
 }
 
 static u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
@@ -491,7 +496,7 @@ static int llc_create_atqs(struct llc_ctx *llcx)
 
 	if (topo_config.nr_llcs > 1) {
 		llcx->mig_atq = (scx_atq_t *)scx_atq_create_size(false,
-								 topo_config.nr_cpus);
+									 topo_config.nr_online_cpus);
 		if (!llcx->mig_atq) {
 			scx_bpf_error("ATQ failed to create ATQ for LLC %u",
 				      llcx->id);
@@ -547,7 +552,7 @@ static int llc_create_dhqs(struct llc_ctx *llcx)
 		 * for queued tasks under load without excessive memory usage.
 		 * Max imbalance controls strand balance for cross-LLC load balancing.
 		 */
-		u64 dhq_capacity = topo_config.nr_cpus * 4;
+		u64 dhq_capacity = topo_config.nr_online_cpus * 4;
 		llc_pair_dhqs[dhq_index] = (scx_dhq_t *)scx_dhq_create_balanced(
 			false,                          /* vtime mode */
 			dhq_capacity,                   /* fixed capacity */
@@ -632,6 +637,11 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
+static __always_inline bool cpu_is_online(s32 cpu)
+{
+	return cpu >= 0 && cpu < topo_config.nr_cpus && cpu_online[cpu];
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -654,7 +664,7 @@ static struct llc_ctx *lookup_llc_ctx(u32 llc_id)
 
 static struct llc_ctx *lookup_cpu_llc_ctx(s32 cpu)
 {
-	if (cpu >= topo_config.nr_cpus || cpu < 0) {
+	if (!cpu_is_online(cpu)) {
 		scx_bpf_error("invalid CPU");
 		return NULL;
 	}
@@ -1164,6 +1174,8 @@ static __always_inline s32 find_idle_cpu_in_target_llc(struct task_struct *p, u3
 
 	/* Try idle core first (both SMT siblings idle) */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
 		struct cpu_ctx *cpuc = lookup_cpu_ctx(cpu);
 		if (!cpuc || cpuc->llc_id != target_llc_id)
 			continue;
@@ -1176,6 +1188,8 @@ static __always_inline s32 find_idle_cpu_in_target_llc(struct task_struct *p, u3
 
 	/* No idle core, try any idle CPU */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
 		struct cpu_ctx *cpuc = lookup_cpu_ctx(cpu);
 		if (!cpuc || cpuc->llc_id != target_llc_id)
 			continue;
@@ -1247,6 +1261,8 @@ static __always_inline s32 pick_idle_thermal_aware(struct bpf_cpumask *mask,
 
 	/* First pass: try to find unthrottled idle CPU */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
 			continue;
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
@@ -1260,6 +1276,9 @@ static __always_inline s32 pick_idle_thermal_aware(struct bpf_cpumask *mask,
 	/* Second pass: allow throttled CPUs, prefer least throttled */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
 		u32 capacity;
+
+		if (!cpu_is_online(cpu))
+			continue;
 
 		if (mask && !bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
 			continue;
@@ -1304,6 +1323,9 @@ static __always_inline s32 select_best_idle_cpu(struct task_struct *p,
 
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
 		u32 capacity, energy_cost, score;
+
+		if (!cpu_is_online(cpu))
+			continue;
 
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
 			continue;
@@ -2796,6 +2818,8 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 		bpf_for(other_cpu, 0, topo_config.nr_cpus) {
 			struct bpf_cpumask *llc_cpumask;
 
+			if (!cpu_is_online(other_cpu))
+				continue;
 			if (other_cpu == cpu)
 				continue;
 
@@ -3354,6 +3378,9 @@ static s32 init_cpu(int cpu)
 	struct llc_ctx *llcx;
 	struct cpu_ctx *cpuc;
 
+	if (!cpu_is_online(cpu))
+		return 0;
+
 	if (!(cpuc = lookup_cpu_ctx(cpu)))
 		return -ENOENT;
 
@@ -3656,6 +3683,8 @@ static s32 p2dq_init_impl()
 	}
 
 	bpf_for(i, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(i))
+			continue;
 		ret = init_cpu(i);
 		if (ret)
 			return ret;
@@ -3663,6 +3692,8 @@ static s32 p2dq_init_impl()
 
 	// Create DSQs for the LLCs
 	bpf_for(i, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(i))
+			continue;
 		if (!(cpuc = lookup_cpu_ctx(i)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 			return -EINVAL;
