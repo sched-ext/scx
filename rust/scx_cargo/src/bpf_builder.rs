@@ -5,12 +5,15 @@
 
 use crate::ClangInfo;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
+use libbpf_rs::btf::{Btf, BtfKind, BtfType, types::DataSec};
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::Level;
@@ -166,6 +169,10 @@ use tracing_subscriber::{Layer, filter, layer::SubscriberExt};
 ///
 /// - `RUSTFLAGS`: This is a generic `cargo` flag and can be useful for
 ///   specifying extra linker flags.
+///
+/// - `SCX_ALLOW_OLD_CLANG`: Build a cid-form scheduler with a clang older
+///   than 22 anyway. clang before 22 mishandles arena memory, so such a build
+///   fails by default; setting this turns the failure into a warning.
 ///
 /// A common case for using the above flags is using the latest `libbpf`
 /// from the kernel tree. Let's say the kernel tree is at `$KERNEL` and
@@ -362,10 +369,13 @@ impl BpfBuilder {
                     .build()
             })?;
 
+            fixup_arena_externs(&obj)?;
             linker.add_file(&obj)?;
         }
 
         linker.link()?;
+        fixup_arena_datasec(&linkobj)?;
+        self.check_cid_clang(&linkobj)?;
 
         self.bindgen_bpf_intf()?;
 
@@ -434,8 +444,35 @@ impl BpfBuilder {
         Ok(())
     }
 
+    /// clang before 22 mishandles arena memory: memset() on it is lowered
+    /// without the address space cast. cid-form schedulers are arena based, so
+    /// refuse to build one with such a clang unless SCX_ALLOW_OLD_CLANG turns
+    /// the refusal into a warning.
+    fn check_cid_clang(&self, linkobj: &Path) -> Result<()> {
+        if version_compare::compare(&self.clang.ver, "22") != Ok(version_compare::Cmp::Lt) {
+            return Ok(());
+        }
+        let Some(ops) = cid_struct_ops_type(linkobj)? else {
+            return Ok(());
+        };
+        let msg = format!(
+            "{} registers cid-form struct_ops {ops} but is built with clang {}, and \
+             clang before 22 mishandles arena memory (memset() on it is lowered without \
+             the address space cast), which cid-form schedulers depend on. Use clang >= 22, \
+             or set SCX_ALLOW_OLD_CLANG=1 to build anyway.",
+            env::var("CARGO_PKG_NAME").unwrap_or_default(),
+            self.clang.ver
+        );
+        if env::var_os("SCX_ALLOW_OLD_CLANG").is_some_and(|v| !v.is_empty()) {
+            println!("cargo:warning={msg}");
+            return Ok(());
+        }
+        bail!(msg)
+    }
+
     fn gen_cargo_reruns(&self, dependencies: Option<&BTreeSet<String>>) -> Result<()> {
         println!("cargo:rerun-if-env-changed=BPF_CLANG");
+        println!("cargo:rerun-if-env-changed=SCX_ALLOW_OLD_CLANG");
         println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
         println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
         println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
@@ -464,6 +501,241 @@ impl BpfBuilder {
         self.gen_cargo_reruns(Some(&deps))?;
         Ok(())
     }
+}
+
+/// The cid-form struct_ops type the linked object registers, if any. The
+/// struct_ops DATASECs list the ops variables; a cid-form one has type struct
+/// sched_ext_ops_cid or a CO-RE variant of it.
+fn cid_struct_ops_type(linkobj: &Path) -> Result<Option<String>> {
+    let btf = Btf::from_path(linkobj)
+        .with_context(|| format!("Failed to parse BTF from {}", linkobj.display()))?;
+
+    for sec in [".struct_ops", ".struct_ops.link"] {
+        let Some(datasec) = btf.type_by_name::<DataSec>(sec) else {
+            continue;
+        };
+        for vsi in datasec.iter() {
+            let Some(ty) = btf
+                .type_by_id::<BtfType>(vsi.ty)
+                .and_then(|var| var.next_type())
+                .map(|ty| ty.skip_mods_and_typedefs())
+            else {
+                continue;
+            };
+            if ty.kind() != BtfKind::Struct {
+                continue;
+            }
+            let name = ty.name().unwrap_or_default().to_string_lossy();
+            if name == "sched_ext_ops_cid" || name.starts_with("sched_ext_ops_cid___") {
+                return Ok(Some(name.into_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+// libbpf's static linker (libbpf 1.7 and 1.8) mishandles an arena global that
+// one compilation unit defines and another declares extern, in two ways. An
+// unresolved extern comes out of a link bound to the output's .addr_space.1
+// section as a size-zero NOTYPE symbol instead of staying undefined, so the
+// next link takes it for a definition. libbpf-cargo's build() links every
+// per-source object once, so the bound externs reach the final link here.
+// Separately, the merged .addr_space.1 BTF DATASEC keeps the extern's
+// placeholder offset when the declaring unit is linked before the defining
+// one, which the skeleton generators reject. The ELF symbols are correct in
+// both cases, so the two fixups below restore the objects from them. Both
+// edit bytes in place and never change sizes. Drop them once libbpf carries
+// the fix.
+
+const ARENA_SEC: &str = ".addr_space.1";
+const SHT_SYMTAB: u32 = 2;
+const STT_NOTYPE: u8 = 0;
+const STT_OBJECT: u8 = 1;
+const BTF_MAGIC: u16 = 0xeB9F;
+const BTF_KIND_VAR: u32 = 14;
+const BTF_KIND_DATASEC: u32 = 15;
+
+fn le16(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes(b[o..o + 2].try_into().unwrap())
+}
+
+fn le32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
+}
+
+fn le64(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+}
+
+fn cstr(b: &[u8], o: usize) -> String {
+    let len = b[o..].iter().position(|&c| c == 0).unwrap_or(0);
+    String::from_utf8_lossy(&b[o..o + len]).into_owned()
+}
+
+/// The pieces of a little-endian ELF64 object the arena fixups touch.
+struct ArenaElf {
+    arena_shndx: u16,
+    symtab: (usize, usize),
+    strtab: usize,
+    btf: Option<(usize, usize)>,
+}
+
+impl ArenaElf {
+    /// Returns None when the object has no arena data section.
+    fn parse(elf: &[u8], path: &Path) -> Result<Option<Self>> {
+        if elf.len() < 0x40 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+            bail!("{}: not a little-endian ELF64 object", path.display());
+        }
+        let shoff = le64(elf, 0x28) as usize;
+        let shentsize = le16(elf, 0x3a) as usize;
+        let shnum = le16(elf, 0x3c) as usize;
+        let shdr = |i: usize| shoff + i * shentsize;
+        let shstr = le64(elf, shdr(le16(elf, 0x3e) as usize) + 24) as usize;
+        let (mut arena_shndx, mut symtab, mut btf) = (None, None, None);
+
+        for i in 0..shnum {
+            let h = shdr(i);
+            let name = cstr(elf, shstr + le32(elf, h) as usize);
+            let (off, size) = (le64(elf, h + 24) as usize, le64(elf, h + 32) as usize);
+
+            if name == ARENA_SEC {
+                arena_shndx = Some(i as u16);
+            } else if name == ".BTF" {
+                btf = Some((off, size));
+            } else if le32(elf, h + 4) == SHT_SYMTAB {
+                let strtab = le64(elf, shdr(le32(elf, h + 40) as usize) + 24) as usize;
+                symtab = Some(((off, size), strtab));
+            }
+        }
+        let (Some(arena_shndx), Some((symtab, strtab))) = (arena_shndx, symtab) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            arena_shndx,
+            symtab,
+            strtab,
+            btf,
+        }))
+    }
+
+    /// File offsets of the 24-byte symbol table entries.
+    fn syms(&self) -> impl Iterator<Item = usize> {
+        (self.symtab.0..self.symtab.0 + self.symtab.1).step_by(24)
+    }
+}
+
+/// A libbpf linker pass binds unresolved arena externs to the arena section
+/// as size-zero NOTYPE symbols, with the declaring object's section offset as
+/// their value. Mark them undefined again so the next pass treats them as
+/// externs.
+fn fixup_arena_externs(path: &Path) -> Result<()> {
+    let mut elf = fs::read(path)?;
+    let Some(parts) = ArenaElf::parse(&elf, path)? else {
+        return Ok(());
+    };
+    let mut changed = false;
+
+    for o in parts.syms() {
+        if le16(&elf, o + 6) != parts.arena_shndx
+            || elf[o + 4] & 0xf != STT_NOTYPE
+            || le64(&elf, o + 16) != 0
+        {
+            continue;
+        }
+        elf[o + 6..o + 8].copy_from_slice(&0u16.to_le_bytes());
+        elf[o + 8..o + 16].copy_from_slice(&0u64.to_le_bytes());
+        changed = true;
+    }
+    if changed {
+        fs::write(path, elf)?;
+    }
+    Ok(())
+}
+
+/// Rewrite the .addr_space.1 BTF DATASEC of a linked object from its ELF
+/// symbols and sort it by offset.
+fn fixup_arena_datasec(path: &Path) -> Result<()> {
+    let mut elf = fs::read(path)?;
+    let Some(parts) = ArenaElf::parse(&elf, path)? else {
+        return Ok(());
+    };
+    let Some((btf_off, _)) = parts.btf else {
+        return Ok(());
+    };
+    if le16(&elf, btf_off) != BTF_MAGIC {
+        bail!("{}: bad BTF magic", path.display());
+    }
+
+    // The DATASEC lists static arena globals too, so keep local symbols. Two
+    // units with a same-named static would collide and are rejected below.
+    let mut syms = HashMap::new();
+    for o in parts.syms() {
+        if le16(&elf, o + 6) != parts.arena_shndx || elf[o + 4] & 0xf != STT_OBJECT {
+            continue;
+        }
+        let name = cstr(&elf, parts.strtab + le32(&elf, o) as usize);
+        if syms.insert(name.clone(), le64(&elf, o + 8)).is_some() {
+            bail!("{}: duplicate arena symbol {name}", path.display());
+        }
+    }
+
+    let hdr_len = le32(&elf, btf_off + 4) as usize;
+    let types = btf_off + hdr_len + le32(&elf, btf_off + 8) as usize;
+    let types_end = types + le32(&elf, btf_off + 12) as usize;
+    let strs = btf_off + hdr_len + le32(&elf, btf_off + 16) as usize;
+    let mut var_names = vec![String::new()];
+    let mut datasec = None;
+    let mut o = types;
+
+    while o < types_end {
+        let name = cstr(&elf, strs + le32(&elf, o) as usize);
+        let info = le32(&elf, o + 4);
+        let (kind, vlen) = ((info >> 24) & 0x1f, (info & 0xffff) as usize);
+        let extra = match kind {
+            1 | 14 | 17 => 4,
+            3 => 12,
+            4 | 5 | 15 | 19 => vlen * 12,
+            6 | 13 => vlen * 8,
+            _ => 0,
+        };
+
+        var_names.push(if kind == BTF_KIND_VAR {
+            name.clone()
+        } else {
+            String::new()
+        });
+        if kind == BTF_KIND_DATASEC && name == ARENA_SEC {
+            datasec = Some((o + 12, vlen));
+        }
+        o += 12 + extra;
+    }
+    let Some((secinfos, vlen)) = datasec else {
+        return Ok(());
+    };
+
+    let mut entries: Vec<[u8; 12]> = (0..vlen)
+        .map(|i| {
+            elf[secinfos + i * 12..secinfos + (i + 1) * 12]
+                .try_into()
+                .unwrap()
+        })
+        .collect();
+    for e in entries.iter_mut() {
+        let name = &var_names[le32(e, 0) as usize];
+        let Some(&value) = syms.get(name) else {
+            bail!(
+                "{}: arena variable {name} has no ELF symbol",
+                path.display()
+            );
+        };
+        e[4..8].copy_from_slice(&(value as u32).to_le_bytes());
+    }
+    entries.sort_by_key(|e| le32(e, 4));
+    for (i, e) in entries.iter().enumerate() {
+        elf[secinfos + i * 12..secinfos + (i + 1) * 12].copy_from_slice(e);
+    }
+    fs::write(path, elf)?;
+    Ok(())
 }
 
 // Helper function to set up tracing and output compiler warnings

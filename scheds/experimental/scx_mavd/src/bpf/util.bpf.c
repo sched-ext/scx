@@ -1,0 +1,528 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Copyright (c) 2023, 2024 Valve Corporation.
+ * Author: Changwoo Min <changwoo@igalia.com>
+ */
+
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include "power.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+/*
+ * To be included to the main.bpf.c
+ */
+
+/*
+ * Sched related globals
+ */
+struct scx_cmask __arena *turbo_cmask; /* CPU mask for turbo CPUs */
+struct scx_cmask __arena *big_cmask; /* CPU mask for big CPUs */
+struct scx_cmask __arena *active_cmask; /* CPU mask for active CPUs */
+struct scx_cmask __arena *ovrflw_cmask; /* CPU mask for overflow CPUs */
+struct scx_cmask __arena *steady_cmask; /* CPU mask for non-turbulent CPUs */
+
+const volatile u64	nr_llcs;	/* number of LLC domains */
+volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
+
+
+/*
+ * Options
+ */
+volatile bool __arena_global	reinit_cpumask_for_performance;
+volatile bool __arena_global	no_preemption;
+volatile bool __arena_global	no_core_compaction;
+volatile bool __arena_global	no_freq_scaling;
+
+const volatile bool	no_wake_sync;
+const volatile bool	no_slice_boost;
+const volatile bool	per_cpu_dsq;
+const volatile bool	enable_cpu_bw;
+const volatile bool	is_autopilot_on;
+const volatile u8	verbose;
+
+/*
+ * Exit information
+ */
+UEI_DEFINE(uei);
+
+struct cpu_ctx __arena *cpu_ctxs;
+
+__hidden
+u64 __find_task_ctx(struct task_struct __arg_trusted *p,
+		      struct cpu_ctx __arena __arg_arena *cpuc, bool quiet)
+{
+	u64 raw = (u64)(quiet ? __scx_task_data(p) : scx_task_data(p));
+
+	if (cpuc && raw) {
+		cpuc->cached_task = (u64)p;
+		cpuc->cached_pid = p->pid;
+		cpuc->cached_taskc_raw = raw;
+	}
+	return raw;
+}
+
+__hidden
+struct cpu_ctx __arena *get_cpu_ctx(void)
+{
+	return get_cpu_ctx_id(scx_bpf_this_cid());
+}
+
+__hidden
+struct cpu_ctx __arena *get_cpu_ctx_id(s32 cid)
+{
+	asm volatile("" :: "r"(&arena));
+	if (cid < 0 || cid >= nr_cids || !cpu_ctxs)
+		return NULL;
+	/* auxiliary programs can outlive the calling scheduler */
+	if (scx_bpf_cid_to_cpu(cid) < 0)
+		return NULL;
+	return &cpu_ctxs[cid];
+}
+
+__hidden
+struct cpu_ctx __arena *get_cpu_ctx_task(const struct task_struct *p)
+{
+	return get_cpu_ctx_id(scx_bpf_task_cid(p));
+}
+
+__hidden
+u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
+{
+	/*
+	 * Calculate the exponential weighted moving average (EWMA).
+	 *  - EWMA = (0.875 * old) + (0.125 * new)
+	 */
+	return __calc_avg(old_val, new_val, 3);
+}
+
+__hidden
+u64 __attribute__ ((noinline)) calc_avg(u64 old_val, u64 new_val)
+{
+	/*
+	 * Calculate the exponential weighted moving average (EWMA).
+	 *  - EWMA = (0.875 * old) + (0.125 * new)
+	 */
+	return __calc_avg(old_val, new_val, 3);
+}
+
+__hidden
+u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
+{
+	/*
+	 * Increase fast but decrease slowly.
+	 */
+	if (old_val < new_val)
+		return __calc_avg(new_val, old_val, 2);
+	else
+		return __calc_avg(old_val, new_val, 3);
+}
+
+__hidden
+u64 __attribute__ ((noinline)) calc_avg_freq(u64 old_freq, u64 interval)
+{
+	u64 new_freq, ewma_freq;
+
+	/*
+	 * Calculate the exponential weighted moving average (EWMA) of a
+	 * frequency with a new interval measured.
+	 */
+	new_freq = LAVD_TIME_ONE_SEC / interval;
+	ewma_freq = __calc_avg(old_freq, new_freq, 3);
+	return ewma_freq;
+}
+
+__hidden
+bool is_kernel_task(struct task_struct *p)
+{
+	return !!(p->flags & PF_KTHREAD);
+}
+
+__hidden
+bool is_kernel_worker(struct task_struct *p)
+{
+	return !!(p->flags & (PF_WQ_WORKER | PF_IO_WORKER));
+}
+
+__hidden
+bool is_ksoftirqd(struct task_struct *p)
+{
+	return is_kernel_task(p) && !__builtin_memcmp(p->comm, "ksoftirqd/", 10);
+}
+
+__hidden
+bool is_permanently_pinned(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed == 1;
+}
+
+__hidden
+bool is_effectively_pinned(task_ctx __arg_arena *taskc)
+{
+	return test_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
+}
+
+__hidden
+bool test_task_flag(task_ctx __arg_arena *taskc, u64 flag)
+{
+	return (taskc->flags & flag) == flag;
+}
+
+__hidden
+bool test_task_flag_mask(task_ctx __arg_arena *taskc, u64 flag)
+{
+	return (taskc->flags & flag);
+}
+
+__hidden
+void set_task_flag(task_ctx __arg_arena *taskc, u64 flag)
+{
+	taskc->flags |= flag;
+}
+
+__hidden
+void reset_task_flag(task_ctx __arg_arena *taskc, u64 flag)
+{
+	taskc->flags &= ~flag;
+}
+
+__hidden
+inline bool test_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
+{
+	return (cpuc->flags & flag) == flag;
+}
+
+__hidden
+inline void set_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
+{
+	cpuc->flags |= flag;
+}
+
+__hidden
+inline void reset_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
+{
+	cpuc->flags &= ~flag;
+}
+
+__hidden
+bool is_lat_cri(task_ctx __arg_arena *taskc)
+{
+	return taskc->lat_cri >= sys_stat.avg_lat_cri;
+}
+
+__hidden
+bool is_lock_holder(task_ctx __arg_arena *taskc)
+{
+	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
+}
+
+__hidden
+bool is_lock_holder_running(struct cpu_ctx __arena __arg_arena *cpuc)
+{
+	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
+}
+
+bool have_scheduled(task_ctx __arg_arena *taskc)
+{
+	/*
+	 * If task's time slice hasn't been updated, that means the task has
+	 * been scheduled by this scheduler.
+	 */
+	return taskc->slice_wall != 0;
+}
+
+__hidden
+bool can_boost_slice(void)
+{
+	/*
+	 * When CPU utilization is too high (>= 95%), do not boost the
+	 * time slice. Checking the number of queued tasks alone is not
+	 * sufficient, especially when many tasks are slice-boosted and
+	 * unlikely relinquish CPUs soon.
+	 */
+	return (sys_stat.avg_util_wall <= LAVD_SLICE_BOOST_UTIL_WALL) &&
+	       (sys_stat.nr_queued_task <= sys_stat.nr_active);
+}
+
+__hidden
+u16 get_nice_prio(struct task_struct __arg_trusted *p)
+{
+	u16 prio = p->static_prio - MAX_RT_PRIO; /* [0, 40) */
+	return prio;
+}
+
+__hidden
+bool use_full_cpus(void)
+{
+	return sys_stat.nr_active >= nr_cpus_onln;
+}
+
+__hidden
+void set_affinity_flags(task_ctx __arg_arena *taskc,
+			const struct scx_cmask __arena __arg_arena *cpumask)
+{
+	bool is_affinitized, dom_pinned, dom_pinned_settled;
+	bool on_big = false, on_little = false;
+	s32 first_cpdom_id = -ENOENT;
+	u32 weight;
+	int cpu;
+
+	weight = cmask_weight(cpumask);
+	is_affinitized = weight != nr_cids;
+	if (weight == 1)
+		set_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
+	if (nr_cpdoms == 1) {
+		dom_pinned = false;
+		dom_pinned_settled = true;
+	} else {
+		dom_pinned = is_affinitized;
+		dom_pinned_settled = !is_affinitized;
+	}
+
+	cmask_for_each(cpu, cpumask) {
+		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+
+		if (cpuc->big_core)
+			on_big = true;
+		else
+			on_little = true;
+
+		/*
+		 * Track whether the task is domain-pinned: confined to a
+		 * single compute domain. On the first CPU seen, record its
+		 * domain. On any subsequent CPU in a different domain, the
+		 * task spans multiple domains and is not domain-pinned.
+		 */
+		if (!dom_pinned_settled) {
+			if (first_cpdom_id < 0)
+				first_cpdom_id = cpuc->cpdom_id;
+			else if (cpuc->cpdom_id != first_cpdom_id) {
+				dom_pinned = false;
+				dom_pinned_settled = true;
+			}
+		}
+
+		if (on_big && on_little && dom_pinned_settled)
+			break;
+	}
+
+	if (is_affinitized)
+		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+
+	if (on_big)
+		set_task_flag(taskc, LAVD_FLAG_ON_BIG);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_ON_BIG);
+
+	if (on_little)
+		set_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
+
+	if (dom_pinned)
+		set_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED);
+}
+
+__hidden
+bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
+{
+	u32 r;
+
+	if (x >= y)
+		return true;
+
+	/*
+	 * [0, r, y)
+	 *  ---- x?
+	 */
+	r = bpf_get_prandom_u32() % y;
+	return r < x;
+}
+/* the core's first cid is its primary; without SMT every cid is its own core */
+__hidden
+u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
+	struct cpu_ctx __arena *cpuc;
+
+	if (!is_smt_active)
+		return cpu;
+	cpuc = get_cpu_ctx_id(cpu);
+	return cpuc ? cpuc->core_cid : cpu;
+}
+
+__hidden
+u32 cpu_to_dsq(u32 cpu)
+{
+	return (get_primary_cpu(cpu)) | LAVD_DSQ_TYPE_CPU << LAVD_DSQ_TYPE_SHFT;
+}
+
+__hidden
+bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc)
+{
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cid))
+		return true;
+
+	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cid)))
+		return true;
+
+	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id)))
+		return true;
+
+	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id)))
+		return true;
+
+	return false;
+}
+
+__hidden
+bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc)
+{
+	int nr;
+
+	nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cid);
+	if (nr >= LAVD_CPU_CONGESTED_THRES)
+		return true;
+
+	if (use_cpdom_dsq()) {
+		nr += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
+		if (nr >= LAVD_CPU_CONGESTED_THRES)
+			return true;
+
+		nr += scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id));
+		if (nr >= LAVD_CPU_CONGESTED_THRES)
+			return true;
+	}
+
+	if (use_per_cpu_dsq()) {
+		nr += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cid));
+		if (nr >= LAVD_CPU_CONGESTED_THRES)
+			return true;
+	}
+
+	return false;
+}
+
+__hidden
+u64 peek_dsq_vtime(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	return p ? p->scx.dsq_vtime : U64_MAX;
+}
+
+__hidden
+void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
+	       struct dsq_entry *c)
+{
+	struct dsq_entry t;
+
+	if (b->vtime < a->vtime) { t = *a; *a = *b; *b = t; }
+	if (c->vtime < b->vtime) { t = *b; *b = *c; *c = t; }
+	if (b->vtime < a->vtime) { t = *a; *a = *b; *b = t; }
+}
+
+__hidden
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+		      task_ctx *taskc)
+{
+	struct cpdom_ctx __arena *cpdomc;
+
+	/*
+	 * Route effectively pinned tasks (permanent pinning or
+	 * migrate_disable) to the per-CPU DSQ when pinned_slice_ns is
+	 * enabled, so the slice-shrinking heuristic in preempt.bpf.c can
+	 * act on them consistently.
+	 */
+	if (per_cpu_dsq || (pinned_slice_ns && is_effectively_pinned(taskc)))
+		return cpu_to_dsq(cpuc->cid);
+
+	cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
+	if (preemption_vulnerability(taskc->normalized_lat_cri,
+				     taskc->util_est) >= cpdomc->vuln_thresh)
+		return cpdom_to_dsq(cpuc->cpdom_id);
+
+	return cpdom_to_turb_dsq(cpuc->cpdom_id);
+}
+
+/*
+ * Current warmth of @cid for @taskc: 0 unless @cid is the CPU the task last ran
+ * on (taskc->cid). Heat decays linearly to 0 across LAVD_CPU_WARM_LIFETIME_NS
+ * of away-time.
+ */
+__hidden
+u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cid, u64 now)
+{
+	u64 away_ns, heat = taskc->cpu_heat;
+
+	if (!heat || taskc->cid != cid)
+		return 0;
+
+	away_ns = time_delta(now, taskc->last_stopping_clk);
+	if (away_ns >= LAVD_CPU_WARM_LIFETIME_NS)
+		return 0;
+
+	return heat - (heat * away_ns) / LAVD_CPU_WARM_LIFETIME_NS;
+}
+
+/*
+ * Add the slice a task just spent on @cpuc to its warmth, saturating at full
+ * heat after LAVD_CPU_WARM_SAT_NS of residence. Heat follows the CPU the task
+ * last ran on (taskc->cid); a migration onto @cpuc (prev_cid != cid)
+ * restarts the clock from this slice.
+ */
+__hidden
+void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
+			    struct cpu_ctx __arena __arg_arena *cpuc, u64 slice_used, u64 now)
+{
+	u64 gain, w;
+
+	gain = (min(slice_used, (u64)LAVD_CPU_WARM_SAT_NS) * LAVD_SCALE) /
+	       LAVD_CPU_WARM_SAT_NS;
+
+	if (taskc->prev_cid == cpuc->cid) {
+		w = task_cpu_warmth(taskc, cpuc->cid, now) + gain;
+		taskc->cpu_heat = min(w, (u64)LAVD_SCALE);
+	} else {
+		taskc->cpu_heat = min(gain, (u64)LAVD_SCALE);
+	}
+	taskc->last_stopping_clk = now;
+}
+
+/**
+ * normalize_lat_cri - Normalize latency criticality to 1024 scale
+ * @lat_cri: The latency criticality value from task_ctx
+ *
+ * Normalizes the lat_cri value from the range [0, max_lat_cri] to [0, 1024].
+ * Uses the system-wide max_lat_cri as the upper bound for normalization.
+ *
+ * Returns: Normalized value in range [0, 1024]
+ */
+__hidden
+u16 normalize_lat_cri(u16 lat_cri)
+{
+	u32 max = sys_stat.max_lat_cri;
+
+	/*
+	 * Handle edge cases:
+	 * - If max_lat_cri is 0, return 0 (no tasks have run yet)
+	 * - If lat_cri >= max_lat_cri, return 1024 (maximum)
+	 */
+	if (max == 0)
+		return 0;
+
+	if (lat_cri >= max)
+		return 1024;
+
+	return (u16)(((u64)lat_cri << LAVD_SHIFT) / max);
+}

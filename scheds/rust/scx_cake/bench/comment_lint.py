@@ -59,7 +59,7 @@ POLICY = re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:NS|MS|SHIFT|DEPTH|MAX|
 
 # Peer band from coding-style.rst §8 and the 2026-07-30 measurement: EEVDF 0.63,
 # scx peers 0.15-0.73. Above this, relocate the narrative rather than trim it.
-DEFAULT_MAX_RATIO = 0.70
+DEFAULT_MAX_RATIO = 0.30
 # Below this a block is a label, not an explanation, and repeating it is fine.
 DUPLICATE_MIN_LINES = 3
 # Jaccard over word multisets. 0.6 catches reworded copies without firing on

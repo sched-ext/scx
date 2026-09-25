@@ -6,7 +6,9 @@ BPFTOOL=bpftool
 
 INCLUDES=-I../../scheds/include -I ../../scheds/vmlinux -I../../scheds/include/arch -I ../../scheds/include/arch/bpf-compat
 
-BPF_CFLAGS=-O2 -g -target bpf -D__TARGET_ARCH_x86 -mcpu=v3 -Wall
+# Sign-extending loads from arena memory need v6.18+. Drop -disable-ldsx once
+# that is the minimum supported kernel (see scx_cargo's clang_info.rs).
+BPF_CFLAGS=-O2 -g -target bpf -D__TARGET_ARCH_x86 -mcpu=v4 -mllvm -disable-ldsx -Wall
 BPF_CFLAGS+=-I/usr/include/bpf -I/usr/include/$(shell uname -m)-linux-gnu 
 BPF_CFLAGS+=$(INCLUDES)
 

@@ -3,8 +3,9 @@
  * BPF-side helpers for cids and cmasks. See kernel/sched/ext/cid.h for the
  * authoritative layout and semantics. The BPF-side helpers use the cmask_*
  * naming (no scx_ prefix); cmask is the SCX bitmap type so the prefix is
- * redundant in BPF code. Atomics use __sync_val_compare_and_swap and every
- * helper is inline (no .c counterpart).
+ * redundant in BPF code. Atomics use __sync_val_compare_and_swap. Every helper
+ * is inline except the binary operations, which are weak global functions
+ * defined here, so there is no .c counterpart.
  *
  * Included by scx/common.bpf.h; don't include directly.
  *
@@ -16,6 +17,11 @@
 
 #include "bpf_arena_common.bpf.h"
 #include <lib/arena_loop.h>
+
+/* libbpf's bpf_helpers.h defines it from 1.4 on */
+#ifndef __arg_arena
+#define __arg_arena __attribute((btf_decl_tag("arg:arena")))
+#endif
 
 #ifndef BIT_U64
 #define BIT_U64(nr)		(1ULL << (nr))
@@ -582,92 +588,136 @@ enum {
 	BPF_CMASK_OP_ANDNOT,
 };
 
-static __always_inline void cmask_op_word(struct scx_cmask __arena *dst,
-					  const struct scx_cmask __arena *src,
-					  u32 di, u32 si, u64 mask, int op)
+/* range bits of word @k of @m, which spans @nr words: 0 past the span */
+static __always_inline u64 __cmask_word_range(const struct scx_cmask __arena *m, u32 k,
+					      u32 nr)
 {
-	u64 dv = dst->bits[di];
-	u64 sv = src->bits[si];
-	u64 rv;
+	u64 bits = ~0ULL;
 
-	if (op == BPF_CMASK_OP_AND)
-		rv = dv & sv;
-	else if (op == BPF_CMASK_OP_OR)
-		rv = dv | sv;
-	else if (op == BPF_CMASK_OP_ANDNOT)
-		rv = dv & ~sv;
-	else
-		rv = sv;
-
-	dst->bits[di] = (dv & ~mask) | (rv & mask);
-}
-
-static __always_inline void cmask_op(struct scx_cmask __arena *dst,
-				     const struct scx_cmask __arena *src, int op)
-{
-	u32 d_end = dst->base + dst->nr_cids;
-	u32 s_end = src->base + src->nr_cids;
-	u32 lo = dst->base > src->base ? dst->base : src->base;
-	u32 hi = d_end < s_end ? d_end : s_end;
-	u32 d_base = dst->base / 64;
-	u32 s_base = src->base / 64;
-	u32 lo_word, hi_word, i;
-	u64 head_mask, tail_mask;
-
-	if (lo >= hi)
-		return;
-
-	lo_word = lo / 64;
-	hi_word = (hi - 1) / 64;
-	head_mask = GENMASK_U64(63, lo & 63);
-	tail_mask = GENMASK_U64((hi - 1) & 63, 0);
-
-	bpf_arena_for(i, 0, CMASK_MAX_WORDS) {
-		u32 w = lo_word + i;
-		u64 m;
-
-		if (w > hi_word)
-			break;
-
-		m = GENMASK_U64(63, 0);
-		if (w == lo_word)
-			m &= head_mask;
-		if (w == hi_word)
-			m &= tail_mask;
-
-		cmask_op_word(dst, src, w - d_base, w - s_base, m, op);
-	}
+	if (k >= nr)
+		return 0;
+	if (k == 0)
+		bits &= GENMASK_U64(63, m->base & 63);
+	if (k == nr - 1)
+		bits &= GENMASK_U64((m->base + m->nr_cids - 1) & 63, 0);
+	return bits;
 }
 
 /*
- * cmask_and/or/copy only modify @dst bits that lie in the intersection of
- * [@dst->base, @dst->base + @dst->nr_cids) and [@src->base,
- * @src->base + @src->nr_cids). Bits in @dst outside that window
- * keep their prior values - in particular, cmask_copy() does NOT zero @dst
- * bits that lie outside @src's range.
+ * The binary operations combine cmasks of any active ranges. A cmask holds bits
+ * only for its own range and reads as the operation's identity outside it, all
+ * ones for AND and all zeros for OR, so an operand alters only the bits it
+ * covers: ANDing a shard's mask into a global one edits that shard's window and
+ * leaves the rest of the global mask alone. ANDNOT is AND with @src2 inverted
+ * over @src2's range, so where only @src2 has range the result is ~@src2.
+ *
+ * @dst is written on its range intersected with the union of the sources'
+ * ranges and untouched elsewhere, and its padding bits outside its own range
+ * stay zero, the invariant every cmask mutator keeps. @dst may alias either
+ * source, and the two sources may be one mask. Returns whether @dst has a bit
+ * set afterwards, over all of @dst's range.
+ *
+ * The operations are global functions, verified once per program. Inlined,
+ * every data-dependent branch in this loop would multiply the states the
+ * verifier explores per iteration at every call site.
  */
-static __always_inline void cmask_and(struct scx_cmask __arena *dst,
-				      const struct scx_cmask __arena *src)
+static __always_inline bool __cmask_op(struct scx_cmask __arena *dst,
+				       const struct scx_cmask __arena *src1,
+				       const struct scx_cmask __arena *src2, int op)
 {
-	cmask_op(dst, src, BPF_CMASK_OP_AND);
+	u32 d_first = dst->base / 64, d_nr = cmask_nr_words(dst);
+	u32 s1_first = src1->base / 64, s1_nr = cmask_nr_words(src1);
+	u32 s2_first = src2->base / 64, s2_nr = cmask_nr_words(src2);
+	u64 any = bpf_arena_loop_zero;
+	u32 i;
+
+	bpf_arena_for(i, 0, d_nr) {
+		u32 k1 = d_first + i - s1_first, k2 = d_first + i - s2_first;
+		u64 m1 = __cmask_word_range(src1, k1, s1_nr);
+		u64 m2 = op == BPF_CMASK_OP_COPY ? m1 : __cmask_word_range(src2, k2, s2_nr);
+		u64 um = __cmask_word_range(dst, i, d_nr) & (m1 | m2);
+		u64 dv = dst->bits[i], v1, v2, rv;
+
+		if (um) {
+			/* a word in range holds zeros outside the range */
+			v1 = m1 ? src1->bits[k1] : 0;
+			v2 = m2 ? src2->bits[k2] : 0;
+			if (op == BPF_CMASK_OP_AND)
+				rv = (v1 | ~m1) & (v2 | ~m2);
+			else if (op == BPF_CMASK_OP_OR)
+				rv = v1 | v2;
+			else if (op == BPF_CMASK_OP_ANDNOT)
+				rv = (v1 | ~m1) & ~v2;
+			else
+				rv = v1;
+			dv = (dv & ~um) | (rv & um);
+			dst->bits[i] = dv;
+		}
+		any |= dv;
+	}
+	return any != 0;
 }
 
-static __always_inline void cmask_or(struct scx_cmask __arena *dst,
-				     const struct scx_cmask __arena *src)
+/**
+ * cmask_and - Store @src1 AND @src2 in @dst
+ * @dst: destination, may be @src1 or @src2
+ * @src1: first operand
+ * @src2: second operand
+ *
+ * See __cmask_op() for how the ranges combine. Return whether @dst has a bit
+ * set afterwards.
+ */
+__weak bool cmask_and(struct scx_cmask __arena __arg_arena *dst,
+		      const struct scx_cmask __arena __arg_arena *src1,
+		      const struct scx_cmask __arena __arg_arena *src2)
 {
-	cmask_op(dst, src, BPF_CMASK_OP_OR);
+	return __cmask_op(dst, src1, src2, BPF_CMASK_OP_AND);
 }
 
-static __always_inline void cmask_copy(struct scx_cmask __arena *dst,
-				       const struct scx_cmask __arena *src)
+/**
+ * cmask_or - Store @src1 OR @src2 in @dst
+ * @dst: destination, may be @src1 or @src2
+ * @src1: first operand
+ * @src2: second operand
+ *
+ * See __cmask_op() for how the ranges combine. Return whether @dst has a bit
+ * set afterwards.
+ */
+__weak bool cmask_or(struct scx_cmask __arena __arg_arena *dst,
+		     const struct scx_cmask __arena __arg_arena *src1,
+		     const struct scx_cmask __arena __arg_arena *src2)
 {
-	cmask_op(dst, src, BPF_CMASK_OP_COPY);
+	return __cmask_op(dst, src1, src2, BPF_CMASK_OP_OR);
 }
 
-static __always_inline void cmask_andnot(struct scx_cmask __arena *dst,
-					 const struct scx_cmask __arena *src)
+/**
+ * cmask_andnot - Store @src1 AND NOT @src2 in @dst
+ * @dst: destination, may be @src1 or @src2
+ * @src1: operand to remove bits from
+ * @src2: bits to remove, inverted over its own range
+ *
+ * See __cmask_op() for how the ranges combine. Return whether @dst has a bit
+ * set afterwards.
+ */
+__weak bool cmask_andnot(struct scx_cmask __arena __arg_arena *dst,
+			 const struct scx_cmask __arena __arg_arena *src1,
+			 const struct scx_cmask __arena __arg_arena *src2)
 {
-	cmask_op(dst, src, BPF_CMASK_OP_ANDNOT);
+	return __cmask_op(dst, src1, src2, BPF_CMASK_OP_ANDNOT);
+}
+
+/**
+ * cmask_copy - Copy @src into @dst
+ * @dst: destination
+ * @src: source
+ *
+ * The single-source case of __cmask_op(): @dst is written over @src's range and
+ * untouched elsewhere.
+ */
+__weak void cmask_copy(struct scx_cmask __arena __arg_arena *dst,
+		       const struct scx_cmask __arena __arg_arena *src)
+{
+	__cmask_op(dst, src, src, BPF_CMASK_OP_COPY);
 }
 
 /*
@@ -748,7 +798,7 @@ static __always_inline u32 cmask_first_set(const struct scx_cmask __arena *m)
 
 #define cmask_for_each(cid, m)							\
 	for ((cid) = cmask_first_set(m);					\
-	     (cid) < (m)->base + (m)->nr_cids;					\
+	     (cid) < (m)->base + (m)->nr_cids && can_loop;			\
 	     (cid) = cmask_next_set((m), (cid) + 1))
 
 /*
@@ -805,7 +855,8 @@ static __always_inline bool cmask_subset(const struct scx_cmask __arena *a,
 static __always_inline u32 cmask_weight(const struct scx_cmask __arena *m)
 {
 	u32 nr_words, i;
-	u32 count = 0;
+	/* callers compare the sum, see bpf_arena_loop_zero */
+	u32 count = bpf_arena_loop_zero;
 
 	if (!m->nr_cids)
 		return 0;
@@ -819,10 +870,7 @@ static __always_inline u32 cmask_weight(const struct scx_cmask __arena *m)
 	return count;
 }
 
-/*
- * True if @a and @b share any set bit. Walk only the intersection of their
- * ranges, matching the semantics of cmask_and().
- */
+/* true if @a and @b share any set bit, over the intersection of their ranges */
 static __always_inline bool cmask_intersects(const struct scx_cmask __arena *a,
 					     const struct scx_cmask __arena *b)
 {
@@ -970,28 +1018,73 @@ static __always_inline u32 cmask_next_and_set_wrap(const struct scx_cmask __aren
 	return found < start ? found : a_end;
 }
 
-/* per-cpu rotor for cmask_any_distribute() */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, u32);
-} cmask_distribute_rotor __weak SEC(".maps");
+/*
+ * The distribute helpers rotate through one slot per cid, a cacheline each so
+ * picks on one CPU do not bounce the line of another. A missing allocation is a
+ * setup bug and aborts the scheduler. On a CPU outside the scheduler's cid
+ * space the helpers fall back to the first matching cid.
+ *
+ * TODO: The slots are one allocation without node placement. Move them to a
+ * per-cid arena allocator once the library has one, for node-local slots
+ * without the cacheline padding.
+ */
+struct cmask_rotor_slot {
+	u32 cid;
+} __attribute__((aligned(SCX_CACHELINE_SIZE)));
+
+struct cmask_rotor_slot __arena *cmask_distribute_rotors __weak;
+
+/**
+ * cmask_distribute_init - Allocate the distribute rotor from @map
+ * @map: the scheduler's arena map
+ *
+ * The shared arena init calls this once. A scheduler with its own arena calls
+ * it before the first distribute pick. On a kernel without the cid kfuncs
+ * nothing can pick, so the call allocates nothing and succeeds. Return 0 on
+ * success, -ENOMEM if the allocation fails.
+ */
+static __always_inline int cmask_distribute_init(void *map)
+{
+	u64 size;
+	u32 pages;
+
+	/* no cid kfuncs means no picks and nothing to allocate */
+	if (!bpf_ksym_exists(scx_bpf_nr_cids))
+		return 0;
+
+	size = scx_bpf_nr_cids() * sizeof(*cmask_distribute_rotors);
+	pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+	cmask_distribute_rotors = bpf_arena_alloc_pages(map, NULL, pages, NUMA_NO_NODE, 0);
+	return cmask_distribute_rotors ? 0 : -ENOMEM;
+}
+
+static __always_inline u32 __arena *__cmask_distribute_rotor(void)
+{
+	s32 cid = scx_bpf_this_cid();
+
+	if (unlikely(!cmask_distribute_rotors)) {
+		scx_bpf_error("cmask distribute rotor not allocated");
+		return NULL;
+	}
+	if (cid < 0)
+		return NULL;
+	return &cmask_distribute_rotors[cid].cid;
+}
 
 /**
  * cmask_any_distribute - Pick a set cid, spreading successive picks
  * @m: cmask to pick from
  *
- * Counterpart of bpf_cpumask_any_distribute(): a per-cpu rotor makes successive
+ * Counterpart of bpf_cpumask_any_distribute(): a per-cid rotor makes successive
  * picks rotate through the set cids instead of repeating the first one. Returns
  * cmask_end(@m) if @m is empty.
  */
 static __always_inline u32 cmask_any_distribute(const struct scx_cmask __arena *m)
 {
-	u32 zero = 0, pick;
-	u32 *rotor;
+	u32 __arena *rotor = __cmask_distribute_rotor();
+	u32 pick;
 
-	if (unlikely(!(rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero))))
+	if (unlikely(!rotor))
 		return cmask_first_set(m);
 
 	pick = cmask_next_set_wrap(m, *rotor + 1);
@@ -1012,10 +1105,10 @@ static __always_inline u32 cmask_any_distribute(const struct scx_cmask __arena *
 static __always_inline u32 cmask_any_and_distribute(const struct scx_cmask __arena *a,
 						    const struct scx_cmask __arena *b)
 {
-	u32 zero = 0, pick;
-	u32 *rotor;
+	u32 __arena *rotor = __cmask_distribute_rotor();
+	u32 pick;
 
-	if (unlikely(!(rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero))))
+	if (unlikely(!rotor))
 		return cmask_next_and_set(a, b, a->base);
 
 	pick = cmask_next_and_set_wrap(a, b, *rotor + 1);
@@ -1028,14 +1121,16 @@ static __always_inline u32 cmask_any_and_distribute(const struct scx_cmask __are
  * cmask_distribute_rotor_pos - Last cid picked by the distribute helpers
  *
  * For callers that anchor scans of their own on the shared rotor. Returns 0
- * when nothing has been picked on this cpu yet.
+ * when nothing has been picked on this cid yet or the CPU is outside the cid
+ * space.
  */
 static __always_inline u32 cmask_distribute_rotor_pos(void)
 {
-	u32 zero = 0;
-	u32 *rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero);
+	u32 __arena *rotor = __cmask_distribute_rotor();
 
-	return likely(rotor) ? *rotor : 0;
+	if (unlikely(!rotor))
+		return 0;
+	return *rotor;
 }
 
 /*

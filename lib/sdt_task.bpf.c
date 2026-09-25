@@ -49,7 +49,7 @@ void __arena *scx_task_alloc(struct task_struct *p)
 
 	mval->tid = sdt_tailer(&scx_task_allocator, data)->tid;
 	mval->tptr = (__u64) p;
-	mval->data = data;
+	WRITE_ONCE(mval->data, data);
 
 	return data;
 }
@@ -68,10 +68,10 @@ void __arena *__scx_task_data(struct task_struct *p)
 	scx_arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
-	if (unlikely(!mval || !mval->data))
+	if (unlikely(!mval))
 		return NULL;
 
-	return mval->data;
+	return READ_ONCE(mval->data);
 }
 
 __hidden

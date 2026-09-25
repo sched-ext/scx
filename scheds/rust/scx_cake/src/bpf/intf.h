@@ -1,11 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * scx_cake — shared interface between the BPF scheduler and the Rust loader.
- * DESIGN.md has the design; HYPOTHESES.md §S the measurements behind these.
- *
- * This software may be used and distributed according to the terms of the GNU
- * General Public License version 2.
- */
+/* This software may be used and distributed according to the terms of the GNU
+ * General Public License version 2. */
 #ifndef __CAKE_INTF_H
 #define __CAKE_INTF_H
 
@@ -21,11 +16,7 @@ typedef signed int s32;
 typedef signed long s64;
 #endif /* __VMLINUX_H__ */
 
-/*
- * No cflag sets topology — the loader measures the host into rodata at
- * attach, so one binary fits any machine. Policy is source-only so an A/B
- * is two commits, not two flags (§S.6).
- */
+/* No topology cflags: the loader measures the host into rodata at attach. */
 
 /* Multi-CCD steal order: 0 off, 1 same-CCD first, 2 also group cache tiers. */
 #define CAKE_CCD_STEAL_POLICY 2
@@ -34,50 +25,31 @@ enum consts {
 	NSEC_PER_USEC	= 1000,
 	NSEC_PER_MSEC	= (1000 * NSEC_PER_USEC),
 
-	/* The slice every task gets. Dose-responsed U-curve minimum (§S.1). */
+	/* The slice every task gets: the dose-response minimum. */
 	SLICE_NS	= 3000 * NSEC_PER_USEC,
 
-	/* Vtime credit for time an occupant already ran (§S.2). */
+	/* Vtime credit for time an occupant already ran. */
 	HOME_PREEMPT_RAN_CREDIT_SHIFT	= 1,
 
-	/* Occupant protection: FIXED slice fractions, so only long-running
-	 * compute is ever preempted and no shared clock moves them (§R.28). */
+	/* Occupant protection and slice cap: fixed fractions of the task's own run
+	 * and mean cycle, so only long-running compute is ever preempted. */
 	PREEMPT_PROTECT_SHIFT		= 4,
 	PROBE_PROTECT_SHIFT		= 2,
 
-	/* Slice cap: half the task's OWN mean cycle (§G12, §R.28). */
 	PERIOD_SLICE_CAP_SHIFT		= 1,
 
-	/* Pre-scale for the wait:run cross-multiply; it cancels (§G12). */
+	/* Pre-scale for the wait:run cross-multiply; it cancels. */
 	CAKE_RATIO_SHIFT		= 16,
 
-	/*
-	 * WALL-CLOCK starvation bound for the global wake queue, ~3 frames at
-	 * 120 Hz: a vtime bound cannot bound a wall-clock stall (§S.4).
-	 */
+	/* Dispatch-time starvation escalation; this arms no timer. */
 	WAKE_STARVE_WALL_NS		= 24 * NSEC_PER_MSEC,
 	WAKE_STARVE_REFRESH_NS		= WAKE_STARVE_WALL_NS / 2,
 
-	/*
-	 * FRAME CLOCK band over ENGINE cadence, not display refresh — an
-	 * uncapped engine outruns any panel. A clamp, not a knob (§G11, §G27).
-	 */
-	FRAME_HZ_MAX			= 2000,
-	FRAME_HZ_MIN			= 25,
-	FRAME_PERIOD_MIN_NS		= 1000 * NSEC_PER_MSEC / FRAME_HZ_MAX,
-	FRAME_PERIOD_MAX_NS		= 1000 * NSEC_PER_MSEC / FRAME_HZ_MIN,
-	/* Floor boot stays display-class; the band min is no safe start (§G27). */
-	FRAME_FLOOR_BOOT_NS		= 2 * NSEC_PER_MSEC,
-	/* Vote buckets spanning that band; width need only separate cadences. */
-	FRAME_BUCKET_SHIFT		= 17,
-	FRAME_BUCKETS			= 512,
-
-	/* Widest host the CCD steal matrix covers (u16² = 32 KB rodata);
-	 * wider machines take the generic ring walk at runtime. */
+	/* Widest host the u16 steal matrix covers; wider hosts take the ring walk. */
 	STEAL_SPAN			= 128,
 	CCD_STEAL_POLICY		= CAKE_CCD_STEAL_POLICY,
 
-	/* Fixed-point weight scaling: representation, not policy (§S.7). */
+	/* Fixed-point weight scaling: representation, not policy. */
 	RECIP_SHIFT		= 20,
 	RECIP_ONE		= 1 << RECIP_SHIFT,
 	RECIP_MASK		= RECIP_ONE - 1,
@@ -87,53 +59,50 @@ enum consts {
 	IDLE_RECIP_INDEX	= 40,
 	MAX_RECIP_WEIGHT	= 357913941,
 
-	/* Cache-isolated mutable-state slot geometry (§R.10). */
 	STATE_SLOT_BYTES	= 128,
 	STATE_SLOT_WORDS	= STATE_SLOT_BYTES / sizeof(u64),
 
-	/* §G51: cpuidle exit-latency table entries (sysfs state count cap). */
-	CAKE_CSTATE_TABLE	= 16,
-
-	/* Runnable-stall safety watchdog, not a scheduling threshold. */
 	WATCHDOG_TIMEOUT_MS	= 5 * 1000,
 
-	/*
-	 * Verifier sizing bound for per-CPU state and the steal loops, a power
-	 * of 2 so hot-path indexes reduce to a mask. NOT the DSQ count. WAKE_DSQ
-	 * sits one id above that range and holds wakeups, so the FIRST CPU to
-	 * block anywhere finds them; MAX_CPUS + 1 is retired, not recycled (§S.7).
-	 */
+	/* Verifier sizing bound, a power of 2 so indexes mask; not the DSQ count. */
 	MAX_CPUS	= 1024,
 	WAKE_DSQ	= MAX_CPUS,
+	MAX_LLCS	= 16,			/* wake pools and served stamps per LLC */
+	LLC_WAKE_DSQ_BASE	= MAX_CPUS + 2,	/* pool of LLC i is LLC_WAKE_DSQ_BASE + i */
 
-	/* The steal-ring queue hint, one bit per CPU (§G25). */
+	/* The steal-ring queue hint, one bit per CPU. */
 	QMASK_WORDS	= MAX_CPUS / 64,
+	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* burst that earns a seat */
+	CLAIM_TRIES_MIN			= 4,			/* idle-word bits tried per claim, floor; the loader scales with the die */
+	SEAT_CAP			= 64,			/* seats live inside one idle word */
+	/* RT displacement census in log2 bands of ~1 us (ns >> 10), 1 us .. >= 128 us. */
+	CAKE_RELEASE_BAND_SHIFT		= 10,
+	CAKE_RELEASE_BANDS		= 8,
+	CAKE_RELEASE_PATHS		= 3,			/* arrival: non-IMMED / IMMED / slice-exhausted */
+	CAKE_RELEASE_REASONS		= 4,			/* RT / DL / stop / unknown */
+	SEAT_HOLDER_SLOTS		= 4 * SEAT_CAP,		/* holder census by pid: a full word collides with a quarter of the non-holders */
+	CAKE_PEND_SPIN_MAX		= 4,			/* dispatch re-picks waiting for a pool landing before clearing the token */
+	CAKE_IDLE_STATES		= 16,			/* cpuidle states tracked; a power of two, indexed masked */
+	CAKE_HIST_SHIFT			= 8,			/* observe-only histograms: log2 bands from 256 ns */
+	CAKE_HIST_BANDS			= 16,			/* ... to 8 ms */
+	CAKE_HIST_KINDS			= 4,			/* hop, handoff quantum, burst; power of two */
+	FRONTIER_GRAIN_NS		= 1 << 16,		/* the frontier advances in 65 us steps: readers work at slice scale */
+	CAKE_POOL_TAG_MASK		= 0x1f,			/* a pooled slice's low bits carry its pool + 1; MAX_LLCS + 1 fits; grants lose <= 31 ns */
+};
 
-	/* §G56 FOLD: LLC band count bound for the banded steal tables. */
-	MAX_LLCS	= 64,
+/* Gates reached, for the tried/fired census (probe). Power of two: the index is masked. */
+enum cake_hist_kind {
+	CAKE_HIST_HOP,			/* direct placement: enqueue stamp to run */
+	CAKE_HIST_HANDOFF,		/* quantum after a wake, at block */
+	CAKE_HIST_BURST,		/* mean burst of the task, at block */
+};
 
-	/*
-	 * §G57: a saturated wake moves to an earlier-freeing CPU only when the
-	 * gain clears this fraction of the slice. A partner inside it keeps the
-	 * wake home: the herd-collapse guard expressed as time, not depth.
-	 */
-	FREE_MOVE_MARGIN_SHIFT		= 5,
-
-	/* §G58: the reservation outlives the fire by this fraction of the
-	 * task's cycle (prediction error scales with the cycle), floored at
-	 * twice the lead. */
-	PREWAKE_WINDOW_SHIFT		= 4,
-	PREWAKE_WINDOW_MULT		= 2,
-	/* §G58: pre-wake lead on a host with no cpuidle table. */
-	PREWAKE_LEAD_DEFAULT_NS		= 50 * NSEC_PER_USEC,
-
-	/* §G59: affine idle candidates the depth pick compares. */
-	DEPTH_SCAN_MAX			= 4,
-	L2_HANDOFF_BURST_NS		= 16 * NSEC_PER_USEC,	/* §G72: wakee burst bound for a sibling handoff */
-	STACK_TOLERANCE_NS		= 40 * NSEC_PER_USEC,	/* §G74: queue behind prev only if it frees within this */
-	GROOVE_HOME_MISS		= 8,		/* §G75: home misses before the task stops asking */
-	GROOVE_PROBE_MASK		= 63,		/* §G75: re-probe the home every 64 wakes */
-	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
+enum cake_tried_gate {
+	CAKE_TRIED_SERIAL,		/* the waker's handoff bit is saturated */
+	CAKE_TRIED_RETAKE,		/* a stage wake whose seat another task runs */
+	CAKE_TRIED_PROBE,		/* neighbour probe entered: no idle CPU, occupant kept tcpu */
+	CAKE_TRIED_TICK,		/* tick test evaluated on an idle candidate */
+	CAKE_TRIED_NR,
 };
 
 #endif /* __CAKE_INTF_H */

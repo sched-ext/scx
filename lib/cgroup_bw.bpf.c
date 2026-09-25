@@ -287,6 +287,16 @@ const volatile u32 tree_height_max = CBW_CGRP_TREE_HEIGHT_MAX;
 const volatile bool bw_set_sleepable;
 
 /*
+ * Whether replenishment wakes dispatch by claiming and kicking an idle CPU
+ * through the built-in idle tracking. A scheduler that tracks idle CPUs itself
+ * leaves this off and overrides scx_cgroup_bw_kick_idle_cb(). Userspace sets it
+ * before load. This is a const so the verifier prunes the unused branch: a
+ * cid-form scheduler may not reference the CPU-form kfuncs the built-in kick
+ * uses, even in a branch that never runs.
+ */
+const volatile bool bw_kick_builtin_idle;
+
+/*
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
  *
  * scx_cgroup_ctx objects are allocated in the BPF arena via
@@ -2874,6 +2884,11 @@ rearm_out:
 	return 0;
 }
 
+void __weak scx_cgroup_bw_kick_idle_cb(void)
+{
+	scx_bpf_error("cgroup_bw: bw_kick_builtin_idle off and no kick_idle_cb override");
+}
+
 /*
  * A handler function for the replenish timer.
  */
@@ -3087,15 +3102,20 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 * Avoid this by selecting and kicking an idle CPU to guarantee
 		 * that ops.dispatch() runs immediately. If no idle CPU is
 		 * available, this is fine since ops.dispatch() will be invoked
-		 * shortly anyway.
+		 * shortly anyway. A scheduler with its own idle tracking does
+		 * the selection in its scx_cgroup_bw_kick_idle_cb() override.
 		 */
-		online_mask = scx_bpf_get_online_cpumask();
-		idle_cpu = scx_bpf_pick_idle_cpu(online_mask, SCX_PICK_IDLE_CORE);
-		if (idle_cpu == -EBUSY)
-			idle_cpu = scx_bpf_pick_idle_cpu(online_mask, 0);
-		if (idle_cpu >= 0)
-			scx_bpf_kick_cpu(idle_cpu, SCX_KICK_IDLE);
-		scx_bpf_put_cpumask(online_mask);
+		if (bw_kick_builtin_idle) {
+			online_mask = scx_bpf_get_online_cpumask();
+			idle_cpu = scx_bpf_pick_idle_cpu(online_mask, SCX_PICK_IDLE_CORE);
+			if (idle_cpu == -EBUSY)
+				idle_cpu = scx_bpf_pick_idle_cpu(online_mask, 0);
+			if (idle_cpu >= 0)
+				scx_bpf_kick_cpu(idle_cpu, SCX_KICK_IDLE);
+			scx_bpf_put_cpumask(online_mask);
+		} else {
+			scx_cgroup_bw_kick_idle_cb();
+		}
 	}
 	/*
 	 * If there is no throttled cgroup, let's transit to the empty state

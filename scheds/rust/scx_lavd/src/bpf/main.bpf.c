@@ -221,6 +221,10 @@ const volatile u8	mig_delta_pct = 0;
 /* Disable batch-migration load balancer; set via --no-fast-lb. */
 const volatile u8	no_fast_lb = 0;
 
+/* Disable the proactive overflow-set extension on wake-up;
+ * set via --no-ovrflw-extend. */
+const volatile u8	no_ovrflw_extend;
+
 /*
  * Warm-CPU wait budget. When > 0, a waking latency-tolerant task waits up to
  * this many ns for its previous CPU to free up before migrating to an idle one,
@@ -388,24 +392,10 @@ static void update_stat_for_running(struct task_struct *p,
 {
 	u64 wait_period, interval;
 	u64 task_clk = 0, pelt_clk = 0;
-	struct ravg_data local_ravg;
 	struct cpu_ctx *prev_cpuc;
 
-	/*
-	 * Mark the task as running in the duty-cycle ravg immediately,
-	 * while the arena pointer is still fresh for the verifier.
-	 * Read fields individually to ensure the compiler goes through
-	 * the arena-cast pointer for each access.
-	 */
-	local_ravg.val = taskc->avg_util_ravg.val;
-	local_ravg.val_at = taskc->avg_util_ravg.val_at;
-	local_ravg.old = taskc->avg_util_ravg.old;
-	local_ravg.cur = taskc->avg_util_ravg.cur;
-	ravg_accumulate(&local_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
-	taskc->avg_util_ravg.val = local_ravg.val;
-	taskc->avg_util_ravg.val_at = local_ravg.val_at;
-	taskc->avg_util_ravg.old = local_ravg.old;
-	taskc->avg_util_ravg.cur = local_ravg.cur;
+	/* mark the task as running in the duty-cycle ravg */
+	ravg_accumulate_arena(&taskc->avg_util_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
@@ -873,7 +863,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * on the idle cpu. Even if there is no idle cpu, still respect
 	 * the chosen cpu.
 	 */
-	cpu_id = pick_idle_cpu(&ictx, &found_idle);
+	cpu_id = pick_idle_cpu(&ictx, true, &found_idle);
 	cpu_id = cpu_id >= 0 ? cpu_id : prev_cpu;
 	ictx.taskc->suggested_cpu_id = cpu_id;
 
@@ -1045,7 +1035,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!bpf_cpumask_test_cpu(ictx.prev_cpu, p->cpus_ptr))
 			ictx.prev_cpu = bpf_cpumask_first(p->cpus_ptr);
 
-		cpu = pick_idle_cpu(&ictx, &is_idle);
+		cpu = pick_idle_cpu(&ictx, false, &is_idle);
 	} else {
 		cpu = task_cpu;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
@@ -1321,13 +1311,114 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 	cpuc->flags = taskc_prev->flags;
 }
 
+__hidden __attribute__ ((noinline))
+bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
+			    struct cpu_ctx *cpuc,
+			    struct bpf_cpumask *active,
+			    struct bpf_cpumask *ovrflw)
+{
+	struct task_struct *p;
+	task_ctx *taskc;
+	s32 new_cpu;
+
+	/*
+	 * Scan @dsq_id for a task that needs this CPU (permanently
+	 * pinned, migrate_disabled, or affinitized only to CPUs outside
+	 * the active+overflow set) and, as a side effect, extend the
+	 * overflow set so such a task can be serviced.
+	 *
+	 *   - When the task's target CPU is @cpu, add @cpu to the
+	 *     overflow set and return true so the caller drains a task
+	 *     locally via consume_task().
+	 *   - When the target is remote, extend the overflow set on
+	 *     that CPU (when not already a member) and kick it.
+	 *
+	 * Returns true if a locally-runnable match was found; false if
+	 * the scan completed without one. Callers may invoke this
+	 * against more than one DSQ to cover both the non-turbulent
+	 * and the turbulent cpdom DSQs (see get_target_dsq_id()).
+	 *
+	 * Must be called with bpf_rcu_read_lock() held; @active and
+	 * @ovrflw are borrowed under that critical section.
+	 */
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		/*
+		 * note that this is a hack to bypass the restriction of the
+		 * current bpf not trusting the pointer p. once the bpf
+		 * verifier gets smarter, we can remove bpf_task_from_pid().
+		 */
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			continue; /* ignore the lookup error */
+
+		/*
+		 * If the task is permanently pinned to its CPU, extend the
+		 * overflow set (and kick if it's a remote CPU). Same
+		 * rationale as the prev-task branch in lavd_dispatch():
+		 * migrate_disable is transient, so its handling is split
+		 * into the else-if below.
+		 */
+		if (is_permanently_pinned(p)) {
+			new_cpu = scx_bpf_task_cpu(p);
+			if (new_cpu == cpu) {
+				ovrflw_test_and_set(ovrflw, new_cpu);
+				bpf_task_release(p);
+				return true;
+			}
+			if (!ovrflw_test_and_set(ovrflw, new_cpu))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			bpf_task_release(p);
+			continue;
+		} else if (is_migration_disabled(p)) {
+			new_cpu = scx_bpf_task_cpu(p);
+			if (new_cpu == cpu) {
+				bpf_task_release(p);
+				return true;
+			}
+			scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			bpf_task_release(p);
+			continue;
+		}
+
+		/*
+		 * if the task can run on either active or overflow set,
+		 * try another task.
+		 */
+		taskc = find_task_ctx(p);
+		if(taskc &&
+		(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+			bpf_task_release(p);
+			continue;
+		}
+
+		/*
+		 * now, we know that the task cannot run on either active
+		 * or overflow set. then, let's consider to extend the
+		 * overflow set.
+		 */
+		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
+		if (new_cpu >= 0) {
+			if (new_cpu == cpu) {
+				ovrflw_test_and_set(ovrflw, new_cpu);
+				bpf_task_release(p);
+				return true;
+			}
+			else if (!ovrflw_test_and_set(ovrflw, new_cpu))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+		}
+		bpf_task_release(p);
+	}
+
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct bpf_cpumask *active, *ovrflw;
-	u64 cpu_dsq_id, cpdom_dsq_id;
 	task_ctx *taskc_prev = NULL;
 	bool try_consume = false;
-	struct task_struct *p;
 	struct cpu_ctx *cpuc;
 	int ret;
 
@@ -1336,9 +1427,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
-
-	cpu_dsq_id = cpu_to_dsq(cpu);
-	cpdom_dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 	/*
 	 * When the CPU bandwidth control is enabled, check if there are
@@ -1399,8 +1487,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * Since this CPU is neither active nor overflow set,
 	 * add this CPU to the overflow set.
 	 */
-	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_dsq_id)) {
-		bpf_cpumask_set_cpu(cpu, ovrflw);
+	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) {
+		ovrflw_test_and_set(ovrflw, cpu);
 		bpf_rcu_read_unlock();
 		goto consume_out;
 	}
@@ -1413,7 +1501,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * and handled in the else-if branch without overflow churn.
 		 */
 		if (is_permanently_pinned(prev)) {
-			bpf_cpumask_set_cpu(cpu, ovrflw);
+			ovrflw_test_and_set(ovrflw, cpu);
 			bpf_rcu_read_unlock();
 			goto consume_out;
 		} else if (is_migration_disabled(prev)) {
@@ -1431,7 +1519,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
-			bpf_cpumask_set_cpu(cpu, ovrflw);
+			ovrflw_test_and_set(ovrflw, cpu);
 			bpf_rcu_read_unlock();
 			goto consume_out;
 		}
@@ -1449,85 +1537,26 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	/* NOTE: We use per-domain DSQ. */
 
 	/*
-	 * If this CPU is neither in active nor overflow CPUs,
-	 * try to find and run the task affinitized on this CPU
-	 * from the per-domain DSQ.
+	 * If this CPU is neither in active nor overflow CPUs, try to
+	 * find a task affinitized on this CPU from the per-domain DSQs.
 	 *
-	 * Note that we don't need to traverse the per-CPU DSQ,
-	 * as it is already handled by the fast path above.
+	 * Scan both the non-turbulent and the turbulent cpdom DSQs:
+	 * get_target_dsq_id() routes pinned / affinitized tasks to
+	 * either one depending on their preemption_vulnerability, so
+	 * the turbulent DSQ can hold tasks that only this CPU can run.
+	 * Skipping it would leave them stalled when this CPU is the
+	 * only legal target and the regular cpdom DSQ happens to be
+	 * empty.
+	 *
+	 * We don't need to traverse the per-CPU DSQ; it is already
+	 * handled by the fast path above.
 	 */
-	bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
-		task_ctx *taskc;
-		s32 new_cpu;
-
-		/*
-		 * note that this is a hack to bypass the restriction of the
-		 * current bpf not trusting the pointer p. once the bpf
-		 * verifier gets smarter, we can remove bpf_task_from_pid().
-		 */
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
-			continue; /* ignore the lookup error */
-
-		/*
-		 * If the task is permanently pinned to its CPU, extend the
-		 * overflow set (and kick if it's a remote CPU). Same rationale
-		 * as the prev-task branch above: migrate_disable is transient,
-		 * so its handling is split into the else-if below.
-		 */
-		if (is_permanently_pinned(p)) {
-			new_cpu = scx_bpf_task_cpu(p);
-			if (new_cpu == cpu) {
-				bpf_cpumask_set_cpu(new_cpu, ovrflw);
-				bpf_task_release(p);
-				try_consume = true;
-				break;
-			}
-			if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
-				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
-			bpf_task_release(p);
-			continue;
-		} else if (is_migration_disabled(p)) {
-			new_cpu = scx_bpf_task_cpu(p);
-			if (new_cpu == cpu) {
-				bpf_task_release(p);
-				try_consume = true;
-				break;
-			}
-			bpf_task_release(p);
-			continue;
-		}
-
-		/*
-		 * if the task can run on either active or overflow set,
-		 * try another task.
-		 */
-		taskc = get_task_ctx(p);
-		if(taskc &&
-		(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
-		bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
-			bpf_task_release(p);
-			continue;
-		}
-
-		/*
-		 * now, we know that the task cannot run on either active
-		 * or overflow set. then, let's consider to extend the
-		 * overflow set.
-		 */
-		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
-		if (new_cpu >= 0) {
-			if (new_cpu == cpu) {
-				bpf_cpumask_set_cpu(new_cpu, ovrflw);
-				bpf_task_release(p);
-				try_consume = true;
-				break;
-			}
-			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
-				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
-		}
-		bpf_task_release(p);
+	try_consume = scan_dsq_for_ovflw_ext(cpdom_to_dsq(cpuc->cpdom_id),
+					     cpu, cpuc, active, ovrflw);
+	if (!try_consume) {
+		try_consume = scan_dsq_for_ovflw_ext(
+				cpdom_to_turb_dsq(cpuc->cpdom_id),
+				cpu, cpuc, active, ovrflw);
 	}
 
 	bpf_rcu_read_unlock();
@@ -1542,7 +1571,7 @@ consume_out:
 	/*
 	 * Otherwise, consume a task.
 	 */
-	if (consume_task(cpu_dsq_id, cpdom_dsq_id))
+	if (consume_task(cpuc->cpdom_id))
 		return;
 
 	/*
@@ -1618,7 +1647,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	else
 		reset_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
 
-	waker_taskc = get_task_ctx(waker);
+	waker_taskc = find_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
 		 * In this case, the waker could be an idle task
@@ -1849,24 +1878,11 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(deq_flags & SCX_DEQ_SLEEP))
 		return;
 
-	/*
-	 * Mark the task as sleeping in the duty-cycle ravg.
-	 * Read fields individually to ensure the compiler goes through
-	 * the arena-cast pointer for each access.
-	 */
+	/* mark the task as sleeping in the duty-cycle ravg */
 	now = scx_bpf_now();
-	struct ravg_data local_ravg;
-	local_ravg.val = taskc->avg_util_ravg.val;
-	local_ravg.val_at = taskc->avg_util_ravg.val_at;
-	local_ravg.old = taskc->avg_util_ravg.old;
-	local_ravg.cur = taskc->avg_util_ravg.cur;
-	ravg_accumulate(&local_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
-	u64 avg_util_fp = ravg_read(&local_ravg, now, LAVD_RAVG_HALFLIFE_NS);
-	taskc->avg_util_ravg.val = local_ravg.val;
-	taskc->avg_util_ravg.val_at = local_ravg.val_at;
-	taskc->avg_util_ravg.old = local_ravg.old;
-	taskc->avg_util_ravg.cur = local_ravg.cur;
-	taskc->util_est = (u32)(avg_util_fp >> RAVG_FRAC_BITS);
+	ravg_accumulate_arena(&taskc->avg_util_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
+	taskc->util_est = (u32)(ravg_read_arena(&taskc->avg_util_ravg, now,
+						LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
@@ -2174,7 +2190,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	 *   https://man7.org/linux/man-pages/man2/sched_setscheduler.2.html
 	 */
 	parent = bpf_task_from_pid(p->real_parent->pid);
-	if (parent && (taskc_parent = get_task_ctx(parent))) {
+	bpf_rcu_read_lock();
+	if (parent && (taskc_parent = find_task_ctx(parent))) {
 		/* Do not inherit cgroup status. */
 		for (i = 0; i < sizeof(taskc->atq) && can_loop; i++)
 			((char __arena *)taskc)[i] = 0;
@@ -2194,6 +2211,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt;
 	}
 
+	bpf_rcu_read_unlock();
+
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
@@ -2207,9 +2226,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);
-	/* task_cpu may fall outside cpus_ptr; seed an allowed CPU. */
-	if (!bpf_cpumask_test_cpu(taskc->suggested_cpu_id, p->cpus_ptr))
-		taskc->suggested_cpu_id = bpf_cpumask_first(p->cpus_ptr);
 	bpf_rcu_read_unlock();
 
 	if (is_ksoftirqd(p))
@@ -2248,12 +2264,12 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	/*
 	 * Mark the task dead in the bandwidth-throttle queues before freeing
 	 * taskc. Concurrent drains or cgroup moves that already hold the task
-	 * must finish before scx_task_free() releases the arena storage.
+	 * must finish before the arena storage can be reclaimed.
 	 */
 	if (enable_cpu_bw && taskc)
 		scx_cgroup_bw_cancel((u64)taskc, SCX_CGROUP_BW_CANCEL_DROP);
 
-	scx_task_free(p);
+	scx_task_free_rcu(p);
 	return 0;
 }
 
@@ -2832,7 +2848,7 @@ int set_aggressive_migration(void)
 	cpuc = get_cpu_ctx();
 	if (cpuc &&
 	    (curr = bpf_get_current_task_btf()) &&
-	    (taskc = get_task_ctx_curcpu(curr, cpuc)) &&
+	    (taskc = find_task_ctx(curr)) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		set_task_flag(taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE);

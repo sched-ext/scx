@@ -1,0 +1,1532 @@
+// SPDX-License-Identifier: GPL-2.0
+//
+// Copyright (c) 2025 Valve Corporation.
+// Author: Changwoo Min <changwoo@igalia.com>
+
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+use anyhow::Result;
+use anyhow::anyhow;
+use itertools::Itertools;
+use itertools::iproduct;
+use scx_utils::CoreType;
+use scx_utils::Cpumask;
+use scx_utils::EnergyModel;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::PerfDomain;
+use scx_utils::PerfState;
+use scx_utils::Topology;
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use tracing::debug;
+use tracing::warn;
+
+#[derive(Debug, Clone)]
+pub struct CpuId {
+    // - *_adx: an absolute index within a system scope
+    // - *_rdx: a relative index under a parent
+    //
+    // - numa_adx: a NUMA domain within a system
+    // - pd_adx: a performance domain (CPU frequency domain) within a system
+    //   - llc_rdx: an LLC domain (CCX) under a NUMA domain
+    //   - llc_kernel_id: physical LLC domain ID provided by the kernel
+    //     - core_rdx: a core under a LLC domain
+    //       - cpu_rdx: a CPU under a core
+    pub numa_adx: usize,
+    pub pd_adx: usize,
+    pub llc_adx: usize,
+    pub llc_rdx: usize,
+    pub llc_kernel_id: usize,
+    pub core_rdx: usize,
+    pub cpu_rdx: usize,
+    pub cpu_adx: usize,
+    pub smt_level: usize,
+    pub cache_size: usize,
+    pub cpu_cap: usize,
+    pub big_core: bool,
+    pub turbo_core: bool,
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
+pub struct ComputeDomainId {
+    pub numa_adx: usize,
+    pub llc_adx: usize,
+    pub llc_rdx: usize,
+    pub llc_kernel_id: usize,
+    pub is_big: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputeDomain {
+    pub cpdom_id: usize,
+    pub cpdom_alt_id: Cell<usize>,
+    pub cpu_ids: Vec<usize>,
+    pub neighbor_map: RefCell<BTreeMap<usize, RefCell<Vec<usize>>>>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PerfCpuOrder {
+    pub perf_cap: usize,                 // performance in capacity
+    pub perf_util: f32,                  // performance in utilization, [0, 1]
+    pub cpus_perf: RefCell<Vec<usize>>,  // CPU adx order within the performance range by @perf_cap
+    pub cpus_ovflw: RefCell<Vec<usize>>, // CPU adx order beyond @perf_cap
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct CpuOrder {
+    pub all_cpus_mask: Cpumask,
+    pub cpuids: Vec<CpuId>,
+    pub perf_cpu_order: BTreeMap<usize, PerfCpuOrder>,
+    pub cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain>,
+    pub nr_cpus: usize,
+    pub nr_cores: usize,
+    pub nr_cpdoms: usize,
+    pub nr_llcs: usize,
+    pub nr_numa: usize,
+    pub smt_enabled: bool,
+    pub has_biglittle: bool,
+    pub has_energy_model: bool,
+}
+
+impl CpuOrder {
+    /// Build a cpu preference order with optional topology configuration.
+    /// When @no_use_em is set, ignore the energy model even if the kernel
+    /// provides one, so the CPU preference order is built as on a machine
+    /// without an energy model.
+    pub fn new(
+        topology_args: Option<&scx_utils::TopologyArgs>,
+        no_use_em: bool,
+    ) -> Result<CpuOrder> {
+        let ctx = CpuOrderCtx::new(topology_args, no_use_em)?;
+        let cpus_pf = ctx.build_topo_order(false).unwrap();
+        let cpus_ps = ctx.build_topo_order(true).unwrap();
+        let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf).unwrap();
+        let perf_cpu_order = if ctx.em.is_ok() {
+            let em = ctx.em.unwrap();
+            EnergyModelOptimizer::get_perf_cpu_order_table(&em, &cpus_pf)
+        } else {
+            EnergyModelOptimizer::get_fake_perf_cpu_order_table(&cpus_pf, &cpus_ps)
+        };
+
+        let nr_cpdoms = cpdom_map.len();
+        Ok(CpuOrder {
+            all_cpus_mask: ctx.topo.span,
+            cpuids: cpus_pf,
+            perf_cpu_order,
+            cpdom_map,
+            nr_cpus: ctx.topo.all_cpus.len(),
+            nr_cores: ctx.topo.all_cores.len(),
+            nr_cpdoms,
+            nr_llcs: ctx.topo.all_llcs.len(),
+            nr_numa: ctx.topo.nodes.len(),
+            smt_enabled: ctx.smt_enabled,
+            has_biglittle: ctx.has_biglittle,
+            has_energy_model: ctx.has_energy_model,
+        })
+    }
+}
+
+/// CpuOrderCtx is a helper struct used to build a CpuOrder
+struct CpuOrderCtx {
+    topo: Topology,
+    em: Result<EnergyModel>,
+    smt_enabled: bool,
+    has_biglittle: bool,
+    has_energy_model: bool,
+}
+
+impl CpuOrderCtx {
+    fn new(topology_args: Option<&scx_utils::TopologyArgs>, no_use_em: bool) -> Result<Self> {
+        let topo = match topology_args {
+            Some(args) => Topology::with_args(args)?,
+            None => Topology::new()?,
+        };
+
+        let em = if no_use_em {
+            Err(anyhow!("energy model disabled (--no-use-em)"))
+        } else {
+            EnergyModel::new()
+        };
+        let smt_enabled = topo.smt_enabled;
+        let has_biglittle = topo.has_little_cores();
+        let has_energy_model = em.is_ok();
+
+        debug!("{:#?}", topo);
+        debug!("{:#?}", em);
+
+        Ok(CpuOrderCtx {
+            topo,
+            em,
+            smt_enabled,
+            has_biglittle,
+            has_energy_model,
+        })
+    }
+
+    /// Build a CPU preference order based on its optimization target
+    fn build_topo_order(&self, prefer_powersave: bool) -> Option<Vec<CpuId>> {
+        let mut cpu_ids = Vec::new();
+
+        // Build a vector of cpu ids.
+        for (&numa_adx, node) in self.topo.nodes.iter() {
+            for (llc_rdx, (&llc_adx, llc)) in node.llcs.iter().enumerate() {
+                for (core_rdx, (_core_adx, core)) in llc.cores.iter().enumerate() {
+                    for (cpu_rdx, (cpu_adx, cpu)) in core.cpus.iter().enumerate() {
+                        let cpu_adx = *cpu_adx;
+                        let pd_adx = Self::get_pd_id(&self.em, cpu_adx, llc_adx);
+                        let cpu_id = CpuId {
+                            numa_adx,
+                            pd_adx,
+                            llc_adx,
+                            llc_rdx,
+                            core_rdx,
+                            cpu_rdx,
+                            cpu_adx,
+                            smt_level: cpu.smt_level,
+                            cache_size: cpu.cache_size,
+                            cpu_cap: cpu.cpu_capacity,
+                            big_core: cpu.core_type != CoreType::Little,
+                            turbo_core: cpu.core_type == CoreType::Big { turbo: true },
+                            llc_kernel_id: llc.kernel_id,
+                        };
+                        cpu_ids.push(RefCell::new(cpu_id));
+                    }
+                }
+            }
+        }
+
+        // Convert a vector of RefCell to a vector of plain cpu_ids
+        let mut cpu_ids2 = Vec::new();
+        for cpu_id in cpu_ids.iter() {
+            cpu_ids2.push(cpu_id.borrow().clone());
+        }
+        let mut cpu_ids = cpu_ids2;
+
+        // Sort the cpu_ids
+        match (prefer_powersave, self.has_biglittle) {
+            // 1. powersave,      no  big/little
+            //     * within the same LLC domain
+            //         - numa_adx, llc_rdx,
+            //     * prefer more capable CPU with higher capacity
+            //       and larger cache
+            //         - ^cpu_cap (chip binning), ^cache_size,
+            //     * prefer the SMT core within the same performance domain
+            //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
+            (true, false) => {
+                cpu_ids.sort_by(|a, b| {
+                    a.numa_adx
+                        .cmp(&b.numa_adx)
+                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
+                        .then_with(|| b.cache_size.cmp(&a.cache_size))
+                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
+                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
+                        .then_with(|| b.smt_level.cmp(&a.smt_level))
+                        .then_with(|| a.cpu_rdx.cmp(&b.cpu_rdx))
+                        .then_with(|| a.cpu_adx.cmp(&b.cpu_adx))
+                });
+            }
+            // 2. powersave,      yes big/little
+            //     * within the same LLC domain
+            //         - numa_adx, llc_rdx,
+            //     * prefer energy-efficient LITTLE CPU with a larger cache
+            //         - cpu_cap (big/little), ^cache_size,
+            //     * prefer the SMT core within the same performance domain
+            //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
+            (true, true) => {
+                cpu_ids.sort_by(|a, b| {
+                    a.numa_adx
+                        .cmp(&b.numa_adx)
+                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
+                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
+                        .then_with(|| b.cache_size.cmp(&a.cache_size))
+                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
+                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
+                        .then_with(|| b.smt_level.cmp(&a.smt_level))
+                        .then_with(|| a.cpu_rdx.cmp(&b.cpu_rdx))
+                        .then_with(|| a.cpu_adx.cmp(&b.cpu_adx))
+                });
+            }
+            // 3. performance,    no  big/little
+            // 4. performance,    yes big/little
+            //     * prefer the non-SMT core
+            //         - cpu_rdx,
+            //     * fill the same LLC domain first
+            //         - numa_adx, llc_rdx,
+            //     * prefer more capable CPU with higher capacity
+            //       (chip binning or big/little) and larger cache
+            //         - ^cpu_cap, ^cache_size, smt_level
+            //     * within the same power domain
+            //         - pd_adx, core_rdx
+            _ => {
+                cpu_ids.sort_by(|a, b| {
+                    a.cpu_rdx
+                        .cmp(&b.cpu_rdx)
+                        .then_with(|| a.numa_adx.cmp(&b.numa_adx))
+                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
+                        .then_with(|| b.cache_size.cmp(&a.cache_size))
+                        .then_with(|| a.smt_level.cmp(&b.smt_level))
+                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
+                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
+                        .then_with(|| a.cpu_adx.cmp(&b.cpu_adx))
+                });
+            }
+        }
+
+        Some(cpu_ids)
+    }
+
+    /// Build a list of compute domains
+    fn build_cpdom(cpu_ids: &Vec<CpuId>) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
+        // Note that building compute domain is independent to CPU order
+        // so it is okay to use any cpus_*.
+
+        // Create a compute domain map, where a compute domain is a CPUs that
+        // are under the same node and LLC (virtual and physical) and have the same core type.
+        let mut cpdom_id = 0;
+        let mut cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain> = BTreeMap::new();
+        let mut cpdom_types: BTreeMap<usize, bool> = BTreeMap::new();
+        for cpu_id in cpu_ids.iter() {
+            let key = ComputeDomainId {
+                numa_adx: cpu_id.numa_adx,
+                llc_adx: cpu_id.llc_adx,
+                llc_rdx: cpu_id.llc_rdx,
+                llc_kernel_id: cpu_id.llc_kernel_id,
+                is_big: cpu_id.big_core,
+            };
+            let value = cpdom_map.entry(key.clone()).or_insert_with(|| {
+                let val = ComputeDomain {
+                    cpdom_id,
+                    cpdom_alt_id: Cell::new(cpdom_id),
+                    cpu_ids: Vec::new(),
+                    neighbor_map: RefCell::new(BTreeMap::new()),
+                };
+                cpdom_types.insert(cpdom_id, key.is_big);
+
+                cpdom_id += 1;
+                val
+            });
+            value.cpu_ids.push(cpu_id.cpu_adx);
+        }
+
+        // Build a neighbor map for each compute domain, where neighbors are
+        // ordered by core type, node, and LLC.
+        for ((from_k, from_v), (to_k, to_v)) in iproduct!(cpdom_map.iter(), cpdom_map.iter()) {
+            if from_k == to_k {
+                continue;
+            }
+
+            let d = Self::dist(from_k, to_k);
+            let mut map = from_v.neighbor_map.borrow_mut();
+            match map.get(&d) {
+                Some(v) => {
+                    v.borrow_mut().push(to_v.cpdom_id);
+                }
+                None => {
+                    map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
+                }
+            }
+        }
+
+        // Circular sort compute domains within the same distance to preserve
+        // proximity between domains.
+        //
+        // Suppose that domains 0, 1, 2, 3, 4, 5, 6, 7 are at the same distance.
+        //            0
+        //         7     1
+        //       6         2
+        //         5     3
+        //            4
+        //
+        // We want to traverse the domains from 0. The circular-sorted order
+        // starting from domain 0 is 0, 1, 7, 2, 6, 3, 5, 4. Similarly,
+        // the order starting from domain 1 is 1, 0, 2, 3, 7, 4, 6, 5.
+        // The one from 7 is 7, 0, 6, 1, 5, 2, 4, 3. As follows, circularly
+        // sorted orders in task stealing preserve proximity between domains
+        // (e.g., 0, 1, 7 in the example), so we can achieve less cacheline
+        // bouncing than with random-ordered task stealing.
+        for cpdom in cpdom_map.values() {
+            for neighbors in cpdom.neighbor_map.borrow_mut().values() {
+                let mut neighbors_csorted =
+                    Self::circular_sort(cpdom.cpdom_id, &neighbors.borrow_mut().to_vec());
+                neighbors.borrow_mut().clear();
+                neighbors.borrow_mut().append(&mut neighbors_csorted);
+            }
+        }
+
+        // Fill up cpdom_alt_id for each compute domain.
+        for (k, v) in cpdom_map.iter() {
+            let mut key = k.clone();
+            key.is_big = !k.is_big;
+
+            if let Some(alt_v) = cpdom_map.get(&key) {
+                // First, try to find an alternative domain
+                // under the same node/LLC.
+                v.cpdom_alt_id.set(alt_v.cpdom_id);
+            } else {
+                // If there is no alternative domain in the same node/LLC,
+                // choose the closest one.
+                //
+                // Note that currently, the idle CPU selection (pick_idle_cpu)
+                // is not optimized for this kind of architecture, where big
+                // and LITTLE cores are in different node/LLCs.
+                'outer: for ncpdoms in v.neighbor_map.borrow().values() {
+                    for ncpdom_id in ncpdoms.borrow().iter() {
+                        if let Some(is_big) = cpdom_types.get(ncpdom_id)
+                            && *is_big == key.is_big
+                        {
+                            v.cpdom_alt_id.set(*ncpdom_id);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(cpdom_map)
+    }
+
+    /// Circular sorting of a list from a starting point
+    fn circular_sort(start: usize, the_rest: &Vec<usize>) -> Vec<usize> {
+        // Create a full list including 'start'
+        let mut list = the_rest.clone();
+        list.push(start);
+        list.sort();
+
+        // Get the index of 'start'
+        let s = list
+            .binary_search(&start)
+            .expect("start must appear exactly once");
+
+        // Get the circularly sorted index list.
+        let n = list.len();
+        let dist = |x: usize| {
+            let d = (x + n - s) % n;
+            d.min(n - d)
+        };
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&x| (dist(x), x));
+
+        // Rearrange the full list
+        // according to the circularly sorted index list.
+        let list_csorted: Vec<_> = order.iter().map(|&i| list[i]).collect();
+
+        // Drop 'start' from the rearranged full list.
+        list_csorted[1..].to_vec()
+    }
+
+    /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
+    /// If the energy model is not available, use LLC ID instead.
+    fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, llc_adx: usize) -> usize {
+        match em {
+            Ok(em) => em.get_pd_by_cpu_id(cpu_adx).unwrap().id,
+            Err(_) => llc_adx,
+        }
+    }
+
+    /// Calculate distance from two compute domains
+    fn dist(from: &ComputeDomainId, to: &ComputeDomainId) -> usize {
+        let mut d = 0;
+        // core type > numa node > llc
+        if from.is_big != to.is_big {
+            d += 100;
+        }
+        if from.numa_adx != to.numa_adx {
+            d += 10;
+        } else {
+            if from.llc_rdx != to.llc_rdx {
+                d += 1;
+            }
+            if from.llc_kernel_id != to.llc_kernel_id {
+                d += 1;
+            }
+        }
+        d
+    }
+}
+
+#[derive(Debug)]
+struct EnergyModelOptimizer<'a> {
+    // The member performance domains of each equivalence performance domain of
+    // the energy model. Both the equivalence performance domains and their
+    // members are in CPU preference order, so taking N CPUs from an equivalence
+    // performance domain takes the N most preferred ones.
+    eq_pds: Vec<Vec<&'a PerfDomain>>,
+
+    // How many CPUs to take from each equivalence performance domain, for
+    // every combination worth considering. The i-th count belongs to
+    // @eq_pds[i]. It depends only on the CPU count of each equivalence
+    // performance domain, not on the CPU utilization, so it is enumerated once
+    // here.
+    //
+    // For example, when @em has two equivalence performance domains, one of
+    // 2 P-cores and one of 3 E-cores, the (2 + 1) * (3 + 1) - 1 = 11
+    // combinations are:
+    //
+    //     [0, 1] -- 1 E-core
+    //     [0, 2] -- 2 E-cores
+    //     [0, 3] -- 3 E-cores
+    //     [1, 0] -- 1 P-core
+    //     [1, 1] -- 1 P-core and 1 E-core
+    //     ...
+    //     [2, 2] -- 2 P-cores and 2 E-cores
+    //     [2, 3] -- 2 P-cores and 3 E-cores
+    nr_cpus_combinations: Vec<Vec<usize>>,
+
+    // CPU preference order in a performance mode purely based on topology
+    cpus_topological_order: Vec<usize>,
+
+    // CPU preference order within a performance domain
+    pd_cpu_order: BTreeMap<usize, RefCell<Vec<usize>>>,
+
+    // Total performance capacity of the system
+    tot_perf: usize,
+
+    // All possible combinations of performance domains & states
+    // indexed by performance.
+    pdss_infos: RefCell<BTreeMap<usize, RefCell<HashSet<PDSetInfo<'a>>>>>,
+
+    // Performance domains and states to achieve a certain performance level,
+    // which is derived from @pdss_infos.
+    perf_pdsi: RefCell<BTreeMap<usize, PDSetInfo<'a>>>,
+
+    // CPU orders indexed by performance
+    perf_cpu_order: RefCell<BTreeMap<usize, PerfCpuOrder>>,
+}
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+struct PDS<'a> {
+    pd: &'a PerfDomain,
+    ps: &'a PerfState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+struct PDCpu<'a> {
+    pd: &'a PerfDomain, // performance domain
+    cpu_vid: usize,     // virtual ID of a CPU on the performance domain
+}
+
+#[derive(Debug, Clone, Eq)]
+struct PDSetInfo<'a> {
+    performance: usize,
+    power: usize,
+    pdcpu_set: BTreeSet<PDCpu<'a>>,
+    pd_id_set: BTreeSet<usize>, // pd:id:0, pd:id:1
+}
+
+const PD_UNIT: usize = 100_000_000;
+const CPU_UNIT: usize = 100_000;
+const LOOKAHEAD_CNT: usize = 10;
+
+/// Upper bound on the number of equivalence performance domain combinations to
+/// consider, to keep the number of combinations manageable. The performance
+/// domains of a processor may not collapse into a few equivalence performance
+/// domains -- per-core binning, for one, could give every core its own
+/// performance table. See <https://github.com/sched-ext/scx/issues/3340>.
+const MAX_EQPD_COMBINATIONS: u128 = 100_000;
+
+impl<'a> EnergyModelOptimizer<'a> {
+    fn new(em: &'a EnergyModel, cpus_pf: &'a Vec<CpuId>) -> EnergyModelOptimizer<'a> {
+        let tot_perf = em.perf_total();
+
+        let eq_pds = Self::sort_eq_pds(em, cpus_pf);
+        let max_nr_cpus: Vec<usize> = eq_pds
+            .iter()
+            .map(|perf_doms| perf_doms.iter().map(|pd| pd.span.weight()).sum())
+            .collect();
+        let nr_cpus_combinations = Self::gen_nr_cpus_combinations(&max_nr_cpus);
+
+        let pdss_infos: BTreeMap<usize, RefCell<HashSet<PDSetInfo<'a>>>> = BTreeMap::new();
+        let pdss_infos = pdss_infos.into();
+
+        let perf_pdsi: BTreeMap<usize, PDSetInfo<'a>> = BTreeMap::new();
+        let perf_pdsi = perf_pdsi.into();
+
+        let mut pd_cpu_order: BTreeMap<usize, RefCell<Vec<usize>>> = BTreeMap::new();
+        let mut cpus_topological_order: Vec<usize> = vec![];
+        for cpuid in cpus_pf.iter() {
+            match pd_cpu_order.get(&cpuid.pd_adx) {
+                Some(v) => {
+                    let mut v = v.borrow_mut();
+                    v.push(cpuid.cpu_adx);
+                }
+                None => {
+                    let v = vec![cpuid.cpu_adx];
+                    pd_cpu_order.insert(cpuid.pd_adx, v.into());
+                }
+            }
+            cpus_topological_order.push(cpuid.cpu_adx);
+        }
+
+        let perf_cpu_order: BTreeMap<usize, PerfCpuOrder> = BTreeMap::new();
+        let perf_cpu_order = perf_cpu_order.into();
+
+        debug!("# pd_cpu_order");
+        debug!("{:#?}", pd_cpu_order);
+
+        EnergyModelOptimizer {
+            eq_pds,
+            nr_cpus_combinations,
+            cpus_topological_order,
+            pd_cpu_order,
+            tot_perf,
+            pdss_infos,
+            perf_pdsi,
+            perf_cpu_order,
+        }
+    }
+
+    fn get_perf_cpu_order_table(
+        em: &'a EnergyModel,
+        cpus_pf: &'a Vec<CpuId>,
+    ) -> BTreeMap<usize, PerfCpuOrder> {
+        let emo = EnergyModelOptimizer::new(em, cpus_pf);
+        emo.gen_perf_cpu_order_table();
+
+        emo.perf_cpu_order.borrow().clone()
+    }
+
+    fn get_fake_perf_cpu_order_table(
+        cpus_pf: &'a Vec<CpuId>,
+        cpus_ps: &'a Vec<CpuId>,
+    ) -> BTreeMap<usize, PerfCpuOrder> {
+        let tot_perf: usize = cpus_pf.iter().map(|cpuid| cpuid.cpu_cap).sum();
+
+        let pco_pf = Self::fake_pco(tot_perf, cpus_pf, false);
+        let pco_ps = Self::fake_pco(tot_perf, cpus_ps, true);
+
+        let mut perf_cpu_order: BTreeMap<usize, PerfCpuOrder> = BTreeMap::new();
+        perf_cpu_order.insert(pco_pf.perf_cap, pco_pf);
+        perf_cpu_order.insert(pco_ps.perf_cap, pco_ps);
+
+        perf_cpu_order
+    }
+
+    fn fake_pco(tot_perf: usize, cpuids: &'a Vec<CpuId>, powersave: bool) -> PerfCpuOrder {
+        let perf_cap = if powersave {
+            cpuids[0].cpu_cap
+        } else {
+            tot_perf
+        };
+
+        let perf_util: f32 = (perf_cap as f32) / (tot_perf as f32);
+        let cpus: Vec<usize> = cpuids.iter().map(|cpuid| cpuid.cpu_adx).collect();
+        let cpus_perf: Vec<usize> = cpus[..1].to_vec();
+        let cpus_ovflw: Vec<usize> = cpus[1..].to_vec();
+        PerfCpuOrder {
+            perf_cap,
+            perf_util,
+            cpus_perf: cpus_perf.clone().into(),
+            cpus_ovflw: cpus_ovflw.clone().into(),
+        }
+    }
+
+    /// Generate the performance versus CPU preference order table based on
+    /// the system's CPU topology and energy model. The table consists of the
+    /// following information (PerfCpuOrder):
+    ///
+    ///   - PerfCpuOrder::perf_cap: The upper bound of the performance
+    ///     capacity covered by this tuple.
+    ///
+    ///   - PerfCpuOrder::cpus_perf: Primary CPUs to be used is ordered
+    ///     by preference.
+    ///
+    ///   - PerfCpuOrder::cpus_ovrflw: When the system load goes beyond
+    ///     @perf_cap, the list of CPUs to be used is ordered by preference.
+    fn gen_perf_cpu_order_table(&'a self) {
+        // First, generate all possible combinations of CPUs (e.g., two CPUs
+        // in performance domain 0 and three CPUs in performance domain 1) to
+        // achieve the possible performance capacities with minimal energy
+        // consumption. We assume a reasonable load balancer, so the
+        // utilization of the used CPUs is similar.
+        self.gen_all_pds_combinations();
+
+        // Then, from all the possible combinations of performance versus
+        // CPU sets, select a list of combinations that minimize the number of
+        // active performance domains and reduce the number of performance
+        // domain switches when changing performance levels.
+        self.gen_perf_pds_table();
+
+        // Finally, assign CPUs (@cpu_adx) to the virtual CPU ID (@cpu_vid) of
+        // a performance domain.
+        self.assign_cpu_vids();
+    }
+
+    /// Generate a CPU order table for each performance range.
+    fn assign_cpu_vids(&'a self) {
+        // Generate CPU order within the performance range (@cpus_perf).
+        for (&perf_cap, pdsi) in self.perf_pdsi.borrow().iter() {
+            let mut cpus_perf: Vec<usize> = vec![];
+
+            for pdcpu in pdsi.pdcpu_set.iter() {
+                let pd_id = pdcpu.pd.id;
+                let cpu_vid = pdcpu.cpu_vid;
+                let cpu_order = self.pd_cpu_order.get(&pd_id).unwrap().borrow();
+                let cpu_adx = cpu_order[cpu_vid];
+                cpus_perf.push(cpu_adx);
+            }
+
+            let perf_util: f32 = (perf_cap as f32) / (self.tot_perf as f32);
+            let cpus_perf = self.sort_cpus_by_topological_order(&cpus_perf);
+            let cpus_ovflw: Vec<usize> = vec![];
+
+            let mut perf_cpu_order = self.perf_cpu_order.borrow_mut();
+            perf_cpu_order.insert(
+                perf_cap,
+                PerfCpuOrder {
+                    perf_cap,
+                    perf_util,
+                    cpus_perf: cpus_perf.clone().into(),
+                    cpus_ovflw: cpus_ovflw.clone().into(),
+                },
+            );
+        }
+
+        // Generate CPU order beyond the performance range (@cpus_ovflw).
+        let perf_cpu_order = self.perf_cpu_order.borrow();
+        let perf_caps: Vec<_> = self.perf_pdsi.borrow().keys().cloned().collect();
+        for o in 1..perf_caps.len() {
+            // Gather all @cpus_perf from the upper performance ranges.
+            let ovrflw_perf_caps = &perf_caps[o..];
+            let mut ovrflw_cpus_all: Vec<usize> = vec![];
+            for perf_cap in ovrflw_perf_caps.iter() {
+                let cpu_order = perf_cpu_order.get(perf_cap).unwrap();
+                let cpus_perf = cpu_order.cpus_perf.borrow();
+                ovrflw_cpus_all.extend(cpus_perf.iter().cloned());
+            }
+
+            // Filter out already taken CPUs from the @ovrflw_cpus_all,
+            // and build @cpus_ovrflw.
+            let mut cpu_set = HashSet::<usize>::new();
+            let perf_cap = perf_caps[o - 1];
+            let cpu_order = perf_cpu_order.get(&perf_cap).unwrap();
+            let cpus_perf = cpu_order.cpus_perf.borrow();
+            for &cpu_adx in cpus_perf.iter() {
+                cpu_set.insert(cpu_adx);
+            }
+
+            let mut cpus_ovflw: Vec<usize> = vec![];
+            for &cpu_adx in ovrflw_cpus_all.iter() {
+                if cpu_set.get(&cpu_adx).is_none() {
+                    cpus_ovflw.push(cpu_adx);
+                    cpu_set.insert(cpu_adx);
+                }
+            }
+
+            // Inject the constructed @cpus_ovrflw to the table.
+            let mut v = cpu_order.cpus_ovflw.borrow_mut();
+            v.extend(cpus_ovflw.iter().cloned());
+        }
+
+        // Debug print of the generated table
+        debug!("## gen_perf_cpu_order_table");
+        debug!("{:#?}", perf_cpu_order);
+    }
+
+    /// Sort the CPU IDs by topological order (@self.cpus_topological_order).
+    fn sort_cpus_by_topological_order(&'a self, cpus: &Vec<usize>) -> Vec<usize> {
+        let mut sorted: Vec<usize> = vec![];
+        for &cpu_adx in self.cpus_topological_order.iter() {
+            if cpus.iter().find(|&&x| x == cpu_adx).is_some() {
+                sorted.push(cpu_adx);
+            }
+        }
+        sorted
+    }
+
+    /// Generate a table of performance vs. performance domain sets
+    /// (@self.perf_pdss) from all the possible performance domain & state
+    /// combinations (@self.pdss_infos).
+    ///
+    /// An example result is as follows:
+    ///     PERF: [_, 300]
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 0 -- cpu_vid: 1
+    ///     PERF: [_, 1138]
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 0 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///     PERF: [_, 3386]
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///     PERF: [_, 3977]
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///     PERF: [_, 4508]
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 0 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///     PERF: [_, 5627]
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 0 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    fn gen_perf_pds_table(&'a self) {
+        let utils = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+        // Find the best performance domains for each system utilization target.
+        for &util in utils.iter() {
+            let mut best_pdsi: Option<PDSetInfo<'a>>;
+            let mut del_pdsi: Option<PDSetInfo<'a>> = None;
+
+            match self.perf_pdsi.borrow().last_key_value() {
+                Some((_, base)) => {
+                    best_pdsi = self.find_perf_pds_for(util, Some(base));
+
+                    // If the next performance level (@best_pdsi) is subsumed
+                    // by the previous level (@base), extend the base to the
+                    // next level. To this end, insert the extended base (with
+                    // updated performance and power values) and delete the old
+                    // base.
+                    if let Some(ref best) = best_pdsi
+                        && best.pdcpu_set.is_subset(&base.pdcpu_set)
+                    {
+                        let ext_pdcpu = PDSetInfo {
+                            performance: best.performance,
+                            power: best.power,
+                            pdcpu_set: base.pdcpu_set.clone(),
+                            pd_id_set: base.pd_id_set.clone(),
+                        };
+                        best_pdsi = Some(ext_pdcpu);
+                        del_pdsi = Some(base.clone());
+                    }
+                }
+                None => {
+                    best_pdsi = self.find_perf_pds_for(util, None);
+                }
+            };
+
+            if let Some(best_pdsi) = best_pdsi {
+                self.perf_pdsi
+                    .borrow_mut()
+                    .insert(best_pdsi.performance, best_pdsi);
+            }
+
+            if let Some(del_pdsi) = del_pdsi {
+                self.perf_pdsi.borrow_mut().remove(&del_pdsi.performance);
+            }
+        }
+
+        // Debug print of the generated table
+        debug!("## gen_perf_pds_table");
+        for (perf, pdsi) in self.perf_pdsi.borrow().iter() {
+            debug!("PERF: [_, {}]", perf);
+            for pdcpu in pdsi.pdcpu_set.iter() {
+                debug!(
+                    "        pd:id: {:?} -- cpu_vid: {}",
+                    pdcpu.pd.id, pdcpu.cpu_vid
+                );
+            }
+        }
+    }
+
+    fn find_perf_pds_for(
+        &'a self,
+        util: f32,
+        base: Option<&PDSetInfo<'a>>,
+    ) -> Option<PDSetInfo<'a>> {
+        let target_perf = (util * self.tot_perf as f32) as usize;
+        let mut lookahead = 0;
+        let mut min_dist: usize = usize::MAX;
+        let mut best_pdsi: Option<PDSetInfo<'a>> = None;
+
+        let pdss_infos = self.pdss_infos.borrow();
+        for (&pdsi_perf, pdsi_set) in pdss_infos.iter() {
+            if pdsi_perf >= target_perf {
+                let pdsi_set_ref = pdsi_set.borrow();
+                for pdsi in pdsi_set_ref.iter() {
+                    let dist = pdsi.dist(base);
+                    if dist < min_dist {
+                        min_dist = dist;
+                        best_pdsi = Some(pdsi.clone());
+                    }
+                }
+                lookahead += 1;
+                if lookahead >= LOOKAHEAD_CNT {
+                    break;
+                }
+            }
+        }
+
+        best_pdsi
+    }
+
+    /// Generate all possible performance domain & state combinations,
+    /// @self.pdss_infos. Each combination represents a set of performance
+    /// domains (and their corresponding performance states) that achieve the
+    /// requested performance with minimal power consumption.
+    ///
+    /// We assume a 'reasonable load balancer,' so the CPU utilization of all
+    /// the involved CPUs is similar.
+    ///
+    /// An example result is as follows:
+    ///
+    ///     PERF: [_, 5135]
+    ///         perf: 5135 -- power: 5475348
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    ///     PERF: [_, 5187]
+    ///         perf: 5187 -- power: 4844969
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 0 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    ///     PERF: [_, 5195]
+    ///         perf: 5195 -- power: 5924606
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    ///     PERF: [_, 5217]
+    ///         perf: 5217 -- power: 4894911
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 0 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    ///     PERF: [_, 5225]
+    ///         perf: 5225 -- power: 5665770
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    ///     PERF: [_, 5316]
+    ///         perf: 5316 -- power: 5860568
+    ///             pd:id: 0 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 0
+    ///             pd:id: 1 -- cpu_vid: 1
+    ///             pd:id: 1 -- cpu_vid: 2
+    ///             pd:id: 2 -- cpu_vid: 0
+    ///             pd:id: 2 -- cpu_vid: 1
+    ///             pd:id: 3 -- cpu_vid: 0
+    fn gen_all_pds_combinations(&'a self) {
+        // Start from the min (0%) and max (100%) CPU utilizations
+        let pdsi_vec = self.gen_pds_combinations(0.0);
+        self.insert_pds_combinations(&pdsi_vec);
+
+        let pdsi_vec = self.gen_pds_combinations(100.0);
+        self.insert_pds_combinations(&pdsi_vec);
+
+        // Then dive into the range between the min and max.
+        self.gen_perf_cpuset_table_range(0, 100);
+
+        // Debug print performance table
+        debug!("## gen_all_pds_combinations");
+        for (perf, pdss_info) in self.pdss_infos.borrow().iter() {
+            debug!("PERF: [_, {}]", perf);
+            for pdsi in pdss_info.borrow().iter() {
+                debug!("    perf: {} -- power: {}", pdsi.performance, pdsi.power);
+                for pdcpu in pdsi.pdcpu_set.iter() {
+                    debug!(
+                        "        pd:id: {:?} -- cpu_vid: {}",
+                        pdcpu.pd.id, pdcpu.cpu_vid
+                    );
+                }
+            }
+        }
+    }
+
+    fn gen_perf_cpuset_table_range(&'a self, low: isize, high: isize) {
+        if low > high {
+            return;
+        }
+
+        // If there is a new performance point in the middle,
+        // let's further explore. Otherwise, stop it here.
+        let mid: isize = low + (high - low) / 2;
+        let pdsi_vec = self.gen_pds_combinations(mid as f32);
+        let found_new = self.insert_pds_combinations(&pdsi_vec);
+        if found_new {
+            self.gen_perf_cpuset_table_range(mid + 1, high);
+            self.gen_perf_cpuset_table_range(low, mid - 1);
+        }
+    }
+
+    /// Rank the performance domains by CPU preference: a performance domain is
+    /// as preferred as its most preferred CPU, which is the first one appearing
+    /// in @cpus_pf. A performance domain with no CPU in @cpus_pf is unranked and
+    /// comes last.
+    fn rank_perf_doms(cpus_pf: &[CpuId]) -> BTreeMap<usize, usize> {
+        let mut ranks = BTreeMap::new();
+
+        for (rank, cpuid) in cpus_pf.iter().enumerate() {
+            ranks.entry(cpuid.pd_adx).or_insert(rank);
+        }
+
+        ranks
+    }
+
+    /// Collect the member performance domains of each equivalence performance
+    /// domain of @em, ordering both the members and the equivalence performance
+    /// domains by CPU preference. See @EnergyModelOptimizer::eq_pds.
+    fn sort_eq_pds(em: &'a EnergyModel, cpus_pf: &'a [CpuId]) -> Vec<Vec<&'a PerfDomain>> {
+        let ranks = Self::rank_perf_doms(cpus_pf);
+        let rank_of = |pd: &PerfDomain| ranks.get(&pd.id).copied().unwrap_or(usize::MAX);
+
+        let mut eq_pds: Vec<Vec<&'a PerfDomain>> = em
+            .eq_perf_doms
+            .values()
+            .map(|eq_pd| {
+                let mut perf_doms: Vec<&'a PerfDomain> =
+                    eq_pd.perf_doms.iter().map(|pd| pd.as_ref()).collect();
+                perf_doms.sort_by_key(|pd| rank_of(pd));
+                perf_doms
+            })
+            .collect();
+
+        // An equivalence performance domain is as preferred as its most
+        // preferred member performance domain.
+        eq_pds.sort_by_key(|perf_doms| perf_doms.iter().map(|pd| rank_of(pd)).min());
+
+        eq_pds
+    }
+
+    /// Enumerate how many CPUs to take from each equivalence performance
+    /// domain, taking at most @max_nr_cpus[i] CPUs from the i-th one. See
+    /// @EnergyModelOptimizer::nr_cpus_combinations.
+    fn gen_nr_cpus_combinations(max_nr_cpus: &[usize]) -> Vec<Vec<usize>> {
+        // The number of all the possible combinations. An equivalence
+        // performance domain can contribute none, some, or all of its CPUs, so
+        // it has max_nr_cpus + 1 choices, and the choices of all the
+        // equivalence performance domains multiply. Subtract one for the
+        // combination taking no CPU at all. The product saturates instead of
+        // overflowing when there are hundreds of equivalence performance
+        // domains.
+        let nr_combinations = max_nr_cpus
+            .iter()
+            .fold(1u128, |nr, &max| nr.saturating_mul(max as u128 + 1))
+            - 1;
+        if nr_combinations <= MAX_EQPD_COMBINATIONS {
+            return Self::gen_all_nr_cpus(max_nr_cpus);
+        }
+
+        let combinations = Self::gen_run_nr_cpus(max_nr_cpus);
+        warn!(
+            "{} equivalence performance domains yield {nr_combinations} combinations, \
+             exceeding the limit of {MAX_EQPD_COMBINATIONS}, so consider only {} of them",
+            max_nr_cpus.len(),
+            combinations.len(),
+        );
+
+        combinations
+    }
+
+    /// Enumerate how many CPUs to take from each equivalence performance domain
+    /// in every possible way. An equivalence performance domain independently
+    /// takes 0, 1, ... up to all of its CPUs, so a combination picks one count
+    /// from the range `0..=max_nr_cpus[i]` of every equivalence performance
+    /// domain. Picking one element from each of several ranges, in all the
+    /// possible ways, is the cartesian product of those ranges, which
+    /// `multi_cartesian_product` enumerates one combination at a time. See
+    /// @EnergyModelOptimizer::nr_cpus_combinations for an example.
+    fn gen_all_nr_cpus(max_nr_cpus: &[usize]) -> Vec<Vec<usize>> {
+        max_nr_cpus
+            .iter()
+            .map(|&max| 0..=max)
+            .multi_cartesian_product()
+            // Drop the one combination taking no CPU at all.
+            .filter(|nr_cpus| nr_cpus.iter().any(|&nr| nr > 0))
+            .collect()
+    }
+
+    /// Enumerate how many CPUs to take from each equivalence performance domain
+    /// when there are too many combinations to consider them all
+    /// (@MAX_EQPD_COMBINATIONS). Only the runs of equivalence performance
+    /// domains are considered, where a run takes all the CPUs of consecutive
+    /// equivalence performance domains and some of the CPUs of the last one:
+    ///
+    ///   - A forward run grows from the first equivalence performance domain,
+    ///     adding one more equivalence performance domain at a time.
+    ///   - A backward run grows from the last equivalence performance domain
+    ///     in the opposite direction.
+    ///   - A single run takes CPUs from one equivalence performance domain and
+    ///     none from the others.
+    ///
+    /// For example, with three equivalence performance domains of 1, 2, and 1
+    /// CPUs, the runs are:
+    ///
+    ///     forward:  [1, 0, 0]
+    ///               [1, 1, 0], [1, 2, 0]
+    ///               [1, 2, 1]
+    ///     backward: [0, 0, 1]
+    ///               [0, 1, 1], [0, 2, 1]
+    ///               [1, 2, 1]
+    ///     single:   [1, 0, 0]
+    ///               [0, 1, 0], [0, 2, 0]
+    ///               [0, 0, 1]
+    ///
+    /// which is 3 * nr_cpus = 12 combinations, or 9 once the duplicates are
+    /// removed. Since there are at most 3 * nr_cpus of them, the runs always
+    /// fit in @MAX_EQPD_COMBINATIONS.
+    fn gen_run_nr_cpus(max_nr_cpus: &[usize]) -> Vec<Vec<usize>> {
+        let nr_eq_pds = max_nr_cpus.len();
+        let mut combinations = vec![];
+
+        // Take 1 to all the CPUs of the @i-th equivalence performance domain,
+        // which is the last one of a forward run, the last one of a backward
+        // run, and the only one of a single run.
+        for i in 0..nr_eq_pds {
+            let mut forward = vec![0; nr_eq_pds];
+            forward[..i].copy_from_slice(&max_nr_cpus[..i]);
+
+            let mut backward = vec![0; nr_eq_pds];
+            backward[i + 1..].copy_from_slice(&max_nr_cpus[i + 1..]);
+
+            let mut single = vec![0; nr_eq_pds];
+
+            for nr in 1..=max_nr_cpus[i] {
+                forward[i] = nr;
+                backward[i] = nr;
+                single[i] = nr;
+
+                combinations.push(forward.clone());
+                combinations.push(backward.clone());
+                combinations.push(single.clone());
+            }
+        }
+
+        combinations.sort();
+        combinations.dedup();
+
+        combinations
+    }
+
+    /// Generate the combinations of performance domains and states to consider
+    /// for a given CPU utilization (@util), one for each combination of
+    /// per-equivalence performance domain CPU counts.
+    fn gen_pds_combinations(&'a self, util: f32) -> Vec<PDSetInfo<'a>> {
+        self.nr_cpus_combinations
+            .iter()
+            .map(|nr_cpus| self.gen_pdsi(nr_cpus, util))
+            .collect()
+    }
+
+    /// Build the performance domains and states taking @nr_cpus[i] CPUs from
+    /// the i-th equivalence performance domain at the performance state for
+    /// @util. The CPUs are taken from the member performance domains in order,
+    /// so the CPUs for a count of N are always a subset of the ones for N + 1.
+    fn gen_pdsi(&'a self, nr_cpus: &[usize], util: f32) -> PDSetInfo<'a> {
+        let mut pds_set = vec![];
+
+        for (perf_doms, &nr) in self.eq_pds.iter().zip(nr_cpus.iter()) {
+            // All the member performance domains share one performance table,
+            // so they are all at the same performance state.
+            let ps = perf_doms[0].select_perf_state(util).unwrap();
+            let mut remaining = nr;
+
+            for pd in perf_doms.iter() {
+                if remaining == 0 {
+                    break;
+                }
+
+                // A performance domain contributes at most its own CPUs.
+                let take = remaining.min(pd.span.weight());
+                for _ in 0..take {
+                    pds_set.push(PDS::new(pd, ps));
+                }
+                remaining -= take;
+            }
+        }
+
+        PDSetInfo::new(pds_set)
+    }
+
+    fn insert_pds_combinations(&self, new_pdsi_vec: &Vec<PDSetInfo<'a>>) -> bool {
+        // For the same performance, keep the PDS combinations with the lowest
+        // power consumption. If there are more than one lowest, keep them all
+        // to choose one later when assigning CPUs from the selected
+        // performance domains.
+        let mut found_new = false;
+
+        for new_pdsi in new_pdsi_vec.iter() {
+            let mut pdss_infos = self.pdss_infos.borrow_mut();
+            let v = pdss_infos.get(&new_pdsi.performance);
+            match v {
+                // There are already PDSetInfo in the list.
+                Some(v) => {
+                    let mut v = v.borrow_mut();
+                    let pdsi = &v.iter().next().unwrap();
+                    if pdsi.power == new_pdsi.power {
+                        // If the power consumptions are the same, keep both.
+                        if v.insert(new_pdsi.clone()) {
+                            found_new = true;
+                        }
+                    } else if pdsi.power > new_pdsi.power {
+                        // If the new one takes less power, keep the new one.
+                        v.clear();
+                        v.insert(new_pdsi.clone());
+                        found_new = true;
+                    }
+                }
+                // This is the first for the performance target.
+                None => {
+                    // Let's add it and move on.
+                    let mut v: HashSet<PDSetInfo<'a>> = HashSet::new();
+                    v.insert(new_pdsi.clone());
+                    pdss_infos.insert(new_pdsi.performance, v.into());
+                    found_new = true;
+                }
+            }
+        }
+        found_new
+    }
+}
+
+impl<'a> PDS<'_> {
+    fn new(pd: &'a PerfDomain, ps: &'a PerfState) -> PDS<'a> {
+        PDS { pd, ps }
+    }
+}
+
+impl<'a> PDCpu<'_> {
+    fn new(pd: &'a PerfDomain, cpu_vid: usize) -> PDCpu<'a> {
+        PDCpu { pd, cpu_vid }
+    }
+}
+
+impl fmt::Display for PDS<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "pd:id:{}/pd:weight:{}/ps:cap:{}/ps:power:{}",
+            self.pd.id,
+            self.pd.span.weight(),
+            self.ps.performance,
+            self.ps.power,
+        )?;
+        Ok(())
+    }
+}
+
+impl<'a> PDSetInfo<'_> {
+    fn new(pds_set: Vec<PDS<'a>>) -> PDSetInfo<'a> {
+        // Create a pd_id_set and calculate performance and power.
+        let mut performance = 0;
+        let mut power = 0;
+        let mut pd_id_set: BTreeSet<usize> = BTreeSet::new();
+
+        for pds in pds_set.iter() {
+            performance += pds.ps.performance;
+            power += pds.ps.power;
+            pd_id_set.insert(pds.pd.id);
+        }
+
+        // Create a pdcpu_set, so first gather the same PDS entries.
+        let mut pds_map: BTreeMap<PDS<'a>, RefCell<Vec<PDS<'a>>>> = BTreeMap::new();
+
+        for pds in pds_set.iter() {
+            let v = pds_map.get(pds);
+            match v {
+                Some(v) => {
+                    let mut v = v.borrow_mut();
+                    v.push(pds.clone());
+                }
+                None => {
+                    let mut v: Vec<PDS<'a>> = Vec::new();
+                    v.push(pds.clone());
+                    pds_map.insert(pds.clone(), v.into());
+                }
+            }
+        }
+        // Then assign cpu virtual ids to pdcpu_set.
+        let mut pdcpu_set: BTreeSet<PDCpu<'a>> = BTreeSet::new();
+        let pds_map = pds_map;
+
+        for v in pds_map.values() {
+            for (cpu_vid, pds) in v.borrow().iter().enumerate() {
+                let pdcpu = PDCpu::new(pds.pd, cpu_vid);
+                pdcpu_set.insert(pdcpu);
+            }
+        }
+
+        PDSetInfo {
+            performance,
+            power,
+            pdcpu_set,
+            pd_id_set,
+        }
+    }
+
+    /// Calculate the distance from @base to @self. We minimize the number of
+    /// performance domains involved to reduce the leakage power consumption.
+    /// We then maximize the overlap between the previous (i.e., base)
+    /// performance domains and the new one for a smooth transition to the new
+    /// cpuset with higher cache locality. Finally, we minimize the number of
+    /// CPUs involved, thereby reducing the chance of contention for shared
+    /// hardware resources (e.g., shared cache).
+    fn dist(&self, base: Option<&PDSetInfo<'a>>) -> usize {
+        let nr_pds = self.pd_id_set.len();
+        let nr_pds_overlap = match base {
+            Some(base) => self.pd_id_set.intersection(&base.pd_id_set).count(),
+            None => 0,
+        };
+        let nr_cpus = self.pdcpu_set.len();
+
+        ((nr_pds - nr_pds_overlap) * PD_UNIT) +         // # non-overlapping PDs
+        ((*NR_CPU_IDS - nr_cpus) * CPU_UNIT) +          // # of CPUs
+        (*NR_CPU_IDS - self.pd_id_set.first().unwrap()) // PD ID as a tiebreaker
+    }
+}
+
+impl PartialEq for PDSetInfo<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.performance == other.performance
+            && self.power == other.power
+            && self.pdcpu_set == other.pdcpu_set
+    }
+}
+
+impl Hash for PDSetInfo<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // We don't need to hash performance, power, and pd_id_set
+        // since they are a kind of cache for pds_set.
+        self.pdcpu_set.hash(state);
+    }
+}
+
+impl PartialEq for PerfCpuOrder {
+    fn eq(&self, other: &Self) -> bool {
+        self.perf_cap == other.perf_cap
+    }
+}
+
+impl fmt::Display for PerfCpuOrder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(
+            f,
+            "capacity bound:  {} ({}%)",
+            self.perf_cap,
+            self.perf_util * 100.0
+        )?;
+        writeln!(f, "  primary CPUs:  {:?}", self.cpus_perf.borrow())?;
+        write!(f, "  overflow CPUs: {:?}", self.cpus_ovflw.borrow())?;
+        Ok(())
+    }
+}
+
+/// Tests for enumerating the combinations of equivalence performance domains,
+/// which used to be enumerated over the individual performance domains and
+/// blow up on a hybrid processor, where there is one performance domain per
+/// CPU. See <https://github.com/sched-ext/scx/issues/3340>.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scx_utils::EqPerfDomain;
+    use std::sync::Arc;
+
+    /// Build an energy model whose i-th equivalence performance domain has
+    /// @eq_pd_nr_cpus[i] CPUs, each CPU in a performance domain of its own as
+    /// on an Intel hybrid processor.
+    fn energy_model(eq_pd_nr_cpus: &[usize]) -> EnergyModel {
+        let mut perf_doms = BTreeMap::new();
+        let mut eq_perf_doms = BTreeMap::new();
+        let mut pd_id = 0;
+
+        for (eq_pd_id, &nr_cpus) in eq_pd_nr_cpus.iter().enumerate() {
+            // Give every equivalence performance domain a performance table of
+            // its own so that they stay distinct.
+            let performance = 100 * (eq_pd_id + 1);
+            let ps = PerfState {
+                cost: performance,
+                frequency: performance,
+                inefficient: 0,
+                performance,
+                power: performance,
+            };
+            let perf_table: BTreeMap<usize, Arc<PerfState>> =
+                [(performance, ps.into())].into_iter().collect();
+
+            let mut members = vec![];
+            let mut span_bits = 0u64;
+            for _ in 0..nr_cpus {
+                let pd: Arc<PerfDomain> = PerfDomain {
+                    id: pd_id,
+                    span: Cpumask::from_vec(vec![1u64 << pd_id]),
+                    perf_table: perf_table.clone(),
+                }
+                .into();
+                span_bits |= 1u64 << pd_id;
+                perf_doms.insert(pd_id, pd.clone());
+                members.push(pd);
+                pd_id += 1;
+            }
+
+            let eq_pd = EqPerfDomain {
+                id: eq_pd_id,
+                perf_doms: members,
+                span: Cpumask::from_vec(vec![span_bits]),
+                perf_table,
+            };
+            eq_perf_doms.insert(eq_pd_id, eq_pd.into());
+        }
+
+        EnergyModel {
+            perf_doms,
+            eq_perf_doms,
+        }
+    }
+
+    /// Build a CPU preference order taking one CPU from each performance domain
+    /// of @pd_adxs, so the performance domain listed first is the most
+    /// preferred one.
+    fn cpu_pref_order(pd_adxs: &[usize]) -> Vec<CpuId> {
+        pd_adxs
+            .iter()
+            .enumerate()
+            .map(|(core_rdx, &pd_adx)| CpuId {
+                numa_adx: 0,
+                pd_adx,
+                llc_adx: 0,
+                llc_rdx: 0,
+                llc_kernel_id: 0,
+                core_rdx,
+                cpu_rdx: 0,
+                cpu_adx: pd_adx,
+                smt_level: 1,
+                cache_size: 0,
+                cpu_cap: 1024,
+                big_core: true,
+                turbo_core: false,
+            })
+            .collect()
+    }
+
+    /// The CPUs of an equivalence performance domain are taken from its most
+    /// preferred member performance domain first, not from the one with the
+    /// lowest id.
+    #[test]
+    fn test_members_in_cpu_preference_order() {
+        // One equivalence performance domain of 4 CPUs, each in a performance
+        // domain of its own, preferred in the reverse order of their ids.
+        let em = energy_model(&[4]);
+        let cpus_pf = cpu_pref_order(&[3, 2, 1, 0]);
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let pd_ids: Vec<usize> = emo.eq_pds[0].iter().map(|pd| pd.id).collect();
+        assert_eq!(pd_ids, vec![3, 2, 1, 0]);
+
+        // Taking 2 CPUs takes them from the 2 most preferred performance
+        // domains.
+        let expected: BTreeSet<usize> = [2, 3].into_iter().collect();
+        assert_eq!(emo.gen_pdsi(&[2], 100.0).pd_id_set, expected);
+    }
+
+    /// The equivalence performance domains themselves are ordered by CPU
+    /// preference, so a count belongs to the equivalence performance domain of
+    /// the same preference.
+    #[test]
+    fn test_eq_pds_in_cpu_preference_order() {
+        // Two equivalence performance domains of 2 CPUs each, preferring the
+        // CPUs of the second one.
+        let em = energy_model(&[2, 2]);
+        let cpus_pf = cpu_pref_order(&[2, 3, 0, 1]);
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let pd_ids: Vec<Vec<usize>> = emo
+            .eq_pds
+            .iter()
+            .map(|perf_doms| perf_doms.iter().map(|pd| pd.id).collect())
+            .collect();
+        assert_eq!(pd_ids, vec![vec![2, 3], vec![0, 1]]);
+
+        // The first count belongs to the first equivalence performance domain,
+        // which is the preferred one.
+        let expected: BTreeSet<usize> = [2].into_iter().collect();
+        assert_eq!(emo.gen_pdsi(&[1, 0], 100.0).pd_id_set, expected);
+    }
+
+    /// A 28-thread hybrid processor (8 P-cores, 16 E-cores, and 4 LP-E-cores)
+    /// collapsing into three equivalence performance domains. Enumerating over
+    /// its 28 performance domains, one per CPU, would take 2^28 - 1
+    /// combinations.
+    #[test]
+    fn test_hybrid_combinations() {
+        let em = energy_model(&[8, 16, 4]);
+        let cpus_pf = vec![];
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        // (8 + 1) * (16 + 1) * (4 + 1) - 1
+        assert_eq!(emo.nr_cpus_combinations.len(), 764);
+        assert!(emo.nr_cpus_combinations.contains(&vec![8, 16, 4]));
+        assert_eq!(emo.gen_pds_combinations(100.0).len(), 764);
+    }
+
+    /// A processor whose performance domains do not collapse at all, as
+    /// per-core binning could produce. Enumerating all the combinations would
+    /// take 2^24 - 1 of them, exceeding @MAX_EQPD_COMBINATIONS, so only the
+    /// runs of equivalence performance domains are considered.
+    #[test]
+    fn test_uncollapsed_combinations_fall_back_to_runs() {
+        let em = energy_model(&[1; 24]);
+        let cpus_pf = vec![];
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        // 24 forward runs, 24 backward runs, and 24 single runs, of which the
+        // all-CPU run and the two end single runs are duplicates.
+        assert_eq!(emo.nr_cpus_combinations.len(), 69);
+        assert!(emo.nr_cpus_combinations.contains(&vec![1; 24]));
+
+        // Every run takes CPUs from consecutive equivalence performance
+        // domains.
+        for nr_cpus in emo.nr_cpus_combinations.iter() {
+            let first = nr_cpus.iter().position(|&nr| nr > 0).unwrap();
+            let last = nr_cpus.iter().rposition(|&nr| nr > 0).unwrap();
+            assert!(nr_cpus[first..=last].iter().all(|&nr| nr > 0));
+        }
+    }
+
+    /// A single equivalence performance domain, so a combination is just how
+    /// many of its CPUs to take.
+    #[test]
+    fn test_uniform_combinations() {
+        let em = energy_model(&[8]);
+        let cpus_pf = vec![];
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        assert_eq!(emo.nr_cpus_combinations.len(), 8);
+        assert_eq!(emo.gen_pds_combinations(100.0).len(), 8);
+    }
+}

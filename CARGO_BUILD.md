@@ -83,6 +83,7 @@ cargo build --profile=release-tiny -p scx_flash
 | `scx_cake`     | `cargo build --release -p scx_cake` |
 | `scx_chaos`    | `cargo build --release -p scx_chaos` |
 | `scx_cosmos`   | `cargo build --release -p scx_cosmos` |
+| `scx_eevdf`    | `cargo build --release -p scx_eevdf` |
 | `scx_flash`    | `cargo build --release -p scx_flash` |
 | `scx_flow`     | `cargo build --release -p scx_flow` |
 | `scx_lavd`     | `cargo build --release -p scx_lavd` |

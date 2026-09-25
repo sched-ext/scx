@@ -298,8 +298,7 @@ static inline int account_subcell_llc_enqueue(u32 cell_id, u32 subcell_id, u32 l
 
 	subcell = lookup_subcell(cell_id, subcell_id);
 	if (!subcell) {
-		scx_bpf_error("account_subcell_llc_enqueue: invalid cell %u subcell %u", cell_id,
-			      subcell_id);
+		scx_bpf_error("account_subcell_llc_enqueue: invalid cell %u subcell %u", cell_id, subcell_id);
 		return -ENOENT;
 	}
 
@@ -329,8 +328,7 @@ enum {
  * CONTINUE_DISPATCH when work was moved to a remote CPU DSQ, and a negative
  * error when no work was dispatched.
  */
-static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc,
-				    struct cpu_ctx *local_cctx)
+static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc, struct cpu_ctx *local_cctx)
 {
 	if (!llc_is_valid(local_llc)) {
 		scx_bpf_error("try_draining_work: invalid local_llc: %d", local_llc);
@@ -443,8 +441,7 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc,
 
 				tctx = lookup_task_ctx(p);
 				if (!tctx) {
-					scx_bpf_error(
-						"lookup_task_ctx() failed in try_draining_work()");
+					scx_bpf_error("lookup_task_ctx() failed in try_draining_work()");
 					break;
 				}
 
@@ -462,8 +459,7 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc,
 
 				basis_vtime = READ_ONCE(target_cctx->vtime_now);
 				scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER, basis_vtime);
-				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, cpu_dsq.raw,
-								  0);
+				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, cpu_dsq.raw, 0);
 				if (consumed) {
 					tctx->basis_vtime = basis_vtime;
 					tctx->dsq = cpu_dsq;
@@ -559,8 +555,7 @@ static inline s32 try_stealing_work(u32 cell_id, u32 subcell_id, s32 local_llc)
 	return -ENOENT;
 }
 
-static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32 new_llc,
-			       bool reset_vtime)
+static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32 new_llc, bool reset_vtime)
 {
 	if (!tctx) {
 		scx_bpf_error("Invalid task context");
@@ -575,8 +570,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 	struct subcell *subcell = lookup_subcell(tctx->cell, tctx->subcell);
 	struct subcell_llc *new_llc_state;
 	if (!subcell) {
-		scx_bpf_error("failed to lookup cell %u subcell %u for LLC assignment", tctx->cell,
-			      tctx->subcell);
+		scx_bpf_error("failed to lookup cell %u subcell %u for LLC assignment", tctx->cell, tctx->subcell);
 		return -ENOENT;
 	}
 	new_llc_state = lookup_subcell_llc(subcell, new_llc);
@@ -585,8 +579,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 
 	u32 old_llc = tctx->llc;
 	if (refresh_task_llc_cpumask(tctx, new_llc)) {
-		scx_bpf_error("failed to refresh task LLC cpumask for cell %u LLC %u", tctx->cell,
-			      new_llc);
+		scx_bpf_error("failed to refresh task LLC cpumask for cell %u LLC %u", tctx->cell, new_llc);
 		return -EINVAL;
 	}
 
@@ -611,8 +604,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 	return 0;
 }
 
-static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx,
-					     s32 preferred_cpu)
+static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx, s32 preferred_cpu)
 {
 	s32 new_llc = choose_task_llc(tctx, preferred_cpu);
 	if (!llc_is_valid(new_llc))
@@ -621,8 +613,7 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 	return set_task_llc(p, tctx, (u32)new_llc, true);
 }
 
-static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx,
-					s32 preferred_cpu)
+static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx, s32 preferred_cpu)
 {
 	int ret;
 	s32 new_llc;

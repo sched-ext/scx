@@ -16,7 +16,6 @@
 #include "../../../../include/lib/cpumask.h"
 #include "../../../../include/lib/dhq.h"
 #include "../../../../include/lib/minheap.h"
-#include "../../../../include/lib/percpu.h"
 #include "../../../../include/lib/sdt_task.h"
 #include "../../../../include/lib/topology.h"
 #else
@@ -27,7 +26,6 @@
 #include <lib/cpumask.h>
 #include <lib/dhq.h>
 #include <lib/minheap.h>
-#include <lib/percpu.h>
 #include <lib/sdt_task.h>
 #include <lib/topology.h>
 #endif

@@ -196,8 +196,7 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	s32 cid;
 	int ret;
 
-	cmask_copy(effective, allowed);
-	cmask_and(effective, cell_mask);
+	cmask_and(effective, allowed, cell_mask);
 
 	/*
 	 * An empty allowed mask means all of the task's cpus are offline. The
@@ -1372,8 +1371,7 @@ void BPF_STRUCT_OPS(mitosis_set_cmask, struct task_struct *p, struct scx_cmask _
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
-	cmask_copy(&tctx->allowed, cmask);
-	cmask_and(&tctx->allowed, topo_cids);
+	cmask_and(&tctx->allowed, cmask, topo_cids);
 	update_task_cmask(p, tctx);
 }
 
@@ -1436,7 +1434,7 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 		 * ops.set_cmask() keeps it in sync from here on.
 		 */
 		cmask_from_cpumask(&tctx->allowed, p->cpus_ptr);
-		cmask_and(&tctx->allowed, topo_cids);
+		cmask_and(&tctx->allowed, &tctx->allowed, topo_cids);
 
 		/* Initialize LLC assignment fields */
 		if (enable_llc_awareness)
@@ -1695,11 +1693,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	t->nr_cids = nr_cids;
 
-	bpf_for(i, 0, nr_cids) {
+	bpf_arena_for(i, 0, nr_cids) {
 		struct scx_cid_topo ct = {};
+		struct scx_cid_topo __arena *dst = &t->cid[i];
 
 		scx_bpf_cid_topo(i, &ct);
-		t->cid[i] = ct;
+
+		/*
+		 * clang 20 derives an aggregate copy destination before the arena
+		 * address-space cast, causing the BPF verifier to see it as a
+		 * scalar. Open-code the copy so stores go through @dst.
+		 */
+		dst->core_cid = ct.core_cid;
+		dst->core_idx = ct.core_idx;
+		dst->llc_cid = ct.llc_cid;
+		dst->llc_idx = ct.llc_idx;
+		dst->node_cid = ct.node_cid;
+		dst->node_idx = ct.node_idx;
+		dst->shard_cid = ct.shard_cid;
+		dst->shard_idx = ct.shard_idx;
 
 		/*
 		 * Offline-possible cpus get no-topo tail cids with -1

@@ -27,7 +27,6 @@ extern const volatile u64	slice_min_ns;
 extern const volatile u64	slice_max_ns;
 extern volatile bool		__weak no_core_compaction;
 extern volatile bool		__weak reinit_cpumask_for_performance;
-const volatile bool	__weak is_autopilot_on;
 
 int do_autopilot(void);
 u32 calc_avg32(u32 old_val, u32 new_val);

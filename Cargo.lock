@@ -5960,26 +5960,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scx_cidland"
-version = "1.1.3"
-dependencies = [
- "anyhow",
- "clap",
- "crossbeam",
- "ctrlc",
- "libbpf-rs 0.27.1",
- "libc",
- "log",
- "scx_arena",
- "scx_cargo",
- "scx_stats",
- "scx_stats_derive",
- "scx_utils",
- "serde",
- "simplelog",
-]
-
-[[package]]
 name = "scx_cosmos"
 version = "1.1.6"
 dependencies = [
@@ -5991,6 +5971,26 @@ dependencies = [
  "log",
  "nvml-wrapper",
  "nvml-wrapper-sys",
+ "scx_cargo",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
+[[package]]
+name = "scx_eevdf"
+version = "1.1.3"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "libbpf-rs 0.27.1",
+ "libc",
+ "log",
+ "scx_arena",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
@@ -6151,6 +6151,37 @@ dependencies = [
  "scx_cargo",
  "scx_utils",
  "simplelog",
+]
+
+[[package]]
+name = "scx_mavd"
+version = "1.1.3"
+dependencies = [
+ "anyhow",
+ "bitvec",
+ "clap",
+ "clap-num",
+ "clap_main",
+ "crossbeam",
+ "ctrlc",
+ "gpoint",
+ "hex",
+ "itertools 0.14.0",
+ "libbpf-rs 0.27.1",
+ "libc",
+ "nix 0.31.3",
+ "ordered-float 5.5.0",
+ "plain",
+ "rlimit",
+ "scx_arena",
+ "scx_cargo",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "static_assertions",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
