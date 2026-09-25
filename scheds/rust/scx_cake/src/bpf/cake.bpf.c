@@ -592,6 +592,48 @@ static __always_inline bool cake_stage(const struct task_struct *p)
 	       p->se.sum_exec_runtime >= SEAT_BURST_MIN_NS * n;
 }
 
+/* Keep clang from combining the 32-bit limbs into an unsupported i128 helper. */
+static __noinline u64 cake_mul_u32_u32(u32 a, u32 b)
+{
+	return (u64)a * b;
+}
+
+static __noinline u64 cake_mul_hi_u64(u64 a, u64 b)
+{
+	u32 a_lo = a, a_hi = a >> 32;
+	u32 b_lo = b, b_hi = b >> 32;
+	u64 ll = cake_mul_u32_u32(a_lo, b_lo);
+	u64 hl = cake_mul_u32_u32(a_hi, b_lo);
+	u64 lh = cake_mul_u32_u32(a_lo, b_hi);
+	u64 carry = (ll >> 32) + (u32)hl + (u32)lh;
+
+	return cake_mul_u32_u32(a_hi, b_hi) + (hl >> 32) + (lh >> 32) +
+	       (carry >> 32);
+}
+
+/* Compare wide products without truncating either product. */
+static __noinline bool cake_ratio_gt_wide(u64 a, u64 b, u64 c, u64 d)
+{
+	u64 ab_hi = cake_mul_hi_u64(a, b);
+	u64 cd_hi = cake_mul_hi_u64(c, d);
+
+	if (ab_hi != cd_hi)
+		return ab_hi > cd_hi;
+
+	/* With equal high halves, the wrapped products compare as low halves. */
+	return a * b > c * d;
+}
+
+/* Keep the common 32-bit cross-multiply cheap; wide values use the exact slow
+ * path above. */
+static __always_inline bool cake_ratio_gt(u64 a, u64 b, u64 c, u64 d)
+{
+	if (!((a | b | c | d) >> 32))
+		return a * b > c * d;
+
+	return cake_ratio_gt_wide(a, b, c, d);
+}
+
 /* Does this task wait longer than it runs? run_delay/pcount is the mean wait,
  * sum_exec_runtime/nvcsw the mean burst; cross-multiplied, the shared
  * pre-scale cancels. The threshold is a definition, not a tuning. */
@@ -602,7 +644,8 @@ static __always_inline bool cake_starved(const struct task_struct *p)
 
 	if (!run)
 		return false;
-	return wait * (p->nvcsw | 1) > run * (p->sched_info.pcount | 1);
+	return cake_ratio_gt(wait, p->nvcsw | 1, run,
+			     p->sched_info.pcount | 1);
 }
 
 /* Does this task wait longer than one turn of its own? cake_starved has no
@@ -615,7 +658,8 @@ static __always_inline bool cake_starved_turn(const struct task_struct *p)
 
 	if (!run)
 		return false;
-	return wait * (p->nvcsw | 1) > (run << 1) * (p->sched_info.pcount | 1);
+	return cake_ratio_gt(wait, p->nvcsw | 1, run << 1,
+			     p->sched_info.pcount | 1);
 }
 
 _Static_assert(sizeof(struct cake_slot) == STATE_SLOT_BYTES,
