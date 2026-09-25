@@ -907,15 +907,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 	 * Frame the masks over the cid space, with the helpers, before any
 	 * bit is set.
 	 */
-	cmask_init(idle_cids, 0, nr_cids);
-	cmask_init(idle_core_llcs, 0, nr_cids);
+	err = scx_cid_idle_init_masks(&eevdf_idle, nr_cids, smt_enabled);
+	if (err)
+		return err;
 	cmask_init(queued_cids, 0, nr_cids);
 	bpf_arena_for(cid, 0, nr_place_tiers)
 		cmask_init(place_tier_mask(cid), 0, nr_cids);
 	bpf_arena_for(cid, 0, nr_capacity_tiers)
 		cmask_init(capacity_tier_mask(cid), 0, nr_cids);
 
-	nr_words = cmask_nr_words(idle_cids);
+	nr_words = scx_cid_idle_nr_words(&eevdf_idle);
 
 	init_topology();
 	now = bpf_ktime_get_ns();
@@ -936,8 +937,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 			stats->ratio[level] = 512;
 			stats->stamp[level] = now;
 		}
-		if (cid == (s32)cid_topo(cid)->llc_base)
-			cctx->sis_idle_scan = cid_topo(cid)->llc_nr;
+		if (cid == (s32)cid_topo(cid)->ranges.llc_base)
+			cctx->sis_idle_scan = cid_topo(cid)->ranges.llc_nr;
 	}
 
 	/*
@@ -951,19 +952,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 		u32 best = nr_place_tiers - 1;
 		u32 i;
 
-		bpf_arena_for(i, 0, topo->llc_nr)
+		bpf_arena_for(i, 0, topo->ranges.llc_nr)
 			best = MIN(best,
-				   cid_topo(topo->llc_base + i)->place_tier);
+				   cid_topo(topo->ranges.llc_base + i)->place_tier);
 		topo->llc_place_tier = best;
 	}
 
 	/*
 	 * Build the packing- and capacity-tier bitmaps and start with every cid
 	 * idle, the way the kernel resets its own
-	 * idle masks: a CPU that is busy clears its bit as soon as a task
-	 * runs there, while a CPU that sits idle from the start never
-	 * transitions, and left with its bit clear it would never be
-	 * picked, so never transition, for good.
+	 * idle masks. A CPU that sits idle from the start never transitions;
+	 * left with its bit clear it would never be picked. A busy CPU's
+	 * optimistic bit is cleared by the first claim or idle transition.
 	 */
 	bpf_arena_for(cid, 0, nr_cids) {
 		struct cid_topo __arena *topo = cid_topo(cid);

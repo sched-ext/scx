@@ -33,13 +33,13 @@
  * claimed for a task and kicked, and then found nothing to run, goes back
  * to idle without a transition and would keep its bit cleared for good:
  * ops.dispatch() re-arms the bit whenever a cid is about to idle. The
- * re-arm can be wrong the other way, when a task lands on the cid right
- * after it, since a cid that never went idle sees no transition either:
- * ops.running() clears the bit again in that case.
+ * re-arm can be wrong the other way when a task lands on the cid before
+ * it idles. The next idle claim or ops.update_idle(cid, false) clears
+ * that stale hint; a claim of a busy cid is bounced back to ops.enqueue().
  */
 static bool cid_idle_test(s32 cid)
 {
-	return cid_valid(cid) && __cmask_test(cid, idle_cids);
+	return scx_cid_idle_test(&eevdf_idle, cid);
 }
 
 /*
@@ -48,24 +48,9 @@ static bool cid_idle_test(s32 cid)
  */
 static bool core_is_idle(s32 cid)
 {
-	struct cid_topo __arena *topo;
-	u32 base, nr, shift;
-	u64 mask;
-
 	if (!cid_valid(cid))
 		return false;
-	topo = cid_topo(cid);
-	base = topo->core_base;
-	nr = topo->core_nr;
-	shift = base & 63;
-
-	/* A core within one word, which every SMT core is: one load. */
-	if (nr && nr < 64 && shift + nr <= 64 && __cmask_contains(base, idle_cids)) {
-		mask = ((1ULL << nr) - 1) << shift;
-		return (*__cmask_word(base, idle_cids) & mask) == mask;
-	}
-
-	return cmask_full_range(idle_cids, base, nr);
+	return scx_cid_idle_core_idle(&eevdf_idle, &cid_topo(cid)->ranges);
 }
 
 /*
@@ -81,7 +66,7 @@ static bool siblings_idle(s32 cid)
 	if (!cid_valid(cid))
 		return false;
 	topo = cid_topo(cid);
-	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+	bpf_arena_for(sibling, topo->ranges.core_base, topo->ranges.core_base + topo->ranges.core_nr) {
 		if (sibling != (u32)cid && !cid_idle_test(sibling))
 			return false;
 	}
@@ -113,7 +98,7 @@ static bool test_idle_cores(s32 cid)
 		return false;
 	topo = cid_topo(cid);
 
-	return __cmask_test(topo->llc_base, idle_core_llcs);
+	return scx_cid_idle_has_core(&eevdf_idle, topo->ranges.llc_base);
 }
 
 static void set_idle_cores(s32 cid, bool has_idle_core)
@@ -123,10 +108,8 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
 	if (!cid_valid(cid))
 		return;
 	topo = cid_topo(cid);
-	if (has_idle_core)
-		cmask_set(topo->llc_base, idle_core_llcs);
-	else
-		cmask_clear(topo->llc_base, idle_core_llcs);
+	scx_cid_idle_set_core_hint(&eevdf_idle, topo->ranges.llc_base,
+				    has_idle_core);
 }
 
 /*
@@ -136,7 +119,7 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
  */
 static bool cid_idle_claim(s32 cid)
 {
-	return cid_valid(cid) && cmask_test_and_clear(cid, idle_cids);
+	return scx_cid_idle_claim(&eevdf_idle, cid);
 }
 
 /*
@@ -147,9 +130,7 @@ static void cid_idle_set(s32 cid)
 	if (!cid_valid(cid))
 		return;
 
-	cmask_set(cid, idle_cids);
-	if (smt_enabled && !test_idle_cores(cid) && core_is_idle(cid))
-		set_idle_cores(cid, true);
+	scx_cid_idle_set_ranges(&eevdf_idle, cid, &cid_topo(cid)->ranges);
 }
 
 /*
@@ -192,11 +173,6 @@ static __always_inline u64 place_tier_word(u32 t, u32 k)
 	return cmask_word(place_tier_mask(t), k);
 }
 
-static __always_inline u64 capacity_tier_word(u32 t, u32 k)
-{
-	return cmask_word(capacity_tier_mask(t), k);
-}
-
 /*
  * Return the first idle cid of word @k of @w that @p can run on and, if
  * @whole_core is set, whose whole core is idle, or -EBUSY.
@@ -205,21 +181,11 @@ static __always_inline s32 first_idle_cid(const struct task_struct *p, u64 w,
 					  u32 k, bool restricted, bool whole_core)
 {
 	while (w && can_loop) {
-		s32 cid = k * 64 + __builtin_ctzll(w);
+		s32 cid = scx_cid_idle_next(&eevdf_idle, &w, k);
 
-		/*
-		 * The flag is the truth: a cid that was just claimed keeps
-		 * its bit until the claim's add lands, and a scan that took
-		 * the bit for the truth picked the same cid again on every
-		 * retry after losing a claim to it, ran out of retries and
-		 * had a fork fall back to the shallowest queue, the sibling
-		 * of a busy CPU as often as not.
-		 */
-		if (__cmask_test(cid, idle_cids) &&
-		    (!whole_core || core_is_idle(cid)) &&
+		if (cid >= 0 && (!whole_core || core_is_idle(cid)) &&
 		    (!restricted || cid_allowed(p, cid)))
 			return cid;
-		w &= w - 1;
 	}
 
 	return -EBUSY;
@@ -236,8 +202,7 @@ scan_idle_unranked_range(const struct task_struct *p, u32 base, u32 nr,
 		return -EBUSY;
 	last = (base + nr - 1) / 64;
 	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = cmask_word(idle_cids, k) &
-			cmask_range_word(idle_cids, k, base, nr);
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle, NULL, k, base, nr);
 		s32 cid;
 
 		if (!w)
@@ -261,8 +226,8 @@ scan_idle_capacity_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 		return -EBUSY;
 	last = (base + nr - 1) / 64;
 	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = cmask_word(idle_cids, k) & capacity_tier_word(t, k) &
-			cmask_range_word(idle_cids, k, base, nr);
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle, capacity_tier_mask(t),
+					    k, base, nr);
 		s32 cid;
 
 		if (!w)
@@ -282,7 +247,7 @@ static __always_inline u32 sis_idle_scan_nr(s32 cid)
 	if (!sis_util || !cid_valid(cid))
 		return UINT_MAX;
 	topo = cid_topo(cid);
-	return READ_ONCE(cid_ctx(topo->llc_base)->sis_idle_scan);
+	return READ_ONCE(cid_ctx(topo->ranges.llc_base)->sis_idle_scan);
 }
 
 /* Flags for pick_idle_cid_topology() */
@@ -359,7 +324,7 @@ static s32 select_idle_smt_cpu(const struct task_struct *p, s32 cid)
 		return cid;
 	topo = cid_topo(cid);
 
-	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+	bpf_arena_for(sibling, topo->ranges.core_base, topo->ranges.core_base + topo->ranges.core_nr) {
 		if (sibling == (u32)best || !cid_idle_test(sibling) ||
 		    !cid_allowed(p, sibling))
 			continue;

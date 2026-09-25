@@ -141,7 +141,7 @@ static s32 select_idle_smt_balance_cid(const struct task_struct *p, s32 cid,
 	if (!smt_asym_active(cid))
 		return cid;
 	topo = cid_topo(cid);
-	bpf_arena_for(sibling, topo->core_base, topo->core_base + topo->core_nr) {
+	bpf_arena_for(sibling, topo->ranges.core_base, topo->ranges.core_base + topo->ranges.core_nr) {
 		if (sibling == (u32)best || !cid_idle_test(sibling) ||
 		    !cid_allowed(p, sibling) || !active_balance_due(sibling, now))
 			continue;
@@ -163,7 +163,7 @@ static u32 active_balance_min_ms(s32 cid)
 {
 	struct cid_topo __arena *topo = cid_topo(cid);
 
-	return numa_enabled ? topo->node_nr : nr_cids;
+	return numa_enabled ? topo->ranges.node_nr : nr_cids;
 }
 
 static bool active_balance_due(s32 cid, u64 now)
@@ -243,17 +243,14 @@ balance_scan_range(const struct task_struct *p, s32 t, u32 base, u32 nr,
 		return -EBUSY;
 	last = (base + nr - 1) / 64;
 	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = cmask_word(idle_cids, k) &
-			cmask_range_word(idle_cids, k, base, nr);
-
-		if (t >= 0)
-			w &= place_tier_word(t, k);
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle,
+					      t >= 0 ? place_tier_mask(t) : NULL,
+					      k, base, nr);
 
 		while (w && can_loop) {
-			s32 cid = k * 64 + __builtin_ctzll(w);
+			s32 cid = scx_cid_idle_next(&eevdf_idle, &w, k);
 
-			w &= w - 1;
-			if (!cid_valid(cid) || !cid_idle_test(cid) ||
+			if (cid < 0 ||
 			    (smt_enabled && !core_is_idle(cid)) ||
 			    (restricted && !cid_allowed(p, cid)) ||
 			    !active_balance_due(cid, now))
@@ -285,7 +282,7 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 	restricted = is_restricted(p);
 
 	if (smt_enabled && src->smt_asym_packing) {
-		bpf_arena_for(sibling, src->core_base, src->core_base + src->core_nr) {
+		bpf_arena_for(sibling, src->ranges.core_base, src->ranges.core_base + src->ranges.core_nr) {
 			if (sibling != (u32)src_cid && cid_idle_test(sibling) &&
 			    cid_topo(sibling)->place_tier < src->place_tier &&
 			    (!restricted || cid_allowed(p, sibling)) &&
@@ -310,7 +307,7 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 	if (!nr_tiers)
 		goto parent;
 	bpf_arena_for(t, 0, nr_tiers) {
-		s32 cid = balance_scan_range(p, t, src->llc_base, src->llc_nr,
+		s32 cid = balance_scan_range(p, t, src->ranges.llc_base, src->ranges.llc_nr,
 					     restricted, now);
 
 		if (cid >= 0)
@@ -326,12 +323,12 @@ parent:
 	nr_tiers = src->llc_place_tier;
 	if (!nr_tiers)
 		return -EBUSY;
-	base = numa_enabled ? src->node_base : 0;
-	nr = numa_enabled ? src->node_nr : nr_cids;
+	base = numa_enabled ? src->ranges.node_base : 0;
+	nr = numa_enabled ? src->ranges.node_nr : nr_cids;
 	bpf_arena_for(t, 0, nr_tiers) {
 		s32 cid = balance_scan_range(p, t, base, nr, restricted, now);
 
-		if (cid >= 0 && cid_topo(cid)->llc_base != src->llc_base)
+		if (cid >= 0 && cid_topo(cid)->ranges.llc_base != src->ranges.llc_base)
 			return cid;
 	}
 
@@ -355,7 +352,7 @@ static s32 idle_misfit_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	u32 cid;
 
 	if (!asym_capacity || !cid_valid(src_cid) || is_pcpu_task(p) ||
-	    cmask_empty(idle_cids))
+	    scx_cid_idle_empty(&eevdf_idle))
 		return -EBUSY;
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -397,7 +394,7 @@ static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	struct cid_topo __arena *src;
 	s32 cid;
 
-	if (cmask_empty(idle_cids) || !cid_valid(src_cid) || is_pcpu_task(p))
+	if (scx_cid_idle_empty(&eevdf_idle) || !cid_valid(src_cid) || is_pcpu_task(p))
 		return -EBUSY;
 
 	/*
@@ -414,8 +411,8 @@ static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 		if (!cctx->smt_busy_since)
 			cctx->smt_busy_since = now;
 		else if (!time_before(now, cctx->smt_busy_since + slice_ns)) {
-			cid = balance_scan_range(p, -1, src->llc_base,
-						 src->llc_nr, is_restricted(p),
+			cid = balance_scan_range(p, -1, src->ranges.llc_base,
+						 src->ranges.llc_nr, is_restricted(p),
 						 now);
 			if (cid >= 0)
 				return select_idle_smt_balance_cid(p, cid, now);
@@ -460,24 +457,24 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 	 * moves a running task; --smt-asym-packing ranks equal threads for
 	 * placement and never migrates between them.
 	 */
-	if (dst->core_base == src->core_base)
+	if (dst->ranges.core_base == src->ranges.core_base)
 		return asym_packing && dst->smt_asym_packing &&
 		       dst->place_tier < src->place_tier ?
 		       ACTIVE_BALANCE_LOCAL_PACKING : ACTIVE_BALANCE_NONE;
-	if (smt_enabled && dst->llc_base == src->llc_base &&
+	if (smt_enabled && dst->ranges.llc_base == src->ranges.llc_base &&
 	    core_is_idle(dst_cid) && !siblings_idle(src_cid))
 		return ACTIVE_BALANCE_LOCAL_SMT;
 
 	if (asym_packing) {
-		if (dst->llc_base == src->llc_base &&
+		if (dst->ranges.llc_base == src->ranges.llc_base &&
 		    (!smt_enabled || core_is_idle(dst_cid))) {
 			if (dst->place_tier < src->place_tier)
 				return ACTIVE_BALANCE_LOCAL_PACKING;
 			if (smt_enabled && !siblings_idle(src_cid))
 				return ACTIVE_BALANCE_LOCAL_SMT;
 		}
-		if (dst->llc_base != src->llc_base &&
-		    (!numa_enabled || dst->node_base == src->node_base) &&
+		if (dst->ranges.llc_base != src->ranges.llc_base &&
+		    (!numa_enabled || dst->ranges.node_base == src->ranges.node_base) &&
 		    (!smt_enabled || core_is_idle(dst_cid)) &&
 		    dst->llc_place_tier < src->llc_place_tier) {
 			return ACTIVE_BALANCE_REMOTE_PACKING;
@@ -501,8 +498,8 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 static bool request_active_balance(s32 dst_cid, u64 now)
 {
 	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
-	u32 base = numa_enabled ? cid_topo(dst_cid)->node_base : 0;
-	u32 nr = numa_enabled ? cid_topo(dst_cid)->node_nr : nr_cids;
+	u32 base = numa_enabled ? cid_topo(dst_cid)->ranges.node_base : 0;
+	u32 nr = numa_enabled ? cid_topo(dst_cid)->ranges.node_nr : nr_cids;
 	u32 start = dst->steal_cursor;
 	u32 best_type = ACTIVE_BALANCE_NONE, best_tier = 0;
 	u32 best_nr_running = 0;
@@ -608,7 +605,7 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 	type = active_balance_type(dst_cid, src_cid);
 	if (type > ACTIVE_BALANCE_CAPACITY) {
 		/* Preferred SMT siblings remain fair.c's direct priority case. */
-		if (dst->core_base == src->core_base) {
+		if (dst->ranges.core_base == src->ranges.core_base) {
 			target = dst_cid;
 			goto out;
 		}
@@ -803,14 +800,14 @@ __noinline bool busy_balance_find_src_group(s32 dst_cid, u32 base, u32 nr)
 		if (!cid_valid(i))
 			break;
 		if (env->level == BUSY_BALANCE_SYSTEM) {
-			group_base = cid_topo(i)->node_base;
-			group_nr = cid_topo(i)->node_nr;
+			group_base = cid_topo(i)->ranges.node_base;
+			group_nr = cid_topo(i)->ranges.node_nr;
 		} else if (env->level == BUSY_BALANCE_NODE) {
-			group_base = cid_topo(i)->llc_base;
-			group_nr = cid_topo(i)->llc_nr;
+			group_base = cid_topo(i)->ranges.llc_base;
+			group_nr = cid_topo(i)->ranges.llc_nr;
 		} else {
-			group_base = cid_topo(i)->core_base;
-			group_nr = cid_topo(i)->core_nr;
+			group_base = cid_topo(i)->ranges.core_base;
+			group_nr = cid_topo(i)->ranges.core_nr;
 		}
 		/* Each child group is contiguous; aggregate it only at its base. */
 		if (i != group_base ||
@@ -1019,14 +1016,14 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 		return -1;
 	env->dst_overloaded = cid_queue_nr(dst_cid) > 0;
 	if (level == BUSY_BALANCE_SYSTEM) {
-		env->local_base = cid_topo(dst_cid)->node_base;
-		env->local_nr = cid_topo(dst_cid)->node_nr;
+		env->local_base = cid_topo(dst_cid)->ranges.node_base;
+		env->local_nr = cid_topo(dst_cid)->ranges.node_nr;
 	} else if (level == BUSY_BALANCE_NODE) {
-		env->local_base = cid_topo(dst_cid)->llc_base;
-		env->local_nr = cid_topo(dst_cid)->llc_nr;
+		env->local_base = cid_topo(dst_cid)->ranges.llc_base;
+		env->local_nr = cid_topo(dst_cid)->ranges.llc_nr;
 	} else {
-		env->local_base = cid_topo(dst_cid)->core_base;
-		env->local_nr = cid_topo(dst_cid)->core_nr;
+		env->local_base = cid_topo(dst_cid)->ranges.core_base;
+		env->local_nr = cid_topo(dst_cid)->ranges.core_nr;
 	}
 	env->local_room = busy_balance_group_delta(dst_cid,
 						    (u64)env->local_nr << 32 |
@@ -1080,9 +1077,9 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	 * leader as too busy must not prevent that sibling from pulling work.
 	 */
 	if ((level == BUSY_BALANCE_SYSTEM &&
-	     dst_cid != cid_topo(dst_cid)->node_base) ||
+	     dst_cid != cid_topo(dst_cid)->ranges.node_base) ||
 	    (level == BUSY_BALANCE_NODE &&
-	     dst_cid != cid_topo(dst_cid)->llc_base))
+	     dst_cid != cid_topo(dst_cid)->ranges.llc_base))
 		return false;
 	/* A fair-style detach pass is still draining through dispatch. */
 	if (READ_ONCE(dst->busy_balance_cid) != -1)
@@ -1109,8 +1106,8 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 		u64 load = cid_load(dst_cid, now);
 		u32 i;
 
-		bpf_arena_for(i, topo->core_base,
-			      topo->core_base + topo->core_nr) {
+		bpf_arena_for(i, topo->ranges.core_base,
+			      topo->ranges.core_base + topo->ranges.core_nr) {
 			u64 other;
 
 			if (i == (u32)dst_cid)
@@ -1198,7 +1195,7 @@ capacity_pressure_target(const struct task_struct *p, s32 src_cid, u64 now)
 		return -1;
 	src_cap = READ_ONCE(cid_ctx(src_cid)->busy_balance_cap);
 	/* Pace the scan, including misses, at the LLC busy-balance interval. */
-	interval_ms = MAX(cid_topo(src_cid)->llc_nr * busy_balance_factor, 1U);
+	interval_ms = MAX(cid_topo(src_cid)->ranges.llc_nr * busy_balance_factor, 1U);
 	if (interval_ms > 1)
 		interval_ms--;
 	WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_next,
@@ -1462,14 +1459,14 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 	 * the same tick. Stop after one successfully reserved source rather than
 	 * stacking migrations from multiple levels at one scheduling boundary.
 	 */
-	if (nr_cids > topo->node_nr &&
+	if (nr_cids > topo->ranges.node_nr &&
 	    busy_balance_domain(cid, 0, nr_cids, BUSY_BALANCE_SYSTEM, now))
 		return;
-	if (topo->node_nr > topo->llc_nr &&
-	    busy_balance_domain(cid, topo->node_base, topo->node_nr,
+	if (topo->ranges.node_nr > topo->ranges.llc_nr &&
+	    busy_balance_domain(cid, topo->ranges.node_base, topo->ranges.node_nr,
 				BUSY_BALANCE_NODE, now))
 		return;
-	if (busy_balance_domain(cid, topo->llc_base, topo->llc_nr,
+	if (busy_balance_domain(cid, topo->ranges.llc_base, topo->ranges.llc_nr,
 				BUSY_BALANCE_LLC, now))
 		return;
 	queued = cid_queue_nr(cid);
@@ -1512,7 +1509,7 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 	 * to offer when no cid is idle; that is the common case on a busy
 	 * machine, and the lookup is the expensive part of this tick.
 	 */
-	if (cmask_empty(idle_cids))
+	if (scx_cid_idle_empty(&eevdf_idle))
 		return;
 	tid = cid_edq_peek_tid_owned(cid);
 	head = tid ? scx_bpf_tid_to_task(tid) : NULL;

@@ -492,8 +492,8 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	bool own = !keep && cid_queued_test(dst_cid) && cid_queue_nr(dst_cid);
 	bool busy = own || has_prev;
 	bool force_steal = !busy && READ_ONCE(cctx->force_steal);
-	u32 node_base = numa_enabled ? topo->node_base : 0;
-	u32 node_nr = numa_enabled ? topo->node_nr : nr_cids;
+	u32 node_base = numa_enabled ? topo->ranges.node_base : 0;
+	u32 node_nr = numa_enabled ? topo->ranges.node_nr : nr_cids;
 	u32 failed = cctx->nr_balance_failed;
 	bool sample_newidle = newidle_sampling && !force_steal && !kicked;
 	bool budget = false, node_skipped = false, system_skipped = false;
@@ -584,8 +584,8 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			}
 		}
 		if (src < 0)
-			src = steal_from_range(dst_cid, -1, topo->llc_base,
-					       topo->llc_nr, start + 1, now,
+			src = steal_from_range(dst_cid, -1, topo->ranges.llc_base,
+					       topo->ranges.llc_nr, start + 1, now,
 					       !force_steal &&
 					       failed <= cache_nice_tries,
 					       0xff);
@@ -600,10 +600,10 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			update_newidle_stats(dst_cid, NEWIDLE_LLC,
 					     src >= 0 ? weight : 0, t1);
 	}
-	if (budget && node_nr > topo->llc_nr)
+	if (budget && node_nr > topo->ranges.llc_nr)
 		node_skipped = cctx->avg_idle <
 			       curr_cost + cctx->newidle_cost[NEWIDLE_NODE];
-	if (src < 0 && node_nr > topo->llc_nr && !node_skipped) {
+	if (src < 0 && node_nr > topo->ranges.llc_nr && !node_skipped) {
 		admitted = !sample_newidle ||
 			newidle_should_scan(dst_cid, NEWIDLE_NODE, now, &weight);
 		if (admitted) {

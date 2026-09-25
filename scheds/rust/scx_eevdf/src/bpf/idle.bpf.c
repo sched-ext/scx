@@ -81,7 +81,8 @@
  * of forks ends up with both threads of a core busy and the E-cores idle.
  * A cid that was claimed and kicked but found nothing to run goes back to
  * idle without a transition, so ops.dispatch() re-arms the bit on its way
- * out, and ops.running() clears it again for the opposite race.
+ * out. A stale idle bit left by a late enqueue clears on the next claim
+ * or ops.update_idle(cid, false); dispatch to a busy cid bounces back.
  */
 #include "eevdf.bpf.h"
 #include "cgroup.bpf.h"
@@ -154,8 +155,9 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 			continue;
 		last = (sbase + snr - 1) / 64;
 		bpf_arena_for(k, sbase / 64, last + 1) {
-			u64 w = cmask_word(idle_cids, k) & capacity_tier_word(t, k) &
-				cmask_range_word(idle_cids, k, sbase, snr);
+			u64 w = scx_cid_idle_scan_word(&eevdf_idle,
+							capacity_tier_mask(t),
+							k, sbase, snr);
 			s32 cid;
 
 			if (!w)
@@ -192,7 +194,7 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 
 	TOUCH_ARENA();
 	if ((!sched_asym_capacity && !force_asym_capacity) ||
-	    !target_topo->asym_capacity_nr || cmask_empty(idle_cids))
+	    !target_topo->asym_capacity_nr || scx_cid_idle_empty(&eevdf_idle))
 		return -EBUSY;
 
 	bpf_arena_for(off, 0, nr_cpu_ids) {
@@ -289,7 +291,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
 	restricted = is_restricted(p);
-	llc_scan_nr = MIN(prev->llc_nr, scan_nr);
+	llc_scan_nr = MIN(prev->ranges.llc_nr, scan_nr);
 	if (is_prev_allowed && cid_idle_test(prev_cid) &&
 	    (!whole_core || core_is_idle(prev_cid)) &&
 	    task_fits_cid(tctx, prev_cid, now)) {
@@ -303,18 +305,18 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 		 * twice.
 		 */
 		best = scan_idle_window(p, t,
-					(u64)prev->llc_nr << 32 | prev->llc_base,
+					(u64)prev->ranges.llc_nr << 32 | prev->ranges.llc_base,
 					(u64)llc_scan_nr << 32 | (u32)(prev_cid + 1),
 					(restricted ? SCAN_WINDOW_RESTRICTED : 0) |
 					(whole_core ? SCAN_WINDOW_WHOLE_CORE : 0));
-		if (best < 0 && !llc_only && numa_enabled && prev->node_nr > prev->llc_nr)
+		if (best < 0 && !llc_only && numa_enabled && prev->ranges.node_nr > prev->ranges.llc_nr)
 			best = asym_capacity ?
-				scan_idle_capacity_range(p, t, prev->node_base,
-							 prev->node_nr, restricted, whole_core) :
-				scan_idle_unranked_range(p, prev->node_base,
-						       prev->node_nr, restricted, whole_core);
+				scan_idle_capacity_range(p, t, prev->ranges.node_base,
+							 prev->ranges.node_nr, restricted, whole_core) :
+				scan_idle_unranked_range(p, prev->ranges.node_base,
+						       prev->ranges.node_nr, restricted, whole_core);
 		if (best < 0 && !llc_only &&
-		    (numa_enabled ? prev->node_nr : prev->llc_nr) < nr_cids)
+		    (numa_enabled ? prev->ranges.node_nr : prev->ranges.llc_nr) < nr_cids)
 			best = asym_capacity ?
 				scan_idle_capacity_range(p, t, 0, nr_cids,
 							 restricted, whole_core) :
@@ -345,10 +347,10 @@ static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
 	dst = cid_topo(target);
-	if (prev->llc_base != dst->llc_base)
+	if (prev->ranges.llc_base != dst->ranges.llc_base)
 		return -EBUSY;
 
-	bpf_arena_for(sibling, prev->core_base, prev->core_base + prev->core_nr) {
+	bpf_arena_for(sibling, prev->ranges.core_base, prev->ranges.core_base + prev->ranges.core_nr) {
 		s32 cid;
 
 		if (sibling == (u32)prev_cid || !cid_idle_test(sibling) ||
@@ -387,7 +389,7 @@ static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
  * placement is the only point at which it can be prevented.
  *
  * The trade is cache locality for core throughput, so it is spent only when
- * there is a whole idle core to be had. The idle_core_llcs hint says whether
+ * there is a whole idle core to be had. The LLC hint says whether
  * any LLC has one, which makes "no" a single word test.
  */
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
@@ -409,7 +411,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 	 * Nothing idle at all is the common case under load: say so without
 	 * walking the tiers.
 	 */
-	if (cmask_empty(idle_cids))
+	if (scx_cid_idle_empty(&eevdf_idle))
 		return -EBUSY;
 
 	/*
@@ -446,7 +448,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		 * core, which is the loaded case this must not slow down.
 		 */
 		if (llc_extend && smt_whole_core && smt_enabled &&
-		    !cmask_empty(idle_core_llcs)) {
+		    scx_cid_idle_any_core(&eevdf_idle)) {
 			whole_scanned = true;
 			cid = pick_idle_cid_topology((struct task_struct *)p, target,
 						   flags | PICK_IDLE_WHOLE_CORE);
@@ -477,7 +479,7 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		 * and the task is left on its affine target.
 		 */
 		if (sis_util &&
-		    sis_idle_scan_nr(target) < cid_topo(target)->llc_nr) {
+		    sis_idle_scan_nr(target) < cid_topo(target)->ranges.llc_nr) {
 			return -EBUSY;
 		}
 
@@ -547,7 +549,7 @@ static bool wake_wide_cid(const task_ctx_t *pctx, const task_ctx_t *wctx,
 
 	master = wctx->wakee_flips;
 	slave = pctx->wakee_flips;
-	factor = cid_topo(this_cid)->llc_nr;
+	factor = cid_topo(this_cid)->ranges.llc_nr;
 	if (master < slave) {
 		u32 tmp = master;
 
@@ -638,7 +640,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	this_eff *= 100;
 	this_eff *= cid_topo(prev_cid)->cap;
 
-	pct = smt_enabled && cid_topo(prev_cid)->core_base == cid_topo(this_cid)->core_base ?
+	pct = smt_enabled && cid_topo(prev_cid)->ranges.core_base == cid_topo(this_cid)->ranges.core_base ?
 	      100 + (110 - 100) / 2 : 100 + (117 - 100) / 2;
 	prev_eff = (s64)MAX(cid_wake_load(prev_cid),
 			    READ_ONCE(cid_pack(prev_cid)->vsum_w)) - (s64)load;
@@ -724,7 +726,7 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 		return target;
 
 	if (prev_cid != target &&
-	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
+	    cid_topo(prev_cid)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
 	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
 	    asym_fits_cid(tctx, prev_cid, now)) {
 		cid = claim_idle_cid(p, prev_cid);
@@ -734,7 +736,7 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 		}
 	}
 	if (prev_cid != target &&
-	    cid_topo(prev_cid)->llc_base == cid_topo(target)->llc_base &&
+	    cid_topo(prev_cid)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
 	    cid_allowed(p, prev_cid) && asym_fits_cid(tctx, prev_cid, now) &&
 	    cid_sched_idle_target(p, prev_cid))
 		return prev_cid;
@@ -743,7 +745,7 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 	recent = tctx->recent_used_cid;
 	tctx->recent_used_cid = prev_cid;
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
-	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
+	    cid_topo(recent)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
 	    cid_idle_test(recent) && cid_allowed(p, recent) &&
 	    asym_fits_cid(tctx, recent, now)) {
 		cid = claim_idle_cid(p, recent);
@@ -753,7 +755,7 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 		}
 	}
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
-	    cid_topo(recent)->llc_base == cid_topo(target)->llc_base &&
+	    cid_topo(recent)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
 	    cid_allowed(p, recent) && asym_fits_cid(tctx, recent, now) &&
 	    cid_sched_idle_target(p, recent))
 		return recent;
@@ -967,14 +969,14 @@ fork_pick_child(const struct task_struct *p, u64 range, s32 anchor, u32 level,
 		if (!env->group_nr || i == env->group_end) {
 			fork_pick_commit(env);
 			if (env->level == FORK_CHILD_NODE) {
-				env->group_base = cid_topo(i)->node_base;
-				env->group_nr = cid_topo(i)->node_nr;
+				env->group_base = cid_topo(i)->ranges.node_base;
+				env->group_nr = cid_topo(i)->ranges.node_nr;
 			} else if (env->level == FORK_CHILD_LLC) {
-				env->group_base = cid_topo(i)->llc_base;
-				env->group_nr = cid_topo(i)->llc_nr;
+				env->group_base = cid_topo(i)->ranges.llc_base;
+				env->group_nr = cid_topo(i)->ranges.llc_nr;
 			} else {
-				env->group_base = cid_topo(i)->core_base;
-				env->group_nr = cid_topo(i)->core_nr;
+				env->group_base = cid_topo(i)->ranges.core_base;
+				env->group_nr = cid_topo(i)->ranges.core_nr;
 			}
 			env->group_end = env->group_base + env->group_nr;
 			env->group_allowed = !restricted;
@@ -1110,7 +1112,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 	u64 child;
 	s32 cid;
 
-	if (topo->fork_nr > topo->node_nr) {
+	if (topo->fork_nr > topo->ranges.node_nr) {
 		child = fork_pick_child(p, range, anchor, FORK_CHILD_NODE, now);
 		if (child >> 32)
 			range = child;
@@ -1118,7 +1120,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 	if (!cid_in_range(anchor, (u32)range, range >> 32))
 		anchor = (u32)range;
 	topo = cid_topo(anchor);
-	if ((range >> 32) > topo->llc_nr) {
+	if ((range >> 32) > topo->ranges.llc_nr) {
 		child = fork_pick_child(p, range, anchor, FORK_CHILD_LLC, now);
 		if (child >> 32)
 			range = child;
@@ -1126,7 +1128,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 	if (!cid_in_range(anchor, (u32)range, range >> 32))
 		anchor = (u32)range;
 	topo = cid_topo(anchor);
-	if ((range >> 32) > topo->core_nr) {
+	if ((range >> 32) > topo->ranges.core_nr) {
 		child = fork_pick_child(p, range, anchor, FORK_CHILD_CORE, now);
 		if (child >> 32)
 			range = child;
@@ -1136,7 +1138,7 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 
 	cid = fork_pick_cid(p, range, now);
 	if (cid >= 0) {
-		WRITE_ONCE(cid_ctx(cid_topo(cid)->core_base)->fork_place_at, now);
+		WRITE_ONCE(cid_ctx(cid_topo(cid)->ranges.core_base)->fork_place_at, now);
 		WRITE_ONCE(cid_ctx(cid)->fork_cid_place_at, now);
 	}
 	return cid;
@@ -1156,7 +1158,7 @@ static s32 idle_peer_cid(const struct task_struct *p, s32 cid)
 {
 	s32 other;
 
-	if (!cid_valid(cid) || is_pcpu_task(p) || cmask_empty(idle_cids))
+	if (!cid_valid(cid) || is_pcpu_task(p) || scx_cid_idle_empty(&eevdf_idle))
 		return -ENOENT;
 
 	if (smt_enabled) {
@@ -1209,16 +1211,16 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 	struct cid_topo __arena *topo = cid_topo(cid);
 	u32 i;
 
-	bpf_arena_for(i, 0, topo->llc_nr) {
-		s32 c = topo->llc_base + i;
+	bpf_arena_for(i, 0, topo->ranges.llc_nr) {
+		s32 c = topo->ranges.llc_base + i;
 
 		if (cid_allowed(p, c))
 			return c;
 	}
 
-	if (numa_enabled && topo->node_nr > topo->llc_nr) {
-		bpf_arena_for(i, 0, topo->node_nr) {
-			s32 c = topo->node_base + i;
+	if (numa_enabled && topo->ranges.node_nr > topo->ranges.llc_nr) {
+		bpf_arena_for(i, 0, topo->ranges.node_nr) {
+			s32 c = topo->ranges.node_base + i;
 
 			if (cid_allowed(p, c))
 				return c;
