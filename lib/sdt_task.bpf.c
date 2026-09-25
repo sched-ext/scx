@@ -28,6 +28,10 @@ struct {
 
 struct scx_allocator scx_task_allocator;
 
+static struct scx_urcu scx_task_urcu;
+
+SCX_URCU_DEFINE(scx_task, scx_task_urcu, scx_task_allocator);
+
 __hidden
 void __arena *scx_task_alloc(struct task_struct *p)
 {
@@ -57,7 +61,12 @@ void __arena *scx_task_alloc(struct task_struct *p)
 __hidden
 int scx_task_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_task_allocator, data_size, align);
+	int ret = scx_alloc_init(&scx_task_allocator, data_size, align);
+
+	if (ret)
+		return ret;
+
+	return scx_task_urcu_init();
 }
 
 __hidden
@@ -110,12 +119,9 @@ void scx_task_free(struct task_struct *p)
 	scx_free(&scx_task_allocator, data);
 }
 
-static struct scx_urcu scx_task_urcu;
-
 /*
  * The deferred counterpart of scx_task_free(): queue @p's allocation, if any,
- * for freeing after a grace period, currently provided by the scx_urcu
- * machinery in lib/sdt_alloc.bpf.c. For free path hooks: absence is not an
+ * for freeing after a grace period. For free path hooks: absence is not an
  * error and repeated calls are no-ops, the first caller claims the allocation.
  */
 __hidden
@@ -134,7 +140,8 @@ void scx_task_free_rcu(struct task_struct *p)
 	if (unlikely(!data))
 		return;
 
-	scx_urcu_free(&scx_task_urcu, &scx_task_allocator, data);
+	if (scx_urcu_free(&scx_task_urcu, &scx_task_allocator, data))
+		scx_task_urcu_kick();
 }
 
 /* scx_urcu driver programs, discovered by name and run by the userspace side */

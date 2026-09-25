@@ -69,6 +69,8 @@ struct scx_cmask __arena *topo_cids;
 static struct scx_allocator cell_cmask_allocator;
 static struct scx_urcu cell_cmask_urcu;
 
+SCX_URCU_DEFINE(cell_cmask, cell_cmask_urcu, cell_cmask_allocator);
+
 struct cell_cmasks __arena *cell_masks;
 
 /* A fresh generation with every mask initialized empty. */
@@ -96,7 +98,8 @@ static __always_inline void cell_cmasks_publish(struct cell_cmasks __arena *gen)
 	u64 old = __sync_lock_test_and_set((u64 *)&cell_masks, (u64)gen);
 
 	if (old)
-		scx_urcu_free(&cell_cmask_urcu, &cell_cmask_allocator, (void __arena *)old);
+		if (scx_urcu_free(&cell_cmask_urcu, &cell_cmask_allocator, (void __arena *)old))
+			cell_cmask_urcu_kick();
 }
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
@@ -1798,6 +1801,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	 * after attach. Borrowables start empty.
 	 */
 	ret = scx_alloc_init(&cell_cmask_allocator, sizeof(struct cell_cmasks), 8);
+	if (!ret)
+		ret = cell_cmask_urcu_init();
 	if (ret)
 		return ret;
 	gen = cell_cmasks_alloc(nr_cids);
