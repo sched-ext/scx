@@ -5,11 +5,12 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use libbpf_rs::libbpf_sys::*;
-use libbpf_rs::{AsRawLibbpf, OpenProgramImpl, ProgramImpl};
-use log::{error, warn};
+use libbpf_rs::{AsRawLibbpf, OpenObject, OpenProgramImpl, ProgramImpl};
+use log::{debug, error, info, warn};
 use std::env;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::OsStr;
 use std::ffi::c_void;
 use std::io;
 use std::io::BufRead;
@@ -285,6 +286,86 @@ pub fn ksym_exists(ksym: &str) -> Result<bool> {
     let ksym_name = CString::new(ksym).unwrap();
     let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
     Ok(tid >= 0)
+}
+
+lazy_static::lazy_static! {
+    /// Every probed kernel feature: its name, its bit in the scx_lib_features
+    /// rodata word or zero when only userspace consults it, and whether the
+    /// running kernel has it. The bits mirror enum scx_lib_feature in
+    /// scheds/include/scx/features.bpf.h.
+    pub static ref LIB_FEATURES: Vec<(&'static str, u64, bool)> = vec![];
+}
+
+/// Write `value` over the rodata variable `name` of an open object. Returns
+/// false when the object has no such variable.
+pub fn set_rodata_var(obj: &mut OpenObject, name: &str, value: &[u8]) -> Result<bool> {
+    let raw = unsafe { &*obj.as_libbpf_object().as_ptr() };
+    let Some(btf) = libbpf_rs::btf::Btf::from_bpf_object(raw)? else {
+        return Ok(false);
+    };
+    let mut var_off = None;
+    for sec in btf.type_by_kind::<libbpf_rs::btf::types::DataSec<'_>>() {
+        if sec.name() != Some(OsStr::new(".rodata")) {
+            continue;
+        }
+        for var in sec.iter() {
+            let ty: libbpf_rs::btf::types::Var<'_> = btf
+                .type_by_id(var.ty)
+                .ok_or_else(|| anyhow!("BTF datasec entry {:?} is not a variable", var.ty))?;
+            if ty.name() == Some(OsStr::new(name)) {
+                var_off = Some((var.offset as usize, var.size));
+            }
+        }
+    }
+    let Some((off, size)) = var_off else {
+        return Ok(false);
+    };
+    if size != value.len() {
+        bail!(
+            "rodata variable {name} is {size} bytes, not {}",
+            value.len()
+        );
+    }
+    for mut map in obj.maps_mut() {
+        if !map.name().to_string_lossy().ends_with(".rodata") {
+            continue;
+        }
+        let data = map
+            .initial_value_mut()
+            .ok_or_else(|| anyhow!("rodata map has no initial value"))?;
+        let Some(slot) = data.get_mut(off..off + size) else {
+            bail!(
+                "rodata variable {name} lies outside the {} byte map",
+                data.len()
+            );
+        };
+        slot.copy_from_slice(value);
+        return Ok(true);
+    }
+    bail!("object has no .rodata map for {name}")
+}
+
+/// Hand the probed features to the BPF side of an open object and log them,
+/// at info when the kernel lacks any of them and at debug otherwise.
+pub fn set_lib_features(obj: &mut OpenObject) -> Result<()> {
+    let mut bits = 0;
+    let mut missing = false;
+    let mut line = String::new();
+    for (name, bit, present) in LIB_FEATURES.iter() {
+        if *present {
+            bits |= bit;
+        } else {
+            missing = true;
+        }
+        line.push_str(&format!(" {name}={}", if *present { "yes" } else { "no" }));
+    }
+    set_rodata_var(obj, "scx_lib_features", &bits.to_ne_bytes())?;
+    if missing {
+        info!("kernel features:{line}");
+    } else {
+        debug!("kernel features:{line}");
+    }
+    Ok(())
 }
 
 /// Scan the running kernel's vmlinux BTF for scx kfuncs whose public-facing
@@ -577,6 +658,7 @@ macro_rules! __scx_ops_open {
         scx_utils::paste! {
         scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements($ops_struct), 'block);
             use ::anyhow::Context;
+            use ::libbpf_rs::skel::OpenSkel;
             use ::libbpf_rs::skel::SkelBuilder;
 
             let mut skel = match $open_opts {
@@ -593,6 +675,10 @@ macro_rules! __scx_ops_open {
                     }
                 }
             };
+
+            if let Err(e) = scx_utils::compat::set_lib_features(skel.open_object_mut()) {
+                break 'block Err(e);
+            }
 
             let ops = skel.struct_ops.[<$ops _mut>]();
             let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
