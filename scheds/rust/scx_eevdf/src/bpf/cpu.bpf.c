@@ -195,7 +195,7 @@ static u64 arena_off, arena_size;
  * there: a short budget makes the last carve fail and the init return
  * -ENOMEM.
  */
-#define ARENA_CARVES 16
+#define ARENA_CARVES 15
 
 static void __arena *arena_carve(u64 bytes, u64 align)
 {
@@ -232,7 +232,8 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	 */
 	mask = (sizeof(struct scx_cmask) + (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = nr * sizeof(struct cid_topo) + nr * sizeof(struct cid_ctx) +
-		(3 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
+		(1 + args->nr_place_tiers + args->nr_capacity_tiers) * mask +
+		nr * sizeof(*eevdf_idle.segments) +
 		nr * (sizeof(struct core_sched_state) + sizeof(struct newidle_stats) +
 		      sizeof(u64) +
 		      6 * sizeof(u32)) + ARENA_CARVES * 64;
@@ -248,8 +249,7 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	cctxs = arena_carve(nr * sizeof(struct cid_ctx), 64);
 	core_sched_states = arena_carve(nr * sizeof(struct core_sched_state), 64);
 	newidle_stats = arena_carve(nr * sizeof(struct newidle_stats), 64);
-	eevdf_idle.idle = arena_carve(mask, 64);
-	eevdf_idle.core_llcs = arena_carve(mask, 64);
+	eevdf_idle.segments = arena_carve(nr * sizeof(*eevdf_idle.segments), 64);
 	eevdf_idle.nr_cids_max = nr;
 	queued_cids = arena_carve(mask, 64);
 	place_tier_stride = mask;
@@ -263,8 +263,8 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	cpu_fork_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_wake_span_in = arena_carve(nr * sizeof(u32), 64);
 	cpu_asym_span_in = arena_carve(nr * sizeof(u32), 64);
-	if (!topos || !cctxs || !core_sched_states || !newidle_stats || !eevdf_idle.idle ||
-	    !eevdf_idle.core_llcs || !queued_cids ||
+	if (!topos || !cctxs || !core_sched_states || !newidle_stats ||
+	    !eevdf_idle.segments || !queued_cids ||
 	    !place_tier_cids || !capacity_tier_cids || !cpu_cap_in ||
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)
