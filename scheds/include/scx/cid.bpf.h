@@ -3,9 +3,8 @@
  * BPF-side helpers for cids and cmasks. See kernel/sched/ext/cid.h for the
  * authoritative layout and semantics. The BPF-side helpers use the cmask_*
  * naming (no scx_ prefix); cmask is the SCX bitmap type so the prefix is
- * redundant in BPF code. Atomics use __sync_val_compare_and_swap. Every helper
- * is inline except the binary operations, which are weak global functions
- * defined here, so there is no .c counterpart.
+ * redundant in BPF code. Every helper is inline except the binary operations,
+ * which are weak global functions defined here, so there is no .c counterpart.
  *
  * Included by scx/common.bpf.h; don't include directly.
  *
@@ -210,15 +209,33 @@ static __always_inline bool cmask_test(u32 cid, const struct scx_cmask __arena *
 }
 
 /*
- * x86 BPF JIT rejects BPF_OR | BPF_FETCH and BPF_AND | BPF_FETCH on arena
- * pointers (see bpf_jit_supports_insn() in arch/x86/net/bpf_jit_comp.c). Only
- * BPF_CMPXCHG / BPF_XCHG / BPF_ADD with FETCH are allowed. Implement
- * test_and_{set,clear} and the atomic set/clear via a cmpxchg loop.
+ * The bit helpers use the fetching bitwise builtins, which order like the
+ * cmpxchg they replace, and not every JIT accepts those on arena pointers. The
+ * loader sets SCX_LIB_FEAT_ARENA_FETCH_BITOPS when a probe with the fetching
+ * form loads, and the helpers run a cmpxchg loop otherwise. The fetched value
+ * is consumed through barrier_var() because clang 19 lowers a builtin whose
+ * result is unused to the non-fetching form, which is relaxed on arm64.
  *
  * CMASK_CAS_TRIES is sized so exhausting it means seconds of real spinning
- * on one word - past any plausible contention. Abort hard.
+ * on one word, past any plausible contention. Abort hard.
  */
 #define CMASK_CAS_TRIES		(1U << 23)
+
+static __always_inline u64 __cmask_fetch_or(u64 __arena *w, u64 mask)
+{
+	u64 old = __atomic_fetch_or(w, mask, __ATOMIC_ACQ_REL);
+
+	barrier_var(old);
+	return old;
+}
+
+static __always_inline u64 __cmask_fetch_andnot(u64 __arena *w, u64 mask)
+{
+	u64 old = __atomic_fetch_and(w, ~mask, __ATOMIC_ACQ_REL);
+
+	barrier_var(old);
+	return old;
+}
 
 static __always_inline void cmask_set(u32 cid, struct scx_cmask __arena *m)
 {
@@ -230,6 +247,10 @@ static __always_inline void cmask_set(u32 cid, struct scx_cmask __arena *m)
 		return;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
+	if (scx_lib_has(SCX_LIB_FEAT_ARENA_FETCH_BITOPS)) {
+		__cmask_fetch_or(w, bit);
+		return;
+	}
 	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (old & bit)
@@ -251,6 +272,10 @@ static __always_inline void cmask_clear(u32 cid, struct scx_cmask __arena *m)
 		return;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
+	if (scx_lib_has(SCX_LIB_FEAT_ARENA_FETCH_BITOPS)) {
+		__cmask_fetch_andnot(w, bit);
+		return;
+	}
 	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (!(old & bit))
@@ -272,6 +297,8 @@ static __always_inline bool cmask_test_and_set(u32 cid, struct scx_cmask __arena
 		return false;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
+	if (scx_lib_has(SCX_LIB_FEAT_ARENA_FETCH_BITOPS))
+		return __cmask_fetch_or(w, bit) & bit;
 	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (old & bit)
@@ -294,6 +321,8 @@ static __always_inline bool cmask_test_and_clear(u32 cid, struct scx_cmask __are
 		return false;
 	w = __cmask_word(cid, m);
 	bit = BIT_U64(cid & 63);
+	if (scx_lib_has(SCX_LIB_FEAT_ARENA_FETCH_BITOPS))
+		return __cmask_fetch_andnot(w, bit) & bit;
 	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (!(old & bit))
@@ -348,12 +377,16 @@ static __always_inline bool __cmask_test_and_clear(u32 cid, struct scx_cmask __a
 	return prev;
 }
 
-/* atomically or @mask into *@w, cmpxchg per the JIT constraint above */
+/* atomically or @mask into *@w */
 static __always_inline void __cmask_word_or(u64 __arena *w, u64 mask)
 {
 	u64 old, new;
 	u32 i;
 
+	if (scx_lib_has(SCX_LIB_FEAT_ARENA_FETCH_BITOPS)) {
+		__cmask_fetch_or(w, mask);
+		return;
+	}
 	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if ((old & mask) == mask)
@@ -365,12 +398,16 @@ static __always_inline void __cmask_word_or(u64 __arena *w, u64 mask)
 	scx_bpf_error("__cmask_word_or CAS exhausted");
 }
 
-/* atomically clear @mask bits in *@w, cmpxchg per the JIT constraint above */
+/* atomically clear @mask bits in *@w */
 static __always_inline void __cmask_word_andnot(u64 __arena *w, u64 mask)
 {
 	u64 old, new;
 	u32 i;
 
+	if (scx_lib_has(SCX_LIB_FEAT_ARENA_FETCH_BITOPS)) {
+		__cmask_fetch_andnot(w, mask);
+		return;
+	}
 	bpf_arena_for(i, 0, CMASK_CAS_TRIES) {
 		old = *w;
 		if (!(old & mask))
@@ -433,9 +470,9 @@ static __always_inline bool cmask_full_range(const struct scx_cmask __arena *m, 
  * @start: first cid of the range
  * @nr: number of cids in the range
  *
- * The range is clamped to @m's active range first. Words are updated with
- * cmpxchg so concurrent updates of other bits sharing a word are never lost.
- * The range as a whole does not transition atomically.
+ * The range is clamped to @m's active range first. Words are updated atomically
+ * so concurrent updates of other bits sharing a word are never lost. The range
+ * as a whole does not transition atomically.
  */
 static __always_inline void cmask_set_range(struct scx_cmask __arena *m, u32 start, u32 nr)
 {
@@ -476,9 +513,9 @@ static __always_inline void cmask_set_range(struct scx_cmask __arena *m, u32 sta
  * @start: first cid of the range
  * @nr: number of cids in the range
  *
- * The range is clamped to @m's active range first. Words are updated with
- * cmpxchg so concurrent updates of other bits sharing a word are never lost.
- * The range as a whole does not transition atomically.
+ * The range is clamped to @m's active range first. Words are updated atomically
+ * so concurrent updates of other bits sharing a word are never lost. The range
+ * as a whole does not transition atomically.
  */
 static __always_inline void cmask_clear_range(struct scx_cmask __arena *m, u32 start, u32 nr)
 {

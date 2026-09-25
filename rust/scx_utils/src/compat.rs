@@ -5,16 +5,22 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use libbpf_rs::libbpf_sys::*;
-use libbpf_rs::{AsRawLibbpf, OpenProgramImpl, ProgramImpl};
-use log::{error, warn};
+use libbpf_rs::{AsRawLibbpf, OpenObject, OpenProgramImpl, ProgramImpl};
+use log::{debug, error, info, warn};
 use std::env;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::OsStr;
 use std::ffi::c_void;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::mem::size_of;
+use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
+use std::os::fd::BorrowedFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::slice::from_raw_parts;
 
 const PROCFS_MOUNTS: &str = "/proc/mounts";
@@ -285,6 +291,268 @@ pub fn ksym_exists(ksym: &str) -> Result<bool> {
     let ksym_name = CString::new(ksym).unwrap();
     let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
     Ok(tid >= 0)
+}
+
+/// A raw BPF instruction for the load probes below, laid out as the kernel
+/// reads it: the two register nibbles follow the host's bitfield order.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProbeInsn {
+    code: u8,
+    regs: u8,
+    off: i16,
+    imm: i32,
+}
+
+const fn probe_insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> ProbeInsn {
+    #[cfg(target_endian = "little")]
+    let regs = (src << 4) | dst;
+    #[cfg(target_endian = "big")]
+    let regs = (dst << 4) | src;
+    ProbeInsn {
+        code,
+        regs,
+        off,
+        imm,
+    }
+}
+
+// Opcodes composed from linux/bpf_common.h and linux/bpf.h.
+const PROBE_LD_IMM64: u8 = 0x18; // BPF_LD | BPF_DW | BPF_IMM
+const PROBE_MOV64_REG: u8 = 0xbf; // BPF_ALU64 | BPF_MOV | BPF_X
+const PROBE_MOV64_IMM: u8 = 0xb7; // BPF_ALU64 | BPF_MOV | BPF_K
+const PROBE_ATOMIC_DW: u8 = 0xdb; // BPF_STX | BPF_ATOMIC | BPF_DW
+const PROBE_EXIT: u8 = 0x95; // BPF_JMP | BPF_EXIT
+const PROBE_ATOMIC_OR_FETCH: i32 = 0x41; // BPF_OR | BPF_FETCH
+const PROBE_ADDR_SPACE_CAST: i16 = 1;
+
+/// Load `insns` as a GPL program of `prog_type` with the BPF_F_* `flags`.
+fn probe_prog_load(
+    prog_type: bpf_prog_type,
+    flags: u32,
+    insns: &[ProbeInsn],
+) -> io::Result<OwnedFd> {
+    let mut opts = bpf_prog_load_opts {
+        sz: size_of::<bpf_prog_load_opts>() as _,
+        prog_flags: flags,
+        ..Default::default()
+    };
+    let fd = unsafe {
+        bpf_prog_load(
+            prog_type,
+            std::ptr::null(),
+            c"GPL".as_ptr(),
+            insns.as_ptr() as *const bpf_insn,
+            insns.len() as _,
+            &mut opts,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::from_raw_os_error(-fd));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// A fetching OR on arena memory, which the verifier rejects where the JIT has
+/// no lowering for it. The JITs accept the fetching AND, OR and XOR as a
+/// group, so one probe covers all three. The arena has to be mapped before
+/// the load because the verifier requires its user address to be known.
+fn probe_arena_fetch_bitops() -> bool {
+    let opts = bpf_map_create_opts {
+        sz: size_of::<bpf_map_create_opts>() as _,
+        map_flags: BPF_F_MMAPABLE,
+        ..Default::default()
+    };
+    let map_fd = unsafe { bpf_map_create(BPF_MAP_TYPE_ARENA, std::ptr::null(), 0, 0, 1, &opts) };
+    if map_fd < 0 {
+        return false;
+    }
+    let map = unsafe { OwnedFd::from_raw_fd(map_fd) };
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            page,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            map.as_raw_fd(),
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        return false;
+    }
+
+    let insns = [
+        probe_insn(
+            PROBE_LD_IMM64,
+            1,
+            BPF_PSEUDO_MAP_VALUE as u8,
+            0,
+            map.as_raw_fd(),
+        ),
+        probe_insn(0, 0, 0, 0, 0),
+        probe_insn(PROBE_MOV64_REG, 1, 1, PROBE_ADDR_SPACE_CAST, 1),
+        probe_insn(PROBE_MOV64_IMM, 2, 0, 0, 1),
+        probe_insn(PROBE_ATOMIC_DW, 1, 2, 0, PROBE_ATOMIC_OR_FETCH),
+        probe_insn(PROBE_MOV64_IMM, 0, 0, 0, 0),
+        probe_insn(PROBE_EXIT, 0, 0, 0, 0),
+    ];
+    let loaded = probe_prog_load(BPF_PROG_TYPE_SYSCALL, BPF_F_SLEEPABLE, &insns).is_ok();
+    unsafe { libc::munmap(addr, page) };
+    loaded
+}
+
+// BPF_PROG_STREAM_OPEN and its attributes, absent from the pinned libbpf. The
+// command number comes from the running kernel's BTF and is None on a kernel
+// without the command.
+const BPF_F_STREAM_NONBLOCK: u32 = 1;
+
+lazy_static::lazy_static! {
+    static ref BPF_PROG_STREAM_OPEN: Option<u64> =
+        read_enum("bpf_cmd", "BPF_PROG_STREAM_OPEN").ok();
+}
+
+#[repr(C)]
+struct ProgStreamOpenAttr {
+    prog_fd: u32,
+    stream_id: u32,
+    flags: u32,
+}
+
+/// Open a read-only descriptor on one of `prog`'s streams, `stream_id` being
+/// BPF_STREAM_STDOUT or BPF_STREAM_STDERR. Reads block unless `nonblock`.
+/// poll(2) reports POLLIN for data and POLLHUP once the program is freed, with
+/// buffered data still readable. A kernel without the command fails with
+/// EINVAL.
+pub fn prog_stream_open(
+    prog: BorrowedFd<'_>,
+    stream_id: u32,
+    nonblock: bool,
+) -> io::Result<OwnedFd> {
+    let attr = ProgStreamOpenAttr {
+        prog_fd: prog.as_raw_fd() as u32,
+        stream_id,
+        flags: if nonblock { BPF_F_STREAM_NONBLOCK } else { 0 },
+    };
+    let Some(cmd) = *BPF_PROG_STREAM_OPEN else {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            cmd as libc::c_long,
+            &attr as *const ProgStreamOpenAttr as *const c_void,
+            size_of::<ProgStreamOpenAttr>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+fn probe_prog_stream_open() -> bool {
+    let insns = [
+        probe_insn(PROBE_MOV64_IMM, 0, 0, 0, 0),
+        probe_insn(PROBE_EXIT, 0, 0, 0, 0),
+    ];
+    let Ok(prog) = probe_prog_load(BPF_PROG_TYPE_SYSCALL, BPF_F_SLEEPABLE, &insns) else {
+        return false;
+    };
+    prog_stream_open(prog.as_fd(), BPF_STREAM_STDOUT, true).is_ok()
+}
+
+// Bits of the scx_lib_features rodata word, mirroring enum scx_lib_feature in
+// scheds/include/scx/features.bpf.h.
+pub const SCX_LIB_FEAT_ARENA_FETCH_BITOPS: u64 = 1 << 0;
+
+lazy_static::lazy_static! {
+    /// The JIT lowers fetching AND, OR and XOR on arena pointers.
+    pub static ref ARENA_FETCH_BITOPS: bool = probe_arena_fetch_bitops();
+
+    /// prog_stream_open() works, so BPF streams can be polled.
+    pub static ref PROG_STREAM_OPEN_SUPPORTED: bool = probe_prog_stream_open();
+
+    /// Every probed kernel feature: its name, its bit in the scx_lib_features
+    /// rodata word or zero when only userspace consults it, and whether the
+    /// running kernel has it.
+    pub static ref LIB_FEATURES: Vec<(&'static str, u64, bool)> = vec![
+        ("arena_fetch_bitops", SCX_LIB_FEAT_ARENA_FETCH_BITOPS, *ARENA_FETCH_BITOPS),
+        ("prog_stream_fds", 0, *PROG_STREAM_OPEN_SUPPORTED),
+    ];
+}
+
+/// Write `value` over the rodata variable `name` of an open object. Returns
+/// false when the object has no such variable.
+pub fn set_rodata_var(obj: &mut OpenObject, name: &str, value: &[u8]) -> Result<bool> {
+    let raw = unsafe { &*obj.as_libbpf_object().as_ptr() };
+    let Some(btf) = libbpf_rs::btf::Btf::from_bpf_object(raw)? else {
+        return Ok(false);
+    };
+    let mut var_off = None;
+    for sec in btf.type_by_kind::<libbpf_rs::btf::types::DataSec<'_>>() {
+        if sec.name() != Some(OsStr::new(".rodata")) {
+            continue;
+        }
+        for var in sec.iter() {
+            let ty: libbpf_rs::btf::types::Var<'_> = btf
+                .type_by_id(var.ty)
+                .ok_or_else(|| anyhow!("BTF datasec entry {:?} is not a variable", var.ty))?;
+            if ty.name() == Some(OsStr::new(name)) {
+                var_off = Some((var.offset as usize, var.size));
+            }
+        }
+    }
+    let Some((off, size)) = var_off else {
+        return Ok(false);
+    };
+    if size != value.len() {
+        bail!(
+            "rodata variable {name} is {size} bytes, not {}",
+            value.len()
+        );
+    }
+    for mut map in obj.maps_mut() {
+        if !map.name().to_string_lossy().ends_with(".rodata") {
+            continue;
+        }
+        let data = map
+            .initial_value_mut()
+            .ok_or_else(|| anyhow!("rodata map has no initial value"))?;
+        let Some(slot) = data.get_mut(off..off + size) else {
+            bail!(
+                "rodata variable {name} lies outside the {} byte map",
+                data.len()
+            );
+        };
+        slot.copy_from_slice(value);
+        return Ok(true);
+    }
+    bail!("object has no .rodata map for {name}")
+}
+
+/// Hand the probed features to the BPF side of an open object and log them,
+/// at info when the kernel lacks any of them and at debug otherwise.
+pub fn set_lib_features(obj: &mut OpenObject) -> Result<()> {
+    let mut bits = 0;
+    let mut missing = false;
+    let mut line = String::new();
+    for (name, bit, present) in LIB_FEATURES.iter() {
+        if *present {
+            bits |= bit;
+        } else {
+            missing = true;
+        }
+        line.push_str(&format!(" {name}={}", if *present { "yes" } else { "no" }));
+    }
+    set_rodata_var(obj, "scx_lib_features", &bits.to_ne_bytes())?;
+    if missing {
+        info!("kernel features:{line}");
+    } else {
+        debug!("kernel features:{line}");
+    }
+    Ok(())
 }
 
 /// Scan the running kernel's vmlinux BTF for scx kfuncs whose public-facing
@@ -577,6 +845,7 @@ macro_rules! __scx_ops_open {
         scx_utils::paste! {
         scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements($ops_struct), 'block);
             use ::anyhow::Context;
+            use ::libbpf_rs::skel::OpenSkel;
             use ::libbpf_rs::skel::SkelBuilder;
 
             let mut skel = match $open_opts {
@@ -593,6 +862,10 @@ macro_rules! __scx_ops_open {
                     }
                 }
             };
+
+            if let Err(e) = scx_utils::compat::set_lib_features(skel.open_object_mut()) {
+                break 'block Err(e);
+            }
 
             let ops = skel.struct_ops.[<$ops _mut>]();
             let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
