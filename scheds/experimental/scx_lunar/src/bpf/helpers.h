@@ -10,22 +10,6 @@
 #include "datatypes.h"
 #include "defines.h"
 
-static __always_inline u64 get_dsq_task_slice(u64 dsqType)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return SLICE_LC;
-    case DSQ_TYPE_INTERACTIVE:
-      return SLICE_INTERACTIVE;
-    case DSQ_TYPE_NORMAL:
-      return SLICE_NORMAL;
-    case DSQ_TYPE_GREEDY:
-      return SLICE_GREEDY;
-  }
-  return SLICE_GREEDY;
-}
-
 static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
 {
   switch (dsqType)
@@ -36,10 +20,15 @@ static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
       return DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu;
     case DSQ_TYPE_NORMAL:
       return DSQ_CPU_QUEUE_BASE_NORMAL + cpu;
-    case DSQ_TYPE_GREEDY:
-      return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
   }
   return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
+}
+
+// scx_bpf_dsq_nr_queued() returns a negative error for an invalid DSQ.
+static __always_inline u64 dsq_queued(u64 dsq)
+{
+  s32 n = scx_bpf_dsq_nr_queued(dsq);
+  return n > 0 ? (u64)n : 0;
 }
 
 static __always_inline void stamp_tier_head_ts(struct dispatch_ctx* dctx, u64 dsqType, u64 now)
@@ -58,19 +47,15 @@ static __always_inline void stamp_tier_head_ts(struct dispatch_ctx* dctx, u64 ds
   }
 }
 
-static __always_inline bool is_kthread(const struct task_struct* p)
-{
-  return p->flags & PF_KTHREAD;
-}
-
-static __always_inline bool is_high_prio_kthread_task(struct task_struct* p)
-{
-  return p->prio == MAX_RT_PRIO && is_kthread(p);
-}
-
 static __always_inline struct task_ctx* get_task_ctx(struct task_struct* task)
 {
   return bpf_task_storage_get(&task_ctx_store, task, NULL, 0);
+}
+
+static __always_inline struct dispatch_ctx* get_dispatch_ctx(u32 cpu)
+{
+  u32 key = 0;
+  return bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
 }
 
 static __always_inline u32 cpu_llc_id(u32 cpu)
@@ -92,10 +77,6 @@ static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 sle
     slept = DUTY_WINDOW_NS;
 
   tctx->run_acc += run;
-
-  if (tctx->run_acc > DUTY_WINDOW_NS)
-    tctx->run_acc = DUTY_WINDOW_NS;
-
   tctx->sleep_acc += slept;
 
   if (tctx->run_acc + tctx->sleep_acc > 2 * DUTY_WINDOW_NS)
@@ -103,11 +84,6 @@ static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 sle
     tctx->run_acc >>= 1;
     tctx->sleep_acc >>= 1;
   }
-}
-
-static __always_inline u64 getTickInterval_ns(void)
-{
-  return 1000000000ULL / CONFIG_HZ;
 }
 
 // ---------------------------------------------------------------------------

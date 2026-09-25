@@ -16,11 +16,12 @@ Duty goes from 0 to 1023.
 The higher the duty number the more the task hogs cpu power.
 The lower the more it is sleeping or dependent on io.
 
-The duty is calculated from a window of the last 100ms
+Run time and sleep time are accumulated and both halved together once their sum
+exceeds 200ms, so the duty roughly reflects the last 100-200ms.
 
 It is calculated like this.
 
-duty = sleep_time * 1024 /(run_time + sleep_time + 1)
+duty = run_time * 1024 / (run_time + sleep_time + 1)
 
 The Tier are calculated as Percent of the 1024 max duty value.
 
@@ -28,27 +29,50 @@ crit score goes from 0 to 32.
 
 It is based on the waker and wakee frequency of a task.
 
-it is calculated from 
-log2(1s/ wakee interval) + log2(1s/ waker interval)
+it is calculated from
+log2(1s / wakee interval) + log2(1s / waker interval)
 
-It has 5 tiers. Which are: 
+It has 3 tiers. Which are:
 
 1. LC with duty <= 5% and crit score of >= 5
 2. INTERACTIVE with duty <= 10% and crit score of >= 3
-3. NORMAL with duty <= 80% and crit score of >= 1
-5. GREEDY with duty > 80% or crit score under 1
+3. NORMAL with duty <= 80% and crit score of >=1
+4. Greedy with everything else
 
-All new tasks get thrown into greedy. And start with duty of 512.
-There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers. 
+There is no hysteresis on the crit score. There is a hysteresis of 1% on the duty.
 
-Each tier also has a slice time of 1ms.
+All new tasks start in greedy.
+There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers.
 
-At the moment the scheduler does not use preemption.
+Every task has a slice time of 1ms.
+
+Nice values and scheduling policies are intentionally ignored. Every task is
+treated equally and only its behavior (duty and crit score) decides its tier.
+
+## Preemption
+
+A waking LC task preempts a running task of a lower tier. The preempted task goes
+back to the head of its queue with the rest of its slice.
+
+## Placement and balancing
+
+Each core has its own queue per tier.
+
+When a task wakes up and an idle core is found, it runs there directly.
+Otherwise the task goes to the queue of the core with the least work ahead of it:
+
+- an idle core is always preferred
+- LC and INTERACTIVE tasks check all cores of the same llc, so they don't wait
+  behind a task of their own tier while another core runs lower tier work
+- NORMAL and GREEDY tasks compare their core with 2 random cores of the same llc
+  and move at most once every 10ms, which evens out long queues between busy cores
 
 ## Dispatch
 
-Each core first tries to run its own queued tasks, then from another core from the same llc and then from core of other llcs.
-From which core the core startes stealing is randomized for better load distribution.
+Each core first runs its own LC tasks, then a starved tier if there is one, then
+its own INTERACTIVE, NORMAL and GREEDY tasks. After that it steals from another
+core of the same llc and then from cores of other llcs.
+From which core the core starts stealing is randomized for better load distribution.
 
 ## Testing
 
