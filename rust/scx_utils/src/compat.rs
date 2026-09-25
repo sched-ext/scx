@@ -16,7 +16,9 @@ use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::mem::size_of;
+use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
+use std::os::fd::BorrowedFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::slice::from_raw_parts;
@@ -401,6 +403,66 @@ fn probe_arena_fetch_bitops() -> bool {
     loaded
 }
 
+// BPF_PROG_STREAM_OPEN and its attributes, absent from the pinned libbpf. The
+// command number comes from the running kernel's BTF and is None on a kernel
+// without the command.
+const BPF_F_STREAM_NONBLOCK: u32 = 1;
+
+lazy_static::lazy_static! {
+    static ref BPF_PROG_STREAM_OPEN: Option<u64> =
+        read_enum("bpf_cmd", "BPF_PROG_STREAM_OPEN").ok();
+}
+
+#[repr(C)]
+struct ProgStreamOpenAttr {
+    prog_fd: u32,
+    stream_id: u32,
+    flags: u32,
+}
+
+/// Open a read-only descriptor on one of `prog`'s streams, `stream_id` being
+/// BPF_STREAM_STDOUT or BPF_STREAM_STDERR. Reads block unless `nonblock`.
+/// poll(2) reports POLLIN for data and POLLHUP once the program is freed, with
+/// buffered data still readable. A kernel without the command fails with
+/// EINVAL.
+pub fn prog_stream_open(
+    prog: BorrowedFd<'_>,
+    stream_id: u32,
+    nonblock: bool,
+) -> io::Result<OwnedFd> {
+    let attr = ProgStreamOpenAttr {
+        prog_fd: prog.as_raw_fd() as u32,
+        stream_id,
+        flags: if nonblock { BPF_F_STREAM_NONBLOCK } else { 0 },
+    };
+    let Some(cmd) = *BPF_PROG_STREAM_OPEN else {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            cmd as libc::c_long,
+            &attr as *const ProgStreamOpenAttr as *const c_void,
+            size_of::<ProgStreamOpenAttr>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+fn probe_prog_stream_open() -> bool {
+    let insns = [
+        probe_insn(PROBE_MOV64_IMM, 0, 0, 0, 0),
+        probe_insn(PROBE_EXIT, 0, 0, 0, 0),
+    ];
+    let Ok(prog) = probe_prog_load(BPF_PROG_TYPE_SYSCALL, BPF_F_SLEEPABLE, &insns) else {
+        return false;
+    };
+    prog_stream_open(prog.as_fd(), BPF_STREAM_STDOUT, true).is_ok()
+}
+
 // Bits of the scx_lib_features rodata word, mirroring enum scx_lib_feature in
 // scheds/include/scx/features.bpf.h.
 pub const SCX_LIB_FEAT_ARENA_FETCH_BITOPS: u64 = 1 << 0;
@@ -409,11 +471,15 @@ lazy_static::lazy_static! {
     /// The JIT lowers fetching AND, OR and XOR on arena pointers.
     pub static ref ARENA_FETCH_BITOPS: bool = probe_arena_fetch_bitops();
 
+    /// prog_stream_open() works, so BPF streams can be polled.
+    pub static ref PROG_STREAM_OPEN_SUPPORTED: bool = probe_prog_stream_open();
+
     /// Every probed kernel feature: its name, its bit in the scx_lib_features
     /// rodata word or zero when only userspace consults it, and whether the
     /// running kernel has it.
     pub static ref LIB_FEATURES: Vec<(&'static str, u64, bool)> = vec![
         ("arena_fetch_bitops", SCX_LIB_FEAT_ARENA_FETCH_BITOPS, *ARENA_FETCH_BITOPS),
+        ("prog_stream_fds", 0, *PROG_STREAM_OPEN_SUPPORTED),
     ];
 }
 
