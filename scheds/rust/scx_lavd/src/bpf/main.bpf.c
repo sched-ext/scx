@@ -386,6 +386,36 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	return taskc->slice_wall;
 }
 
+/*
+ * Update @cpuc's duty-cycle ravg, and the util_est derived from it, against the
+ * CPU's own invariant clock. @val is LAVD_SCALE when the CPU picks up a task
+ * and 0 when it drops one.
+ *
+ * Skipped when the caller is not on @cpuc's CPU. clock_pelt is per-rq and the
+ * kernel does not refresh a remote rq's while it is NO_HZ-idle, so accumulating
+ * against it would fold the idle gap into the average. ops.running() and
+ * ops.stopping() can fire off-rq (see update_stat_for_running() below); the
+ * anchor is dropped in that case so the next local update rebases rather than
+ * charging the unmeasured gap at the stale value.
+ */
+static void cpu_util_ravg_update(struct cpu_ctx *cpuc, u64 val)
+{
+	struct ravg_data_invr *ri = &cpuc->avg_util_ravg;
+	u64 pelt_now = local_clock_pelt(cpuc->cpu_id);
+
+	if (unlikely(!pelt_now)) {
+		ri->anchor_cpu = LAVD_CPU_ID_NONE;
+		return;
+	}
+
+	ravg_accumulate_anchored(&ri->rd, val, pelt_now,
+				 ri->anchor_cpu == cpuc->cpu_id);
+	ri->anchor_cpu = cpuc->cpu_id;
+	cpuc->util_est = (u32)(ravg_read(&ri->rd, pelt_now,
+					 LAVD_RAVG_HALFLIFE_NS) >>
+			       RAVG_FRAC_BITS);
+}
+
 static void update_stat_for_running(struct task_struct *p,
 				    task_ctx *taskc,
 				    struct cpu_ctx *cpuc, u64 now)
@@ -394,8 +424,12 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 task_clk = 0, pelt_clk = 0;
 	struct cpu_ctx *prev_cpuc;
 
-	/* mark the task as running in the duty-cycle ravg */
-	ravg_accumulate_arena(&taskc->avg_util_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
+	/*
+	 * Mark the task as running in the duty-cycle ravg immediately. If @p
+	 * arrived from another CPU this re-anchors the average onto this
+	 * one's clock.
+	 */
+	ravg_accumulate_invr(&taskc->avg_util_ravg, LAVD_SCALE, cpuc->cpu_id);
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
@@ -469,11 +503,7 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Mark this CPU as busy in the duty-cycle ravg.
 	 */
-	ravg_accumulate(&cpuc->avg_util_ravg, LAVD_SCALE,
-			now, LAVD_RAVG_HALFLIFE_NS);
-	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg,
-				now, LAVD_RAVG_HALFLIFE_NS) >>
-				RAVG_FRAC_BITS);
+	cpu_util_ravg_update(cpuc, LAVD_SCALE);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -603,9 +633,10 @@ static void account_task_runtime(struct task_struct *p,
 
 static void update_stat_for_stopping(struct task_struct *p,
 				     task_ctx *taskc,
-				     struct cpu_ctx *cpuc)
+				     struct cpu_ctx *cpuc, bool runnable)
 {
 	u64 now = scx_bpf_now();
+	u64 avg_util_fp;
 
 	/*
 	 * Account task runtime statistics first.
@@ -618,12 +649,21 @@ static void update_stat_for_stopping(struct task_struct *p,
 					   taskc->acc_runtime_invr);
 
 	/*
+	 * The duty-cycle ravg tracks runnable time, so a preempted task stays
+	 * on through its queue wait and only a sleeping one goes off. Either
+	 * way, refresh util_est here so a task that never sleeps still gets
+	 * one. A false return means the clock read would have been remote, so
+	 * leave util_est at its last good reading.
+	 */
+	if (ravg_accumulate_read_invr(&taskc->avg_util_ravg,
+				      runnable ? LAVD_SCALE : 0, cpuc->cpu_id,
+				      &avg_util_fp))
+		taskc->util_est = (u32)(avg_util_fp >> RAVG_FRAC_BITS);
+
+	/*
 	 * Mark this CPU as idle in the duty-cycle ravg.
 	 */
-	ravg_accumulate(&cpuc->avg_util_ravg, 0, now,
-			LAVD_RAVG_HALFLIFE_NS);
-	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg, now,
-				  LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
+	cpu_util_ravg_update(cpuc, 0);
 
 	/*
 	 * Account for how much of the slice was used for this instance.
@@ -1824,7 +1864,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 
-	update_stat_for_stopping(p, taskc, cpuc);
+	update_stat_for_stopping(p, taskc, cpuc, runnable);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1877,12 +1917,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	if (!(deq_flags & SCX_DEQ_SLEEP))
 		return;
-
-	/* mark the task as sleeping in the duty-cycle ravg */
-	now = scx_bpf_now();
-	ravg_accumulate_arena(&taskc->avg_util_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
-	taskc->util_est = (u32)(ravg_read_arena(&taskc->avg_util_ravg, now,
-						LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
@@ -1944,6 +1978,14 @@ unlock_out:
 	cpuc->lat_cri = 0;
 	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
+
+	/*
+	 * Drop the duty-cycle ravg and the util_est derived from it because
+	 * a hotplug is a discontinuity, not an idle period.
+	 */
+	__builtin_memset(&cpuc->avg_util_ravg, 0, sizeof(cpuc->avg_util_ravg));
+	cpuc->avg_util_ravg.anchor_cpu = LAVD_CPU_ID_NONE;
+	cpuc->util_est = 0;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -2193,15 +2235,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	bpf_rcu_read_lock();
 	if (parent && (taskc_parent = find_task_ctx(parent))) {
 		/* Do not inherit cgroup status. */
-		for (i = 0; i < sizeof(taskc->atq) && can_loop; i++)
-			((char __arena *)taskc)[i] = 0;
+		__arena_memset(&taskc->atq, 0, sizeof(taskc->atq));
 
 		for (i = sizeof(taskc->atq); i < sizeof(*taskc) && can_loop; i++)
 			((char __arena *)taskc)[i] = ((char __arena *)taskc_parent)[i];
+
+		/*
+		 * Unlike lat_cri and perf_cri, a running average of past CPU
+		 * consumption is not a characteristic a child can inherit --
+		 * it is a measurement of work the child has not done. Handing
+		 * a fork of a CPU-hog parent that parent's utilization would
+		 * route the child as a hog from its first dispatch, since
+		 * util_est drives preemption_vulnerability(). The kernel draws
+		 * the same line: init_entity_runnable_average() memsets the
+		 * new task's sched_avg, and post_init_entity_util_avg() seeds
+		 * util from the runqueue it lands on, never from the parent.
+		 */
+		__arena_memset(&taskc->avg_util_ravg, 0,
+				 sizeof(taskc->avg_util_ravg));
 	} else {
-		for (i = 0; i < sizeof(*taskc) && can_loop; i++)
-			((char __arena *)taskc)[i] = 0;
-	
+		__arena_memset(taskc, 0, sizeof(*taskc));
+
 		now = scx_bpf_now();
 		taskc->last_runnable_clk = now;
 		taskc->last_running_clk = now;
@@ -2212,6 +2266,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	}
 
 	bpf_rcu_read_unlock();
+
+	/*
+	 * Finish resetting the duty-cycle ravg the inherit path cleared above:
+	 * a new task is anchored to no CPU, and util_est is derived from an
+	 * average that no longer exists.
+	 */
+	taskc->avg_util_ravg.anchor_cpu = LAVD_CPU_ID_NONE;
+	taskc->util_est = 0;
 
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
