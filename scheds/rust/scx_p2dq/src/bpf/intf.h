@@ -48,8 +48,8 @@ enum consts {
 	PELT_MAX_UTIL		= 1024,		// Maximum utilization value
 	PELT_UTIL_SHIFT		= 10,		// capacity/frequency scale denominator
 	PELT_UTIL_SCALE		= 1 << PELT_UTIL_SHIFT,
-	PELT_DECAY_SHIFT	= 7,		// Decay factor: (127/128) ≈ 0.98 per ms
-	PELT_SUM_MAX		= 131072,	// Maximum sum value (128 * 1024)
+	PELT_DECAY_TABLE_SHIFT	= 32,	// Q32 decay table precision
+	PELT_SUM_MAX		= 47742,	// 100% steady-state sum for a 32ms half-life
 
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,

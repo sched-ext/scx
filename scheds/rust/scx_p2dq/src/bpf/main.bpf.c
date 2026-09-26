@@ -329,22 +329,35 @@ static u32 nr_idle_cpus(const struct cpumask *idle_cpumask)
  */
 
 /*
- * Apply exponential decay to a value over a number of periods.
- * Each period decays by factor of 127/128 (≈ 0.98).
- * Bounded loop for BPF verifier compliance.
+ * Linux PELT's Q32 representation of y^n for 0 <= n < 32, where
+ * y^32 = 1/2. Keep this table local to the BPF object so decay is a
+ * constant-time operation instead of a verifier-bounded loop.
  */
+static const u32 pelt_decay_table[PELT_HALFLIFE_MS] = {
+	0xffffffff, 0xfa83b2da, 0xf5257d14, 0xefe4b99a, 0xeac0c6e6,
+	0xe5b906e6, 0xe0ccdeeb, 0xdbfbb796, 0xd744fcc9, 0xd2a81d91,
+	0xce248c14, 0xc9b9bd85, 0xc5672a10, 0xc12c4cc9, 0xbd08a39e,
+	0xb8fbaf46, 0xb504f333, 0xb123f581, 0xad583ee9, 0xa9a15ab4,
+	0xa5fed6a9, 0xa2704302, 0x9ef5325f, 0x9b8d39b9, 0x9837f050,
+	0x94f4efa8, 0x91c3d373, 0x8ea4398a, 0x8b95c1e3, 0x88980e80,
+	0x85aac367, 0x82cd8698,
+};
+
+/* Apply y^periods, using a right shift for every complete half-life. */
 static __always_inline u32 pelt_decay(u32 val, u32 periods)
 {
-	u32 i;
+	u32 half_lives = periods / PELT_HALFLIFE_MS;
+	u32 remainder = periods % PELT_HALFLIFE_MS;
 
-	/* Bound iterations for BPF verifier (max 256 periods = 256ms) */
-	bpf_for(i, 0, periods) {
-		if (i >= 256)
-			break;
-		val = (val * 127) >> 7;
-	}
+	/* The caller caps periods at 256ms; keep this helper safe on its own. */
+	if (half_lives >= 32)
+		return 0;
+	val >>= half_lives;
+	if (!remainder)
+		return val;
 
-	return val;
+	return (u32)(((u64)val * pelt_decay_table[remainder]) >>
+		      PELT_DECAY_TABLE_SHIFT);
 }
 
 /*
@@ -469,9 +482,9 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 	if (unlikely(taskc->util_sum > PELT_SUM_MAX))
 		taskc->util_sum = PELT_SUM_MAX;
 
-	/* Calculate util_avg from util_sum */
-	/* util_avg = util_sum / 128 (representing average over ~128ms window) */
-	taskc->util_avg = taskc->util_sum >> 7;
+	/* Normalize against the steady-state sum for a full-capacity task. */
+	taskc->util_avg = ((u64)taskc->util_sum * PELT_MAX_UTIL) /
+		PELT_SUM_MAX;
 	if (taskc->util_avg > PELT_MAX_UTIL)
 		taskc->util_avg = PELT_MAX_UTIL;
 
