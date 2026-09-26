@@ -123,14 +123,14 @@ struct scx_cgroup_ctx {
 		u64		quota;
 		u64		period;
 		u64		burst;
-	
+
 		/*
 		 * Normalized quota by period of 100 msec. By using the same
 		 * period, we can use a single BPF timer to handle all the
 		 * cgroups.
 		 */
 		u64		nquota;
-	
+
 		/*
 		 * The upper bound of a cgroup’s quota, which is the minimum
 		 * normalized quota of all its ancestors and itself.
@@ -254,9 +254,9 @@ struct scx_cgroup_llc_ctx {
 	 * BTQ are ordered by vtime and will be enqueued to a proper DSQ
 	 * for execution when the cgroup becomes unthrottled again.
 	 *
- 	 * When moving a task from BTQ to a proper DSQ, we need to choose a
- 	 * target CPU by considering CPU idle status, task’s previous CPU, etc.
- 	 * Since DSQ does not support a pop-like operation that dispatches a
+	 * When moving a task from BTQ to a proper DSQ, we need to choose a
+	 * target CPU by considering CPU idle status, task’s previous CPU, etc.
+	 * Since DSQ does not support a pop-like operation that dispatches a
 	 * task from the DSQ without moving to another DSQ, we use ATQ as a
 	 * backend of BTQ.
 	 */
@@ -1719,7 +1719,7 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 * should be taken to properly handle the race between cgroup exit
 	 * and task exit, especially when exiting tasks under an exiting cgroup
 	 * are throttled. We first stop throttling the cgroup to prevent any
-	 * more tasks from being throttled. 
+	 * more tasks from being throttled.
 	 */
 	cgrp_id = cgroup_get_id(cgrp);
 
@@ -3203,7 +3203,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will
-		 * fail silently in the scx core. 
+		 * fail silently in the scx core.
 		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
@@ -3655,7 +3655,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 			cgx->period_budget, cgx->burst_remaining);
 	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
 			cgx->runtime_total_sloppy, cgx->runtime_total_last);
-					
+
 	return 0;
 }
 

@@ -85,7 +85,7 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 	return 0;
 }
 
-/* 
+/*
  * XXXETSAL: We are using the __hidden antipattern for API functions because some
  * older kernels do not allow function calls with preemption disabled. We will replace
  * these annotations with the proper ones (__weak) at some point in the future.

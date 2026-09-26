@@ -192,7 +192,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 		}
 
 		for (j = 0; j < POPS_PER_TEST && can_loop; j++ ) {
-			/* 
+			/*
 			 * XXX We're leaking rbnodes by design here, ATQs nodes are normally embedded
 			 * into task contexts and get cleaned up with the task.
 			 */
@@ -334,8 +334,8 @@ int scx_selftest_atq_sized(u64 unused)
 		return -EINVAL;
 	}
 
-	/* 
-	 * Reusing the already allocated rbnode. We won't be able to 
+	/*
+	 * Reusing the already allocated rbnode. We won't be able to
 	 * do the operation so we won't corrupt the tree.
 	 */
 	ret = scx_atq_insert_vtime(sized_vtime, taskc, 7890);

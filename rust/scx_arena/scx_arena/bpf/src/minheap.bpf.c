@@ -37,7 +37,7 @@ u64 scx_minheap_alloc_internal(size_t capacity)
 
 	heap->helems = arena_calloc(capacity, sizeof(*heap->helems));
 	if (!heap->helems) {
-		/* 
+		/*
 		 * XXXETSAL: Once we move on from the static alloc,
 		 * properly free the initial allocation.
 		 */

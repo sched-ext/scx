@@ -167,9 +167,9 @@ int lvq_steal(lv_queue_t __arg_arena *lvq, u64 *val)
 __weak
 u64 lvq_create_internal(void)
 {
-	/* 
-	 * Marked as volatile because otherwise the array 
-	 * reference in the internal loop gets demoted to 
+	/*
+	 * Marked as volatile because otherwise the array
+	 * reference in the internal loop gets demoted to
 	 * scalar and the program fails verification.
 	 */
 	volatile lv_queue_t *lvq;

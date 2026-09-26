@@ -310,7 +310,7 @@ __weak
 u64 remove_key(struct rbtree __arena *rbtree __arg_arena, task_ctx __arg_arena *taskc, u64 key, int *ret)
 {
 	task_ctx *tmp;
-	
+
 	if (!ret)
 		return (u64)NULL;
 
@@ -717,18 +717,18 @@ __weak int scx_selftest_rbtree_alloc_check(struct rbtree __arena *rbtree __arg_a
 	if (!noalloc)
 		return 2;
 
-	/* 
-	 * Can't allocate a node for a tree that allocates it itself. 
+	/*
+	 * Can't allocate a node for a tree that allocates it itself.
 	 * Ditto for noalloc.
 	 */
 	node = rb_node_alloc(0, 0);
 	if (!node)
 		return 3;
 
-	/* 
+	/*
 	 * RB_ALLOC trees can use rb_insert, RB_NOALLOC trees can
-	 * use rb_insert_node. RB_ALLOC and RB_NOALLOC trees cannot 
-	 * use each other's APIs. 
+	 * use rb_insert_node. RB_ALLOC and RB_NOALLOC trees cannot
+	 * use each other's APIs.
 	 *
 	 * NOTE: This begs the question, why not different types? We
 	 * want to partially share the API and that would require us
