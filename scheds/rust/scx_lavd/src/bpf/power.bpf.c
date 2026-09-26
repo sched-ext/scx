@@ -14,6 +14,10 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#ifndef round_up
+#define round_up(a, b) ((((a) + (b) - 1) / (b)) * (b))
+#endif
+
 /*
  * System-wide properties of CPUs
  */

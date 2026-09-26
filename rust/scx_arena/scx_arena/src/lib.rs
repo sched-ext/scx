@@ -7,16 +7,11 @@
 //!
 //! Crate for setting up the BPF arena library for sched-ext schedulers.
 
-mod bpf_skel;
-
-mod arenalib;
-pub use arenalib::ArenaLib;
-
 #[cfg(feature = "build-support")]
 pub mod build_support;
 
-mod scx_libarena;
-pub use scx_libarena::ScxLibArena;
+mod arenalib;
+pub use arenalib::ArenaLib;
 
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;

@@ -37,7 +37,7 @@ use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::Skel as _;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::eventfd::EventFd;
-use scx_arena::ScxLibArena as ArenaLib;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::Cpumask;
 use scx_utils::NR_CPU_IDS;

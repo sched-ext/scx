@@ -28,20 +28,4 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     package_libarena_bpf(&manifest_dir, &out_dir).unwrap();
-
-    scx_cargo::BpfBuilder::new()
-        .unwrap()
-        .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .add_source("src/bpf/lib/arena.bpf.c")
-        .add_source("src/bpf/lib/common.bpf.c")
-        .add_source("src/bpf/lib/atq.bpf.c")
-        .add_source("src/bpf/lib/bitmap.bpf.c")
-        .add_source("src/bpf/lib/cpumask.bpf.c")
-        .add_source("src/bpf/lib/minheap.bpf.c")
-        .add_source("src/bpf/lib/rbtree.bpf.c")
-        .add_source("src/bpf/lib/sdt_alloc.bpf.c")
-        .add_source("src/bpf/lib/sdt_task.bpf.c")
-        .add_source("src/bpf/lib/topology.bpf.c")
-        .compile_link_gen()
-        .unwrap();
 }

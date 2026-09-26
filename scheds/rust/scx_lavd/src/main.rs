@@ -44,7 +44,7 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libc::c_char;
 use plain::Plain;
-use scx_arena::ScxLibArena as ArenaLib;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::EnergyModel;
 use scx_utils::NR_CPU_IDS;

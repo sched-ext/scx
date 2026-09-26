@@ -7,24 +7,30 @@
 
 #include <scx/common.bpf.h>
 #include <libarena/common.h>
+#include <lib/alloc/bpf_helpers_local.h>
 #include <lib/arena.h>
 #include <lib/sdt_task.h>
 #include <lib/urcu.h>
 
 static size_t task_ctx_size;
 
+struct scx_task_map_val {
+	__u64 tptr;
+	void __arena *data;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, u64);
+	__type(value, struct scx_task_map_val);
 } scx_task_map SEC(".maps");
 
 __hidden
 void __arena *scx_task_alloc(struct task_struct *p)
 {
 	void __arena *data;
-	u64 *mval;
+	struct scx_task_map_val *mval;
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -39,7 +45,8 @@ void __arena *scx_task_alloc(struct task_struct *p)
 		return NULL;
 	}
 
-	*mval = (u64)data;
+	mval->tptr = (__u64) p;
+	WRITE_ONCE(mval->data, data);
 
 	return data;
 }
@@ -62,15 +69,15 @@ int scx_task_init(__u64 data_size, __u64 align)
 __hidden
 void __arena *__scx_task_data(struct task_struct *p)
 {
-	u64 *mval;
+	struct scx_task_map_val *mval;
 
 	arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
-	if (unlikely(!mval || !*mval))
+	if (unlikely(!mval))
 		return NULL;
 
-	return (void __arena *)*mval;
+	return READ_ONCE(mval->data);
 }
 
 __hidden
@@ -79,7 +86,7 @@ void __arena *scx_task_data(struct task_struct *p)
 	void __arena *data = __scx_task_data(p);
 
 	if (unlikely(!data))
-		bpf_printk("%s:%d no task data", __func__, __LINE__);
+		scx_err_loc("no task data");
 
 	return data;
 }
@@ -93,7 +100,7 @@ void __arena *scx_task_data(struct task_struct *p)
 __hidden
 void scx_task_free(struct task_struct *p)
 {
-	u64 *mval;
+	struct scx_task_map_val *mval;
 	void __arena *data;
 
 	arena_subprog_init();
@@ -102,7 +109,7 @@ void scx_task_free(struct task_struct *p)
 	if (unlikely(!mval))
 		return;
 
-	data = (void __arena *)__sync_lock_test_and_set(mval, 0);
+	data = (void __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
 	if (unlikely(!data))
 		return;
 
@@ -121,7 +128,7 @@ __hidden
 void scx_task_free_rcu(struct task_struct *p)
 {
 	void __arena *data;
-	u64 *mval;
+	struct scx_task_map_val *mval;
 
 	arena_subprog_init();
 
@@ -129,7 +136,7 @@ void scx_task_free_rcu(struct task_struct *p)
 	if (unlikely(!mval))
 		return;
 
-	data = (void __arena *)__sync_lock_test_and_set(mval, 0);
+	data = (void __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
 	if (unlikely(!data))
 		return;
 
