@@ -397,6 +397,79 @@ static __always_inline u64 pelt_scale_runtime(u64 runtime_ns, u32 capacity,
 		(NSEC_PER_MSEC * PELT_UTIL_SCALE);
 }
 
+/* Sum the weights for ages 1..periods in PELT sum units. */
+static __always_inline u32 pelt_aged_sum(u32 periods)
+{
+	u32 decayed;
+	u32 sum;
+
+	decayed = pelt_decay(PELT_SUM_MAX, periods + 1);
+	if (PELT_SUM_MAX <= decayed + PELT_MAX_UTIL)
+		return 0;
+
+	sum = PELT_SUM_MAX - decayed - PELT_MAX_UTIL;
+	return sum;
+}
+
+/*
+ * Account runtime in the complete PELT periods ending at elapsed_ns. The
+ * period grid is anchored at pelt_last_update_time; runtime in the current
+ * incomplete period is kept in period_contrib for the next update.
+ */
+static __always_inline u32
+pelt_runtime_contrib(u64 elapsed_ns, u64 runtime_ns, u64 period_contrib,
+			     u32 capacity, u32 freq)
+{
+	u32 periods = elapsed_ns / NSEC_PER_MSEC;
+	u32 contribution;
+	u32 start_seg, full_start, full_end;
+	u32 age_high, age_range;
+	u32 full_contrib;
+	u32 value;
+	u64 runtime_start_ns;
+	u64 start_off_ns, closed_end_ns;
+
+	if (!periods)
+		return 0;
+
+	/* The pending runtime belongs to the first period now being closed. */
+	contribution = pelt_decay(
+		pelt_scale_runtime(period_contrib, capacity, freq), periods - 1);
+	if (!runtime_ns)
+		return contribution;
+
+	if (runtime_ns > elapsed_ns)
+		runtime_ns = elapsed_ns;
+	runtime_start_ns = elapsed_ns - runtime_ns;
+	closed_end_ns = (u64)periods * NSEC_PER_MSEC;
+	if (runtime_start_ns >= closed_end_ns)
+		return contribution;
+
+	start_seg = runtime_start_ns / NSEC_PER_MSEC;
+	start_off_ns = runtime_start_ns % NSEC_PER_MSEC;
+
+	if (start_off_ns) {
+		value = pelt_scale_runtime(NSEC_PER_MSEC - start_off_ns,
+					   capacity, freq);
+		contribution += pelt_decay(value, periods - 1 - start_seg);
+	}
+
+	full_start = start_seg + !!start_off_ns;
+	full_end = periods - 1;
+	if (full_start <= full_end) {
+		/* The newest complete period has age zero. */
+		age_high = periods - 1 - full_start;
+		age_range = PELT_MAX_UTIL + pelt_aged_sum(age_high);
+
+		full_contrib = pelt_scale_runtime(NSEC_PER_MSEC,
+						  capacity, freq);
+		contribution += (u32)(((u64)full_contrib * age_range) /
+					     PELT_MAX_UTIL);
+	}
+
+	return contribution;
+}
+
 /* Forward declarations for energy-aware scheduling helpers */
 static __always_inline u32 get_cpu_capacity(s32 cpu);
 static __always_inline u32 get_cpu_energy_cost(s32 cpu);
@@ -415,10 +488,11 @@ static __always_inline bool prefer_big_core(struct task_struct *p);
  */
 static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta_ns, s32 task_cpu)
 {
-	u64 elapsed_ns, runtime_ns;
-	u32 periods;
+	u64 elapsed_ns, effective_elapsed_ns, runtime_ns, runtime_start_ns;
+	u64 current_start_ns, pending_ns;
+	u32 elapsed_periods, periods;
 	u32 capacity, freq;
-	u64 scaled_runtime;
+	u32 runtime_contrib;
 
 	if (!p2dq_config.pelt_enabled)
 		return;
@@ -447,9 +521,16 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 		return;
 	}
 
-	periods = elapsed_ns / NSEC_PER_MSEC;
+	elapsed_periods = elapsed_ns / NSEC_PER_MSEC;
+	periods = elapsed_periods;
 	if (periods > 256)
-		periods = 256;  /* Cap for verifier */
+		periods = 256;  /* Bound the long-idle approximation. */
+	effective_elapsed_ns = (u64)periods * NSEC_PER_MSEC +
+		(elapsed_ns % NSEC_PER_MSEC);
+	if (delta_ns > effective_elapsed_ns)
+		runtime_ns = effective_elapsed_ns;
+	else
+		runtime_ns = delta_ns;
 
 	if (taskc->util_sum > 0) {
 		taskc->util_sum = pelt_decay(taskc->util_sum, periods);
@@ -461,23 +542,31 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 		freq = SCX_CPUPERF_ONE;
 
 	/*
-	 * Scale period contribution by capacity and frequency
-	 * This makes the PELT metric represent "work done at max CPU capacity at max freq"
-	 *
-	 * Formula: scaled_time = wall_time * (capacity / 1024) * freq
-	 *         = wall_time * capacity * freq / 1024.
-	 * The result is in PELT utilization units per millisecond.
+	 * Decay each runtime segment according to its age. This keeps the
+	 * result independent of whether one interval is reported as one
+	 * callback or several callbacks.
 	 */
-	if (delta_ns > ~0ULL - taskc->period_contrib)
-		runtime_ns = ~0ULL;
-	else
-		runtime_ns = taskc->period_contrib + delta_ns;
-	scaled_runtime = pelt_scale_runtime(runtime_ns, capacity, freq);
-	if (scaled_runtime > (u64)PELT_SUM_MAX - taskc->util_sum)
+	runtime_contrib = pelt_runtime_contrib(effective_elapsed_ns,
+						       runtime_ns,
+						       taskc->period_contrib,
+						       capacity, freq);
+	if (runtime_contrib > PELT_SUM_MAX - taskc->util_sum)
 		taskc->util_sum = PELT_SUM_MAX;
 	else
-		taskc->util_sum += (u32)scaled_runtime;
-	taskc->period_contrib = 0;
+		taskc->util_sum += runtime_contrib;
+
+	/* Keep only runtime that belongs to the current incomplete period. */
+	pending_ns = 0;
+	current_start_ns = (u64)periods * NSEC_PER_MSEC;
+	runtime_start_ns = effective_elapsed_ns - runtime_ns;
+	if (effective_elapsed_ns > current_start_ns &&
+	    runtime_start_ns < effective_elapsed_ns) {
+		if (runtime_start_ns < current_start_ns)
+			pending_ns = effective_elapsed_ns - current_start_ns;
+		else
+			pending_ns = effective_elapsed_ns - runtime_start_ns;
+	}
+	taskc->period_contrib = pending_ns;
 
 	if (unlikely(taskc->util_sum > PELT_SUM_MAX))
 		taskc->util_sum = PELT_SUM_MAX;
@@ -488,7 +577,8 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 	if (taskc->util_avg > PELT_MAX_UTIL)
 		taskc->util_avg = PELT_MAX_UTIL;
 
-	if (periods == 256 && elapsed_ns >= 256ULL * NSEC_PER_MSEC)
+	/* Keep the period grid phase stable across fractional callbacks. */
+	if (elapsed_periods > 256)
 		taskc->pelt_last_update_time = now;
 	else
 		taskc->pelt_last_update_time += periods * NSEC_PER_MSEC;
