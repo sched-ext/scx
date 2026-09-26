@@ -214,6 +214,15 @@ impl<'a> Scheduler<'a> {
         let one_word = *NR_CPU_IDS <= 64;
         rodata.cake_one_word = u8::from(one_word);
         rodata.cake_tick_ns = coarse_tick_ns();
+        // Expiry is seen at a tick: the longest grant (a kthread's SLICE_NS) runs a tick over.
+        let tick = if rodata.cake_tick_ns > 0
+            && rodata.cake_tick_ns <= bpf_intf::consts_TICK_MAX_NS as u64
+        {
+            rodata.cake_tick_ns
+        } else {
+            bpf_intf::consts_TICK_MAX_NS as u64
+        };
+        rodata.cake_vcap_unit_ns = bpf_intf::consts_SLICE_NS as u64 + tick;
         if let Some(ns) = opts.handoff_ns {
             rodata.cake_handoff_max_ns = ns;
             warn!("   sweep   handoff_max {ns} ns (observe-only override)");

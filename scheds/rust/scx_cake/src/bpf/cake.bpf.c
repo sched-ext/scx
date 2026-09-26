@@ -343,6 +343,7 @@ static __always_inline u64 cake_now(u32 site)
  * the precise read. A lifetime quantity only: never a deadline or a delta. */
 const volatile u64 cake_tick_ns;	/* the loader's clock_getres(CLOCK_MONOTONIC_COARSE); 0: precise clock */
 u64 cake_jiffies_offset;	/* precise ns minus jiffies * tick, at init */
+const volatile u64 cake_vcap_unit_ns = SLICE_NS + TICK_MAX_NS;	/* longest run: grant plus a tick */
 
 static __always_inline u64 cake_task_age(const struct task_struct *p, u32 site)
 {
@@ -513,6 +514,14 @@ struct cake_slot {
 	u64 pad[STATE_SLOT_WORDS - 1];
 };
 
+struct cake_frontier_slot {
+	u64 word;	/* F: the global vtime frontier */
+	u64 stamp;	/* rq clock of F's last store: the rate band's base */
+	u64 pad[STATE_SLOT_WORDS - 2];
+};
+_Static_assert(sizeof(struct cake_frontier_slot) == STATE_SLOT_BYTES,
+	       "cake_frontier_slot must keep the slot stride");
+
 struct cake_llc_slot {
 	u64 pending;	/* tasks inserted and not yet seen out of the pool: proof */
 	u64 unserved;	/* inserts not yet moved out by a serve: the interlock's kick */
@@ -542,6 +551,7 @@ struct cake_run_slot {
 	 * prices the remaining grant from one line. */
 	u64 grant;
 	u64 pend_spin;
+	u64 frontier;	/* F as ops.running left it: the charge ceiling's base */
 	/* PROBE, on the slot's second line so the hot ops stay on the first: what
 	 * ops.stopping knew about a task a higher class displaced, for
 	 * ops.cpu_release (the local DSQ has no peek): burst inputs, slice left,
@@ -551,7 +561,7 @@ struct cake_run_slot {
 	u64 out_slice;
 	u64 out_immed;
 	u64 release;
-	u64 pad[STATE_SLOT_WORDS - 12];
+	u64 pad[STATE_SLOT_WORDS - 13];
 };
 
 enum {
@@ -624,8 +634,8 @@ _Static_assert(sizeof(struct cake_run_slot) == STATE_SLOT_BYTES,
 	       "cake_run_slot must preserve cache-isolation stride");
 
 struct cake_state {
-	/* Global vtime frontier: conditional store from every ops.running. */
-	struct cake_slot frontier;
+	/* Global vtime frontier: raised by ops.running within a wall-rate band. */
+	struct cake_frontier_slot frontier;
 	/* Per-CPU run accounting: stamp is read remotely by wake preemption; sum is
 	 * owner-only, so ops.stopping charges runtime with no clock read. One slot,
 	 * so ops.running dirties one line. */
@@ -1040,9 +1050,25 @@ static __always_inline u64 cake_scale_vtime_add(u64 base, u64 runtime, u32 idx)
 	return cake_scale_vtime_slow(base, runtime, reciprocal);
 }
 
-static __always_inline u64 cake_scale_vtime(u64 runtime, u32 idx)
+/* min(@v, @hi) for vtimes, branchless and wrap-safe. */
+static __always_inline u64 cake_vtime_ceil(u64 v, u64 hi)
 {
-	return cake_scale_vtime_add(0, runtime, idx);
+	u64 d = hi - v;
+
+	return hi - (d & ~((u64)((s64)d >> 63)));
+}
+
+_Static_assert(((u64)SLICE_NS + TICK_MAX_NS) * (u64)MAX_RECIP_WEIGHT < (~0ULL >> 1),
+	       "the cap product fits u64");
+
+/* Lead over the frontier a weight may hold: its longest run's charge, within [grain, cap max]. */
+static __always_inline u64 cake_vtime_cap(u64 reciprocal)
+{
+	u64 cap = (cake_vcap_unit_ns * reciprocal) >> RECIP_SHIFT;
+
+	/* A longer span (SCX_SLICE_DFL placement, kept prev) clips: a lower key, never a wait. */
+	cap = cap < CAKE_VTIME_CAP_MAX_NS ? cap : CAKE_VTIME_CAP_MAX_NS;
+	return cap > FRONTIER_GRAIN_NS ? cap : FRONTIER_GRAIN_NS;
 }
 
 /* Preserve the exact 40-level nice table while honoring SCHED_IDLE weight 3. */
@@ -1808,10 +1834,22 @@ static __noinline u64 cake_task_slice(struct task_struct *p __arg_trusted)
 }
 
 /* Three quarters of the unused slice, as two shifts. */
+#define CAKE_SLEEPER_DOSE(unused) (((unused) >> 1) + ((unused) >> 2))	/* 3/4 */
+
 static __always_inline u64 cake_sleeper_dose(u64 unused)
 {
-	return (unused >> 1) + (unused >> 2);	/* 3/4 */
+	return CAKE_SLEEPER_DOSE(unused);
 }
+
+/* Half the watchdog bounds the key window; the rest is drain, tick, clock skew and RT hold. */
+#define CAKE_KEY_BUDGET_NS ((u64)WATCHDOG_TIMEOUT_MS * NSEC_PER_MSEC / 2)
+/* Keys a wait crosses: cap max, the sleeper floor, own/pool hysteresis (cake_dispatch), grain. */
+#define CAKE_FLOOR_WINDOW_NS (CAKE_VTIME_CAP_MAX_NS + 2 * (u64)SLICE_NS +		\
+			      CAKE_SLEEPER_DOSE((u64)SLICE_NS) + FRONTIER_GRAIN_NS)
+_Static_assert((CAKE_FLOOR_WINDOW_NS << RATE_FLOOR_SHIFT) <= CAKE_KEY_BUDGET_NS,
+	       "the floor crosses the key window within its watchdog share");
+_Static_assert((CAKE_FLOOR_WINDOW_NS << (RATE_FLOOR_SHIFT + 1)) > CAKE_KEY_BUDGET_NS,
+	       "RATE_FLOOR_SHIFT is the largest shift that fits");
 
 /* One admit frame: the grant and the insert key from one set of task loads.
  * The key is the sleeper clamp against a floor deepened by the slice fraction
@@ -2380,7 +2418,11 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 * exposed to the steal ring by the mark while keeping L1/L2 warmth. Forced
 	 * requeues and seat collisions use the pool. The slice is the task's own. */
 	{
-		u64 vt = lo + (d & ~((u64)((s64)d >> 63)));
+		/* A requeue keeps its key, floored a starved wake's depth below lo. */
+		u64 rlo = lo - (CAKE_SLEEPER_DOSE((u64)SLICE_NS) &
+			       -(u64)!!(enq_flags & CAKE_ENQ_REENQ));
+		u64 rd = p->scx.dsq_vtime - rlo;
+		u64 vt = rlo + (rd & ~((u64)((s64)rd >> 63)));
 		struct task_struct *hc = NULL;
 
 		/* Anti-collision: home held by an equally well-served peer, whose whole slice
@@ -3014,9 +3056,9 @@ void BPF_STRUCT_OPS(cake_cpu_acquire, s32 cpu, struct scx_cpu_acquire_args *args
 /* A task returning with a large weighted lead must not drag active peers' wake
  * floor with it: ordinary advances read nothing remote; an outlier is capped
  * against observed live service, until within the admission window. */
-static __noinline u64 cake_frontier_candidate(u64 vtime, u32 cpu)
+static __noinline u64 cake_frontier_candidate(u64 vtime, u64 f, u32 cpu)
 {
-	u64 near = cake.frontier.word + SLICE_NS;
+	u64 near = f + SLICE_NS;
 	u64 now;
 	int c;
 
@@ -3042,12 +3084,48 @@ static __noinline u64 cake_frontier_candidate(u64 vtime, u32 cpu)
 	return vtime;
 }
 
-/* ops.running: stamp the per-CPU run start and advance the vtime frontier.
- * The frontier store is conditional, not a branchless max: this is the hottest
- * shared line, and a select would dirty it every quantum. Racy is fine. */
+/* CAS F from @f to @v, stamped @now, returning F after: F bounds every key, a lower one loses. */
+static __always_inline u64 cake_frontier_store(u64 f, u64 v, u64 now)
+{
+	u64 seen = __sync_val_compare_and_swap(&cake.frontier.word, f, v);
+
+	if (seen != f)
+		return seen;
+	cake.frontier.stamp = now;
+	cake_stat_inc(CAKE_SITE_FRONTIER_ST);
+	return v;
+}
+
+/* Step F toward @vtime by [dt >> RATE_FLOOR_SHIFT, dt], dt the wall time since its last store. */
+static __noinline u64 cake_frontier_step(u64 vtime, u64 f, u32 cpu, u64 now)
+{
+	s64 dt = time_delta(now, cake.frontier.stamp), up = 0, step;
+
+	if (dt < FRONTIER_GRAIN_NS)	/* step <= dt: no store is possible */
+		return f;
+	if (!time_before(vtime, f + FRONTIER_GRAIN_NS))
+		up = (s64)(cake_frontier_candidate(vtime, f, cpu) - f);
+	step = up < dt ? up : dt;
+	step = step > (dt >> RATE_FLOOR_SHIFT) ? step : dt >> RATE_FLOOR_SHIFT;
+	if (step < FRONTIER_GRAIN_NS)
+		return f;
+	return cake_frontier_store(f, f + step, now);
+}
+
+/* F after ops.running: most runs are within a grain of F and owe the rate floor under a grain. */
+static __always_inline u64 cake_frontier_advance(u64 vtime, u32 cpu, u64 now)
+{
+	u64 f = cake.frontier.word;
+
+	if (time_before(vtime, f + FRONTIER_GRAIN_NS) &&
+	    time_delta(now, cake.frontier.stamp) < (FRONTIER_GRAIN_NS << RATE_FLOOR_SHIFT))
+		return f;
+	return cake_frontier_step(vtime, f, cpu, now);
+}
+
+/* ops.running: stamp the per-CPU run start and advance the vtime frontier within its wall-rate band. */
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
-	u64 task_vtime;
 	/* The task's CPU: a remote property change fires this op from the caller's
 	 * CPU, whose smp id charged a foreign slot. */
 	u32 cpu = p->thread_info.cpu;
@@ -3085,17 +3163,8 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 			cake_seat_update(cpu, (u32)p->pid, CAKE_SEAT_RUN, 0);
 	}
 
-	/* Read after the seat block: nothing charges p's vtime under its own running. */
-	task_vtime = p->scx.dsq_vtime;
-	/* A store every leading run rewrote a line every CPU reads per op; the
-	 * readers work at slice scale, so the frontier moves by the grain. */
-	if (time_before(cake.frontier.word + FRONTIER_GRAIN_NS, task_vtime)) {
-		task_vtime = cake_frontier_candidate(task_vtime, cpu);
-		if (time_before(cake.frontier.word + FRONTIER_GRAIN_NS, task_vtime)) {
-			cake_stat_inc(CAKE_SITE_FRONTIER_ST);
-			cake.frontier.word = task_vtime;
-		}
-	}
+	/* Late: nothing charges p's vtime while it runs; the stamp reload keeps now out of a spill. */
+	run->frontier = cake_frontier_advance(p->scx.dsq_vtime, cpu, run->stamp);
 }
 
 /* ops.stopping: charge the wall time used to the task's vtime, weighted by the
@@ -3108,7 +3177,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		   cake.run[cpu & (MAX_CPUS - 1)].sum;
 	u32 idx = cake_recip_index(p);
 	struct cake_run_slot *rs = &cake.run[cpu & (MAX_CPUS - 1)];
-	u64 hint = 0;
+	u64 hint = 0, charged, ceil;
 
 	/* The slot is vacant until the next running stamps it; the vtime
 	 * charge below stays after the zero (see cake_run_slot). */
@@ -3163,9 +3232,11 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	rs->hint = hint;
 
 
+	charged = cake_scale_vtime_add(p->scx.dsq_vtime, used, idx);
+	ceil = rs->frontier + cake_vtime_cap(recip_weight[idx & RECIP_INDEX_MASK]);
 	/* Direct write: scx_bpf_task_set_dsq_vtime()'s authority check cost +28-36%
 	 * on this, the hottest per-switch callback. */
-	p->scx.dsq_vtime += cake_scale_vtime(used, idx);
+	p->scx.dsq_vtime = cake_vtime_ceil(charged, ceil);
 }
 
 /* ops.update_idle: the idle census. KEEP_BUILTIN_IDLE keeps the kernel tracking
@@ -3266,6 +3337,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 	/* Tick clock for task age: the offset to the precise clock, measured once. */
 	if (cake_tick_ns)
 		cake_jiffies_offset = bpf_ktime_get_ns() - bpf_jiffies64() * cake_tick_ns;
+	cake.frontier.stamp = scx_bpf_now();	/* the rate band starts at attach */
 
 	bpf_for(i, 0, nr) {
 		ret = scx_bpf_create_dsq((u64)(u32)i, -1);
