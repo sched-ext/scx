@@ -18,6 +18,9 @@ fn main() {
     for flag in assets.libarena_cflags() {
         builder.add_cflag(flag);
     }
+    // v6.13-fb rejects a v4 atomic opcode emitted by the libarena sources.
+    // LAVD still supports that kernel, so keep this object on the v3 ISA.
+    builder.add_cflag("-mcpu=v3");
 
     builder
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
