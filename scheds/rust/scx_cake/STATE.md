@@ -5,6 +5,44 @@
 > then the latest rounds, newest first. Rules live in `CLAUDE.md`; behaviour in
 > `DESIGN.md`.
 
+**2026-09-26 (afternoon) — §G98 ALONE ON `9db04489e` ("B"), uncommitted.** 09-22 was
+ejected again overnight (Unreal Editor + python3 + clang++: clang++ weight 11, 41.72 s of
+vtime ahead of the frontier, waited 6.130 s). The working tree is 09-22 plus only §G98:
+the charge ceiling (`cake_vtime_cap`, `cake_vtime_ceil` in ops.stopping), the rate-band
+frontier (`cake_frontier_step/advance/store`, CAS with a stamp), the requeue floor in
+ops.enqueue, and `cake_vcap_unit_ns` from the loader. 09-22's full-CPU candidate sweep is
+kept; no probe counters. Patch: `history/worktree-patches-2026-09-26/g98-only-on-9db04489e.patch`;
+the tested D tree (§G98 + the 09-23..25 work, §G97 removed): `d-restored-tree.patch` there.
+
+KovaaK's (level 1), borderless, uncapped, CPU-bound (GPU 37–77 %), 30 s MangoHud socket
+slots, arms alternated ABBA, first second dropped; runs in `scx_cake_bench/runs/kovaaks_*_20260926/`.
+Arms: 09-22 `7dcc14e0`, B `66770537` then B2 `10fc3c08` (B plus two comment fixes; BPF
+instructions identical to this tree's build), D `dde4a804`. Medians over slots:
+- Nice-10 load (16 procs, 20 ms bursts; external CPU 88.6–89.3 %), `ab5_hog3` 6 slots/arm:
+  B vs 09-22 avg fps +0.56 % (35/36 slot pairs better or equal), p99 −1.76 % (35/36),
+  p99.9 −4.25 %, 1 % low +2.29 %, 0.1 % low +3.89 %, stddev −5.55 % (36/36), max −7.32 %.
+  D: avg fps −0.16 % (12/36), p99 −1.36 %, 0.1 % low +2.18 %, max −17.5 %.
+- Same load, `ab7_hog_b2`, 8 slots/arm: B2 vs 09-22 avg fps +0.49 % (48/64), p99 −0.69 %,
+  p99.9 −0.61 %, 1 % low +0.67 %, 0.1 % low +0.09 %, stddev −3.99 %, max +7.30 % (14/64).
+  Max (one frame per slot) flips sign between runs: noise at this n.
+- Slots with a ≥ 3 s slow stretch under load (4 runs): 09-22 8/28, D 4/20, B 2/14.
+- Quiet host (external 2.2 %), `ab6_quiet3`, 6 slots/arm: B, D and 09-22 within ±0.3 %
+  on every median, max within ±3 %; ranges overlap. Equal.
+- D under load (`ab3_hog`) had one 0.4 s freeze (24/74/208/65 ms frames); none in B or 09-22.
+
+Stall suite (`runs/g98_20260925/tools/liveness_stress.py`, 20 s):
+| scenario | 09-22 | B/B2 | D | EEVDF |
+|---|---|---|---|---|
+| SCHED_IDLE vs 10 pinned per CPU | ejected 7.0 s | 1.08 s gap | 1.13 s | — |
+| nice 19 vs 60 pinned per CPU | ejected 6.5 s | 1.80 s | 1.81 s | — |
+| pool, 4 runs | 217 ms; 5.6 s; ejected 7.0 s ×2 | 315/135/340/141 ms | 211/300/265/160 ms | 663 ms |
+
+Checks: fmt; release and debug builds with no scx_cake warnings; clippy findings only
+in other crates; `comment_lint` clean (0.26, same as 09-22); `cargo test -p scx_cake` passes
+(32 unit, 1 ignored; 1 + 3 integration). Owed: WoW GPU-bound
+multi-pass A/B (the §G97 loss was GPU-bound); OSLTT vs 09-22 and EEVDF; the HZ 250/300
+stall runs; the verifier load test on the multi-LLC, >64-CPU and sparse rows; the maintainer's go to commit.
+
 **2026-09-26 — REVERTED to `9db04489e` (2026-09-22).** Everything after it (the
 2026-09-23..25 nightlies and the uncommitted §G98 work) was reverted; it is kept on branch
 `keep/pre-revert-2026-09-26` and in `git stash` ("pre-revert 2026-09-26 …"). Maintainer's
