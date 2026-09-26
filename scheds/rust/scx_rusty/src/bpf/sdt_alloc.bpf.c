@@ -147,6 +147,7 @@ void __arena *sdt_alloc_stack_pop(struct sdt_alloc_stack __arena *stack)
 static SDT_TASK_FN_ATTRS
 int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 {
+	void __arena * __arena *next;
 	void __arena *slab;
 
 	cast_kern(stack);
@@ -154,6 +155,17 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 	bpf_spin_lock(&sdt_lock);
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MIN)
 		return 0;
+	if (stack->reserve) {
+		next = (void __arena * __arena *)stack->reserve;
+		slab = stack->reserve;
+		stack->reserve = *next;
+		*next = NULL;
+		stack->stack[stack->idx] = slab;
+		stack->idx += 1;
+		sdt_stats.arena_pages_used += 1;
+		bpf_spin_unlock(&sdt_lock);
+		return -EAGAIN;
+	}
 
 	bpf_spin_unlock(&sdt_lock);
 
@@ -168,10 +180,10 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 	 * allocation does not fit into the stack.
 	 */
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MAX) {
-
+		next = (void __arena * __arena *)slab;
+		*next = stack->reserve;
+		stack->reserve = slab;
 		bpf_spin_unlock(&sdt_lock);
-
-		bpf_arena_free_pages(&arena, slab, 1);
 		return -EAGAIN;
 	}
 

@@ -136,11 +136,23 @@ void __arena *scx_alloc_stack_pop(struct scx_alloc_stack __arena *stack)
 static
 int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 {
+	void __arena * __arena *next;
 	void __arena *slab;
 
 	bpf_spin_lock(&alloc_lock);
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MIN)
 		return 0;
+	if (stack->reserve) {
+		next = (void __arena * __arena *)stack->reserve;
+		slab = stack->reserve;
+		stack->reserve = *next;
+		*next = NULL;
+		stack->stack[stack->idx] = slab;
+		stack->idx += 1;
+		alloc_stats.arena_pages_used += 1;
+		bpf_spin_unlock(&alloc_lock);
+		return -EAGAIN;
+	}
 
 	bpf_spin_unlock(&alloc_lock);
 
@@ -155,10 +167,10 @@ int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 	 * allocation does not fit into the stack.
 	 */
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MAX) {
-
+		next = (void __arena * __arena *)slab;
+		*next = stack->reserve;
+		stack->reserve = slab;
 		bpf_spin_unlock(&alloc_lock);
-
-		bpf_arena_free_pages(&arena, slab, 1);
 		return -EAGAIN;
 	}
 
