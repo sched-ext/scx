@@ -419,7 +419,30 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 	/*
 	 * Attempt a migration on wakeup (task was not running) and only if
 	 * ops.select_cid() has not been called already.
+	 *
+	 * A wakeup can reach here without that call because the kernel queued
+	 * it on the cpu the task was still running on, before select_task_rq()
+	 * is reached at all:
+	 *
+	 *	if (smp_load_acquire(&p->on_cpu) &&
+	 *	    ttwu_queue_wakelist(p, task_cpu(p), wake_flags))
+	 *		goto unlock;
+	 *
+	 * That is a wakeup fair.c does not place either: the task goes back to
+	 * the cpu it was on, whose runqueue it is about to have to itself.
+	 * Scanning here would move a task fair.c leaves alone, and the scan is
+	 * the most expensive thing this callback does. A re-enqueue is a
+	 * different matter, see the comment at the call site.
+	 *
+	 * A task that cannot migrate is left to the scan: the kernel skips
+	 * ops.select_cid() for it too, and the scan is a single test of its own
+	 * cid there, which dispatches it straight to the cpu it is pinned to
+	 * instead of queueing it behind a dispatch.
 	 */
+	if ((enq_flags & SCX_ENQ_WAKEUP) && !(enq_flags & SCX_ENQ_REENQ) &&
+	    !is_pcpu_task(p) && cid_allowed(p, scx_bpf_task_cid(p)))
+		return false;
+
 	return !__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p);
 }
 
