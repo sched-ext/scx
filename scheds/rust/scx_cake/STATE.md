@@ -6,6 +6,27 @@
 > experiment), then the `§` registry (every `§` pointer in the source resolves there).
 > Rules live in `CLAUDE.md`; behaviour in `DESIGN.md`.
 
+**2026-09-26 — REVERTED to `9db04489e` (2026-09-22).** Everything after it (the
+2026-09-23..25 nightlies and the uncommitted §G98 work) was reverted; it is kept on branch
+`keep/pre-revert-2026-09-26` and in `git stash` ("pre-revert 2026-09-26 …"). Maintainer's
+note: Claude Opus 5.5 is of questionable quality for this project; avoid it.
+
+What the reverted rounds showed (full entries: `git stash show -p stash@{0} --
+scheds/rust/scx_cake/STATE.md`; data: `scx_cake_bench/runs/wow_*_2026092[56]/`):
+- §G97 (interrupt-CPU placement, 09-23) cost WoW about 1.3–1.6 % fps and 5–6 % on p99
+  and 1 % low. NVIDIA IRQ 97 lands on CPU 12 in bursts of back-to-back handlers; §G97
+  queued the GPU-completion threads (vkd3d_fence, one WoW.exe thread) on CPU 12 for the
+  whole burst: wake-to-run p99 about 106 µs against under 1 µs.
+- Without §G97, the 09-25 tree with §G98 still trailed 09-22 in the tail over two
+  back-to-back pairs: max frame about 45 % longer, frame-time stddev 5–14 % higher,
+  0.1 % low 1–4 % lower; average fps within 0.25 %.
+- schedstat `run_delay` (thread-health) misses IRQ time between a wakeup and its switch
+  (`rq_clock_skip_update`); use tracepoint timing for this class of delay.
+- No cake build needs sudo: copy it to `target/cake_receipt_builds/<name>/scx_cake`, run
+  `sudo -n /usr/local/libexec/scx-bench-setcap <absolute path>`, start it as the user.
+- 09-22 still carries the frontier change behind the 09-25 Unreal Editor `runnable task
+  stall`; the §G98 fix for it is in the stash.
+
 **Full history:** `git log -p -- scheds/rust/scx_cake/STATE.md` — plus the retired
 `HYPOTHESES.md` and `CAMPAIGN_LEDGER.md` paths, merged into this file 2026-08-18.
 This file was compacted 2026-08-12 from 30,510 words; everything cut is in that history.
