@@ -37,6 +37,7 @@ enum consts {
 	PROBE_PROTECT_SHIFT		= 2,
 
 	PERIOD_SLICE_CAP_SHIFT		= 1,
+	CAKE_GRANT_CAP_NS	= SLICE_NS >> PERIOD_SLICE_CAP_SHIFT,	/* longest computed grant */
 
 	/* Pre-scale for the wait:run cross-multiply; it cancels. */
 	CAKE_RATIO_SHIFT		= 16,
@@ -58,11 +59,17 @@ enum consts {
 	RECIP_INDEX_MASK	= RECIP_TABLE_SIZE - 1,
 	IDLE_RECIP_INDEX	= 40,
 	MAX_RECIP_WEIGHT	= 357913941,
+	NICE_0_WEIGHT		= 1024,	/* sched_prio_to_weight[20] */
+	NICE_19_WEIGHT		= 15,	/* sched_prio_to_weight[39] */
+	/* One nice-19 grant: the most vtime lead over the frontier any weight holds. */
+	CAKE_VTIME_CAP_MAX_NS	= ((u64)CAKE_GRANT_CAP_NS *
+				   (((u64)NICE_0_WEIGHT << RECIP_SHIFT) / NICE_19_WEIGHT)) >> RECIP_SHIFT,
 
 	STATE_SLOT_BYTES	= 128,
 	STATE_SLOT_WORDS	= STATE_SLOT_BYTES / sizeof(u64),
 
 	WATCHDOG_TIMEOUT_MS	= 5 * 1000,
+	TICK_MAX_NS		= 20 * NSEC_PER_MSEC,	/* longest tick the loader accepts (HZ 50) */
 
 	/* Verifier sizing bound, a power of 2 so indexes mask; not the DSQ count. */
 	MAX_CPUS	= 1024,
@@ -86,6 +93,7 @@ enum consts {
 	CAKE_HIST_SHIFT			= 8,			/* observe-only histograms: log2 bands from 256 ns */
 	CAKE_HIST_BANDS			= 16,			/* ... to 8 ms */
 	CAKE_HIST_KINDS			= 4,			/* hop, handoff quantum, burst; power of two */
+	RATE_FLOOR_SHIFT		= 4,			/* F rises >= 2^-this ns per ns: see asserts */
 	FRONTIER_GRAIN_NS		= 1 << 16,		/* the frontier advances in 65 us steps: readers work at slice scale */
 	CAKE_POOL_TAG_MASK		= 0x1f,			/* a pooled slice's low bits carry its pool + 1; MAX_LLCS + 1 fits; grants lose <= 31 ns */
 };
