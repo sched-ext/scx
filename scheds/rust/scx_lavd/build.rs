@@ -4,8 +4,25 @@
 // GNU General Public License version 2.
 
 fn main() {
-    scx_cargo::BpfBuilder::new()
-        .unwrap()
+    let out_dir = std::env::var_os("OUT_DIR").unwrap();
+    let assets = scx_arena::build_support::extract(out_dir).unwrap();
+    let include_dir = assets.include_dir();
+    let libarena_include_dir = assets.libarena_include_dir();
+    let source = |name| assets.source(name).to_string_lossy().into_owned();
+    let libarena_source = |name| assets.libarena_source(name).to_string_lossy().into_owned();
+    let mut builder = scx_cargo::BpfBuilder::new().unwrap();
+
+    builder
+        .add_include_path(include_dir.to_str().unwrap())
+        .add_include_path(libarena_include_dir.to_str().unwrap());
+    for flag in assets.libarena_cflags() {
+        builder.add_cflag(flag);
+    }
+    // v6.13-fb rejects a v4 atomic opcode emitted by the libarena sources.
+    // LAVD still supports that kernel, so keep this object on the v3 ISA.
+    builder.add_cflag("-mcpu=v3");
+
+    builder
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
         .add_source("src/bpf/balance.bpf.c")
@@ -17,18 +34,18 @@ fn main() {
         .add_source("src/bpf/preempt.bpf.c")
         .add_source("src/bpf/sys_stat.bpf.c")
         .add_source("src/bpf/util.bpf.c")
-        .add_source("src/bpf/lib/arena.bpf.c")
-        .add_source("src/bpf/lib/common.bpf.c")
-        .add_source("src/bpf/lib/atq.bpf.c")
-        .add_source("src/bpf/lib/bitmap.bpf.c")
-        .add_source("src/bpf/lib/cgroup_bw.bpf.c")
-        .add_source("src/bpf/lib/cpumask.bpf.c")
-        .add_source("src/bpf/lib/rbtree.bpf.c")
-        .add_source("src/bpf/lib/minheap.bpf.c")
-        .add_source("src/bpf/lib/sdt_alloc.bpf.c")
-        .add_source("src/bpf/lib/sdt_task.bpf.c")
-        .add_source("src/bpf/lib/topology.bpf.c")
-        .add_source("src/bpf/lib/ravg.bpf.c")
+        .add_source(&source("arena.bpf.c"))
+        .add_source(&libarena_source("bitmap.bpf.c"))
+        .add_source(&libarena_source("buddy.bpf.c"))
+        .add_source(&libarena_source("common.bpf.c"))
+        .add_source(&libarena_source("rbtree.bpf.c"))
+        .add_source(&source("atq.bpf.c"))
+        .add_source(&source("cgroup_bw.bpf.c"))
+        .add_source(&source("cpumask.bpf.c"))
+        .add_source(&source("urcu.bpf.c"))
+        .add_source(&source("sdt_task.bpf.c"))
+        .add_source(&source("topology.bpf.c"))
+        .add_source(&source("ravg.bpf.c"))
         .compile_link_gen()
         .unwrap();
 }

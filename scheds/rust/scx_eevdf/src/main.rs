@@ -115,6 +115,19 @@ fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result
     Ok(())
 }
 
+fn run_syscall_prog_noargs(prog: &libbpf_rs::ProgramMut<'_>) -> Result<()> {
+    let output = prog.test_run(ProgramInput::default())?;
+    if output.return_value != 0 {
+        bail!(
+            "{} returned {}",
+            prog.name().to_string_lossy(),
+            output.return_value as i32
+        );
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, clap::Parser)]
 #[command(
     name = "scx_eevdf",
@@ -1332,6 +1345,10 @@ impl<'a> Scheduler<'a> {
                 ),
             );
         }
+
+        // Initialize libarena before the scheduler-specific allocations.
+        run_syscall_prog_noargs(&skel.progs.arena_buddy_reset)
+            .context("initializing libarena buddy allocator")?;
 
         // Size the arena for the cid space, which is num_possible_cpus()
         // wide, and hand over the capacity of each CPU. The cid layout is

@@ -33,7 +33,6 @@
 
 struct grp_hdr {
 	u64 weight;		/* cpu.weight as a load weight, tg->shares */
-	u64 pages;		/* arena pages of this block */
 	u64 idle;		/* cpu.idle, see eevdf_cpuctl_set_idle() */
 	u64 slot;		/* its index in @grp_hdrs */
 	u64 next_free;		/* next block to free, see grp_free_defer() */

@@ -6,8 +6,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-pub use crate::bpf_skel::types;
-
 use scx_utils::Topology;
 use scx_utils::{Core, Llc};
 
@@ -24,9 +22,36 @@ use libbpf_rs::ProgramInput;
 use libbpf_rs::ProgramMut;
 use libbpf_rs::libbpf_sys;
 
-// MAX_CPU_ARRSZ has to be big enough to accommodate all present CPUs.
-// Even if it's larger than the size of cpumask_t, we truncate any
-// invalid data when passing it to the kernel's topology init functions.
+mod types {
+    use std::os::raw::c_ulong;
+
+    #[repr(C)]
+    pub(super) struct ArenaInitArgs {
+        pub task_ctx_size: c_ulong,
+        pub task_ctx_align: c_ulong,
+    }
+
+    #[repr(C)]
+    pub(super) struct ArenaAllocMaskArgs {
+        pub bitmap: c_ulong,
+    }
+
+    #[repr(C)]
+    pub(super) struct ArenaTopologyNodeInitArgs {
+        pub bitmap: c_ulong,
+        pub data_size: c_ulong,
+        pub id: c_ulong,
+    }
+
+    #[repr(C)]
+    pub(super) struct ArenaTopologyInitArgs {
+        pub max_children: [u32; 5],
+    }
+}
+
+// Upper bound on the CPU count the library accepts. Masks handed to the arena
+// are sized from the caller's actual nr_cpus, see nr_cpumask_words(), so this
+// only rejects schedulers that report more CPUs than the library supports.
 /// Maximum length of CPU mask supported by the library in bits.
 const MAX_CPU_SUPPORTED: usize = 640;
 
@@ -41,11 +66,12 @@ pub struct ArenaLib {
 }
 
 impl ArenaLib {
-    /// Maximum CPU mask size, derived from MAX_CPU_SUPPORTED.
-    const MAX_CPU_ARRSZ: usize = MAX_CPU_SUPPORTED.div_ceil(64);
-
-    /// Amount of pages allocated at once form the BPF map. by the static stack allocator.
-    const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 8;
+    /// Number of u64 words needed to hold a mask of @nr_cpus bits. The arena
+    /// side allocates its bitmaps to this size, so writes into them must be
+    /// bounded by it rather than by MAX_CPU_SUPPORTED.
+    fn nr_cpumask_words(nr_cpus: usize) -> usize {
+        nr_cpus.div_ceil(64)
+    }
 
     fn run_prog_by_name(obj: &Object, name: &str, input: ProgramInput) -> Result<i32> {
         let c_name = CString::new(name)?;
@@ -72,11 +98,22 @@ impl ArenaLib {
 
     /// Set up basic library state.
     fn setup_arena(obj: &Object, task_size: usize, task_align: usize) -> Result<()> {
+        // arena_init() allocates per-CPU bitmaps, so the buddy allocator must
+        // be ready before running it.
+        let input = ProgramInput {
+            context_in: None,
+            ..Default::default()
+        };
+
+        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
+        if ret != 0 {
+            bail!("Could not initialize libarena buddy allocator: {}", ret);
+        }
+
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
-        let mut args = types::arena_init_args {
-            static_pages: Self::STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+        let mut args = types::ArenaInitArgs {
             task_ctx_size: task_size as c_ulong,
             task_ctx_align: task_align as c_ulong,
         };
@@ -99,8 +136,18 @@ impl ArenaLib {
         Ok(())
     }
 
-    fn setup_topology_node(obj: &Object, mask: &[u64], id: usize) -> Result<()> {
-        let mut args = types::arena_alloc_mask_args {
+    fn setup_topology_node(obj: &Object, nr_cpus: usize, mask: &[u64], id: usize) -> Result<()> {
+        let nr_words = Self::nr_cpumask_words(nr_cpus);
+        if mask.len() < nr_words {
+            bail!(
+                "CPU mask has {} words, expected at least {}",
+                mask.len(),
+                nr_words
+            );
+        }
+        let mask = &mask[..nr_words];
+
+        let mut args = types::ArenaAllocMaskArgs {
             bitmap: 0 as c_ulong,
         };
 
@@ -128,16 +175,15 @@ impl ArenaLib {
             );
         }
 
-        let ptr = unsafe {
-            &mut *std::ptr::with_exposed_provenance_mut::<[u64; 640]>(
-                args.bitmap.try_into().unwrap(),
+        let valid_mask = unsafe {
+            std::slice::from_raw_parts_mut(
+                std::ptr::with_exposed_provenance_mut::<u64>(args.bitmap.try_into().unwrap()),
+                nr_words,
             )
         };
+        valid_mask.copy_from_slice(mask);
 
-        let (valid_mask, _) = ptr.split_at_mut(mask.len());
-        valid_mask.clone_from_slice(mask);
-
-        let mut args = types::arena_topology_node_init_args {
+        let mut args = types::ArenaTopologyNodeInitArgs {
             bitmap: args.bitmap as c_ulong,
             data_size: 0 as c_ulong,
             id: id as c_ulong,
@@ -193,7 +239,7 @@ impl ArenaLib {
             0,
         ];
 
-        let mut args = types::arena_topology_init_args { max_children };
+        let mut args = types::ArenaTopologyInitArgs { max_children };
 
         let input = ProgramInput {
             context_in: Some(unsafe {
@@ -213,22 +259,23 @@ impl ArenaLib {
         Ok(())
     }
 
-    fn setup_topology(obj: &Object) -> Result<()> {
+    fn setup_topology(obj: &Object, nr_cpus: usize) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
         Self::setup_topology_max_children(obj, &topo)?;
 
         // Top level - ID 0 is fine as there's only one top-level node
-        Self::setup_topology_node(obj, topo.span.as_raw_slice(), 0)?;
+        Self::setup_topology_node(obj, nr_cpus, topo.span.as_raw_slice(), 0)?;
 
         for (node_id, node) in topo.nodes {
-            Self::setup_topology_node(obj, node.span.as_raw_slice(), node_id)?;
+            Self::setup_topology_node(obj, nr_cpus, node.span.as_raw_slice(), node_id)?;
         }
 
         // LLCs need to use their actual LLC ID for proper indexing in topo_nodes
         for (llc_id, llc) in topo.all_llcs {
             Self::setup_topology_node(
                 obj,
+                nr_cpus,
                 Arc::<Llc>::into_inner(llc)
                     .expect("missing llc")
                     .span
@@ -240,6 +287,7 @@ impl ArenaLib {
         for (core_id, core) in topo.all_cores {
             Self::setup_topology_node(
                 obj,
+                nr_cpus,
                 Arc::<Core>::into_inner(core)
                     .expect("missing core")
                     .span
@@ -248,9 +296,9 @@ impl ArenaLib {
             )?;
         }
         for (_, cpu) in topo.all_cpus {
-            let mut mask = [0; Self::MAX_CPU_ARRSZ - 1];
+            let mut mask = vec![0; Self::nr_cpumask_words(nr_cpus)];
             mask[cpu.id / 64] |= 1 << (cpu.id % 64);
-            Self::setup_topology_node(obj, &mask, cpu.id)?;
+            Self::setup_topology_node(obj, nr_cpus, &mask, cpu.id)?;
         }
 
         Ok(())
@@ -271,7 +319,7 @@ impl ArenaLib {
         }
 
         Self::setup_arena(obj, task_size, task_align)?;
-        Self::setup_topology(obj)?;
+        Self::setup_topology(obj, nr_cpus)?;
 
         Self::start(obj)
     }
