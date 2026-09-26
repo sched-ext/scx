@@ -1292,6 +1292,21 @@ s32 BPF_STRUCT_OPS(eevdf_select_cid, struct task_struct *p, s32 prev_cid, u64 wa
 	}
 
 	/*
+	 * A wakeup that asks for the waking CPU gets it, the way
+	 * select_task_rq_fair() answers WF_CURRENT_CPU before it looks at
+	 * affinity or idleness at all. The waker is telling us it is about to
+	 * hand this task the CPU it is on. record_wakee() still runs first
+	 * there, so the waker's flips count this wakeup too.
+	 */
+	if ((wake_flags & SCX_WAKE_TTWU) && (wake_flags & SCX_WAKE_CURRENT_CPU) &&
+	    cid_valid(this_cid) && cid_allowed(p, this_cid)) {
+		const struct task_struct *waker = (void *)bpf_get_current_task_btf();
+
+		record_wakee_cid(p, waker ? try_lookup_task_ctx(waker) : NULL, now);
+		return this_cid;
+	}
+
+	/*
 	 * Follow select_task_rq_fair()'s WF_TTWU fast path: wake_affine()
 	 * computes a target, then select_idle_sibling() looks around it. An
 	 * affine target is not itself a selection; if it is busy, an idle

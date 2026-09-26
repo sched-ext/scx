@@ -595,6 +595,21 @@ static __always_inline bool cid_allowed(const struct task_struct *p, s32 cid)
  * Weight of a nice 0 task on the kernel's own scale, NICE_0_LOAD after
  * scale_load_down(), which is what calc_delta_fair() divides by.
  */
+/*
+ * WF_CURRENT_CPU, which enum scx_wake_flags does not expose. Waking through
+ * wake_up_poll_on_current_cpu() or complete_on_current_cpu() asks for the
+ * wakee on the waking CPU, and select_task_rq_fair() obeys before it consults
+ * anything else:
+ *
+ *	if ((wake_flags & WF_CURRENT_CPU) &&
+ *	    cpumask_test_cpu(cpu, p->cpus_ptr))
+ *		return cpu;
+ *
+ * select_task_rq_scx() passes @wake_flags through untouched, so the bit is
+ * there to be read even without a name for it.
+ */
+#define SCX_WAKE_CURRENT_CPU	0x40ULL
+
 #define NICE_0_WEIGHT	1024
 
 /*
