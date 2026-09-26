@@ -12,6 +12,10 @@ mod bpf_skel;
 mod arenalib;
 pub use arenalib::ArenaLib;
 
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::ErrorKind;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
@@ -474,16 +478,180 @@ fn stream_extract_lines(carry: &mut String, new_data: bool) -> Vec<String> {
     lines
 }
 
+/// Forward a batch of complete lines from one stream to the matching standard
+/// stream of the scheduler, and abort when the kernel reports an error on a
+/// stderr stream. Lines prefixed "IGN: " are dropped instead of
+/// forwarded, for prints with side effects that nobody needs to see, the arena
+/// association print in scx_arena_subprog_init() for example.
+fn stream_forward(name: &str, stream_id: u32, label: &str, lines: &[String]) {
+    let kept: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.starts_with("IGN: "))
+        .collect();
+    if !kept.is_empty() {
+        let msg = kept.join("\n");
+        let out = format!("BPF {} of prog {}:\n{}\n", label, name, msg);
+        if stream_id == BPF_STDOUT {
+            print!("{}", out);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        } else {
+            eprint!("{}", out);
+        }
+    }
+    if stream_id == BPF_STDERR && stream_is_fatal(lines) {
+        eprintln!("FATAL: aborting on BPF error report");
+        std::process::exit(1);
+    }
+}
+
+/// A stream opened as a descriptor. `reader` splits the lines and `pending`
+/// carries the partial line a read ends in over to the next read.
+struct StreamFd {
+    name: String,
+    stream_id: u32,
+    label: &'static str,
+    reader: BufReader<File>,
+    pending: Vec<u8>,
+    eof: bool,
+}
+
+impl StreamFd {
+    /// Forward what the descriptor holds. EOF comes once the program is gone
+    /// and the buffered data is out. A partial line is flushed at EOF and on
+    /// `last`, the final read before the watcher stops.
+    fn read_lines(&mut self, last: bool) {
+        let mut lines = Vec::new();
+
+        loop {
+            match self.reader.read_until(b'\n', &mut self.pending) {
+                Ok(0) => self.eof = true,
+                Ok(_) if self.pending.ends_with(b"\n") => {
+                    self.pending.pop();
+                    lines.push(String::from_utf8_lossy(&self.pending).into_owned());
+                    self.pending.clear();
+                    continue;
+                }
+                /* only EOF returns without the delimiter */
+                Ok(_) => self.eof = true,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    eprintln!("reading BPF {} of prog {}: {}", self.label, self.name, e);
+                    self.eof = true;
+                }
+            }
+            break;
+        }
+        if (self.eof || last) && !self.pending.is_empty() {
+            lines.push(String::from_utf8_lossy(&self.pending).into_owned());
+            self.pending.clear();
+        }
+        if !lines.is_empty() {
+            stream_forward(&self.name, self.stream_id, self.label, &lines);
+        }
+    }
+}
+
+/// poll(2) the stream descriptors and the stop eventfd. A stream is dropped at
+/// EOF and a stop request gets one last read of every stream.
+fn stream_watch_fds(mut streams: Vec<StreamFd>, stop: OwnedFd) {
+    while !streams.is_empty() {
+        let mut fds: Vec<libc::pollfd> = std::iter::once(stop.as_raw_fd())
+            .chain(streams.iter().map(|s| s.reader.get_ref().as_raw_fd()))
+            .map(|fd| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            eprintln!("BPF stream watcher stopping, poll failed: {}", err);
+            break;
+        }
+
+        let stopping = fds[0].revents != 0;
+        for (i, stream) in streams.iter_mut().enumerate() {
+            if stopping || fds[i + 1].revents != 0 {
+                stream.read_lines(stopping);
+            }
+        }
+        streams.retain(|s| !s.eof);
+        if stopping {
+            break;
+        }
+    }
+}
+
+/// Read every stream once per STREAM_POLL_INTERVAL through the read command
+/// and assemble the lines here, for kernels without stream descriptors.
+fn stream_watch_periodic(progs: Vec<(String, OwnedFd)>, stop: OwnedFd) {
+    let mut buf = vec![0u8; 65536];
+    let mut carries: Vec<[String; 2]> = (0..progs.len())
+        .map(|_| [String::new(), String::new()])
+        .collect();
+
+    loop {
+        let mut fds = [libc::pollfd {
+            fd: stop.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let ret =
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, STREAM_POLL_INTERVAL.as_millis() as i32) };
+        /* run one final scan below before honoring a stop request */
+        let stopping = if ret < 0 {
+            std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+        } else {
+            ret > 0
+        };
+
+        for (pidx, (name, fd)) in progs.iter().enumerate() {
+            for (sidx, (stream_id, label)) in BPF_STREAMS.iter().enumerate() {
+                let carry = &mut carries[pidx][sidx];
+                let mut new_data = false;
+
+                /* drain fully, a backlog can exceed the buffer */
+                loop {
+                    let n = stream_read(fd, *stream_id, &mut buf);
+                    if n <= 0 {
+                        break;
+                    }
+                    carry.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+                    new_data = true;
+                    if (n as usize) < buf.len() {
+                        break;
+                    }
+                }
+
+                /* the final scan flushes a trailing partial like the fd path */
+                let lines = stream_extract_lines(carry, new_data && !stopping);
+                if !lines.is_empty() {
+                    stream_forward(name, *stream_id, label, &lines);
+                }
+            }
+        }
+
+        if stopping {
+            break;
+        }
+    }
+}
+
 /// Forward the BPF stdout/stderr streams of every program in the object to
-/// the scheduler's stdout and stderr respectively, and abort when the
-/// kernel reports an error on a stderr stream. Nothing reads these streams
-/// otherwise, so messages would be silently dropped. Lines prefixed "IGN: "
-/// are dropped instead of forwarded, for prints with side effects that
-/// nobody needs to see, the arena association print in
-/// scx_arena_subprog_init() for example. Called from ArenaLib::setup(), the
-/// watcher is owned by the returned ArenaLib.
+/// the scheduler's stdout and stderr. Nothing reads these streams otherwise,
+/// so messages would be silently dropped. On a kernel with stream descriptors
+/// the watcher poll(2)s them and forwards each line as it is written.
+/// Elsewhere it reads the streams periodically. Called from ArenaLib::setup(),
+/// the watcher is owned by the returned ArenaLib.
 pub(crate) fn stream_watcher_spawn(obj: &libbpf_rs::Object) -> Result<Daemon> {
+    let with_fds = *scx_utils::compat::PROG_STREAM_OPEN_SUPPORTED;
     let mut progs = Vec::new();
+    let mut streams = Vec::new();
 
     for prog in obj.progs() {
         let Some(name) = prog.name().to_str() else {
@@ -493,7 +661,22 @@ pub(crate) fn stream_watcher_spawn(obj: &libbpf_rs::Object) -> Result<Daemon> {
         let Some(fd) = prog_fd_clone(&prog)? else {
             continue;
         };
-        progs.push((name.to_string(), fd));
+        if !with_fds {
+            progs.push((name.to_string(), fd));
+            continue;
+        }
+        for (stream_id, label) in BPF_STREAMS {
+            let sfd = scx_utils::compat::prog_stream_open(fd.as_fd(), stream_id, true)
+                .with_context(|| format!("opening BPF {} of prog {}", label, name))?;
+            streams.push(StreamFd {
+                name: name.to_string(),
+                stream_id,
+                label,
+                reader: BufReader::new(File::from(sfd)),
+                pending: Vec::new(),
+                eof: false,
+            });
+        }
     }
 
     let stop = stop_eventfd()?;
@@ -503,75 +686,10 @@ pub(crate) fn stream_watcher_spawn(obj: &libbpf_rs::Object) -> Result<Daemon> {
     let thread = std::thread::Builder::new()
         .name("scx-bpf-stream".into())
         .spawn(move || {
-            let mut buf = vec![0u8; 65536];
-            let mut carries: Vec<[String; 2]> = (0..progs.len())
-                .map(|_| [String::new(), String::new()])
-                .collect();
-
-            loop {
-                let mut fds = [libc::pollfd {
-                    fd: daemon_stop.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                }];
-                let ret = unsafe {
-                    libc::poll(fds.as_mut_ptr(), 1, STREAM_POLL_INTERVAL.as_millis() as i32)
-                };
-                /* run one final scan below before honoring a stop request */
-                let stopping = if ret < 0 {
-                    std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-                } else {
-                    ret > 0
-                };
-
-                for (pidx, (name, fd)) in progs.iter().enumerate() {
-                    for (sidx, (stream_id, label)) in BPF_STREAMS.iter().enumerate() {
-                        let carry = &mut carries[pidx][sidx];
-                        let mut new_data = false;
-
-                        /* drain fully, a backlog can exceed the buffer */
-                        loop {
-                            let n = stream_read(fd, *stream_id, &mut buf);
-                            if n <= 0 {
-                                break;
-                            }
-                            carry.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
-                            new_data = true;
-                            if (n as usize) < buf.len() {
-                                break;
-                            }
-                        }
-
-                        let lines = stream_extract_lines(carry, new_data);
-                        if lines.is_empty() {
-                            continue;
-                        }
-
-                        let kept: Vec<&str> = lines
-                            .iter()
-                            .map(String::as_str)
-                            .filter(|l| !l.starts_with("IGN: "))
-                            .collect();
-                        if !kept.is_empty() {
-                            let msg = kept.join("\n");
-                            let out = format!("BPF {} of prog {}:\n{}\n", label, name, msg);
-                            if *stream_id == BPF_STDOUT {
-                                print!("{}", out);
-                                let _ = std::io::Write::flush(&mut std::io::stdout());
-                            } else {
-                                eprint!("{}", out);
-                            }
-                        }
-                        if *stream_id == BPF_STDERR && stream_is_fatal(&lines) {
-                            eprintln!("FATAL: aborting on BPF error report");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-
-                if stopping {
-                    break;
-                }
+            if with_fds {
+                stream_watch_fds(streams, daemon_stop);
+            } else {
+                stream_watch_periodic(progs, daemon_stop);
             }
         })
         .context("spawning BPF stream watcher")?;
