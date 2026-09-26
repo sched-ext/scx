@@ -166,7 +166,7 @@ struct task_p2dq {
 	u64			pelt_last_update_time;
 	u32			util_sum;
 	u32			util_avg;
-	u32			period_contrib;
+	u64			period_contrib;
 
 	u64			dsq_id;
 	u64			slice_ns;
