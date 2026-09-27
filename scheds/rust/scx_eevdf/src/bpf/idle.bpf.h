@@ -32,10 +32,9 @@
  * ops.update_idle() only fires on real idle transitions. A cid that was
  * claimed for a task and kicked, and then found nothing to run, goes back
  * to idle without a transition and would keep its bit cleared for good:
- * ops.dispatch() re-arms the bit whenever a cid is about to idle. The
- * re-arm can be wrong the other way when a task lands on the cid before
- * it idles. The next idle claim or ops.update_idle(cid, false) clears
- * that stale hint; a claim of a busy cid is bounced back to ops.enqueue().
+ * ops.dispatch() re-arms the bit when it runs from the idle task. A
+ * successful claim excludes other claimers, but the target CPU may become
+ * busy before the task arrives.
  */
 static bool cid_idle_test(s32 cid)
 {

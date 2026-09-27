@@ -31,15 +31,14 @@
  *
  *   ops.update_idle(cid, true)  -> scx_cid_idle_set()
  *   ops.update_idle(cid, false) -> scx_cid_idle_clear()
- *   ops.dispatch() about to idle without a transition -> use set() again
+ *   ops.dispatch() on an idle CPU -> scx_cid_idle_rearm()
  *
  * A claim clears the bit, so concurrent selectors cannot both take the same
  * CID. Initialize with smt_enabled=false when whole-core tracking is not
  * needed.
  *
- * NOTE: a CID rearmed by ops.dispatch() can become busy without an idle
- * transition. Its stale bit is cleared by the next claim; schedulers must
- * handle a claimed CPU that turns out to be busy.
+ * Winning a claim excludes other claimers, but does not guarantee that the
+ * target CPU stays idle until the task arrives.
  *
  * scx_cid_idle_pick() searches the anchor CID's core, LLC, node, or all CIDs.
  * SCX_CID_IDLE_SAME_CORE tries the specified cid first, then its siblings.
@@ -79,11 +78,15 @@
  *                   scx_cid_idle_clear(&idle_state, cid);
  *   }
  *
- *   // Call from ops.dispatch() if the claimed CID has no work to run.
- *   static void rearm_empty_dispatch(s32 cid)
+ *   // ops.dispatch(): rearm only after failing to dispatch work.
+ *   void BPF_STRUCT_OPS(example_dispatch, s32 cid,
+ *                       struct task_struct *prev)
  *   {
  *           TOUCH_ARENA();
- *           scx_cid_idle_set(&idle_state, cid);
+ *           // dispatch_queued_task() is supplied by the scheduler.
+ *           if (dispatch_queued_task(cid))
+ *                   return;
+ *           scx_cid_idle_rearm(&idle_state, cid, &idle_state.ranges[cid]);
  *   }
  *
  *   // ops.select_cid(): try the previous core, then widen the search.
@@ -565,13 +568,25 @@ scx_cid_idle_set_ranges(struct scx_cid_idle_state *state, s32 cid,
 					    ranges->node_base, true);
 }
 
-/* Rearm a CID after an idle transition or an empty dispatch. */
+/* Mirror an idle transition or seed the initial idle state. */
 static __always_inline void
 scx_cid_idle_set(struct scx_cid_idle_state *state, s32 cid)
 {
 	if (cid < 0 || (u32)cid >= state->nr_cids)
 		return;
 	scx_cid_idle_set_ranges(state, cid, &state->ranges[cid]);
+}
+
+/* A dispatch from the idle task may lack an ops.update_idle() transition. */
+static __always_inline void
+scx_cid_idle_rearm(struct scx_cid_idle_state *state, s32 cid,
+		    const struct scx_cid_ranges __arena *ranges)
+{
+	struct task_struct *task;
+
+	task = scx_bpf_cid_curr(cid);
+	if (task && (task->flags & PF_IDLE))
+		scx_cid_idle_set_ranges(state, cid, ranges);
 }
 
 /* Build ranges and seed idle state after allocating storage, in ops.init(). */
