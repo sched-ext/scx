@@ -253,8 +253,9 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
                 .as_raw_slice(),
         )?;
     }
+    let topolen = topo.span.as_raw_slice().len();
     for (_, cpu) in topo.all_cpus {
-        let mut mask = [0; 9];
+        let mut mask = vec![0u64; topolen];
         mask[cpu.id / 64] |= 1 << (cpu.id % 64);
         setup_topology_node(skel, &mask)?;
     }
