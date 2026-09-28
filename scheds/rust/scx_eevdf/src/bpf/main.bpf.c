@@ -903,12 +903,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 		return -E2BIG;
 	}
 
-	/*
-	 * Set the active cid space before building LLC masks or setting bits.
-	 */
-	err = scx_cid_idle_init_state(&eevdf_idle, nr_cids, smt_enabled);
-	if (err)
-		return err;
 	cmask_init(queued_cids, 0, nr_cids);
 	bpf_arena_for(cid, 0, nr_place_tiers)
 		cmask_init(place_tier_mask(cid), 0, nr_cids);
@@ -916,40 +910,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 		cmask_init(capacity_tier_mask(cid), 0, nr_cids);
 
 	init_topology();
-	bpf_arena_for(cid, 0, nr_cids) {
-		const struct scx_cid_ranges __arena *ranges = &cid_topo(cid)->ranges;
-		u32 base, nr;
-
-		err = scx_cid_idle_split_range(ranges, SCX_CID_IDLE_SPLIT_SHARD,
-					     &base, &nr);
-		if (err || base != cid || !nr || ranges->core_base != cid)
-			return -EINVAL;
-		if (cid == ranges->node_base) {
-			const struct scx_cid_ranges __arena *last;
-			u64 bytes;
-
-			if (!ranges->node_nr ||
-			    ranges->node_nr > nr_cids - cid)
-				return -EINVAL;
-			last = &cid_topo(cid + ranges->node_nr - 1)->ranges;
-			err = scx_cid_idle_node_pool_bytes(ranges, last,
-						    SCX_CID_IDLE_SPLIT_SHARD,
-						    &bytes);
-			if (err)
-				return err;
-			err = scx_cid_idle_start_node(&eevdf_idle, cid,
-						   ranges->node_nr, bytes,
-						   __COMPAT_scx_bpf_cid_node(cid));
-			if (err)
-				return err;
-		}
-
-		err = scx_cid_idle_add_segment(&eevdf_idle, cid, nr,
-						 ranges->node_base, ranges->node_nr);
-		if (err)
-			return err;
-		cid += nr - 1;
-	}
+	err = scx_cid_idle_init(&eevdf_idle, smt_enabled,
+				 SCX_CID_IDLE_SPLIT_SHARD,
+				 &topos[0].ranges, sizeof(*topos));
+	if (err)
+		return err;
 	now = bpf_ktime_get_ns();
 
 	/* sched_init(): the idle pull budget starts open by a migration cost. */
@@ -1005,8 +970,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 			topo->capacity_tier = nr_capacity_tiers - 1;
 		__cmask_set(cid, place_tier_mask(topo->place_tier));
 		__cmask_set(cid, capacity_tier_mask(topo->capacity_tier));
-
-		cid_idle_set(cid);
 
 		ht = bpf_map_lookup_elem(&hrticks, &cid);
 		if (!ht) {

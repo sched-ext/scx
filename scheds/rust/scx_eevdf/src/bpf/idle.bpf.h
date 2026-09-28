@@ -131,7 +131,7 @@ static void cid_idle_set(s32 cid)
 	if (!cid_valid(cid))
 		return;
 
-	scx_cid_idle_set_ranges(&eevdf_idle, cid, &cid_topo(cid)->ranges);
+	scx_cid_idle_set(&eevdf_idle, cid);
 }
 
 /*
@@ -192,38 +192,31 @@ static __always_inline s32 first_idle_cid(const struct task_struct *p, u64 w,
 	return -EBUSY;
 }
 
-/* Walk segments in CID order, skipping empty ones in wide ranges. */
-static __noinline s32
-scan_idle_tier_range(const struct task_struct *p,
-		     const struct scx_cmask __arena *tier, u32 base, u32 nr,
-		     u32 flags)
+/*
+ * Walk segments in CID order, skipping empty ones in wide ranges.
+ *
+ * A global function: the verifier checks the segment walk once, not once
+ * per caller and caller loop iteration.
+ */
+__noinline s32
+scan_idle_tier_range(const struct task_struct *p __arg_trusted,
+		     const struct scx_cmask __arena *tier __arg_arena,
+		     u32 base, u32 nr, u32 flags)
 {
-	u32 pos;
+	u32 cursor = base, word;
 
 	if (!nr)
 		return -EBUSY;
-	bpf_arena_for(pos, base, base + nr) {
-		struct scx_cid_idle_segment __arena *seg =
-			eevdf_idle.segments[pos];
-		u32 end = MIN(base + nr, seg->base + seg->nr);
-		u32 k;
+	while (cursor < base + nr && can_loop) {
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle, tier,
+						base, nr, &cursor, &word);
+		s32 cid;
 
-		if ((pos == base && end == base + nr) ||
-		    __cmask_test(seg->base, seg->summary->idle)) {
-			bpf_arena_for(k, pos / 64, (end - 1) / 64 + 1) {
-				u64 w = scx_cid_idle_segment_word(seg, tier, k,
-							      pos, end - pos);
-				s32 cid;
-
-				if (!w)
-					continue;
-				cid = first_idle_cid(p, w, k, flags & 1,
-						     flags & 2);
-				if (cid >= 0)
-					return cid;
-			}
-		}
-		pos = end - 1;
+		if (!w)
+			continue;
+		cid = first_idle_cid(p, w, word, flags & 1, flags & 2);
+		if (cid >= 0)
+			return cid;
 	}
 
 	return -EBUSY;

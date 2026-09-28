@@ -649,27 +649,17 @@ arm:
  */
 static void bw_kick_idle(void)
 {
-	u32 pos;
+	u32 cursor = 0, word;
 
-	bpf_arena_for(pos, 0, nr_cids) {
-		struct scx_cid_idle_segment __arena *seg =
-			eevdf_idle.segments[pos];
-		u32 end = seg->base + seg->nr;
-		u32 k;
+	while (cursor < nr_cids && can_loop) {
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle, NULL, 0,
+						     nr_cids, &cursor, &word);
 
-		if (__cmask_test(seg->base, seg->summary->idle)) {
-			bpf_arena_for(k, pos / 64, (end - 1) / 64 + 1) {
-				u64 w = scx_cid_idle_segment_word(seg, NULL, k,
-							      pos, end - pos);
-
-				if (!w)
-					continue;
-				scx_bpf_kick_cid(k * 64 + __builtin_ctzll(w),
-						 SCX_KICK_IDLE);
-				return;
-			}
-		}
-		pos = end - 1;
+		if (!w)
+			continue;
+		scx_bpf_kick_cid(word * 64 + __builtin_ctzll(w),
+				 SCX_KICK_IDLE);
+		return;
 	}
 }
 

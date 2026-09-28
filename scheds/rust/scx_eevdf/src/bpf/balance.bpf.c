@@ -229,45 +229,40 @@ static void active_balance_complete(s32 cid, u32 outcome)
 }
 
 /*
- * Scan packing tier @t for a fully idle, due active-balance destination.
- * Unlike wake placement this does not claim the idle bit; reservation is a
- * separate atomic step immediately before the kick.
+ * Scan packing tier @t, or all cids if @t < 0, for a fully idle, due
+ * active-balance destination. Unlike wake placement this does not claim the
+ * idle bit; reservation is a separate atomic step immediately before the
+ * kick.
+ *
+ * A global function: the verifier checks the segment walk once, not once per
+ * caller and caller loop iteration.
  */
-static __always_inline s32
-balance_scan_range(const struct task_struct *p, s32 t, u32 base, u32 nr,
-		   bool restricted, u64 now)
+__noinline s32
+balance_scan_range(const struct task_struct *p __arg_trusted, s32 t, u32 base,
+		   u32 nr, u64 now)
 {
-	u32 pos;
+	bool restricted = is_restricted(p);
+	u32 cursor = base, word;
+
+	TOUCH_ARENA();
 
 	if (!nr)
 		return -EBUSY;
-	bpf_arena_for(pos, base, base + nr) {
-		struct scx_cid_idle_segment __arena *seg =
-			eevdf_idle.segments[pos];
-		u32 end = MIN(base + nr, seg->base + seg->nr);
-		u32 k;
+	while (cursor < base + nr && can_loop) {
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle,
+				t >= 0 ? place_tier_mask(t) : NULL,
+				base, nr, &cursor, &word);
 
-		if ((pos == base && end == base + nr) ||
-		    __cmask_test(seg->base, seg->summary->idle)) {
-			bpf_arena_for(k, pos / 64, (end - 1) / 64 + 1) {
-				u64 w = scx_cid_idle_segment_word(seg,
-					t >= 0 ? place_tier_mask(t) : NULL,
-					k, pos, end - pos);
+		while (w && can_loop) {
+			s32 cid = scx_cid_idle_next(&eevdf_idle, &w, word);
 
-				while (w && can_loop) {
-					s32 cid = scx_cid_idle_next(&eevdf_idle,
-							      &w, k);
-
-					if (cid < 0 ||
-					    (smt_enabled && !core_is_idle(cid)) ||
-					    (restricted && !cid_allowed(p, cid)) ||
-					    !active_balance_due(cid, now))
-						continue;
-					return cid;
-				}
-			}
+			if (cid < 0 ||
+			    (smt_enabled && !core_is_idle(cid)) ||
+			    (restricted && !cid_allowed(p, cid)) ||
+			    !active_balance_due(cid, now))
+				continue;
+			return cid;
 		}
-		pos = end - 1;
 	}
 
 	return -EBUSY;
@@ -319,7 +314,7 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 		goto parent;
 	bpf_arena_for(t, 0, nr_tiers) {
 		s32 cid = balance_scan_range(p, t, src->ranges.llc_base, src->ranges.llc_nr,
-					     restricted, now);
+					     now);
 
 		if (cid >= 0)
 			return cid;
@@ -337,7 +332,7 @@ parent:
 	base = numa_enabled ? src->ranges.node_base : 0;
 	nr = numa_enabled ? src->ranges.node_nr : nr_cids;
 	bpf_arena_for(t, 0, nr_tiers) {
-		s32 cid = balance_scan_range(p, t, base, nr, restricted, now);
+		s32 cid = balance_scan_range(p, t, base, nr, now);
 
 		if (cid >= 0 && cid_topo(cid)->ranges.llc_base != src->ranges.llc_base)
 			return cid;
@@ -423,8 +418,7 @@ static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 			cctx->smt_busy_since = now;
 		else if (!time_before(now, cctx->smt_busy_since + slice_ns)) {
 			cid = balance_scan_range(p, -1, src->ranges.llc_base,
-						 src->ranges.llc_nr, is_restricted(p),
-						 now);
+						 src->ranges.llc_nr, now);
 			if (cid >= 0)
 				return select_idle_smt_balance_cid(p, cid, now);
 		}

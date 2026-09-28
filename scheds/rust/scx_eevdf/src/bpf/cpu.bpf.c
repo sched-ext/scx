@@ -124,6 +124,7 @@ static void init_topology(void)
 		if (!smt_enabled) {
 			topo->ranges.core_base = cid;
 			topo->ranges.core_nr = 1;
+			topo->ranges.core_idx = cid;
 		}
 
 		topo->cpu = cpu >= 0 ? cpu : 0;
@@ -196,7 +197,7 @@ static u64 arena_off, arena_size;
  * there: a short budget makes the last carve fail and the init return
  * -ENOMEM.
  */
-#define ARENA_CARVES 15
+#define ARENA_CARVES 14
 
 static void __arena *arena_carve(u64 bytes, u64 align)
 {

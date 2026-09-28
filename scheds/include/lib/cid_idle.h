@@ -21,11 +21,18 @@
  * or ops.update_idle() clears a CID that is already busy. Segment allocations
  * use the CID's NUMA node when the kfunc is available.
  *
- * Schedulers with ranges embedded in another topology table can supply their
- * own ranges and use scx_cid_idle_init_state(), scx_cid_idle_start_node(),
- * scx_cid_idle_add_segment(), and scx_cid_idle_set_ranges() instead. Set
- * nr_cids_max before init when a larger CID space is needed. Every CID
- * needs a segment before it is used.
+ * Schedulers with ranges embedded in another topology table can pass the
+ * first ranges entry and the table stride to scx_cid_idle_init(). Set
+ * nr_cids_max before init when a larger CID space is needed. A scheduler
+ * that rewrites a level's base and length must rewrite its index to match:
+ * init sizes each node's pool from the first and last index of the split
+ * level in the node.
+ *
+ * Each segment of the split level must start at a core boundary and lie
+ * within one node; init fails otherwise. Kernel-built shards satisfy this,
+ * since they are cut on core boundaries inside an LLC. Shard boundaries
+ * passed to scx_bpf_cid_override() must follow the same rules to use
+ * SCX_CID_IDLE_SPLIT_SHARD.
  *
  * Runtime lifecycle:
  *
@@ -63,7 +70,7 @@
  *   {
  *           TOUCH_ARENA();
  *           return scx_cid_idle_init(&idle_state, smt_enabled,
- *                                    SCX_CID_IDLE_SPLIT_SHARD);
+ *                                    SCX_CID_IDLE_SPLIT_SHARD, NULL, 0);
  *   }
  *
  *   // ops.update_idle(): own the idle bitmap after registering this op.
@@ -86,7 +93,7 @@
  *           // dispatch_queued_task() is supplied by the scheduler.
  *           if (dispatch_queued_task(cid))
  *                   return;
- *           scx_cid_idle_rearm(&idle_state, cid, &idle_state.ranges[cid]);
+ *           scx_cid_idle_rearm(&idle_state, cid);
  *   }
  *
  *   // ops.select_cid(): try the previous core, then widen the search.
@@ -136,12 +143,9 @@
 struct scx_cid_idle_state {
 	struct scx_cid_idle_segment __arena * __arena *segments;
 	struct scx_cid_idle_segment __arena * __arena *node_summaries;
+	struct scx_cmask __arena * __arena *node_core_llcs;
 	struct scx_cid_ranges __arena *ranges;
-	char __arena *node_pool;
-	struct scx_cid_idle_segment __arena *node_summary;
-	u32 node_pool_size;
-	u32 node_pool_off;
-	u32 node_pool_base;
+	u32 range_stride;
 	u32 nr_cids_max;
 	u32 nr_cids;
 	bool smt_enabled;
@@ -149,14 +153,31 @@ struct scx_cid_idle_state {
 	struct scx_cid_topo topo_buf;
 };
 
-/* One topology segment's mutable masks, isolated by cache lines. */
+/*
+ * One topology segment's idle mask, isolated by cache lines. A node summary
+ * is a segment too: its idle mask has a bit set at the base of each segment
+ * of the node that may have an idle CID, and its core-hint mask follows it
+ * in the node's pool, reached through scx_cid_idle_state->node_core_llcs.
+ */
 struct scx_cid_idle_segment {
-	struct scx_cmask __arena *idle;
-	struct scx_cmask __arena *core_llcs;
 	struct scx_cid_idle_segment __arena *summary;
-	u32 base;
-	u32 nr;
+	struct scx_cmask idle;
 };
+
+struct scx_cid_idle_build {
+	char __arena *node_pool;
+	struct scx_cid_idle_segment __arena *node_summary;
+	u32 node_pool_size;
+	u32 node_pool_off;
+	u32 node_pool_base;
+};
+
+static __always_inline struct scx_cid_ranges __arena *
+scx_cid_idle_ranges(const struct scx_cid_idle_state *state, u32 cid)
+{
+	return (void __arena *)((char __arena *)state->ranges +
+				 (u64)cid * state->range_stride);
+}
 
 enum scx_cid_idle_scope {
 	SCX_CID_IDLE_SAME_CORE,
@@ -230,6 +251,7 @@ scx_cid_idle_alloc(struct scx_cid_idle_state *state, u32 nr_cids_max)
 	u32 segment_pages;
 	struct scx_cid_idle_segment __arena * __arena *segments;
 	struct scx_cid_idle_segment __arena * __arena *summaries;
+	struct scx_cmask __arena * __arena *core_llcs;
 
 	if (!nr_cids_max)
 		return -EINVAL;
@@ -245,22 +267,32 @@ scx_cid_idle_alloc(struct scx_cid_idle_state *state, u32 nr_cids_max)
 		bpf_arena_free_pages(&arena, segments, segment_pages);
 		return -ENOMEM;
 	}
+	core_llcs = bpf_arena_alloc_pages(&arena, NULL, segment_pages,
+					    NUMA_NO_NODE, 0);
+	if (!core_llcs) {
+		bpf_arena_free_pages(&arena, summaries, segment_pages);
+		bpf_arena_free_pages(&arena, segments, segment_pages);
+		return -ENOMEM;
+	}
 
 	state->segments = segments;
 	state->node_summaries = summaries;
+	state->node_core_llcs = core_llcs;
 	state->nr_cids_max = nr_cids_max;
 	state->nr_cids = 0;
 	return 0;
 }
 
-/* Place each header and mask on a cache-line boundary in the node pool. */
+/* Keep segments separate and align the node's core-hint mask. */
 static __always_inline u64
 scx_cid_idle_segment_bytes(u32 nr, bool with_core_hints)
 {
 	u64 mask_bytes = (sizeof(struct scx_cmask) +
 			  (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
+	u64 idle_bytes = (sizeof(struct scx_cid_idle_segment) +
+			  (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 
-	return 64 + (with_core_hints ? 2 : 1) * mask_bytes;
+	return idle_bytes + (with_core_hints ? mask_bytes : 0);
 }
 
 /* Bound each segment by the node size to size the pool in one pass. */
@@ -283,37 +315,37 @@ scx_cid_idle_node_pool_bytes(const struct scx_cid_ranges __arena *first,
 	return 0;
 }
 
+/* The node's core-hint mask follows its summary segment in the pool. */
+static __always_inline struct scx_cmask __arena *
+scx_cid_idle_summary_core_llcs(struct scx_cid_idle_segment __arena *summary)
+{
+	return (void __arena *)((char __arena *)summary +
+		scx_cid_idle_segment_bytes(summary->idle.nr_cids, false));
+}
+
 static __always_inline struct scx_cid_idle_segment __arena *
-scx_cid_idle_alloc_segment(struct scx_cid_idle_state *state, u32 base,
+scx_cid_idle_alloc_segment(struct scx_cid_idle_build *build, u32 base,
 			   u32 nr, bool with_core_hints)
 {
 	struct scx_cid_idle_segment __arena *seg;
-	char __arena *mem;
-	u64 mask_bytes, bytes;
+	u64 bytes;
 
-	mask_bytes = (sizeof(struct scx_cmask) +
-		      (u64)CMASK_NR_WORDS(nr) * sizeof(u64) + 63) & ~63ULL;
 	bytes = scx_cid_idle_segment_bytes(nr, with_core_hints);
-	if (!state->node_pool || bytes > state->node_pool_size - state->node_pool_off)
+	if (!build->node_pool || bytes > build->node_pool_size - build->node_pool_off)
 		return NULL;
-	mem = state->node_pool + state->node_pool_off;
-	state->node_pool_off += bytes;
-	seg = (void __arena *)mem;
-	seg->base = base;
-	seg->nr = nr;
+	seg = (void __arena *)(build->node_pool + build->node_pool_off);
+	build->node_pool_off += bytes;
 	seg->summary = NULL;
-	seg->idle = (void __arena *)(mem + 64);
-	seg->core_llcs = with_core_hints ?
-		(void __arena *)(mem + 64 + mask_bytes) : NULL;
-	cmask_init(seg->idle, base, nr);
+	cmask_init(&seg->idle, base, nr);
 	if (with_core_hints)
-		cmask_init(seg->core_llcs, base, nr);
+		cmask_init(scx_cid_idle_summary_core_llcs(seg), base, nr);
 	return seg;
 }
 
 /* Allocate one NUMA-local pool for a node's summary and all its segments. */
 static __always_inline int
-scx_cid_idle_start_node(struct scx_cid_idle_state *state, u32 node_base,
+scx_cid_idle_start_node(struct scx_cid_idle_state *state,
+			struct scx_cid_idle_build *build, u32 node_base,
 			u32 node_nr, u64 bytes, s32 node)
 {
 	u64 pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -322,42 +354,47 @@ scx_cid_idle_start_node(struct scx_cid_idle_state *state, u32 node_base,
 	    node_nr > state->nr_cids - node_base ||
 	    !pages || pages > (u64)~0U / PAGE_SIZE)
 		return -EINVAL;
-	state->node_pool = bpf_arena_alloc_pages(&arena, NULL, pages, node, 0);
-	if (!state->node_pool)
+	build->node_pool = bpf_arena_alloc_pages(&arena, NULL, pages, node, 0);
+	if (!build->node_pool)
 		return -ENOMEM;
-	state->node_pool_size = pages * PAGE_SIZE;
-	state->node_pool_off = 0;
-	state->node_pool_base = node_base;
-	state->node_summary = scx_cid_idle_alloc_segment(state, node_base,
+	build->node_pool_size = pages * PAGE_SIZE;
+	build->node_pool_off = 0;
+	build->node_pool_base = node_base;
+	build->node_summary = scx_cid_idle_alloc_segment(build, node_base,
 							  node_nr, true);
-	if (state->node_summary)
-		state->node_summaries[node_base] = state->node_summary;
-	return state->node_summary ? 0 : -ENOMEM;
+	if (!build->node_summary)
+		return -ENOMEM;
+	state->node_summaries[node_base] = build->node_summary;
+	state->node_core_llcs[node_base] =
+		scx_cid_idle_summary_core_llcs(build->node_summary);
+	return 0;
 }
 
 /* Validate a node's range and allocate its summary and segment pool. */
 static __always_inline int
-scx_cid_idle_init_node(struct scx_cid_idle_state *state, u32 cid,
+scx_cid_idle_init_node(struct scx_cid_idle_state *state,
+		       struct scx_cid_idle_build *build, u32 cid,
 		       enum scx_cid_idle_split split)
 {
-	const struct scx_cid_ranges __arena *first = &state->ranges[cid];
+	const struct scx_cid_ranges __arena *first = scx_cid_idle_ranges(state, cid);
 	const struct scx_cid_ranges __arena *last;
 	u64 bytes;
 	int ret;
 
 	if (!first->node_nr || first->node_nr > state->nr_cids - cid)
 		return -EINVAL;
-	last = &state->ranges[cid + first->node_nr - 1];
+	last = scx_cid_idle_ranges(state, cid + first->node_nr - 1);
 	ret = scx_cid_idle_node_pool_bytes(first, last, split, &bytes);
 	if (ret)
 		return ret;
-	return scx_cid_idle_start_node(state, cid, first->node_nr,
+	return scx_cid_idle_start_node(state, build, cid, first->node_nr,
 					    bytes, __COMPAT_scx_bpf_cid_node(cid));
 }
 
 /* Add a segment after scx_cid_idle_start_node() for its node. */
 static __always_inline int
-scx_cid_idle_add_segment(struct scx_cid_idle_state *state, u32 base, u32 nr,
+scx_cid_idle_add_segment(struct scx_cid_idle_state *state,
+			 struct scx_cid_idle_build *build, u32 base, u32 nr,
 			 u32 node_base, u32 node_nr)
 {
 	struct scx_cid_idle_segment __arena *seg, *summary;
@@ -367,12 +404,12 @@ scx_cid_idle_add_segment(struct scx_cid_idle_state *state, u32 base, u32 nr,
 	    nr > state->nr_cids - base || !node_nr ||
 	    node_base > base || node_nr > state->nr_cids - node_base ||
 	    nr > node_base + node_nr - base ||
-	    node_base != state->node_pool_base || !state->node_summary)
+	    node_base != build->node_pool_base || !build->node_summary)
 		return -EINVAL;
 	if (base != node_base && !state->segments[node_base])
 		return -EINVAL;
-	summary = state->node_summary;
-	seg = scx_cid_idle_alloc_segment(state, base, nr, false);
+	summary = build->node_summary;
+	seg = scx_cid_idle_alloc_segment(build, base, nr, false);
 	if (!seg)
 		return -ENOMEM;
 	seg->summary = summary;
@@ -387,7 +424,7 @@ scx_cid_idle_mask(const struct scx_cid_idle_state *state, u32 cid)
 	struct scx_cid_idle_segment __arena *seg;
 
 	seg = state->segments[cid];
-	return seg->idle;
+	return &seg->idle;
 }
 
 /* Set the active CID count before adding segments. */
@@ -400,11 +437,13 @@ scx_cid_idle_init_state(struct scx_cid_idle_state *state, u32 nr_cids,
 	if (!nr_cids ||
 	    (state->nr_cids_max && nr_cids > state->nr_cids_max))
 		return -EINVAL;
-	if (!state->segments && !state->node_summaries) {
+	if (!state->segments && !state->node_summaries &&
+	    !state->node_core_llcs) {
 		ret = scx_cid_idle_alloc(state, state->nr_cids_max ?: nr_cids);
 		if (ret)
 			return ret;
-	} else if (!state->segments || !state->node_summaries) {
+	} else if (!state->segments || !state->node_summaries ||
+		   !state->node_core_llcs) {
 		return -EINVAL;
 	}
 	state->nr_cids = nr_cids;
@@ -428,9 +467,9 @@ scx_cid_idle_empty(const struct scx_cid_idle_state *state)
 		struct scx_cid_idle_segment __arena *summary =
 			state->node_summaries[cid];
 
-		if (!cmask_empty(summary->idle))
+		if (!cmask_empty(&summary->idle))
 			return false;
-		cid = summary->base + summary->nr - 1;
+		cid = summary->idle.base + summary->idle.nr_cids - 1;
 	}
 	return true;
 }
@@ -444,9 +483,9 @@ scx_cid_idle_any_core(const struct scx_cid_idle_state *state)
 		struct scx_cid_idle_segment __arena *summary =
 			state->node_summaries[cid];
 
-		if (!cmask_empty(summary->core_llcs))
+		if (!cmask_empty(state->node_core_llcs[cid]))
 			return true;
-		cid = summary->base + summary->nr - 1;
+		cid = summary->idle.base + summary->idle.nr_cids - 1;
 	}
 	return false;
 }
@@ -466,9 +505,105 @@ scx_cid_idle_segment_word(const struct scx_cid_idle_segment __arena *seg,
 		hi = wlo + 64;
 	if (lo >= hi)
 		return 0;
-	bits = cmask_word(seg->idle, word - seg->base / 64) &
+	bits = cmask_word(&seg->idle, word - seg->idle.base / 64) &
 	       GENMASK_U64(hi - wlo - 1, lo - wlo);
 	return tier ? bits & cmask_word(tier, word) : bits;
+}
+
+/*
+ * Return the next nonempty word in a CID range, advancing @cursor.
+ *
+ * The segment at @cursor is read directly when @cursor is inside it or the
+ * rest of the range ends inside it, so narrow scopes never touch a summary.
+ * Wider scans then walk the node summaries: their set bits are the bases of
+ * the segments that may have an idle CID, and every CID between the current
+ * position and the next set bit belongs to an empty segment. Only the
+ * segments found that way are read.
+ */
+static __always_inline u64
+__scx_cid_idle_scan_word(const struct scx_cid_idle_state *state,
+			 const struct scx_cmask __arena *tier,
+			 u32 end, u32 *cursor)
+{
+	struct scx_cid_idle_segment __arena *seg, *summary;
+	u32 pos, direct_end;
+
+	if (*cursor >= end)
+		return 0;
+	seg = state->segments[*cursor];
+	summary = seg->summary;
+	direct_end = seg->idle.base + seg->idle.nr_cids;
+	if (*cursor == seg->idle.base && direct_end < end)
+		direct_end = 0;
+	else if (direct_end > end)
+		direct_end = end;
+
+	bpf_arena_for(pos, *cursor, end) {
+		u32 next, k;
+		u64 bits;
+
+		if (pos >= direct_end) {
+			u32 summary_end = summary->idle.base +
+					  summary->idle.nr_cids;
+			u64 candidates;
+
+			/* Only a node boundary reaches the end of a summary. */
+			if (pos >= summary_end) {
+				summary = state->node_summaries[pos];
+				summary_end = summary->idle.base +
+					      summary->idle.nr_cids;
+			}
+			candidates = cmask_word(&summary->idle,
+				pos / 64 - summary->idle.base / 64) &
+				GENMASK_U64(63, pos & 63);
+			if (!candidates) {
+				next = (pos / 64 + 1) * 64;
+				if (next > summary_end)
+					next = summary_end;
+				pos = (next < end ? next : end) - 1;
+				continue;
+			}
+			next = (pos & ~63U) + __builtin_ctzll(candidates);
+			if (next != pos) {
+				pos = (next < end ? next : end) - 1;
+				continue;
+			}
+			seg = state->segments[pos];
+			direct_end = seg->idle.base + seg->idle.nr_cids;
+			if (direct_end > end)
+				direct_end = end;
+		}
+
+		k = pos / 64;
+		next = direct_end < (k + 1) * 64 ? direct_end : (k + 1) * 64;
+		bits = scx_cid_idle_segment_word(seg, tier, k, pos, next - pos);
+		if (bits) {
+			*cursor = next;
+			return bits;
+		}
+		pos = next - 1;
+	}
+	*cursor = end;
+	return 0;
+}
+
+/*
+ * A nonempty result ends in the word before @cursor. @tier, if not NULL, is
+ * read by absolute word index, so it must be framed with base 0.
+ */
+static __always_inline u64
+scx_cid_idle_scan_word(const struct scx_cid_idle_state *state,
+		       const struct scx_cmask __arena *tier,
+		       u32 base, u32 nr, u32 *cursor, u32 *word)
+{
+	u64 bits;
+
+	if (!nr)
+		return 0;
+	bits = __scx_cid_idle_scan_word(state, tier, base + nr, cursor);
+	if (bits)
+		*word = (*cursor - 1) / 64;
+	return bits;
 }
 
 /* A successful claim prevents another concurrent wakeup from taking @cid. */
@@ -480,12 +615,38 @@ scx_cid_idle_claim(struct scx_cid_idle_state *state, s32 cid)
 	if (cid < 0 || (u32)cid >= state->nr_cids)
 		return false;
 	seg = state->segments[cid];
-	if (!cmask_test_and_clear(cid, seg->idle))
+	if (!cmask_test_and_clear(cid, &seg->idle))
 		return false;
-	if (cmask_empty(seg->idle)) {
-		cmask_clear(seg->base, seg->summary->idle);
-		if (!cmask_empty(seg->idle))
-			cmask_set(seg->base, seg->summary->idle);
+	/*
+	 * Clear the summary bit of a segment this claim emptied, then check
+	 * again: a concurrent scx_cid_idle_set() may have added a CID after
+	 * the first check and skipped the summary because its bit was still
+	 * set. Either that set() sees the bit cleared and sets it again, or
+	 * the second check here sees its CID. This is the store-buffering
+	 * pattern: each side does an atomic RMW on one word and then loads
+	 * the other, which needs the RMWs to act as full barriers. C11
+	 * acq_rel alone does not promise that, but the x86 and arm64 JITs
+	 * emit fully ordered fetching RMWs, and the CAS fallback is a full
+	 * barrier.
+	 *
+	 * That ordering is required, not an optimization. Without it both
+	 * sides can miss each other: the summary bit ends up clear while the
+	 * segment holds an idle CID, and it stays clear. The CPU gets no
+	 * further ops.update_idle() and no dispatch unless it is kicked, so
+	 * the summary-driven scans and scx_cid_idle_empty() skip it until
+	 * another CID of the segment changes state. A JIT without fully
+	 * ordered fetching RMWs on arena memory must use the CAS fallback.
+	 *
+	 * With the ordering, between the clear and the second check, a
+	 * segment that just gained an idle CID looks empty to the
+	 * summary-driven scans and to scx_cid_idle_empty(). That window is a
+	 * few instructions long and a missed candidate only costs a less
+	 * ideal placement, so it is not closed.
+	 */
+	if (cmask_empty(&seg->idle)) {
+		cmask_clear(seg->idle.base, &seg->summary->idle);
+		if (!cmask_empty(&seg->idle))
+			cmask_set(seg->idle.base, &seg->summary->idle);
 	}
 	return true;
 }
@@ -503,7 +664,7 @@ scx_cid_idle_has_core(const struct scx_cid_idle_state *state, u32 llc_base,
 {
 	return llc_base < state->nr_cids &&
 	       node_base < state->nr_cids &&
-	       __cmask_test(llc_base, state->node_summaries[node_base]->core_llcs);
+	       __cmask_test(llc_base, state->node_core_llcs[node_base]);
 }
 
 static __always_inline void
@@ -513,9 +674,9 @@ scx_cid_idle_set_core_hint(struct scx_cid_idle_state *state,
 	if (llc_base >= state->nr_cids || node_base >= state->nr_cids)
 		return;
 	if (has_idle_core)
-		cmask_set(llc_base, state->node_summaries[node_base]->core_llcs);
+		cmask_set(llc_base, state->node_core_llcs[node_base]);
 	else
-		cmask_clear(llc_base, state->node_summaries[node_base]->core_llcs);
+		cmask_clear(llc_base, state->node_core_llcs[node_base]);
 }
 
 /* Test whether every CID in a core is set in an idle cmask. */
@@ -550,16 +711,25 @@ scx_cid_idle_core_idle(const struct scx_cid_idle_state *state,
 			      scx_cid_idle_mask(state, ranges->core_base));
 }
 
-/* Use caller-owned ranges when they are embedded in another topology table. */
+/* Mirror an idle transition or seed the initial idle state. */
 static __always_inline void
-scx_cid_idle_set_ranges(struct scx_cid_idle_state *state, s32 cid,
-			const struct scx_cid_ranges __arena *ranges)
+scx_cid_idle_set(struct scx_cid_idle_state *state, s32 cid)
 {
+	const struct scx_cid_ranges __arena *ranges;
+	struct scx_cid_idle_segment __arena *seg;
+
 	if (cid < 0 || (u32)cid >= state->nr_cids)
 		return;
-	cmask_set(cid, scx_cid_idle_mask(state, cid));
-	cmask_set(state->segments[cid]->base,
-		  state->segments[cid]->summary->idle);
+	ranges = scx_cid_idle_ranges(state, cid);
+	seg = state->segments[cid];
+	/*
+	 * Set the CID before testing the summary; see scx_cid_idle_claim()
+	 * for the other half. Testing first keeps CPUs going idle from
+	 * writing the node's shared summary line when the bit is already set.
+	 */
+	cmask_set(cid, &seg->idle);
+	if (!__cmask_test(seg->idle.base, &seg->summary->idle))
+		cmask_set(seg->idle.base, &seg->summary->idle);
 	if (state->smt_enabled &&
 	    !scx_cid_idle_has_core(state, ranges->llc_base,
 				   ranges->node_base) &&
@@ -568,73 +738,93 @@ scx_cid_idle_set_ranges(struct scx_cid_idle_state *state, s32 cid,
 					    ranges->node_base, true);
 }
 
-/* Mirror an idle transition or seed the initial idle state. */
-static __always_inline void
-scx_cid_idle_set(struct scx_cid_idle_state *state, s32 cid)
-{
-	if (cid < 0 || (u32)cid >= state->nr_cids)
-		return;
-	scx_cid_idle_set_ranges(state, cid, &state->ranges[cid]);
-}
-
 /* A dispatch from the idle task may lack an ops.update_idle() transition. */
 static __always_inline void
-scx_cid_idle_rearm(struct scx_cid_idle_state *state, s32 cid,
-		    const struct scx_cid_ranges __arena *ranges)
+scx_cid_idle_rearm(struct scx_cid_idle_state *state, s32 cid)
 {
 	struct task_struct *task;
 
 	task = scx_bpf_cid_curr(cid);
 	if (task && (task->flags & PF_IDLE))
-		scx_cid_idle_set_ranges(state, cid, ranges);
+		scx_cid_idle_set(state, cid);
 }
 
 /* Build ranges and seed idle state after allocating storage, in ops.init(). */
 static __always_inline int
 scx_cid_idle_init(struct scx_cid_idle_state *state, bool smt_enabled,
-			  enum scx_cid_idle_split split)
+			  enum scx_cid_idle_split split,
+			  struct scx_cid_ranges __arena *ranges, u32 stride)
 {
 	struct scx_cid_range_builder builder = SCX_CID_RANGE_BUILDER_INIT;
+	struct scx_cid_idle_build build = {};
 	u32 nr_cids = scx_bpf_nr_online_cids();
 	u32 range_pages;
 	u32 i;
 	int ret;
 
 	ret = scx_cid_idle_init_state(state, nr_cids, smt_enabled);
-	if (ret)
+	if (ret) {
+		scx_bpf_error("cid_idle: %u online cids, sized for %u (%d)",
+			      nr_cids, state->nr_cids_max, ret);
 		return ret;
-	range_pages = ((u64)state->nr_cids_max * sizeof(*state->ranges) +
-		       PAGE_SIZE - 1) / PAGE_SIZE;
-	state->ranges = bpf_arena_alloc_pages(&arena, NULL, range_pages,
-					      NUMA_NO_NODE, 0);
-	if (!state->ranges)
-		return -ENOMEM;
+	}
+	if (ranges) {
+		if (stride < sizeof(*ranges)) {
+			scx_bpf_error("cid_idle: range stride %u too small",
+				      stride);
+			return -EINVAL;
+		}
+		state->ranges = ranges;
+		state->range_stride = stride;
+	} else {
+		range_pages = ((u64)state->nr_cids_max * sizeof(*state->ranges) +
+			       PAGE_SIZE - 1) / PAGE_SIZE;
+		state->ranges = bpf_arena_alloc_pages(&arena, NULL, range_pages,
+						      NUMA_NO_NODE, 0);
+		if (!state->ranges) {
+			scx_bpf_error("cid_idle: failed to allocate ranges");
+			return -ENOMEM;
+		}
+		state->range_stride = sizeof(*state->ranges);
 
-	/* The highest CID in a contiguous domain reveals its full length. */
-	bpf_arena_for(i, 0, nr_cids) {
-		u32 cid = nr_cids - 1 - i;
+		/* The highest CID reveals each contiguous domain's length. */
+		bpf_arena_for(i, 0, nr_cids) {
+			u32 cid = nr_cids - 1 - i;
 
-		scx_bpf_cid_topo(cid, &state->topo_buf);
-		scx_cid_ranges_build(&state->ranges[cid], &builder,
-				     &state->topo_buf, cid);
+			scx_bpf_cid_topo(cid, &state->topo_buf);
+			scx_cid_ranges_build(scx_cid_idle_ranges(state, cid),
+					     &builder, &state->topo_buf, cid);
+		}
 	}
 	bpf_arena_for(i, 0, nr_cids) {
-		const struct scx_cid_ranges __arena *ranges = &state->ranges[i];
+		const struct scx_cid_ranges __arena *ranges =
+			scx_cid_idle_ranges(state, i);
 		u32 base, nr;
 
 		ret = scx_cid_idle_split_range(ranges, split, &base, &nr);
-		if (ret || base != i || !nr || ranges->core_base != i)
+		if (ret || base != i || !nr || ranges->core_base != i) {
+			scx_bpf_error("cid_idle: cid %u: bad split %d segment %u+%u (core %u)",
+				      i, split, base, nr, ranges->core_base);
 			return -EINVAL;
+		}
 		if (i == ranges->node_base) {
-			ret = scx_cid_idle_init_node(state, i, split);
-			if (ret)
+			ret = scx_cid_idle_init_node(state, &build, i, split);
+			if (ret) {
+				scx_bpf_error("cid_idle: cid %u: node %u+%u pool failed (%d)",
+					      i, ranges->node_base,
+					      ranges->node_nr, ret);
 				return ret;
+			}
 		}
 
-		ret = scx_cid_idle_add_segment(state, i, nr,
+		ret = scx_cid_idle_add_segment(state, &build, i, nr,
 					       ranges->node_base, ranges->node_nr);
-		if (ret)
+		if (ret) {
+			scx_bpf_error("cid_idle: cid %u: segment %u+%u in node %u+%u failed (%d)",
+				      i, base, nr, ranges->node_base,
+				      ranges->node_nr, ret);
 			return ret;
+		}
 		i += nr - 1;
 	}
 	bpf_arena_for(i, 0, nr_cids)
@@ -668,7 +858,7 @@ scx_cid_idle_claim_allowed(struct scx_cid_idle_state *state,
 	s32 cpu;
 
 	if (kind == SCX_CID_IDLE_FULL_CORE &&
-	    !scx_cid_idle_core_idle(state, &state->ranges[cid]))
+	    !scx_cid_idle_core_idle(state, scx_cid_idle_ranges(state, cid)))
 		return false;
 	if (kind != SCX_CID_IDLE_FULL_CORE && kind != SCX_CID_IDLE_ANY_CPU)
 		return false;
@@ -683,42 +873,21 @@ scx_cid_idle_pick_range(struct scx_cid_idle_state *state,
 				const struct task_struct *p, u32 base, u32 nr,
 				enum scx_cid_idle_kind kind)
 {
-	u32 cid;
-	bool single_segment;
+	u32 cursor = base, word;
+	u64 bits;
 
 	if (!nr)
 		return -EBUSY;
-	single_segment = state->segments[base] ==
-			 state->segments[base + nr - 1];
-	bpf_arena_for(cid, base, base + nr) {
-		struct scx_cid_idle_segment __arena *seg = state->segments[cid];
-		u32 end = seg->base + seg->nr;
-		u32 word;
+	while (cursor < base + nr && can_loop) {
+		bits = scx_cid_idle_scan_word(state, NULL, base, nr,
+					       &cursor, &word);
+		while (bits && can_loop) {
+			s32 found = scx_cid_idle_next(state, &bits, word);
 
-		if (end > base + nr)
-			end = base + nr;
-		if (single_segment || __cmask_test(seg->base, seg->summary->idle)) {
-			bpf_arena_for(word, cid / 64, (end - 1) / 64 + 1) {
-				u32 lo = cid > word * 64 ? cid : word * 64;
-				u32 hi = end < (word + 1) * 64 ?
-					 end : (word + 1) * 64;
-				u64 bits = cmask_word(seg->idle,
-							 word - seg->base / 64) &
-					   GENMASK_U64(hi - word * 64 - 1,
-						       lo - word * 64);
-
-				while (bits && can_loop) {
-					s32 found = scx_cid_idle_next(state, &bits,
-							      word);
-
-					if (found >= 0 &&
-					    scx_cid_idle_claim_allowed(state, p, found,
-							       kind))
-						return found;
-				}
-			}
+			if (found >= 0 &&
+			    scx_cid_idle_claim_allowed(state, p, found, kind))
+				return found;
 		}
-		cid = end - 1;
 	}
 	return -EBUSY;
 }
@@ -744,7 +913,7 @@ scx_cid_idle_pick(struct scx_cid_idle_state *state,
 	} else {
 		if (anchor < 0 || (u32)anchor >= state->nr_cids)
 			return -EINVAL;
-		ranges = &state->ranges[anchor];
+		ranges = scx_cid_idle_ranges(state, anchor);
 		if (scope == SCX_CID_IDLE_SAME_CORE) {
 			base = ranges->core_base;
 			nr = ranges->core_nr;

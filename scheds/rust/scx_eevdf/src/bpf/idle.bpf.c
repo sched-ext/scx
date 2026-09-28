@@ -1181,7 +1181,7 @@ __noinline int cid_idle_rearm(s32 cid)
 {
 	TOUCH_ARENA();
 
-	scx_cid_idle_rearm(&eevdf_idle, cid, &cid_topo(cid)->ranges);
+	scx_cid_idle_rearm(&eevdf_idle, cid);
 
 	return 0;
 }
