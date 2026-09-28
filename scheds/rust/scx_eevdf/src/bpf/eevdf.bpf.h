@@ -46,8 +46,8 @@
  * The rest of .bss is read by every op on every CPU (the sizes, the arena
  * pointers) and a written word sharing a line with them makes every one of
  * those reads a miss: the layout of .bss follows the whims of the compiler
- * and adding one global once moved nr_words next to the system vruntime
- * that used to live here, which cost ~5% of the BPF time.
+ * and adding one global once moved an existing one next to the system
+ * vruntime that used to live here, which cost ~5% of the BPF time.
  */
 #define __hot_written	__attribute__((aligned(64)))
 
@@ -94,13 +94,11 @@ extern volatile u64 nr_sis_updates;
 extern volatile u64 sis_scan_sum;
 
 /*
- * Size of the cid space this scheduler schedules on, [0, nr_cids), the
- * number of u64 words one bit per cid takes, and the size of the cid
- * space the arena was allocated for, which is what the kernel says it can
- * ever be. Set by eevdf_arena_init() and ops.init().
+ * Size of the cid space this scheduler schedules on, [0, nr_cids), and the
+ * size of the cid space the arena was allocated for, which is what the
+ * kernel says it can ever be. Set by eevdf_arena_init() and ops.init().
  */
 static u32 nr_cids;
-static u32 nr_words;
 static u32 nr_cids_max;
 
 /*

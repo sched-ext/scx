@@ -916,8 +916,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 	bpf_arena_for(cid, 0, nr_capacity_tiers)
 		cmask_init(capacity_tier_mask(cid), 0, nr_cids);
 
-	nr_words = scx_cid_idle_nr_words(&eevdf_idle);
-
 	init_topology();
 	now = bpf_ktime_get_ns();
 

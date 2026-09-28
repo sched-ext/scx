@@ -243,12 +243,6 @@ scx_cid_idle_word(const struct scx_cid_idle_state *state, u32 word)
 	return cmask_word(state->idle, word);
 }
 
-static __always_inline u32
-scx_cid_idle_nr_words(const struct scx_cid_idle_state *state)
-{
-	return cmask_nr_words(state->idle);
-}
-
 /* A successful claim prevents another concurrent wakeup from taking @cid. */
 static __always_inline bool
 scx_cid_idle_claim(struct scx_cid_idle_state *state, s32 cid)
