@@ -80,6 +80,8 @@ struct sdt_chunk {
 struct scx_alloc_stack {
 	__u64 idx;
 	void __arena	*stack[SDT_TASK_ALLOC_STACK_MAX];
+	/* Refill pages which lost the concurrent stack-capacity race. */
+	void __arena	*reserve;
 };
 
 struct sdt_pool {
