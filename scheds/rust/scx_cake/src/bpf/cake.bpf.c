@@ -756,15 +756,30 @@ static __always_inline void cake_pool_pending_inc(u32 llc)
 	__atomic_fetch_add(&ps->unserved, 1, __ATOMIC_RELAXED);
 }
 
-/* A serve moved a task out: the landing the interlock kicks for is over. A
- * kernel-side pop leaves this high; the proof token at zero licenses the
- * reset (cake_pool_unserved). */
-static __always_inline void cake_pool_served_dec(u32 llc)
+/* Claim one insert before the move: the interlock then counts only inserts no CPU
+ * is taking. A kernel-side pop leaves this high; the proof token at zero licenses
+ * the reset (cake_pool_unserved). */
+static __always_inline bool cake_pool_claim(u32 llc)
 {
 	u64 *w = &cake.pool[llc & (MAX_LLCS - 1)].unserved;
 
-	if ((s64)__sync_fetch_and_sub(w, 1) <= 0)
-		__sync_fetch_and_add(w, 1);
+	if ((s64)*w <= 0)
+		return false;
+	if ((s64)__sync_fetch_and_sub(w, 1) > 0)
+		return true;
+	__sync_fetch_and_add(w, 1);
+	return false;
+}
+
+/* A claimed serve; a move that takes nothing gives the claim back. */
+static __always_inline bool cake_pool_serve(u64 pool, u32 llc)
+{
+	if (!cake_pool_claim(llc))
+		return false;
+	if (cake_move_to_local(pool))
+		return true;
+	__sync_fetch_and_add(&cake.pool[llc & (MAX_LLCS - 1)].unserved, 1);
+	return false;
 }
 
 /* Inserts in flight, by proof: a raised unserved with a zero pending token is
@@ -792,9 +807,9 @@ static __always_inline void cake_pool_pending_dec(u32 llc)
 
 /* The token is proof, not a hint: a pooled task carries its pool + 1 in the
  * low bits of its slice, which cake writes at every insert with those bits
- * zero (cake_slice_from_service) and the kernel touches only while the task
- * runs. The token lowers where the task is next seen out of the pool --
- * ops.running before anything else, a re-enqueue, ops.disable -- so every
+ * zero (cake_slice_from_service); ops.stopping clears the kernel's charge
+ * residue there. The token lowers where the task is next seen out of the pool
+ * -- ops.running before anything else, a re-enqueue, ops.disable -- so every
  * departure passes one of those and a zero token means an empty pool. */
 static __always_inline u64 cake_pool_tag(u64 slice, u32 llc)
 {
@@ -2486,9 +2501,9 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		/* The owner's own put_prev (p still on_cpu) serves its queue on the next
 		 * pick; a kicked idle CPU would lose the steal race or move it cold. Any
 		 * other re-enqueue has no owner about to pick. The mark is read before
-		 * the insert sets it; a stale set bit keeps the kick. */
+		 * the insert sets it; a pooled wake the owner may take first keeps the kick. */
 			alone = !(enq_flags & CAKE_ENQ_WAKEUP) && cake_task_on_cpu(p) &&
-			!cake_qmark_test((u32)tcpu);
+			!cake_qmark_test((u32)tcpu) && !cake_pool_pending(cake_llc_of(tcpu));
 		/* The own vtime queue is a user DSQ, where the kernel ignores
 		 * ENQ_PREEMPT: the verdict, taken before the insert so its inputs
 		 * do not outlive it, is delivered as a kick after. */
@@ -2660,8 +2675,7 @@ static __noinline bool cake_llc_pool_rescue(u32 own)
 		}
 		if (time_before(h->scx.dsq_vtime + SLICE_NS, cake.frontier.word) ||
 		    cake_wake_starved(i)) {
-			if (cake_move_to_local(cake_pool_dsq(i))) {
-				cake_pool_served_dec(i);
+			if (cake_pool_serve(cake_pool_dsq(i), i)) {
 				cake_wake_serve_stamp(i);
 				return true;
 			}
@@ -2688,9 +2702,8 @@ static __noinline bool cake_take_remote(u32 cpu)
 	llc = (u32)(offer - 1) & (MAX_LLCS - 1);
 	if (llc == cake_llc_of((s32)cpu))
 		return false;
-	if (!cake_move_to_local(cake_pool_dsq(llc)))
+	if (!cake_pool_serve(cake_pool_dsq(llc), llc))
 		return false;
-	cake_pool_served_dec(llc);
 	cake_wake_serve_stamp(llc);
 	return true;
 }
@@ -2749,6 +2762,7 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	u64 pool = cake_pool_dsq(llc);
 	u64 first = (u64)ucpu, second = pool;
 	struct task_struct *own, *wake;
+	u32 own_n = 0;
 
 	if (multi && cake_take_remote(ucpu))
 		return true;
@@ -2757,7 +2771,6 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	 * fairness slack; without it every CPU takes the pool first and the wake-storm
 	 * serialisation returns. An empty own queue costs one count, not an iterator. */
 	{
-		u32 own_n = 0;
 		u32 wake_n;
 		bool seat;
 
@@ -2854,9 +2867,12 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 				h && cake_cross_llc((s32)h->thread_info.cpu, cpu);
 		}
 	}
-	if (cake_move_to_local(first)) {
+	if (first == pool ? cake_pool_serve(pool, llc) : cake_move_to_local(first)) {
+		/* The owner took its last task under its own rq lock: the mark goes now,
+		 * not at its next dispatch, or every thief until then walks an empty queue. */
+		if (first != pool && own_n == 1)
+			cake_qmark_publish(ucpu, false);
 		if (first == pool) {
-			cake_pool_served_dec(llc);
 			cake_wake_serve_stamp(llc);
 			if (cake_tog_probe) {
 				cake_stat_inc(CAKE_SITE_POOL_SERVED);
@@ -2870,9 +2886,8 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		return true;
 	}
 	/* Unconditional: a second healing net under a lost mark; a peek guard spilled. */
-	if (cake_move_to_local(second)) {
+	if (second == pool ? cake_pool_serve(pool, llc) : cake_move_to_local(second)) {
 		if (second == pool) {
-			cake_pool_served_dec(llc);
 			cake_wake_serve_stamp(llc);
 			if (cake_tog_probe) {
 				cake_stat_inc(CAKE_SITE_POOL_SERVED);
@@ -3195,6 +3210,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 			cake_probe_quantum(p, used, rs->hint & CAKE_HINT_WOKE);
 		}
 	}
+	/* Charge residue reads as a pool tag; the kernel's later charges keep a zero slice zero. */
+	p->scx.slice = runnable ? p->scx.slice & ~(u64)CAKE_POOL_TAG_MASK : 0;
 	/* Allocation failure means no reservation, never failed scheduling. The stage
 	 * class is tested last: the gates cost a load each, the class an imul. */
 	if (cake_one_word && !runnable && cpu < 64 && cake_stage(p)) {

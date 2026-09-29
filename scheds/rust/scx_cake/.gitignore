@@ -14,6 +14,7 @@ docs/*
 !docs/AUDIT_OPERATION_COST_2026-09-15.md
 !docs/TOOLING.md
 !docs/KERNEL_TOOL_INVENTORY_2026-08-23.md
+!docs/KOVAAKS_KICK_ABBA_2026-09-28.md
 
 # Benchmark binaries and local captures
 bench/*
