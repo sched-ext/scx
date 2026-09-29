@@ -6196,7 +6196,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.27.1",
+ "libbpf-rs 0.27.2",
  "log",
  "scx_cargo",
  "scx_stats",
