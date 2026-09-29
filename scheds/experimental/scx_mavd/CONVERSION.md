@@ -429,7 +429,7 @@ ordering. This cleanup intends no scheduling-policy change.
 
 ## Loops
 
-Every bpf_for() scan became bpf_arena_for() from lib/arena_loop.h, and the
+Every bpf_for() scan became bpf_arena_for() from common.bpf.h, and the
 loops that were plain C stay plain C. Loop counters are u32 or narrower, as
 the macro requires.
 

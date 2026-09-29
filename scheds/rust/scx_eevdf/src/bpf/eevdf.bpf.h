@@ -21,7 +21,6 @@
 #include <lib/cid_idle.h>
 #include <lib/edq.h>
 #include <lib/ravg.h>
-#include <lib/arena_loop.h>
 #include <lib/sdt_alloc.h>
 #include "intf.h"
 

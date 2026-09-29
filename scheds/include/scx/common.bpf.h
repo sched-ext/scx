@@ -27,7 +27,7 @@
 #include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
 #include "bpf_arena_common.bpf.h"
-#include <lib/const-defs.h>
+#include "const-defs.h"
 
 #define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
@@ -107,8 +107,8 @@ u64 scx_bpf_now(void) __ksym __weak;
 void scx_bpf_events(struct scx_event_stats *events, size_t events__sz) __ksym __weak;
 s32 scx_bpf_cpu_to_cid(s32 cpu) __ksym __weak;
 s32 scx_bpf_cid_to_cpu(s32 cid) __ksym __weak;
-void scx_bpf_cid_topo(s32 cid, struct scx_cid_topo *out) __ksym __weak;
-/* scx_bpf_kick_cid() is declared in compat.bpf.h */
+s32 scx_bpf_cid_node(s32 cid) __ksym __weak;
+/* scx_bpf_cid_topo() and scx_bpf_kick_cid() are declared in compat.bpf.h */
 s32 scx_bpf_task_cid(const struct task_struct *p) __ksym __weak;
 s32 scx_bpf_this_cid(void) __ksym __weak;
 struct task_struct *scx_bpf_cid_curr(s32 cid) __ksym __weak;
@@ -308,7 +308,7 @@ BPF_PROG(name, ##args)
  * Similar to MEMBER_VPTR() but is intended for use with arrays where the
  * element count needs to be explicit.
  * It can be used in cases where a global array is defined with an initial
- * size but is intended to be be resized before loading the BPF program.
+ * size but is intended to be resized before loading the BPF program.
  * Without this version of the macro, MEMBER_VPTR() will use the compile time
  * size of the array to compute the max, which will result in rejection by
  * the verifier.
@@ -1213,6 +1213,51 @@ static inline u64 scx_clock_irq(u32 cpu)
 
 #define TRAILING_OVERLAP(TYPE, NAME, FAM, MEMBERS)				\
 	__TRAILING_OVERLAP(TYPE, NAME, FAM, /* no attrs */, MEMBERS)
+
+/*
+ * Loop counters the verifier cannot see through.
+ *
+ * A may_goto loop converges when the state at its head is within the state
+ * of a previous iteration. A counter tracked as a precise constant prevents
+ * that convergence: every iteration creates a new state, and the verifier
+ * unrolls the loop until it runs out of budget whenever the counter feeds an
+ * operation that requires precision.
+ *
+ * Loading a writable global gives the verifier an unknown scalar while its
+ * runtime value remains one. Using it as the step makes the counter unknown
+ * after the first iteration, and the load on every increment keeps the loop
+ * body from making it precise again. volatile is required to keep the compiler
+ * from hoisting or eliminating the loads, and the value must remain non-const
+ * so the verifier cannot resolve it. The variable is weak so the objects linked
+ * into a scheduler share one copy. Its runtime value must never be changed from
+ * one.
+ *
+ * bpf_for() avoids this verifier behavior too, but calls bpf_iter_num_next()
+ * on every iteration. bpf_arena_for() is intended for hot scheduler walks
+ * where that cost matters. @var must be no wider than u32, and @start and
+ * @end must be representable as u32.
+ */
+volatile u32 bpf_arena_loop_one __weak = 1;
+
+/*
+ * A loop-carried accumulator that a caller later compares is kept precise, and
+ * a precise scalar whose range grows every iteration keeps a may_goto loop from
+ * converging. Initializing it from this zero makes it unknown from the first
+ * iteration, so every pass through the loop head looks the same.
+ */
+volatile u32 bpf_arena_loop_zero __weak = 0;
+
+#define __bpf_arena_loop_start(var, start)				\
+	({								\
+		_Static_assert(sizeof(var) <= sizeof(u32),		\
+			       "bpf_arena_for() index must fit in u32");	\
+		(start);						\
+	})
+
+#define bpf_arena_for(var, start, end)					\
+	for (var = __bpf_arena_loop_start(var, start);			\
+	     var < (end) && can_loop;					\
+	     var += bpf_arena_loop_one)
 
 #include "compat.bpf.h"
 #include "enums.bpf.h"

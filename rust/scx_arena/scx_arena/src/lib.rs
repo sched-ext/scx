@@ -32,7 +32,7 @@ use libbpf_rs::MapCore as _;
 use libbpf_rs::libbpf_sys;
 
 /// Cacheline size assumed by the arena allocator's alignment parameter.
-/// Mirrors scheds/include/lib/const-defs.h, keep in sync.
+/// Mirrors scheds/include/scx/const-defs.h, keep in sync.
 #[cfg(target_arch = "s390x")]
 pub const CACHELINE_SIZE: usize = 256;
 #[cfg(target_arch = "powerpc64")]
