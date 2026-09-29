@@ -12,8 +12,8 @@ fork, the features it removed, the representation choices, the verifier
 constraints that shaped the code, and the procedure for syncing with
 mitosis.
 
-The last sync, on 2026-08-28, covered main through 1e9d241b0716
-("scx_mitosis: Make the test scripts robust on real machines").
+The last sync, on 2026-09-29, covered main through c9b90b3ad3d0
+("scheds/include: Sync with kernel sched_ext/for-7.4 (c6fe97c34a1a)").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
@@ -525,5 +525,7 @@ metal.
   do.
 - Restoring the idle bit of an abandoned claim, which the builtin idle
   picker did.
+- Whether idle tracking should move onto the shared cid idle helpers in
+  scheds/include/lib/cid_idle.h, which arrived after the conversion.
 - Bringing back the subcell scheme and virtual LLCs through a cid topology
   override.
