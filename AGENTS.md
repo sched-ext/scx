@@ -131,13 +131,16 @@ one kernel patch then copies it into the kernel tree.
    regenerated from vmlinux.h. enums.autogen.h and enums.autogen.bpf.h have
    no generator, whatever the kernel copy's header says. They and
    rust/scx_utils/src/enums.rs, which must match them, are the
-   hand-maintained list of enumerators the schedulers can look up. Add every
-   enumerator the kernel gained, each under the enum type the new vmlinux.h
-   shows it in, since a lookup under a type the running kernel lacks yields
-   zero without an error. Keep the entries for enumerators the kernel
-   removed. They zero-fill at load. The kernel's own copy of these two
-   tables is not a reference: it was copied from here and is not updated
-   with the kernel's enums.
+   hand-maintained list of enumerators the schedulers can look up. Diff the
+   kernel's copy of the two tables against ours and add what it has that
+   ours lacks, each entry under the enum type the new vmlinux.h shows it in,
+   since a lookup under a type the running kernel lacks yields zero without
+   an error. The kernel's copy is where kernel changes add their
+   enumerators, but its types can go stale, as its task state lookups did
+   after the kernel folded the states into scx_ent_flags. Keep our entries
+   for enumerators the kernel removed, which zero-fill at load. Enumerators
+   in table-covered types that neither copy lists, such as rq and entity
+   internals, stay out unless a scheduler needs them.
 7. Build, then run `cargo test` and `make -C lib/selftests/compat test`.
    Commit the sync as `scheds/include: Sync with kernel sched_ext/for-X.Y
    (<sha12>)`, with the vmlinux.h update and the caller fixes in commits of
