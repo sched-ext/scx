@@ -1,10 +1,5 @@
 <!--
-  SPDX-License-Identifier: GPL-2.0
-  scx_flow dashboard page
-  Live view of per CPU queues, per CPU running tasks, and system
-  counters. Offline single file with no external assets. Data
-  source is the loopback snapshot route with /api/snapshot and
-  /api/stats.
+  Live dashboard for the flow scheduler.
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 -->
 <!doctype html>
@@ -63,10 +58,10 @@
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-    /* Per-CPU card grid. Dense small chips that
-     * wrap across the page. No inner scroll. The
-     * page scrolls as one page so 20+ cores fit
-     * without a nested scroll container. */
+    /* Per CPU card grid with dense small chips that */
+    /* wrap across the page with no inner scroll. The */
+    /* page scrolls as one page so many cores fit */
+    /* without a nested scroll container. */
     .core-grid {
       display: grid;
       grid-template-columns:
@@ -89,24 +84,12 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .core-card .core-freq {
-      font-size: 0.6rem;
-      color: var(--text-secondary);
-      margin-top: 0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+    /* SMT mark on the second thread cards. Warning color */
+    /* names the sibling with no extra text, so single */
+    /* thread cards stay plain. */
     .core-card .core-smt {
       font-size: 0.5625rem;
       color: var(--warning);
-    }
-    .core-card .core-llc {
-      font-size: 0.6rem;
-      color: var(--text-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
     .core-card .core-pid {
       font-size: 0.6rem;
@@ -126,6 +109,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    /* Slice stays single line with ellipsis. The quantum */
+    /* is fixed so every card shows the same slice. */
     .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
@@ -134,18 +119,26 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      font-feature-settings: "tnum";
+      font-variant-numeric: tabular-nums;
     }
-    /* Running badge on each CPU card. Running tasks
-     * show live, idle cards stay muted. */
+    /* Running badge on each CPU card. Running tasks */
+    /* show live while idle cards stay muted. Flex centers */
+    /* the text by height plus width with balanced */
+    /* padding matching the header capsules. */
     .run-badge {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      vertical-align: middle;
       margin-top: 2px;
-      padding: 0 6px;
+      padding: 1px 6px;
       border-radius: 999px;
       border: 1px solid var(--border-hover);
       font-family: var(--font-mono);
       font-size: 0.6rem;
-      line-height: 1.5;
+      line-height: 1.4;
     }
     .run-idle { color: var(--text-muted); }
     .run-live {
@@ -206,53 +199,25 @@
         gap: 4px;
       }
     }
-    /* Energy meter. Calm stack with hero answer first. */
-    .energy-meter {
-      display: grid;
-      gap: 14px;
-      padding: 6px 0 12px;
+    /* Header badges. Weight plus tracking mark running */
+    /* plus disconnected plus never color alone. */
+    /* Flex centers the text by height plus width with the */
+    /* inline balanced padding matching the per CPU pill. */
+    #status-badge,
+    #download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      vertical-align: middle;
+      line-height: 1.4;
     }
-    /* Hero numerals stay mono with tabular figures. */
-    #energy-since,
-    #energy-watts {
-      font-family: var(--font-mono);
-      color: var(--text-primary);
-      font-feature-settings: "tnum";
-      line-height: 1.3;
-    }
-    /* Hero holds the one number, large and quiet. */
-    #energy-since {
-      font-size: 1.75rem;
-      font-weight: 700;
-    }
-    /* Live watts stays smaller as supporting readout. */
-    #energy-watts {
-      font-size: 0.875rem;
-      font-weight: 600;
-    }
-    /* Meter labels stay muted sans so numerals carry the answer. */
-    .energy-label {
-      font-size: 0.8125rem;
-      color: var(--text-muted);
-    }
-    /* Note. Muted sans line carries the manual compare note. */
-    #energy-note {
-      font-family: var(--font-sans);
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      line-height: 1.55;
-    }
-    /* Note weight marks the line, never color alone. */
-    #energy-note:not(:empty) {
-      font-weight: 500;
-    }
-    /* Header badges. Weight and tracking mark mode, running, disconnected, never color alone. */
-    #mode-badge,
     #status-badge {
       font-weight: 600;
       letter-spacing: 0.02em;
     }
-    /* Run badges. Live adds weight and solid border, idle stays dashed, muted. */
+    /* Run badges. Live adds weight plus solid border */
+    /* while idle stays dashed plus muted. */
     .run-idle {
       border-style: dashed;
       font-weight: 400;
@@ -261,12 +226,14 @@
       border-style: solid;
       font-weight: 700;
     }
-    /* Connection status. Mono with weight marks live, disconnected, retrying. */
+    /* Connection status. Mono with weight marks live */
+    /* plus disconnected plus retrying. */
     #conn-status {
       font-family: var(--font-mono);
       font-weight: 500;
     }
-    /* Empty grid notice. Dashed border with centered weight marks the idle grid, quiet till work arrives. */
+    /* Empty grid notice. Dashed border with centered weight */
+    /* marks the idle grid quiet till work arrives. */
     #core-cards > .card:not(.core-card) {
       border-style: dashed;
       font-weight: 600;
@@ -286,7 +253,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per-CPU queues, fixed slices and placement
+          per-CPU deadline queues, fixed quantum and placement
         </p>
         <p style="font-size:0.75rem;
           color:var(--text-muted);margin-top:2px;
@@ -302,14 +269,6 @@
           font-family:var(--font-mono);white-space:nowrap">
           Download JSON
         </button>
-        <div id="mode-badge" title="governor unknown"
-          style="font-size:0.75rem;
-          padding:3px 10px;border-radius:999px;
-          border:1px solid var(--border-hover);
-          color:var(--text-secondary);
-          font-family:var(--font-mono);white-space:nowrap">
-          strict
-        </div>
         <div id="status-badge" style="font-size:0.75rem;
           padding:3px 10px;border-radius:999px;
           border:1px solid var(--success);
@@ -335,99 +294,6 @@
         id="summary-explanation"></p>
     </div>
 
-    <!-- Energy meter with used energy since launch and live watts -->
-    <div class="card" style="margin-bottom:16px">
-      <p class="section-label">Energy</p>
-      <div class="energy-meter">
-        <div><div class="energy-label">
-          Consumed since launch</div>
-          <div class="stat-value" id="energy-since">unavailable</div>
-          <!-- Meter shows used energy since launch. -->
-        </div>
-        <div><span class="energy-label">
-          Live watts:</span>
-          <span class="stat-value" id="energy-watts">—</span>
-        </div>
-      </div>
-      <p id="energy-note" style="margin-top:4px;
-        font-size:0.75rem;color:var(--text-muted)">Section shows energy consumed since launch. Note numbers for manual compare across runs. Placement follows the governor only.</p>
-    </div>
-
-    <!-- Groups with depths, pressure, and rates -->
-    <div class="card" style="margin-bottom:16px">
-      <p class="section-label">Groups</p>
-      <div class="sys-grid">
-        <div><span style="color:var(--text-muted)">
-          Light depth:</span>
-          <span class="stat-value" id="light-depth">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Hog depth:</span>
-          <span class="stat-value" id="hog-depth">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Allowance:</span>
-          <span class="stat-value" id="allowance">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Demote rate:</span>
-          <span class="stat-value" id="demote-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Promote rate:</span>
-          <span class="stat-value" id="promote-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Wake rate:</span>
-          <span class="stat-value" id="wake-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Steal rate:</span>
-          <span class="stat-value" id="steal-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip rate:</span>
-          <span class="stat-value" id="skip-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Preempt rate:</span>
-          <span class="stat-value" id="preempt-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Preempt skip (all):</span>
-          <span class="stat-value" id="pskip-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip armed:</span>
-          <span class="stat-value" id="pskip-a-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip deserved:</span>
-          <span class="stat-value" id="pskip-d-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip group:</span>
-          <span class="stat-value" id="pskip-g-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip mask:</span>
-          <span class="stat-value" id="pskip-m-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip rate:</span>
-          <span class="stat-value" id="pskip-r-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Coalesce rate:</span>
-          <span class="stat-value" id="coalesce-rate">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Slot rate:</span>
-          <span class="stat-value" id="slot-rate">0</span>
-        </div>
-      </div>
-    </div>
-
     <!-- System stats -->
     <div class="card">
       <p class="section-label">System</p>
@@ -435,6 +301,10 @@
         <div><span style="color:var(--text-muted)">
           On-CPU:</span>
           <span class="stat-value" id="on-cpu">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Live pids:</span>
+          <span class="stat-value" id="running-pids">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Uptime:</span>
@@ -457,100 +327,44 @@
           <span class="stat-value" id="completions">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Park moves:</span>
-          <span class="stat-value" id="park">0</span>
+          Local moves:</span>
+          <span class="stat-value" id="local-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Steal moves:</span>
-          <span class="stat-value" id="steal">0</span>
+          Node moves:</span>
+          <span class="stat-value" id="node-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Steal cross:</span>
-          <span class="stat-value" id="steal-xmoves">0</span>
+          Machine moves:</span>
+          <span class="stat-value" id="machine-moves">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Overflow moves:</span>
+          <span class="stat-value" id="over-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Kicks:</span>
           <span class="stat-value" id="kicks">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          No task state:</span>
-          <span class="stat-value" id="no-tctx">0</span>
+          Admits:</span>
+          <span class="stat-value" id="admits">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          EDF enqueued:</span>
-          <span class="stat-value" id="edf-enq">0</span>
+          Rejects:</span>
+          <span class="stat-value" id="rejects">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          EDF clamped:</span>
-          <span class="stat-value" id="edf-clamp">0</span>
+          Misses:</span>
+          <span class="stat-value" id="misses">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          EDF ordered:</span>
-          <span class="stat-value" id="edf-ord">0</span>
+          Parks:</span>
+          <span class="stat-value" id="parks">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Demote:</span>
-          <span class="stat-value" id="demote">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Promote:</span>
-          <span class="stat-value" id="promote">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Wake promote:</span>
-          <span class="stat-value" id="wpromote">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Pinned inflate:</span>
-          <span class="stat-value" id="pinfl">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Group skip:</span>
-          <span class="stat-value" id="gskip">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Preempt kicks:</span>
-          <span class="stat-value" id="pkick">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Preempt skip (all):</span>
-          <span class="stat-value" id="pskip">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip armed:</span>
-          <span class="stat-value" id="pskip-a">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip deserved:</span>
-          <span class="stat-value" id="pskip-d">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip group:</span>
-          <span class="stat-value" id="pskip-g">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip mask:</span>
-          <span class="stat-value" id="pskip-m">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Skip rate:</span>
-          <span class="stat-value" id="pskip-r">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Kick coalesced:</span>
-          <span class="stat-value" id="kcoal">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Slot moves:</span>
-          <span class="stat-value" id="slot-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Slot defer:</span>
-          <span class="stat-value" id="slot-defer">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Slot kicks:</span>
-          <span class="stat-value" id="slot-kicks">0</span>
+          Gate rejects:</span>
+          <span class="stat-value" id="gate-rejects">0</span>
         </div>
       </div>
     </div>
@@ -567,8 +381,8 @@
 
     function clamp(v) { return v < 0 ? 0 : v; }
 
-    /* Compact counter form, same shape as the
-     * system table values. */
+    /* Compact counter form with the same shape as the */
+    /* system table values. */
     function fmt(n) {
       n = clamp(n);
       if (n >= 1e15) return (n / 1e15).toFixed(2) + 'Q';
@@ -579,8 +393,8 @@
       return n.toLocaleString();
     }
 
-    /* Nanoseconds as a wall clock duration for the
-     * uptime and runtime gauges. */
+    /* Nanoseconds as a wall clock duration for the */
+    /* uptime plus runtime gauges. */
     function fmtRuntime(ns) {
       ns = clamp(ns);
       var sec = ns / 1e9;
@@ -593,9 +407,9 @@
       return day.toFixed(1) + ' days';
     }
 
-    /* Slice in nanos. Below a microsecond stays in
-     * ns, below a millisecond shows us, above
-     * shows ms. */
+    /* Slice in nanos. Below a microsecond stays in */
+    /* ns while below a millisecond shows us plus above */
+    /* shows ms. */
     function fmtSlice(ns) {
       ns = clamp(ns);
       if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
@@ -603,14 +417,10 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per-CPU cards with fixed slice, group, and the running estimate. They
-     * also show the pid, nice, weight, and delay. Freq unknown stays
-     * plain with no zero print. No sibling stays plain
-     * with no badge. Group shows live table when
-     * ready, else halves. Nice and weight stay
-     * display only with dash when idle. Delay shows
-     * latched dot with hollow when clear. Delay
-     * shows stale word when idle, explicit. */
+    /* Per CPU cards with fixed slice plus pid plus SMT. They show */
+    /* the pid plus the slice with no rate sampling plus the SMT mark */
+    /* on the second thread. Slice stays single line with full text */
+    /* in the title. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -622,27 +432,15 @@
         return;
       }
       container.innerHTML = perCpu.map(function(cpu) {
-        var curMhz = Math.round(
-          (cpu.cur_freq_khz || 0) / 1000);
-        var maxMhz = Math.round(
-          (cpu.freq_khz || 0) / 1000);
-        var freqLabel = 'freq unknown';
-        if (maxMhz > 0 && curMhz > 0) {
-          freqLabel = curMhz + ' of ' +
-            maxMhz + ' MHz';
-        } else if (maxMhz > 0) {
-          freqLabel = maxMhz + ' MHz';
-        } else if (curMhz > 0) {
-          freqLabel = curMhz + ' MHz';
-        }
+        var id = (Number(cpu.id) | 0);
+        if (id < 0) id = 0;
+        var pid = (Number(cpu.running_pid) | 0);
+        if (pid < 0) pid = 0;
+        var slice = (Number(cpu.slice_ns) || 0);
+        if (slice < 0) slice = 0;
         var smtLabel = cpu.smt
           ? ' <span class="core-smt">SMT</span>'
           : '';
-        var pid = cpu.running_pid || 0;
-        var est = cpu.running_est_ns || 0;
-        var slice = cpu.slice_ns || cpu.tq_ns || 0;
-        var nice = cpu.running_nice || 0;
-        var weight = cpu.running_weight || 0;
         var idle = !pid;
         var badge = idle
           ? '<span class="run-badge run-idle">idle</span>'
@@ -650,57 +448,58 @@
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
-        var estLabel = idle
-          ? '<div class="core-est">est -</div>'
-          : '<div class="core-est">est ' + fmtSlice(est) +
-            '</div>';
-        var niceLabel = idle
-          ? '<div class="core-llc">nice -</div>'
-          : '<div class="core-llc">nice ' + nice + '</div>';
-        var weightLabel = idle
-          ? '<div class="core-llc">weight -</div>'
-          : '<div class="core-llc">weight ' + weight + '</div>';
-        var sliceLabel = '<div class="core-slice">slice ' +
-          fmtSlice(slice) + '</div>';
-        var llcLabel = '<div class="core-llc">LLC ' +
-          (cpu.llc_id || 0) + '</div>';
-        var grp = (cpu.group === 1) ? 'hog' : 'light';
-        var groupLabel = '<div class="core-llc">group ' +
-          grp + '</div>';
-        var delay = cpu.delay_win || 0;
-        var armed = !!cpu.delay_armed;
-        var dot = armed ? ' ●' : ' ○';
-        var delayLabel = '<div class="core-llc">delay ' +
-          delay + dot + (idle ? ' stale' : '') + '</div>';
+        var sliceText = 'slice ' + fmtSlice(slice);
+        var sliceLabel = '<div class="core-slice" title="' +
+          sliceText + '">' + sliceText + '</div>';
         return '<div class="card core-card">' +
-          '<div class="core-id">CPU ' + cpu.id +
+          '<div class="core-id">CPU ' + id +
           smtLabel + '</div>' +
-          '<div class="core-freq">' + freqLabel +
-          '</div>' + llcLabel + groupLabel +
           '<div>' + badge + '</div>' +
-          pidLabel + estLabel + niceLabel +
-          weightLabel + sliceLabel + delayLabel +
+          pidLabel + sliceLabel +
           '</div>';
       }).join('');
     }
 
-    /* Summary prose, built from the live gauges.
-     * The tldr names the running count. The explanation
-     * walks the insert, move, and group split with
-     * wake detail. */
+    /* Summary prose built from the live gauges. */
+    /* The tldr names the running count. The explanation */
+    /* walks joins plus moves plus admission plus misses. */
+    /* Live pid count from the per CPU cards. */
+    /* Counts cards with a nonzero pid with no gauge use. */
+    function livePids(perCpu) {
+      var n = 0;
+      var i;
+      for (i = 0; i < perCpu.length; i++) {
+        if ((perCpu[i].running_pid || 0) !== 0) n++;
+      }
+      return n;
+    }
+
+    /* Clamped on CPU for display. Caps the raw gauge at the */
+    /* online card count so a stale gauge never prints past */
+    /* the live cards. */
+    function shownOnCpu(s, perCpu) {
+      var raw = s.on_cpu || 0;
+      if (raw < 0) raw = 0;
+      if (raw > perCpu.length) return perCpu.length;
+      return raw;
+    }
+
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
       var req = s.requeues || 0;
       var done = s.completions || 0;
-      var park = s.park_moves || 0;
-      var steal = s.steal_moves || 0;
-      var smoves = s.slot_moves || 0;
-      var sdefer = s.slot_defer || 0;
-      var demote = s.group_demote || 0;
-      var promote = s.group_promote || 0;
-      var wake = s.group_wake_promote || 0;
+      var local = s.local_moves || 0;
+      var node = s.node_moves || 0;
+      var machine = s.machine_moves || 0;
+      var over = s.over_moves || 0;
+      var adm = s.admits || 0;
+      var rej = s.rejects || 0;
+      var miss = s.misses || 0;
+      var park = s.parks || 0;
+      var gate = s.gate_rejects || 0;
       var placed = ins + req;
+      var shared = node + machine + over;
       var tldr, explanation;
       if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
@@ -712,81 +511,28 @@
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
-          '. Park moves cover ' + fmt(park) +
-          ' and steal moves cover ' + fmt(steal) +
-          '. Slot moves cover ' + fmt(smoves) +
-          ' with defer ' + fmt(sdefer) +
-          '. Demote covers ' + fmt(demote) +
-          ' and promote covers ' + fmt(promote) +
-          ' with wake ' + fmt(wake) + '.';
+          '. Local moves cover ' + fmt(local) +
+          ' and shared moves cover ' + fmt(shared) +
+          '. Admits cover ' + fmt(adm) +
+          ' with rejects ' + fmt(rej) +
+          ' and misses ' + fmt(miss) +
+          ' with parks ' + fmt(park) +
+          ' and gate rejects ' + fmt(gate) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
-          '. Park moves cover ' + fmt(park) +
-          ' and steal moves cover ' + fmt(steal) +
-          '. Slot moves cover ' + fmt(smoves) +
-          ' with defer ' + fmt(sdefer) +
-          '. Demote covers ' + fmt(demote) +
-          ' and promote covers ' + fmt(promote) +
-          ' with wake ' + fmt(wake) + '.';
+          '. Local moves cover ' + fmt(local) +
+          ' and shared moves cover ' + fmt(shared) +
+          '. Admits cover ' + fmt(adm) +
+          ' with rejects ' + fmt(rej) +
+          ' and misses ' + fmt(miss) +
+          ' with parks ' + fmt(park) +
+          ' and gate rejects ' + fmt(gate) + '.';
       }
       return { tldr: tldr, explanation: explanation };
-    }
-
-    /* Prior counters with wall time for rate math. */
-    var prevStats = null;
-    var prevAt = 0;
-
-    /* Per second rate with one decimal below 100. */
-    function fmtRate(v) {
-      v = clamp(v);
-      if (v >= 100) return Math.round(v) + '/s';
-      return v.toFixed(1) + '/s';
-    }
-
-    /* Rate of one counter over the poll gap. */
-    function rateOf(cur, prev, dt) {
-      if (!dt || dt <= 0) return 0;
-      var d = cur - prev;
-      if (d < 0) d = 0;
-      return d / dt;
-    }
-
-    /* Meter formatters. kWh holds six decimals, watts holds one. */
-    /* Used kWh with six decimals for the meter. */
-    function fmtKwh(x) {
-      var v = +x || 0;
-      if (v < 0) v = 0;
-      return v.toFixed(6) + ' kWh';
-    }
-    /* Live watts with one decimal, dash when unknown. */
-    function fmtWatts(x) {
-      var v = +x || 0;
-      if (v <= 0) return '—';
-      return v.toFixed(1) + ' W';
-    }
-
-    /* Energy meter with used energy and live watts. */
-    /* Runs on the single one second poll with no extra timer */
-    /* and no stored history, so a restart resets the view. */
-    function updateEnergy(data) {
-      var energy = (data && data.energy) || {};
-      var sinceText = fmtKwh(energy.since_running_kwh);
-      var wattsText = fmtWatts(energy.live_watts);
-      var note = 'Section shows energy consumed since launch. ' +
-        'Note numbers for manual compare across runs. ' +
-        'Placement follows the governor only.';
-      if (energy.state === 'unavailable') {
-        el('energy-since').textContent = 'unavailable';
-        el('energy-watts').textContent = '—';
-      } else {
-        el('energy-since').textContent = sinceText;
-        el('energy-watts').textContent = wattsText;
-      }
-      el('energy-note').textContent = note;
     }
 
     function updateUI(data) {
@@ -795,25 +541,24 @@
         'var(--success)';
       el('status-badge').style.color = 'var(--success)';
 
-      /* Mode cell with strict, perf, and governor tip. */
-      /* Perf widens placement to any allowed on miss. */
-      /* Strict keeps group isolation with mask win. */
-      var perf = data.perf_mode === 1 ? 'perf' : 'strict';
-      var gov = data.governor || 'unknown';
-      el('mode-badge').textContent = perf;
-      el('mode-badge').title = gov;
-
-      /* Energy meter with used energy and live watts. */
-      /* Since running is the meter. */
-      updateEnergy(data);
-
       var s = data.stats || {};
-      var summary = buildSummary(s);
+      var perCpu = data.per_cpu || [];
+      var live = livePids(perCpu);
+      var shown = shownOnCpu(s, perCpu);
+      var disp = {};
+      var k;
+      for (k in s) {
+        if (Object.prototype.hasOwnProperty.call(s, k)) {
+          disp[k] = s[k];
+        }
+      }
+      disp.on_cpu = shown;
+      var summary = buildSummary(disp);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
 
-      /* Meta line with version and topology. */
+      /* Meta line with version plus topology. */
       var ver = data.version || '';
       var topo = data.topology || '';
       var meta = '';
@@ -821,95 +566,12 @@
       if (ver && topo) meta += ', ';
       if (topo) meta += topo;
       el('meta-line').textContent = meta ||
-        'per-CPU queues, fixed slices and placement';
+        'per-CPU deadline queues, fixed quantum and placement';
 
-      /* Group depths and pressure from snapshot. */
-      el('light-depth').textContent =
-        fmt(data.light_depth || 0);
-      el('hog-depth').textContent =
-        fmt(data.hog_depth || 0);
-      el('allowance').textContent =
-        fmtSlice(data.burst_allowance_ns || 0);
-
-      /* Rates from deltas over the poll gap. */
-      var nowMs = Date.now();
-      var dt = prevStats ?
-        (nowMs - prevAt) / 1000 : 0;
-      var demoteR = prevStats ?
-        rateOf(s.group_demote || 0,
-          prevStats.group_demote || 0, dt) : 0;
-      var promoteR = prevStats ?
-        rateOf(s.group_promote || 0,
-          prevStats.group_promote || 0, dt) : 0;
-      var wakeR = prevStats ?
-        rateOf(s.group_wake_promote || 0,
-          prevStats.group_wake_promote || 0, dt) : 0;
-      var stealR = prevStats ?
-        rateOf(s.steal_moves || 0,
-          prevStats.steal_moves || 0, dt) : 0;
-      var skipR = prevStats ?
-        rateOf(s.group_steal_skipped || 0,
-          prevStats.group_steal_skipped || 0, dt) : 0;
-      var preemptR = prevStats ?
-        rateOf(s.preempt_kicks || 0,
-          prevStats.preempt_kicks || 0, dt) : 0;
-      var pskipR = prevStats ?
-        rateOf(s.preempt_skipped || 0,
-          prevStats.preempt_skipped || 0, dt) : 0;
-      var pskipAR = prevStats ?
-        rateOf(s.preempt_skipped_armed || 0,
-          prevStats.preempt_skipped_armed || 0, dt) : 0;
-      var pskipDR = prevStats ?
-        rateOf(s.preempt_skipped_deserved || 0,
-          prevStats.preempt_skipped_deserved || 0, dt) : 0;
-      var pskipGR = prevStats ?
-        rateOf(s.preempt_skipped_group || 0,
-          prevStats.preempt_skipped_group || 0, dt) : 0;
-      var pskipMR = prevStats ?
-        rateOf(s.preempt_skipped_mask || 0,
-          prevStats.preempt_skipped_mask || 0, dt) : 0;
-      var pskipRR = prevStats ?
-        rateOf(s.preempt_skipped_rate || 0,
-          prevStats.preempt_skipped_rate || 0, dt) : 0;
-      var coalesceR = prevStats ?
-        rateOf(s.kick_coalesced || 0,
-          prevStats.kick_coalesced || 0, dt) : 0;
-      var slotR = prevStats ?
-        rateOf(s.slot_moves || 0,
-          prevStats.slot_moves || 0, dt) : 0;
-      el('demote-rate').textContent = fmtRate(demoteR);
-      el('promote-rate').textContent = fmtRate(promoteR);
-      el('wake-rate').textContent = fmtRate(wakeR);
-      el('steal-rate').textContent = fmtRate(stealR);
-      el('skip-rate').textContent = fmtRate(skipR);
-      el('preempt-rate').textContent = fmtRate(preemptR);
-      el('pskip-rate').textContent = fmtRate(pskipR);
-      el('pskip-a-rate').textContent = fmtRate(pskipAR);
-      el('pskip-d-rate').textContent = fmtRate(pskipDR);
-      el('pskip-g-rate').textContent = fmtRate(pskipGR);
-      el('pskip-m-rate').textContent = fmtRate(pskipMR);
-      el('pskip-r-rate').textContent = fmtRate(pskipRR);
-      el('coalesce-rate').textContent = fmtRate(coalesceR);
-      el('slot-rate').textContent = fmtRate(slotR);
-      prevStats = {
-        group_demote: s.group_demote || 0,
-        group_promote: s.group_promote || 0,
-        group_wake_promote: s.group_wake_promote || 0,
-        steal_moves: s.steal_moves || 0,
-        group_steal_skipped: s.group_steal_skipped || 0,
-        preempt_kicks: s.preempt_kicks || 0,
-        preempt_skipped: s.preempt_skipped || 0,
-        preempt_skipped_armed: s.preempt_skipped_armed || 0,
-        preempt_skipped_deserved: s.preempt_skipped_deserved || 0,
-        preempt_skipped_group: s.preempt_skipped_group || 0,
-        preempt_skipped_mask: s.preempt_skipped_mask || 0,
-        preempt_skipped_rate: s.preempt_skipped_rate || 0,
-        kick_coalesced: s.kick_coalesced || 0,
-        slot_moves: s.slot_moves || 0
-      };
-      prevAt = nowMs;
-
-      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('on-cpu').textContent = fmt(shown);
+      el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
+        ', live cards ' + fmt(live);
+      el('running-pids').textContent = fmt(live);
       el('uptime').textContent =
         fmtRuntime(s.uptime_ns || 0);
       el('runtime').textContent =
@@ -920,61 +582,34 @@
         fmt(s.requeues || 0);
       el('completions').textContent =
         fmt(s.completions || 0);
-      el('park').textContent =
-        fmt(s.park_moves || 0);
-      el('steal').textContent =
-        fmt(s.steal_moves || 0);
-      el('steal-xmoves').textContent =
-        fmt(s.steal_xmoves || 0);
+      el('local-moves').textContent =
+        fmt(s.local_moves || 0);
+      el('node-moves').textContent =
+        fmt(s.node_moves || 0);
+      el('machine-moves').textContent =
+        fmt(s.machine_moves || 0);
+      el('over-moves').textContent =
+        fmt(s.over_moves || 0);
       el('kicks').textContent =
         fmt(s.kicks || 0);
-      el('no-tctx').textContent =
-        fmt(s.enq_no_tctx || 0);
-      el('edf-enq').textContent =
-        fmt(s.edf_enqueued || 0);
-      el('edf-clamp').textContent =
-        fmt(s.edf_clamped || 0);
-      el('edf-ord').textContent =
-        fmt(s.edf_ordered || 0);
-      el('demote').textContent =
-        fmt(s.group_demote || 0);
-      el('promote').textContent =
-        fmt(s.group_promote || 0);
-      el('wpromote').textContent =
-        fmt(s.group_wake_promote || 0);
-      el('pinfl').textContent =
-        fmt(s.pinned_hog_inflated || 0);
-      el('gskip').textContent =
-        fmt(s.group_steal_skipped || 0);
-      el('pkick').textContent =
-        fmt(s.preempt_kicks || 0);
-      el('pskip').textContent =
-        fmt(s.preempt_skipped || 0);
-      el('pskip-a').textContent =
-        fmt(s.preempt_skipped_armed || 0);
-      el('pskip-d').textContent =
-        fmt(s.preempt_skipped_deserved || 0);
-      el('pskip-g').textContent =
-        fmt(s.preempt_skipped_group || 0);
-      el('pskip-m').textContent =
-        fmt(s.preempt_skipped_mask || 0);
-      el('pskip-r').textContent =
-        fmt(s.preempt_skipped_rate || 0);
-      el('kcoal').textContent =
-        fmt(s.kick_coalesced || 0);
-      el('slot-moves').textContent =
-        fmt(s.slot_moves || 0);
-      el('slot-defer').textContent =
-        fmt(s.slot_defer || 0);
-      el('slot-kicks').textContent =
-        fmt(s.slot_kicks || 0);
+      el('admits').textContent =
+        fmt(s.admits || 0);
+      el('rejects').textContent =
+        fmt(s.rejects || 0);
+      el('misses').textContent =
+        fmt(s.misses || 0);
+      el('parks').textContent =
+        fmt(s.parks || 0);
+      el('gate-rejects').textContent =
+        fmt(s.gate_rejects || 0);
 
       renderCoreCards(data);
     }
 
-    /* Full snapshot download as a timestamped file. */
-    /* Pure blob save with no new network surface and */
-    /* the same loopback snapshot route. */
+    /* Full snapshot download as a versioned file. */
+    /* Pure blob save with no new network surface plus */
+    /* the same loopback snapshot route. The file keeps */
+    /* version plus timestamp for shared diagnosis. */
     function downloadSnapshot() {
       fetch('/api/snapshot', { cache: 'no-store' })
         .then(function(r) { return r.json(); })
@@ -984,10 +619,13 @@
             { type: 'application/json' });
           var url = URL.createObjectURL(blob);
           var a = document.createElement('a');
+          var ver = (data && data.version) || 'unknown';
+          var ts = (data && data.timestamp_ns) || 0;
           var stamp = new Date().toISOString()
             .replace(/[:.]/g, '-').slice(0, 19);
+          var tag = ts ? ver + '_' + ts : ver + '_' + stamp;
           a.href = url;
-          a.download = 'scx_flow_' + stamp + '.json';
+          a.download = 'scx_flow_' + tag + '.json';
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
