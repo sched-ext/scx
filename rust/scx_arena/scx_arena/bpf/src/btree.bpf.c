@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/sdt_task.h>
 #include <lib/btree.h>
@@ -55,7 +56,7 @@ static bt_node *btnode_alloc(btree_t *btree, bt_node __arg_arena *parent, u64 fl
 	} while (cmpxchg(&btree->freelist, btn, btn->parent) != btn && can_loop);
 
 	if (!btn)
-		btn = scx_static_alloc(sizeof(*btn), 1);
+		btn = arena_calloc(1, sizeof(*btn));
 	if (!btn)
 		return NULL;
 
@@ -92,7 +93,7 @@ u64 bt_create_internal(void)
 {
 	btree_t __arg_arena *btree;
 
-	btree = scx_static_alloc(sizeof(*btree), 1);
+	btree = arena_calloc(1, sizeof(*btree));
 	if (!btree)
 		return (u64)NULL;
 

@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/arena.h>
 #include <lib/cpumask.h>
@@ -247,7 +248,7 @@ int scx_selftest_arena_topology_timer_timer_with_helpers(void)
 		return -EINVAL;
 	}
 
-	data = (struct topology_data __arena *)scx_static_alloc(sizeof(struct topology_data), 8);
+	data = (struct topology_data __arena *)arena_calloc(1, sizeof(struct topology_data));
 	if (!data) {
 		bpf_printk("TOPO TIMER HELPERS: failed to allocate arena data");
 		return -ENOMEM;
@@ -266,7 +267,7 @@ int scx_selftest_arena_topology_timer_timer_with_helpers(void)
 			break;
 
 		child_data = (struct topology_data __arena *)
-			scx_static_alloc(sizeof(struct topology_data), 8);
+			arena_calloc(1, sizeof(struct topology_data));
 		if (!child_data)
 			continue;
 
@@ -353,7 +354,7 @@ int scx_selftest_arena_topology_timer_arena_data(void)
 	 * Note: In production code, this would typically be done during
 	 * topology initialization via topo_init() with a non-zero data_size.
 	 */
-	data = (struct topology_data __arena *)scx_static_alloc(sizeof(struct topology_data), 8);
+	data = (struct topology_data __arena *)arena_calloc(1, sizeof(struct topology_data));
 	if (!data) {
 		bpf_printk("TOPO ARENA DATA: failed to allocate arena data");
 		return -ENOMEM;
@@ -402,7 +403,7 @@ int scx_selftest_arena_topology_timer_arena_data(void)
 			break;
 
 		child_data = (struct topology_data __arena *)
-			scx_static_alloc(sizeof(struct topology_data), 8);
+			arena_calloc(1, sizeof(struct topology_data));
 		if (!child_data) {
 			bpf_printk("TOPO ARENA DATA: failed to allocate child data");
 			continue;

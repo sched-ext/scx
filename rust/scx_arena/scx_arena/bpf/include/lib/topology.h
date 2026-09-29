@@ -33,7 +33,7 @@ struct topology {
 
 	/*
 	 * Variable-length children array. Allocated as part of the struct via
-	 * scx_static_alloc(sizeof(struct topology) + max_children * sizeof(topo_ptr)).
+	 * arena_calloc(1, sizeof(struct topology) + max_children * sizeof(topo_ptr)).
 	 * The per-level capacity is stored in topo_max_children[].
 	 */
 	topo_ptr children[];

@@ -19,14 +19,13 @@
  */
 
 #include <scx/common.bpf.h>
-#include <lib/alloc/bpf_helpers_local.h>
-#include <lib/sdt_alloc.h>
+#include <libarena/common.h>
 #include <lib/sdt_cgroup.h>
+#include <lib/urcu.h>
 
 /*
  * Cgroup BPF map entry pointing to the data area allocated in arena. The
- * allocation's identity lives in its tailer: the pointer is the single word
- * that alloc and free race on.
+ * pointer is the single word that alloc and free race on.
  */
 struct scx_cgrp_map_val {
 	__u64			cptr;
@@ -40,12 +39,20 @@ struct {
 	__type(value, struct scx_cgrp_map_val);
 } scx_cgrp_map SEC(".maps");
 
-struct scx_allocator scx_cgrp_allocator;
+static size_t cgrp_ctx_size;
 
 __hidden
 int scx_cgrp_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_cgrp_allocator, data_size, align);
+	if (!align)
+		align = sizeof(u64);
+	if (unlikely(align < sizeof(u64) || (align & (align - 1)))) {
+		bpf_printk("invalid cgroup context alignment %llu", align);
+		return -EINVAL;
+	}
+
+	cgrp_ctx_size = data_size > align ? data_size : align;
+	return 0;
 }
 
 __hidden
@@ -65,16 +72,16 @@ void __arena *scx_cgrp_alloc(struct cgroup *cgrp)
 	if (unlikely(data))
 		return data;
 
-	data = scx_alloc(&scx_cgrp_allocator);
+	data = arena_calloc(1, cgrp_ctx_size);
 	if (unlikely(!data)) {
-		scx_bpf_error("scx_alloc failed");
+		scx_bpf_error("arena_calloc failed");
 		return NULL;
 	}
 
 	/* racing allocs publish with cmpxchg, the loser uses the winner's */
 	old = __sync_val_compare_and_swap((__u64 *)&mval->data, 0, (__u64)data);
 	if (unlikely(old)) {
-		scx_free(&scx_cgrp_allocator, data);
+		arena_free(data);
 		data = (void __arena *)old;
 	} else {
 		mval->cptr = (__u64)cgrp;
@@ -93,7 +100,7 @@ void __arena *scx_cgrp_data(struct cgroup *cgrp)
 {
 	struct scx_cgrp_map_val *mval;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	mval = bpf_cgrp_storage_get(&scx_cgrp_map, cgrp, 0, 0);
 	if (unlikely(!mval))
@@ -113,7 +120,7 @@ void scx_cgrp_free(struct cgroup *cgrp)
 	struct scx_cgrp_map_val *mval;
 	void __arena *data;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	mval = bpf_cgrp_storage_get(&scx_cgrp_map, cgrp, 0, 0);
 	if (unlikely(!mval))
@@ -123,7 +130,7 @@ void scx_cgrp_free(struct cgroup *cgrp)
 	if (unlikely(!data))
 		return;
 
-	scx_free(&scx_cgrp_allocator, data);
+	arena_free(data);
 }
 
 static struct scx_urcu scx_cgrp_urcu;
@@ -131,7 +138,7 @@ static struct scx_urcu scx_cgrp_urcu;
 /*
  * The deferred counterpart of scx_cgrp_free(): queue @cgrp's allocation, if
  * any, for freeing after a grace period, currently provided by the scx_urcu
- * machinery in lib/sdt_alloc.bpf.c. Same repetition rules as scx_cgrp_free().
+ * machinery in lib/urcu.bpf.c. Same repetition rules as scx_cgrp_free().
  */
 __hidden
 void scx_cgrp_free_rcu(struct cgroup *cgrp)
@@ -139,7 +146,7 @@ void scx_cgrp_free_rcu(struct cgroup *cgrp)
 	struct scx_cgrp_map_val *mval;
 	void __arena *data;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	mval = bpf_cgrp_storage_get(&scx_cgrp_map, cgrp, 0, 0);
 	if (unlikely(!mval))
@@ -149,7 +156,7 @@ void scx_cgrp_free_rcu(struct cgroup *cgrp)
 	if (unlikely(!data))
 		return;
 
-	scx_urcu_free(&scx_cgrp_urcu, &scx_cgrp_allocator, data);
+	scx_urcu_free(&scx_cgrp_urcu, data);
 }
 
 /* scx_urcu driver programs, discovered by name and run by the userspace side */
@@ -162,5 +169,5 @@ int scx_urcu_cgrp_pending(void *ctx)
 SEC("syscall")
 int scx_urcu_cgrp_reclaim(void *ctx)
 {
-	return scx_urcu_reclaim(&scx_cgrp_urcu, &scx_cgrp_allocator);
+	return scx_urcu_reclaim(&scx_cgrp_urcu);
 }

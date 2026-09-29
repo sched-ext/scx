@@ -5,10 +5,15 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <bpf_arena_common.bpf.h>
 #include <lib/topology.h>
 #include <lib/cgroup.h>
 #include <lib/atq.h>
+
+#ifndef round_up
+#define round_up(a, b) ((((a) + (b) - 1) / (b)) * (b))
+#endif
 
 #ifndef U64_MAX
 #define U64_MAX		((u64)~0ULL)
@@ -111,14 +116,14 @@ struct scx_cgroup_ctx {
 		u64		quota;
 		u64		period;
 		u64		burst;
-	
+
 		/*
 		 * Normalized quota by period of 100 msec. By using the same
 		 * period, we can use a single BPF timer to handle all the
 		 * cgroups.
 		 */
 		u64		nquota;
-	
+
 		/*
 		 * The upper bound of a cgroup’s quota, which is the minimum
 		 * normalized quota of all its ancestors and itself.
@@ -242,9 +247,9 @@ struct scx_cgroup_llc_ctx {
 	 * BTQ are ordered by vtime and will be enqueued to a proper DSQ
 	 * for execution when the cgroup becomes unthrottled again.
 	 *
- 	 * When moving a task from BTQ to a proper DSQ, we need to choose a
- 	 * target CPU by considering CPU idle status, task’s previous CPU, etc.
- 	 * Since DSQ does not support a pop-like operation that dispatches a
+	 * When moving a task from BTQ to a proper DSQ, we need to choose a
+	 * target CPU by considering CPU idle status, task’s previous CPU, etc.
+	 * Since DSQ does not support a pop-like operation that dispatches a
 	 * task from the DSQ without moving to another DSQ, we use ATQ as a
 	 * backend of BTQ.
 	 */
@@ -300,7 +305,7 @@ const volatile bool bw_kick_builtin_idle;
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
  *
  * scx_cgroup_ctx objects are allocated in the BPF arena via
- * scx_static_alloc(); the map holds only an arena pointer to each object.
+ * arena_calloc(); the map holds only an arena pointer to each object.
  */
 struct cbw_cgrp_entry {
 	u64	cgx;
@@ -319,7 +324,7 @@ struct {
  * cgroup id and LLC id (struct cgroup_llc_id).
  *
  * scx_cgroup_llc_ctx objects are allocated in the BPF arena via
- * scx_static_alloc(); the map holds only an arena pointer to each object.
+ * arena_calloc(); the map holds only an arena pointer to each object.
  */
 struct cgroup_llc_id {
 	u64		cgrp_id;
@@ -460,7 +465,8 @@ static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx_sleepable(void)
 		/* Claimed a slot but the pop lost a CAS race; undo and fall back. */
 		__sync_fetch_and_add(&cbw_nr_free_llcx, 1);
 	}
-	return scx_static_alloc(sizeof(scx_cgroup_llc_ctx_t), SCX_CACHELINE_SIZE);
+	return arena_calloc(1, round_up(sizeof(scx_cgroup_llc_ctx_t),
+				      SCX_CACHELINE_SIZE));
 }
 
 /*
@@ -530,7 +536,8 @@ static inline scx_cgroup_ctx_t *cbw_alloc_cgx_sleepable(void)
 		/* Claimed a slot but the pop lost a CAS race; undo and fall back. */
 		__sync_fetch_and_add(&cbw_nr_free_cgx, 1);
 	}
-	return scx_static_alloc(sizeof(scx_cgroup_ctx_t), SCX_CACHELINE_SIZE);
+	return arena_calloc(1, round_up(sizeof(scx_cgroup_ctx_t),
+				      SCX_CACHELINE_SIZE));
 }
 
 /* Materialize (non-sleepable): claim a reserved cgx, or NULL. Never allocates. */
@@ -578,7 +585,7 @@ static void cbw_build_spare(void)
 	scx_cgroup_llc_ctx_t *llcx;
 	int i;
 
-	cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
+	cgx = arena_calloc(1, round_up(sizeof(*cgx), SCX_CACHELINE_SIZE));
 	if (!cgx) {
 		scx_bpf_error("cgroup_bw: failed to build spare cgx");
 		return;
@@ -586,7 +593,7 @@ static void cbw_build_spare(void)
 	cbw_free_cgx(cgx);
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
-		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
+		llcx = arena_calloc(1, round_up(sizeof(*llcx), SCX_CACHELINE_SIZE));
 		if (!llcx) {
 			scx_bpf_error("cgroup_bw: failed to build spare llcx");
 			return;
@@ -1223,7 +1230,7 @@ int cbw_set_bandwidth(u64 cgx_raw, u64 period_us, u64 quota_us, u64 burst_us)
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	cgx->period = period_us * 1000;
 	cgx->period_start_clk = scx_bpf_now();
@@ -1247,7 +1254,7 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 {
 	/*
 	 * Accept cgx as u64 rather than scx_cgroup_ctx_t * to avoid a BPF
-	 * verifier type mismatch.  When cgx comes from scx_static_alloc() the
+	 * verifier type mismatch.  When cgx comes from arena_calloc() the
 	 * compiler tracks it as a scalar; __noinline call sites with arena
 	 * pointer parameters require an arena-qualified register, which the
 	 * compiler does not emit from a scalar.  Passing u64 and casting here
@@ -1685,7 +1692,7 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 * should be taken to properly handle the race between cgroup exit
 	 * and task exit, especially when exiting tasks under an exiting cgroup
 	 * are throttled. We first stop throttling the cgroup to prevent any
-	 * more tasks from being throttled. 
+	 * more tasks from being throttled.
 	 */
 	cgrp_id = cgroup_get_id(cgrp);
 
@@ -2909,7 +2916,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	/*
 	 * Let's start running the top half.
@@ -3169,7 +3176,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will
-		 * fail silently in the scx core. 
+		 * fail silently in the scx core.
 		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
@@ -3433,7 +3440,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	bool cancelled;
 	int ret;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 	/*
 	 * Drain any time an earlier cache-only call deferred (pending_ns) and
 	 * charge it to @from below, before repointing @p -- otherwise it would be
@@ -3584,7 +3591,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	char name[64];
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	cgx = cbw_get_cgroup_ctx(cgrp);
 	if (!cgx) {
@@ -3621,7 +3628,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 			cgx->period_budget, cgx->burst_remaining);
 	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
 			cgx->runtime_total_sloppy, cgx->runtime_total_last);
-					
+
 	return 0;
 }
 

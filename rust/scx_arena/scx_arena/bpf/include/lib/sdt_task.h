@@ -6,9 +6,9 @@
  */
 #pragma once
 
-#include "sdt_alloc.h"
-
 #ifdef __BPF__
+
+#include <bpf_arena_spin_lock.h>
 
 /*
  * scx_task_data() returns @p's arena data and reports a missing association as

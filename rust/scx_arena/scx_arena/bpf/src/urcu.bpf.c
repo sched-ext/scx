@@ -1,22 +1,23 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2026 Meta Platforms, Inc. and affiliates.
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
-#include <lib/sdt_alloc.h>
+#include <lib/urcu.h>
 
 /*
  * Poor man's userspace-driven RCU, standing in until BPF grows bpf_call_rcu().
- * scx_urcu_free() pushes freed nodes onto the active side of a two-sided list.
+ * scx_urcu_free() pushes nodes onto the active side of a two-sided list.
  * Userspace waits for an RCU grace period, see rust/scx_arena, and then runs a
  * BPF program which calls scx_urcu_reclaim() to return the draining side to the
  * allocator and flip the sides.
  *
  * A side may only be reclaimed after a grace period which started after the
- * side stopped being active. Readers still holding pointers into the nodes and
- * frees which read the active index before the flip are all inside RCU read
+ * side stopped being active. Readers still holding pointers into the payloads
+ * and frees which read the active index before the flip are all inside RCU read
  * sections which such a grace period waits out.
  */
 
@@ -35,6 +36,40 @@ struct {
 	__uint(max_entries, 4096);
 } scx_urcu_doorbell SEC(".maps");
 
+static scx_urcu_node_t *scx_urcu_node_get(struct scx_urcu *urcu)
+{
+	scx_urcu_node_t *node;
+	u32 i;
+
+	bpf_for(i, 0, SCX_URCU_CAS_TRIES) {
+		node = (scx_urcu_node_t *)READ_ONCE(urcu->freelist);
+		if (!node)
+			break;
+
+		if (__sync_val_compare_and_swap(&urcu->freelist, (u64)node,
+						node->next) == (u64)node)
+			return node;
+	}
+
+	return (scx_urcu_node_t *)arena_malloc(sizeof(struct scx_urcu_node));
+}
+
+static void scx_urcu_node_put(struct scx_urcu *urcu, scx_urcu_node_t *node)
+{
+	u32 i;
+
+	bpf_for(i, 0, SCX_URCU_CAS_TRIES) {
+		u64 head = READ_ONCE(urcu->freelist);
+
+		node->next = head;
+		if (__sync_val_compare_and_swap(&urcu->freelist, head,
+						(u64)node) == head)
+			return;
+	}
+
+	arena_free(node);
+}
+
 /* Whether any node is awaiting reclaim. */
 __hidden
 int scx_urcu_pending(struct scx_urcu *urcu)
@@ -43,19 +78,27 @@ int scx_urcu_pending(struct scx_urcu *urcu)
 }
 
 __hidden
-void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __arena *payload)
+void scx_urcu_free(struct scx_urcu *urcu, void __arena *payload)
 {
-	struct sdt_data __arena *data = sdt_tailer(alloc, payload);
+	scx_urcu_node_t *node;
 	u32 side, i;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
+
+	node = scx_urcu_node_get(urcu);
+	if (unlikely(!node)) {
+		scx_bpf_error("urcu node allocation failed");
+		return;
+	}
+
+	node->payload = payload;
 
 	side = READ_ONCE(urcu->active) & 1;
 	bpf_for(i, 0, SCX_URCU_CAS_TRIES) {
 		u64 head = READ_ONCE(urcu->head[side]);
 
-		data->urcu_link = head;
-		if (__sync_val_compare_and_swap(&urcu->head[side], head, (u64)data) != head)
+		node->next = head;
+		if (__sync_val_compare_and_swap(&urcu->head[side], head, (u64)node) != head)
 			continue;
 
 		/*
@@ -80,6 +123,8 @@ void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __ar
 		}
 		return;
 	}
+
+	scx_urcu_node_put(urcu, node);
 	scx_bpf_error("urcu free CAS exhausted");
 }
 
@@ -89,24 +134,26 @@ void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __ar
  * no new grace period.
  */
 __hidden
-int scx_urcu_reclaim(struct scx_urcu *urcu, struct scx_allocator *alloc)
+int scx_urcu_reclaim(struct scx_urcu *urcu)
 {
 	u32 side = (READ_ONCE(urcu->active) ^ 1) & 1;
 	u32 i;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	/*
 	 * The grace period has flushed every free which could still see this
 	 * side as active, so plain accesses suffice from here on.
 	 */
 	bpf_for(i, 0, SCX_URCU_RECLAIM_BATCH) {
-		struct sdt_data __arena *data = (struct sdt_data __arena *)urcu->head[side];
+		scx_urcu_node_t *node = (scx_urcu_node_t *)urcu->head[side];
 
-		if (!data)
+		if (!node)
 			break;
-		urcu->head[side] = data->urcu_link;
-		scx_alloc_free_idx(alloc, data->tid.idx);
+		urcu->head[side] = node->next;
+
+		arena_free(node->payload);
+		scx_urcu_node_put(urcu, node);
 	}
 
 	if (urcu->head[side])

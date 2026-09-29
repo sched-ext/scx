@@ -10,7 +10,6 @@
 #endif
 
 struct arena_init_args {
-	u64 static_pages;
 	u64 task_ctx_size;
 	/* task ctx element alignment, 0 for word alignment */
 	u64 task_ctx_align;

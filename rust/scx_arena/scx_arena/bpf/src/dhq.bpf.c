@@ -1,4 +1,5 @@
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <lib/sdt_task.h>
 
 #include <lib/dhq.h>
@@ -22,7 +23,7 @@ u64 scx_dhq_create_internal(bool fifo, size_t capacity, u64 mode, u64 max_imbala
 	scx_dhq_t *dhq;
 	u64 heap_capacity;
 
-	dhq = scx_static_alloc(sizeof(*dhq), 1);
+	dhq = arena_calloc(1, sizeof(*dhq));
 	if (!dhq)
 		return (u64)NULL;
 
