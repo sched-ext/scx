@@ -5,6 +5,76 @@
 > then the latest rounds, newest first. Rules live in `CLAUDE.md`; behaviour in
 > `DESIGN.md`.
 
+**2026-09-28 — TESTED POOL-SERVING C POLICY FOR NIGHTLY USER TESTING.** The
+pool-tag fix below plus historical C `f3ae91cf2` (claim before move, early
+own-queue mark clear, pool-aware continuation kick) is included by default;
+normal release builds need no special feature or runtime toggle. This is the
+tested C source, not the proposed eager-clear removal experiment.
+- KovaaK's Correction Accuracy – Close I idle-player freeplay: two ABBA blocks,
+  eight accepted captures, 525,783 frames / 477.138 s, all frames retained.
+  Compared with tagfix A `f53aabda9`: FPS +0.250%, mean frame -2,252 ns,
+  p99 +845 ns, p99.9 -1,609 ns, mean adjacent-frame jitter +612 ns.
+- Noise-model sensitivity: FPS +0.482%, mean frame -4,353 ns, mean jitter
+  +398 ns; worst-maximum capture excluded per arm: +0.647%, -5,850 ns, +777 ns.
+  These are exploratory analyses; the full eight-capture result stays primary.
+- Small measured gains count as useful. Unfiltered tails are mixed and the
+  two blocks do not establish repeatability. Frame time is not render-pipeline
+  or mouse-to-display latency; no active-aiming/Helldivers or aim-feel verdict.
+- Source/activation and normal stops verified in all eight slots; native
+  restored after capture. Broader topology, repeated/holdout, and end-to-end
+  input-latency validation remain owed. Publication is for user testing.
+- [Findings, metric definitions, evidence limits, and proposed follow-up](docs/KOVAAKS_KICK_ABBA_2026-09-28.md).
+  Local evidence: `scx_cake_bench/runs/kovaaks_kick_abba_20260928T195312/`.
+
+**2026-09-27 — POOL TOKEN LEAK FIXED (stopping clears slice residue), developed on
+`99377e26f` and included in the September 28 nightly update.** The pool token
+(`cake_llc_slot.pending`) ran negative on this host: -38 idle
+and falling, -34 in 8 s under 16 hogs, unused pools to -364. Cause: `cake_pool_seen` reads
+the slice's low 5 bits as a pool tag, and the kernel's runtime charge leaves arbitrary bits
+there that reach a reader without a cake insert between: a preempted task kept at the local
+head (`put_prev_task_scx`), and every dequeue of a running task (sleep, property change,
+class switch), which `put_prev_task_scx` charges again after `ops.stopping`. Effects: the
+token never read zero, so every idle dispatch counted the pool (`find_user_dsq`: 13.6 % of
+cake time in the idle profile) and the proof reset of `unserved` never fired (self-kicks in
+update_idle); on a multi-LLC host false decrements can pass a real pool's token through zero
+while it holds a task, which breaks "zero means empty". Fix (one line in ops.stopping): a
+runnable task keeps its slice with the tag bits cleared; a stopped one gets 0, which the
+kernel's later charges keep at 0 and the next insert replaces. Build `33d88256`.
+- Token: 0 idle, follows pooled tasks under load, back to 0 after; 60 s stress (24 hogs,
+  fork storm, renice and taskset on running tasks): 0 negative samples, all pools 0 after.
+- `cake-bpfstats`, 24 ABBA slots vs HEAD `e76f3225` (`scx_cake_bench/runs/tagfix_ab_20260927/`),
+  quiet host (0.4 % busy): dispatch -11.1 ± 2.0 ns (31.5 -> 20.8, 6/6 pairs), stopping
+  +0.5 ± 0.2, select_cpu +1.0 ± 0.5, others 0. 16 hogs: update_idle -11.5 ± 3.9 ns
+  (31.2 -> 16.0); other callbacks inside noise (slot rates swing 3k-110k/s with the hogs' phase).
+- Stall suite, 20 s, no ejections: pool fix 268/279/331/164 ms vs HEAD 275/208/235/203 ms
+  (B range before: 135-340); idle 1.11 s, n19 1.09 s.
+- Owed: KovaaK's A/B (level 1); verifier load on the multi-LLC, >64-CPU and sparse rows.
+
+Rejected the same day, on appsim frames (`cakebench cost`, arms on top of the tag fix `f53aabda9`):
+- Early own-mark clear (`25ce6bac7`: dispatch clears its qmask bit when it took the last task of
+  its own queue). Cake CPU -8 to -12 % ms/s, but the frame tail is worse. Pass 1 (Unreal build in
+  the background, 84-99 % busy): p99 median 0.748 -> 0.901 ms, 0.1 % low 724 -> 554. Pass 2
+  (+16 nice-10 hogs, 100 %): fps 1684 -> 1636, p99 1.552 -> 1.623, 0.1 % low 297 -> 270. The mark
+  also drives ops.enqueue's `alone` test (idle kick for a continuation); a stale bit was supplying
+  kicks that the tail needs.
+- Earliest-free pick at select_cpu's nothing-idle exit (`76542ae5b`, §G57 moved to select so the
+  migration happens asleep). p99 0.82 -> 2.08 ms in pass 1; census under appsim + hogs: fps -22.5 %,
+  p99 +65 %, 0.1 % low -67 %. Start + grant/2 is smallest on CPUs running short-burst game
+  threads: wakes stacked there (own-queue inserts x1.7, wake preempts x2) instead of the pool.
+Route census per load, Mermaid flows and patches: `scx_cake_bench/runs/flows_20260927/`
+(`flows.json`, `flows.mmd`, `exp2_before_after.mmd`, `tagleak.mmd`, `exp*.patch`).
+Measured, for the next round: two thirds of kick calls under appsim (4.5k of 6.9k/s) are pool-
+interlock self-kicks (update_idle + pending spin); they can fire while `unserved` still counts a task
+another CPU is moving (payoff not measured); the host runs xAPIC (no `x2apic` flag), so every
+IPI spins in apic_mem_wait_icr_idle.
+
+Rejected the same day: packing `pending` and `unserved` into one word (one atomic per pool
+insert). Hardware bench 2x cheaper per insert, model exact, but in cake no gain: quiet-host
+fit enqueue +10.0 ± 6.1 ns, running +5.8 ± 5.8 (24 slots). HEAD's second atomic hits a line
+the first just made local (about 4 ns). Design and data: `scx_cake_bench/runs/packab_20260927/`.
+Measured cost map (perf, kernel-mode samples resolved against a kallsyms snapshot):
+`scx_cake_bench/runs/perfmap_20260927/` (`perfmap.sh`, `perfmap.py`, `annotate.py`).
+
 **2026-09-26 (afternoon) — §G98 ALONE ON `9db04489e` ("B"), uncommitted.** 09-22 was
 ejected again overnight (Unreal Editor + python3 + clang++: clang++ weight 11, 41.72 s of
 vtime ahead of the frontier, waited 6.130 s). The working tree is 09-22 plus only §G98:
