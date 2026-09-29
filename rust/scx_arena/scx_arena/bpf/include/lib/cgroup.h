@@ -1,0 +1,285 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
+ * Author: Changwoo Min <changwoo@igalia.com>
+ */
+#pragma once
+
+#include <lib/atq.h>
+
+/**
+ * Configs for cpu.max
+ */
+struct scx_cgroup_bw_config {
+	/* verbose level */
+	int		verbose;
+};
+
+/**
+ * scx_cgroup_bw_lib_init - Initialize the library with a configuration.
+ * @config: tunnables, see the struct definition.
+ *
+ * It should be called for the library initialization before calling any
+ * other API.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config);
+
+/**
+ * scx_cgroup_bw_init - Initialize a cgroup for CPU bandwidth control.
+ * @cgrp: cgroup being initialized.
+ * @args: init arguments, see the struct definition.
+ *
+ * Either the BPF scheduler is being loaded or @cgrp created, initialize
+ * @cgrp for CPU bandwidth control. When being loaded, cgroups are initialized
+ * in a pre-order from the root. This operation may block.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted);
+
+/**
+ * scx_cgroup_bw_exit - Exit a cgroup.
+ * @cgrp: cgroup being exited
+ *
+ * Either the BPF scheduler is being unloaded or @cgrp destroyed, exit
+ * @cgrp for sched_ext. This operation my block.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted);
+
+/**
+ * scx_cgroup_bw_set - A cgroup's bandwidth is being changed.
+ * @cgrp: cgroup whose bandwidth is being updated
+ * @period_us: bandwidth control period
+ * @quota_us: bandwidth control quota
+ * @burst_us: bandwidth control burst
+ *
+ * Update @cgrp's bandwidth control parameters. This is from the cpu.max
+ * cgroup interface.
+ *
+ * @quota_us / @period_us determines the CPU bandwidth @cgrp is entitled
+ * to. For example, if @period_us is 1_000_000 and @quota_us is
+ * 2_500_000. @cgrp is entitled to 2.5 CPUs. @burst_us can be
+ * interpreted in the same fashion and specifies how much @cgrp can
+ * burst temporarily. The specific control mechanism and thus the
+ * interpretation of @period_us and burstiness is upto to the BPF
+ * scheduler.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quota_us, u64 burst_us);
+
+/**
+ * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
+ * @p: the task to test; must be the current op's subject task, or NULL to test
+ *     using only the cached billing (never resolving) -- for non-subject ops
+ *     such as ops.dispatch() where scx_bpf_task_cgroup() is illegal. With NULL
+ *     and a cold cache the task is reported not throttled.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
+ *
+ * Return 0 when the cgroup is not throttled,
+ * -EAGAIN when the cgroup is throttled, and
+ * -errno for some other failures.
+ */
+int scx_cgroup_bw_throttled(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc);
+
+/**
+ * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
+ * @p: the task being accounted; the current op's subject task, or NULL for a
+ *     cache-only call (a non-subject op such as ops.dispatch()).
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
+ * @consumed_ns: amount of time actually used.
+ *
+ * Return 0 on success -- billed now, nothing to bill (root/unlimited), or
+ * deferred: a cache-only caller (@p == NULL) whose billing cgroup is not yet
+ * resolved has this interval carried in the task and billed on the next
+ * resolved call, so the caller never has to defer its own accounting. Returns
+ * -errno only on a hard failure.
+ */
+int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc,
+			  u64 consumed_ns);
+
+/**
+ * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
+ * unthrottled later.
+ * @p: a task to be put aside since the cgroup is throttled.
+ * @taskc: a task-embedded pointer to scx_task_common.
+ * @vtime: vtime of a task @p.
+ *
+ * When a cgroup is throttled (i.e., scx_cgroup_bw_reserve() returns -EAGAIN),
+ * a task that is in the ops.enqueue() path should be put aside to the BTQ of
+ * its associated LLC context. When the cgroup becomes unthrottled again,
+ * the registered enqueue_cb() will be called to re-enqueue the task for
+ * execution.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime);
+
+/**
+ * scx_cgroup_bw_kick_idle_cb - Wake a CPU after bandwidth replenishment.
+ *
+ * Called by the replenish timer after publishing replenishment results when the
+ * bw_kick_builtin_idle rodata knob is left off before load. The override claims
+ * and kicks an idle CPU through the scheduler's own idle tracking so dispatch
+ * runs even when all CPUs are idle. No kick is needed if every CPU is already
+ * busy. The weak default exits the scheduler with an error.
+ */
+void scx_cgroup_bw_kick_idle_cb(void);
+
+/**
+ * scx_cgroup_bw_reenqueue - Reenqueue backlogged tasks.
+ *
+ * When a cgroup is throttled, a task should be put aside at the ops.enqueue()
+ * path. Once the cgroup becomes unthrottled again, such backlogged tasks
+ * should be requeued for execution. To this end, a BPF scheduler should call
+ * this at the beginning of its ops.dispatch() method, so that backlogged tasks
+ * can be reenqueued if necessary.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_reenqueue(void);
+
+/**
+ * enum scx_cgroup_bw_cancel_flags - Flags for scx_cgroup_bw_cancel().
+ * @SCX_CGROUP_BW_CANCEL_UNLINK: unlinks the task from its BTQ and keeps
+ *   ownership active.
+ * @SCX_CGROUP_BW_CANCEL_DROP: also drop the task's throttling-ownership
+ *   reference and quiesce in-flight ATQ operations so the task context can be
+ *   freed (from ops.exit_task). Without it, cancel only unlinks the task from
+ *   its BTQ and keeps ownership active.
+ */
+enum scx_cgroup_bw_cancel_flags {
+	SCX_CGROUP_BW_CANCEL_UNLINK = ((u64)0x00),
+	SCX_CGROUP_BW_CANCEL_DROP = ((u64)0x01),
+};
+
+/**
+ * scx_cgroup_bw_cancel - Cancel a task's BTQ membership.
+ *
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ * @flags: bitmask of enum scx_cgroup_bw_cancel_flags.
+ *
+ * This removes the task from any current bandwidth-throttle queue but leaves it
+ * eligible to be re-queued. Pass SCX_CGROUP_BW_CANCEL_DROP at task exit to
+ * instead mark it dying (SCX_ATQ_DEAD) and quiesce in-flight ATQ ops so the
+ * task context can be freed.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_cancel(u64 taskc, u64 flags);
+
+/**
+ * REGISTER_SCX_CGROUP_BW_ENQUEUE_CB - Register an enqueue callback.
+ * @eqcb: A function name with a prototype of
+ *        'int fn(struct task_struct * __arg_trusted, u64)'.
+ *
+ * @eqcb enqueues task @p following the BPF scheduler's regular enqueue
+ * path. @eqcb will be called when a throttled cgroup becomes available
+ * again or when the cgroup is exiting for some reason.
+ * @eqcb MUST enqueue the task; otherwise, the task will be lost and
+ * never be scheduled.
+ */
+#define REGISTER_SCX_CGROUP_BW_ENQUEUE_CB(eqcb)					\
+	__hidden int scx_cgroup_bw_enqueue_cb(u64 ctx)				\
+	{									\
+		extern int eqcb(struct task_struct * __arg_trusted, u64);	\
+		task_ctx *taskc = (task_ctx *)ctx;				\
+		struct task_struct *p = bpf_task_from_pid(taskc->pid);		\
+		if (p) {							\
+			eqcb(p, (u64)taskc);					\
+			bpf_task_release(p);					\
+		}								\
+		/*								\
+		 * If bpf_task_from_pid() fails the task already exited; a	\
+		 * dying task is not lost by skipping reenqueue. This races	\
+		 * a drain against ops.exit_task, which is expected.		\
+		 */								\
+		return 0;							\
+	}
+
+/**
+ * scx_cgroup_bw_is_cgroup_throttled - Test if a cgroup is throttled or not.
+ *
+ * @cgrp: the cgroup to test
+ *
+ * Return true if the cgroup is throttled. Otherwise, return false.
+ */
+int scx_cgroup_bw_is_cgroup_throttled(struct cgroup *cgrp);
+
+/**
+ * scx_cgroup_bw_is_task_throttled - Test if a task is throttled or not.
+ *
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ *
+ * Return true if the task is throttled. Otherwise, return false.
+ */
+int scx_cgroup_bw_is_task_throttled(u64 taskc);
+
+/**
+ * scx_cgroup_bw_move - Move a task from a cgroup to another (@from -> @to).
+ *
+ * @p: task being moved
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ * @from: cgroup @p is being moved from
+ * @to: cgroup @p is being moved to
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
+		       struct cgroup *from __arg_trusted,
+		       struct cgroup *to __arg_trusted);
+
+/**
+ * scx_cgroup_bw_dump - Dump the cgroup status
+ *
+ * @cgrp_id: cgroup id
+ * @descendent: If true, dump the cgroup and its descendent in preorder.
+ * Otherwise, dump only itself.
+ * @accurate: If true, update runtime total before dumping the status to
+ * get more accurate information. Otherwise, dump the currently collected
+ * snapshot of runtime values.
+ * @indent: If true, indent the output. Otherwise, do not indent the output.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent);
+
+/**
+ * Per-task context for CPU bandwidth control.
+ *
+ * Schedulers that use cpu.max control should embed this struct at the
+ * beginning of their per-task context. @common is at offset 0, so all
+ * existing scx_task_common casts still work.
+ *
+ * @common:       Must be first; all existing scx_task_common casts still work.
+ * @bill_cgrp_id: Cached billing cgroup id -- the task's nearest managed
+ *                (limited, or root) ancestor-or-self, resolved on first use
+ *                (0 = unresolved). All accounting/throttling is charged here.
+ * @cgx_raw:      Cached arena pointer to scx_cgroup_ctx (0 = not cached).
+ * @llcx_raw:     Cached arena pointer to scx_cgroup_llc_ctx (0 = not cached).
+ * @bill_gen:     Generation id (cbw_bill_gen) the cached billing state above
+ *                was resolved against; when it lags, the cache is dropped and
+ *                re-resolved.
+ * @pending_ns:   Consumed time a cache-only call could not yet attribute to a
+ *                billing cgroup; carried here and billed on the next resolved
+ *                call so no accounting is lost.
+ * @last_llc_id:  LLC id for which @llcx_raw was cached.
+ */
+struct scx_task_cgroup_bw {
+	struct scx_task_common	common;		/* MUST be first */
+	u64			bill_cgrp_id;	/* 0 = unresolved */
+	u64			cgx_raw;	/* 0 = not cached */
+	u64			llcx_raw;	/* 0 = not cached */
+	u64			bill_gen;	/* cbw_bill_gen the cache was resolved against */
+	u64			pending_ns;	/* deferred consumed time, billed once resolved */
+	int			last_llc_id;
+};
+
+typedef struct scx_task_cgroup_bw __arena scx_task_cgroup_bw_t;
