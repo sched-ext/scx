@@ -45,6 +45,12 @@ cargo build --locked --release -p scx_cake
 You can also select Cake through your distribution's scheduler service.
 The default policy needs no profile or toggle options.
 
+The September 28 nightly pool-serving and queue-mark changes are part of that
+default policy, including in release builds. See the [KovaaK's testing
+findings](docs/KOVAAKS_KICK_ABBA_2026-09-28.md) for the measured gains, jitter
+tradeoff, and remaining input-latency questions. Rebuild or update from this
+nightly source to test them; an older installed release does not include them.
+
 While running, `cat /sys/kernel/sched_ext/root/ops` identifies the active
 scheduler; Cake's name starts with `cake`. Press Ctrl+C to stop a foreground
 instance. Detaching returns scheduling to the kernel's default scheduler.
@@ -61,10 +67,11 @@ mechanism, not a latency guarantee.
 | `--print-topology` | Off | Print discovered core topology, capacity and preferred-core information, then exit without attaching |
 | `-v`, `--verbose` | Off | Enable verbose libbpf output, startup details, IRQ diagnostics and exit event counts |
 | `--toggle NAME=0\|1` | No overrides | Override a setting from the table below; repeat the option for multiple settings |
+| `--handoff-ns NS` | No override | Override the handoff threshold in nanoseconds for experiments; leave unset for the default policy |
 
 `--version` takes precedence over `--print-topology`. These inspection modes
-do not apply or validate toggle specifications. In particular,
-`--print-topology --toggle llcsplit=1` still prints the real host topology.
+do not apply or validate toggle specifications. Use the ordinary scheduler
+startup logs to check whether a requested diagnostic toggle was accepted.
 
 ### Obsolete and invalid options
 
@@ -95,17 +102,13 @@ Repeated valid assignments are processed in order, so the last one wins.
 
 | Name | Default | What it controls |
 |---|---|---|
-| `g85` | `1` | Seat rules that protect a pipeline-stage task's association with a CPU |
-| `g86` | `1` | Retry idle-CPU claims and allow eligible kernel-thread wakes to use a shared pool |
-| `g87` | `1` | Base wakeup protection and pinned-wake preemption margins on the waiting task's own slice |
-| `g89` | `1` | Use per-cache wake pools and cache-local routing; `0` selects one shared pool and disables this routing policy |
 | `probe` | `0` | Collect additional BPF placement and delay diagnostics, reported at exit |
-| `llcsplit` | `0` | Testing only: split the host's cores into two synthetic cache domains, keeping SMT siblings together |
 
 `-v` and `probe` are independent: verbose logging does not enable probe
-instrumentation. Neither is needed for normal scheduling. `llcsplit` changes
-the topology supplied to the scheduling policy; it does not reproduce physical
-inter-cache costs. Hardware fallbacks still apply. There is no `g88` toggle.
+instrumentation. Neither is needed for normal scheduling. The former `g85`,
+`g86`, `g87`, `g89`, and `llcsplit` toggle names are not accepted by this
+checkout; unknown names are warned about and ignored. Scheduling policy is
+enabled by default, with hardware fallbacks applied automatically.
 
 With launch permissions already provisioned:
 
@@ -115,9 +118,6 @@ With launch permissions already provisioned:
 
 # Collect additional diagnostics.
 ./target/release/scx_cake --toggle probe=1
-
-# Compare one shared wake pool with the default per-cache policy.
-./target/release/scx_cake --toggle g89=0
 ```
 
 ## How scheduling works
