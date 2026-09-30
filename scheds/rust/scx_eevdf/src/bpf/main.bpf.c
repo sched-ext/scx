@@ -316,9 +316,6 @@ const volatile bool no_hrtick;
 volatile u64 nr_sis_updates;
 volatile u64 sis_scan_sum;
 
-volatile u64 user_util_sum __hot_written;
-volatile u64 user_util_snapshot_at __hot_written;
-
 /*
  * Scheduler's exit status.
  */
