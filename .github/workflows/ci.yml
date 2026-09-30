@@ -214,6 +214,12 @@ jobs:
           tool: cargo-nextest
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
+      - name: Check scx_arena package contents
+        run: |
+          cargo package --locked --no-verify -p scx_arena
+          tar -tf target/package/scx_arena-*.crate > target/package/scx_arena-files.txt
+          grep -q '/bpf/src/arena.bpf.c$' target/package/scx_arena-files.txt
+          grep -q '/bpf/include/lib/arena.h$' target/package/scx_arena-files.txt
       - name: Compat header tests
         run: make -C lib/selftests/compat test
 
