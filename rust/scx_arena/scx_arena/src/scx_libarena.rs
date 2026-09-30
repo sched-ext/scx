@@ -54,12 +54,12 @@ mod types {
 /// and joins the library's background threads.
 #[must_use]
 #[derive(Debug)]
-pub struct ArenaLib {
+pub struct ScxLibArena {
     _watcher: crate::Daemon,
     _urcu: Option<crate::Daemon>,
 }
 
-impl ArenaLib {
+impl ScxLibArena {
     /// Number of u64 words needed to hold a mask of @nr_cpus bits.
     fn nr_cpumask_words(nr_cpus: usize) -> usize {
         nr_cpus.div_ceil(64)
@@ -294,7 +294,7 @@ impl ArenaLib {
     }
 
     /// Set up the BPF arena library state and, when the object carries the
-    /// scx_urcu doorbell, spawn the reclaim daemon. The returned ArenaLib
+    /// scx_urcu doorbell, spawn the reclaim daemon. The returned ScxLibArena
     /// owns the library's background threads.
     /// @task_align: task ctx element alignment, 0 for word alignment.
     pub fn setup(
@@ -302,7 +302,7 @@ impl ArenaLib {
         task_size: usize,
         task_align: usize,
         nr_cpus: usize,
-    ) -> Result<ArenaLib> {
+    ) -> Result<ScxLibArena> {
         Self::setup_arena(obj, task_size, task_align)?;
         Self::setup_topology(obj, nr_cpus)?;
 
@@ -310,13 +310,13 @@ impl ArenaLib {
     }
 
     /// Start the userspace services for BPF arena state initialized by the
-    /// caller. The returned ArenaLib must be kept alive for as long as the BPF
+    /// caller. The returned ScxLibArena must be kept alive for as long as the BPF
     /// object uses the arena.
     ///
     /// Use this instead of setup() when a scheduler has its own BPF-side arena
     /// initialization and does not use the generic arena topology.
-    pub fn start(obj: &Object) -> Result<ArenaLib> {
-        Ok(ArenaLib {
+    pub fn start(obj: &Object) -> Result<ScxLibArena> {
+        Ok(ScxLibArena {
             _watcher: crate::stream_watcher_spawn(obj)?,
             _urcu: crate::urcu_spawn(obj)?,
         })
