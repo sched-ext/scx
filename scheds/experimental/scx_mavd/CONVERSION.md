@@ -7,7 +7,10 @@ source organization file for file. The fork baseline is 0ed245e2d0a3
 the reference sources are [scx_lavd](../../rust/scx_lavd). This file records
 the goals of the fork, the representation choices, the verifier constraints
 that shaped the code and how to measure them, the known issues, and the
-procedure for porting a lavd change.
+procedure for syncing with lavd.
+
+The last sync, on 2026-09-29, covered main through c9b90b3ad3d0
+("scheds/include: Sync with kernel sched_ext/for-7.4 (c6fe97c34a1a)").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
@@ -16,9 +19,9 @@ equivalence.
 ## Goals
 
 The standing task once the conversion lands is to track lavd's development
-while keeping the properties the conversion established. Every lavd change
-is ported or recorded as deliberately omitted, following "Porting a lavd
-change", and a port preserves all of the following.
+while keeping the properties the conversion established. Every lavd commit
+is ported or listed under "Skipped lavd commits", following "Syncing with
+lavd", and a port preserves all of the following.
 
 - Policy parity. mavd makes the same scheduling decisions as lavd from the
   same inputs: the same thresholds, equations, accounting, branch order and
@@ -437,9 +440,11 @@ can_loop in bpf_arena_for() and cmask_for_each() bounds verifier state, not
 valid traversal. Every scan is bounded by the immutable cid, CPU or domain
 count, far below the may_goto budget, so complete scans finish.
 
-The Clang 22.1.8 BPF v3 build rejected the attempted 32-bit relaxed atomic
-loads. The local view requests repeated reads without changing the field
-declaration or adding ordering or synchronization with writers. Emitted
+Runtime preference-table reads go through a const volatile u16 __arena view,
+as lavd's reads of its const volatile rodata table do, so every read is a
+fresh load. The arena table itself is declared plain u16. The view adds no
+ordering or synchronization with writers. A relaxed atomic load would
+compile to the same plain load under the v4 ISA the build uses. Emitted
 AS1-to-AS0 casts mark PTR_TO_ARENA, including in this tree's READ_ONCE()
 expansion.
 
@@ -472,8 +477,21 @@ buffers") for the same problem. The compiler is clang 22.1.8 with libbpf
 per core. Another compiler or kernel can change every number below, so
 re-measure rather than reason from them.
 
-The scheduler requires clang 22 or newer, and no code accommodates an older
-compiler. Clang 19 through 21 compile the memset that zeroes the
+The measured objects were built for the v3 ISA and predate the shared
+changes of the last sync, among them 69761e2f982d ("scx_cargo: Build BPF
+with -mcpu=v4") and 830d1816966d ("scx_utils, scheds/include: Use the
+fetching atomic builtins in the cmask bit helpers"). On the v4 object built
+at 7b301d545e38 ("Merge pull request #3853 from sched-ext/libbpf-update"),
+the stack model gives the same rounded frames and totals, and the chain
+table below is from that object. That object has not been loaded, so the
+verifier's numbers have not been re-measured. The cmask bit helpers carry
+both the fetching builtins and the cmpxchg loop. The loader probes whether
+the JIT accepts the fetching forms, and the verifier prunes the other path,
+so the counts also depend on the kernel.
+
+The scheduler requires clang 22 or newer. scx_cargo refuses to build it with
+an older one unless SCX_ALLOW_OLD_CLANG is set, and no code accommodates an
+older compiler. Clang 19 through 21 compile the memset that zeroes the
 arena-resident sys_stat_ctx in sys_stat.bpf.c into stores through the raw
 arena address, without the address-space cast that clang 22 emits, and the
 verifier rejects init, cid_online and cid_offline, the programs that reach
@@ -500,7 +518,7 @@ cmask_andnot(), are global functions with a frame of their own, while the
 scans and bit tests stay inline in their callers. The deepest chain from
 either program is the picker's own, six frames down to the idle claim:
 
-    lavd_enqueue            160 -> 160
+    lavd_enqueue            152 -> 160
     pick_idle_cpu           104 -> 112
     migrate_to_neighbor     112 -> 112
     pick_idle_cpu_at_cpdom   16 ->  16
@@ -579,10 +597,11 @@ The script's own docstring explains its output. The total is an upper bound:
 the verifier charges a subprog only for the accesses it verifies, so code it
 never reaches does not count. Every rejection seen during the conversion
 modeled over 512, at 528 and 544, but a 528 model has both loaded and been
-rejected depending on what the verifier reached, and the current code models
-at 544 from lavd_enqueue() and 512 from lavd_select_cid() and loads, with
-the verifier reporting 496 and 464. A model over the limit therefore names a
-chain to measure, and the verifier's `stack depth` line decides.
+rejected depending on what the verifier reached, and the measured objects
+modeled at 544 from lavd_enqueue() and 512 from lavd_select_cid() and
+loaded, with the verifier reporting 496 and 464. A model over the limit
+therefore names a chain to measure, and the verifier's `stack depth` line
+decides.
 
 ### The instruction budget
 
@@ -634,8 +653,8 @@ operations are global functions too, so the picker's mask intersections are
 verified once per program instead of at every call site: on the same mavd
 code they took select_cid from 88k to 70k verified instructions and enqueue
 from 105k to 89k, and returning the picker to lavd's inline helpers cost 4k
-and 3k of that back. Verified instructions per program with the current
-code:
+and 3k of that back. Verified instructions per program on the measured
+objects:
 
     lavd_select_cid      74,546
     lavd_enqueue         91,512
@@ -701,23 +720,57 @@ lockdep build of the kernel above, on bare metal: a 24-thread desktop and a
   and predates the library's rewrite: the dump format and dump scope
   changed, and its trace-buffer sizing assumptions no longer hold.
 
-## Porting a lavd change
+## Syncing with lavd
 
-The last lavd commit accounted for is the fork baseline named at the top of
-this file. Move that line with every port. To see what moved, compare from
-it to the current tree, and read the shared library and headers together
-with lavd's own files, because lavd's arena conversion, the cmask operations
-and the bandwidth code live there:
+mavd follows lavd commit by commit. The top of this file records the last
+sync: its date and the main commit it covered, LAST in the commands below. A
+sync first brings main up to upstream and works on a branch from it. List
+the commits since LAST that touch lavd or the shared code both schedulers
+build on, oldest first:
 
 ```sh
-git log --oneline BASELINE..main -- scheds/rust/scx_lavd lib \
-    scheds/include rust/scx_utils rust/scx_cargo
-git diff BASELINE..main -- scheds/rust/scx_lavd
+git log --reverse --no-merges --abbrev=12 --format='%h %s' LAST..main -- \
+    scheds/rust/scx_lavd lib scheds/include rust/scx_utils rust/scx_cargo \
+    rust/scx_arena rust/scx_stats
 ```
 
-1. Record the selected lavd commit, its subject and the original incoming
-   patches. Compare corresponding files and functions before translating
-   identifiers.
+Handle each listed commit as follows.
+
+- Changes to shared files that mavd builds reach it through the shared tree.
+  Read them for changes to anything this file documents, such as build
+  flags, library helpers or the measurement environment, and update the
+  affected section. A change to a shared file that only lavd builds, such as
+  lib/cpumask.bpf.c, is handled like a lavd change.
+- A lavd change that the same commit also made to mavd, as a dependency bump
+  does, is already ported. So is one that an earlier mavd commit already
+  carries, which the sync record names.
+- A lavd change that does not apply to mavd, such as one to code the cid
+  form replaced, is proposed for skipping. Once the maintainer confirms the
+  skip, list it under "Skipped lavd commits" as sha12 ("subject") with the
+  reason.
+- Every other lavd change is ported as below.
+
+Before porting anything, present the plan: every listed commit, how it will
+be handled, and for each proposed skip what the commit does and why it
+should not be ported. Port only after the maintainer confirms the plan. No
+commit is skipped without that confirmation.
+
+git cherry-pick cannot port a commit here. mavd is a copy of lavd rather
+than a rename, so the pick would apply to lavd's files again. Apply the lavd
+part of the commit to mavd with a three-way fallback instead. The touched
+mavd files must be clean, and the result is staged. Where the change touches
+code the conversion rewrote, it leaves conflict markers between mavd's code
+and lavd's result:
+
+```sh
+git show --format= SHA -- scheds/rust/scx_lavd | \
+    git apply -3 -p4 --directory=scheds/experimental/scx_mavd
+```
+
+Resolve the conflicts and translate the change to the cid form and arena
+storage.
+
+1. Compare corresponding files and functions before translating identifiers.
 2. Identify every input, output, index, mask and helper's units. Keep policy
    thresholds, equations, accounting updates, branch order and options
    unless an API constraint requires a documented difference.
@@ -730,24 +783,49 @@ git diff BASELINE..main -- scheds/rust/scx_lavd
    fields. Inspect generated BPF code for large copies and variable indices.
    The compiler has previously miscompiled a large aligned copy in this
    work. Source-level memcpy equivalence is insufficient.
-5. Build both schedulers, load mavd, and re-measure the stack chains and
-   instruction counts when the picker or the callbacks changed. Add every
-   new branch or interface to the coverage inventory under "Validation
-   obligations". Record any divergence with its reason, evidence, expected
-   effect and a test that exercises it. Do not treat an untested difference
-   as equivalent.
-6. Record the port in its patch description: the lavd commit and subject,
-   the changed functions, each translation or deviation with its reason, and
-   the build, review and functional evidence. A skipped lavd change needs
-   the same record. Then update the baseline line.
+5. Build both schedulers, load mavd when a kernel with the cid form is at
+   hand, and re-measure the stack chains and instruction counts when the
+   picker or the callbacks changed. Add every new branch or interface to the
+   coverage inventory under "Validation obligations". Record any divergence
+   with its reason, evidence, expected effect and a test that exercises it.
+   Do not treat an untested difference as equivalent.
 
-To confirm the fork is still lavd plus the conversion, extract lavd at the
-ported commit and diff it against mavd:
+Commit each port with lavd's author, date and message, the subject's
+scx_lavd prefix replaced by scx_mavd. The sed below handles only a leading
+"scx_lavd:". Edit other subject forms, such as "scx_utils, scx_lavd:", by
+hand.
 
 ```sh
-mkdir -p /tmp/lavd
-git archive BASELINE scheds/rust/scx_lavd | tar -x -C /tmp/lavd
-diff -r --no-dereference /tmp/lavd/scheds/rust/scx_lavd \
+git log -1 --format=%B SHA | sed '1s/^scx_lavd:/scx_mavd:/' > MSG
+# append the cherry-pick line and the port notes to MSG
+git commit --author="$(git log -1 --format='%an <%ae>' SHA)" \
+    --date="$(git log -1 --format=%aD SHA)" -F MSG
+```
+
+After lavd's message come the line git cherry-pick -x writes, "(cherry
+picked from commit FULL_SHA)", where FULL_SHA is the originating lavd commit
+on main, and then the port notes. The line makes every ported commit point
+to the lavd commit it came from. The notes cover every conflict and how it
+was resolved, every modification the conversion required with its reason,
+and the build, review and functional evidence. A port that applied cleanly
+and needed no modification says so. A port that changes something this file
+documents updates that section in the same commit.
+
+After the last port, build both schedulers, load mavd when a kernel with the
+cid form is at hand, and run the fork check below. Then record the sync in
+one commit to this file: the new date and main commit at the top, every
+skipped commit, and the sections the shared commits affect. The record
+commit's message also names each lavd commit an earlier mavd commit already
+carries. A sync that finds nothing to port still records itself.
+
+To confirm the fork is still lavd plus the conversion, extract lavd from the
+sync branch, whose lavd matches the main commit it covers, and diff it
+against mavd:
+
+```sh
+L=$(mktemp -d)
+git archive HEAD scheds/rust/scx_lavd | tar -x -C $L
+diff -r --no-dereference $L/scheds/rust/scx_lavd \
     scheds/experimental/scx_mavd
 ```
 
@@ -761,6 +839,12 @@ main.bpf.c and the introspection comm filter in introspec.bpf.c,
 cpu_order.rs without the sibling field and table that the kernel's cid
 topology replaces, this file and tools/. Everything else in that diff must
 be explained by a section of this file.
+
+## Skipped lavd commits
+
+Each lavd commit a sync did not port, as sha12 ("subject"), with its reason.
+
+None yet.
 
 ## Validation obligations
 
