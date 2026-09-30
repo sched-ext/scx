@@ -11,6 +11,8 @@ mod bpf_skel;
 
 mod arenalib;
 pub use arenalib::ArenaLib;
+mod scx_libarena;
+pub use scx_libarena::ScxLibArena;
 
 use std::fs::File;
 use std::io::BufRead;
