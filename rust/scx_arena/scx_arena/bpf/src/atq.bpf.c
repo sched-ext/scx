@@ -45,7 +45,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 __hidden __inline
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	rbnode_t *node = &taskc->node;
+	struct rbnode __arena *node = &taskc->node;
 	scx_atq_t *old_atq;
 	int ret;
 
@@ -85,7 +85,7 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 	return 0;
 }
 
-/* 
+/*
  * XXXETSAL: We are using the __hidden antipattern for API functions because some
  * older kernels do not allow function calls with preemption disabled. We will replace
  * these annotations with the proper ones (__weak) at some point in the future.
@@ -167,11 +167,11 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	return ret;
 }
 
-__hidden
+__hidden __always_inline
 u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 {
 	scx_task_common *taskc;
-	u64 vtime, taskc_ptr;
+	u64 taskc_ptr;
 	int ret;
 
 	ret = scx_atq_lock(atq);
@@ -183,7 +183,7 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 		return (u64)NULL;
 	}
 
-	ret = rb_pop(atq->tree, &vtime, &taskc_ptr);
+	ret = rb_least(atq->tree, NULL, &taskc_ptr);
 	if (ret) {
 		scx_atq_unlock(atq);
 
@@ -192,9 +192,16 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 		return (u64)NULL;
 	}
 
+	taskc = (scx_task_common *)taskc_ptr;
+	ret = rb_remove_node(atq->tree, &taskc->node);
+	if (ret) {
+		scx_atq_unlock(atq);
+		bpf_printk("%s: failed to remove least node: %d", __func__, ret);
+		return (u64)NULL;
+	}
+
 	atq->size -= 1;
 
-	taskc = (scx_task_common *)taskc_ptr;
 	if (hold)
 		scx_atq_task_hold(taskc);
 

@@ -10,8 +10,6 @@
 #include <lib/arena.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
-#include <lib/rbtree.h>
-#include <lib/atq.h>
 
 /*
  * "System-call" based API for arenas.
