@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 
 #include <lib/arena.h>
 #include <lib/cpumask.h>
@@ -39,9 +40,11 @@ int scx_selftest_topology_print(void)
 }
 
 
-__weak
-int scx_selftest_topology(void)
+SEC("syscall")
+int arena_selftest_topology(void)
 {
+	arena_subprog_init();
+
 	// Assume topology has been initialized before the test
 	if (!topo_all) {
 		bpf_printk("TOPO: failed to initialize topology");

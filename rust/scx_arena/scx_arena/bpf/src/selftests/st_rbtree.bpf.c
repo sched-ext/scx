@@ -324,7 +324,7 @@ u64 remove_key(struct rbtree __arena *rbtree __arg_arena, task_ctx __arg_arena *
 		return (u64)NULL;
 	}
 
-	tmp = taskc->next->next;
+	tmp = taskc->next ? taskc->next->next : NULL;
 	*ret = rb_remove_node(rbtree, &taskc->rbnode);
 
 	return (u64)tmp;
@@ -762,9 +762,11 @@ __weak int scx_selftest_rbtree_print(struct rbtree __arena *rbtree __arg_arena)
 
 #define SCX_RBTREE_SELFTEST(suffix, rbtree) SCX_SELFTEST(scx_selftest_rbtree_ ## suffix, (rbtree))
 
-__weak
-int scx_selftest_rbtree(void)
+SEC("syscall")
+int arena_selftest_rbtree(void)
 {
+	arena_subprog_init();
+
 	struct rbtree __arena *standard, *update, *duplicate, *noalloc;
 
 	standard = rb_create(RB_ALLOC, RB_DEFAULT);
