@@ -3,7 +3,6 @@
 #pragma once
 
 #include <lib/cid_topology.h>
-#include <lib/arena_loop.h>
 
 /*
  * CID idle tracking for sched_ext schedulers

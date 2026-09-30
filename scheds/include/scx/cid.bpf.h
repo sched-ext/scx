@@ -15,7 +15,6 @@
 #define __SCX_CID_BPF_H
 
 #include "bpf_arena_common.bpf.h"
-#include <lib/arena_loop.h>
 
 /* libbpf's bpf_helpers.h defines it from 1.4 on */
 #ifndef __arg_arena
