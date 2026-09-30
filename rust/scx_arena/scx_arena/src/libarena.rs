@@ -24,12 +24,6 @@ use libbpf_rs::ProgramInput;
 use libbpf_rs::ProgramMut;
 use libbpf_rs::libbpf_sys;
 
-// Upper bound on the CPU count the library accepts. Masks handed to the arena
-// are sized from the caller's actual nr_cpus, see nr_cpumask_words(), so this
-// only rejects schedulers that report more CPUs than the library supports.
-/// Maximum length of CPU mask supported by the library in bits.
-const MAX_CPU_SUPPORTED: usize = 640;
-
 /// Live BPF arena library state. Returned by setup() and must be kept alive
 /// for as long as the scheduler instance uses the arena: dropping it stops
 /// and joins the library's background threads.
@@ -41,9 +35,7 @@ pub struct ArenaLib {
 }
 
 impl ArenaLib {
-    /// Number of u64 words needed to hold a mask of @nr_cpus bits. The arena
-    /// side allocates its bitmaps to this size, so writes into them must be
-    /// bounded by it rather than by MAX_CPU_SUPPORTED.
+    /// Number of u64 words needed to hold a mask of @nr_cpus bits.
     fn nr_cpumask_words(nr_cpus: usize) -> usize {
         nr_cpus.div_ceil(64)
     }
@@ -73,6 +65,15 @@ impl ArenaLib {
 
     /// Set up basic library state.
     fn setup_arena(obj: &Object, task_size: usize, task_align: usize) -> Result<()> {
+        let input = ProgramInput {
+            context_in: None,
+            ..Default::default()
+        };
+        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
+        if ret != 0 {
+            bail!("Could not initialize libarena buddy allocator: {}", ret);
+        }
+
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
@@ -92,16 +93,6 @@ impl ArenaLib {
         };
 
         let ret = Self::run_prog_by_name(obj, "arena_init", input)?;
-        if ret != 0 {
-            bail!("Could not initialize arenas, setup_arenas returned {}", ret);
-        }
-
-        let input = ProgramInput {
-            context_in: None,
-            ..Default::default()
-        };
-
-        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
         if ret != 0 {
             bail!("Could not initialize arenas, setup_arenas returned {}", ret);
         }
@@ -287,10 +278,6 @@ impl ArenaLib {
         task_align: usize,
         nr_cpus: usize,
     ) -> Result<ArenaLib> {
-        if nr_cpus >= MAX_CPU_SUPPORTED {
-            bail!("Scheduler specifies too many CPUs");
-        }
-
         Self::setup_arena(obj, task_size, task_align)?;
         Self::setup_topology(obj, nr_cpus)?;
 

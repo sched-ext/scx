@@ -1,53 +1,58 @@
 #include <scx/common.bpf.h>
+#include <libarena/common.h>
 #include <lib/sdt_task.h>
 
 #include <lib/cpumask.h>
 
-extern const volatile u32 nr_cpu_ids;
-
-extern size_t mask_size;
+const volatile u32 nr_cpu_ids = NR_CPU_IDS_UNINIT;
 
 static __always_inline s32
-scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask, u64 __arg_arena *start)
+scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask, u64 *start)
 {
-	u64 old, new;
+	u64 old;
 	u64 ind, i;
+	u64 nr_longs = SCX_BITMAP_NR_LONGS;
 	s32 cpu;
 
-	if (unlikely(mask_size < SCXMASK_NLONG))
+	if (unlikely(!nr_longs))
 		return -EINVAL;
 
-	bpf_for (i, 0, SCXMASK_NLONG) {
-		if (i >= mask_size)
-			break;
-
-		ind = (*start + i) % mask_size;
+	for (i = 0; i < nr_longs && can_loop; i++) {
+		ind = (*start + i) % nr_longs;
 
 		old = mask->bits[ind];
 		if (!old)
 			continue;
 
 		cpu = __builtin_ffsll(old) - 1;
-		new = old & ~(1ULL << cpu);
-		if (cmpxchg(&mask->bits[ind], old, new) != old)
+		if (!bmp_test_and_clear_bit(ind * BITS_PER_LONG_LONG + cpu, mask))
 			return -EAGAIN;
 
 		*start = ind;
 
-		return ind * 64 + cpu;
+		return ind * BITS_PER_LONG_LONG + cpu;
 	}
 
 	return -ENOSPC;
 }
 
 __weak s32
-scx_bitmap_pick_any_cpu_from(scx_bitmap_t __arg_arena mask, u64 __arg_arena *start)
+scx_bitmap_pick_any_cpu_from(scx_bitmap_t __arg_arena mask,
+			     u64 __arena *start __arg_arena)
 {
+	u64 cursor;
 	s32 cpu;
 
+	if (!start)
+		return -EINVAL;
+	cursor = *start;
+
 	do {
-		cpu = scx_bitmap_pick_any_cpu_once(mask, start);
+		cpu = scx_bitmap_pick_any_cpu_once(mask, &cursor);
 	} while (cpu == -EAGAIN && can_loop);
+
+	if (cpu >= 0)
+		*start = cursor;
 
 	return cpu;
 }
@@ -68,26 +73,11 @@ scx_bitmap_pick_any_cpu(scx_bitmap_t __arg_arena mask)
 __weak s32
 scx_bitmap_vacate_cpu(scx_bitmap_t __arg_arena mask, s32 cpu)
 {
-	int off = (u32)cpu / 64;
-	int ind = (u32)cpu % 64;
-	u64 old, new;
-
 	if (cpu < 0 || cpu >= nr_cpu_ids) {
 		bpf_printk("freeing invalid cpu");
 		return -EINVAL;
 	}
 
-	if (off < 0 || off >= mask_size || off >= SCXMASK_NLONG) {
-		bpf_printk("impossible out-of-bounds on free");
-		return -EINVAL;
-	}
-
-	while (can_loop) {
-		old = mask->bits[off];
-		new = old | 1ULL << ind;
-		if (cmpxchg(&mask->bits[off], old, new) == old)
-			return 0;
-	}
-
-	return -EAGAIN;
+	bmp_set_bit(cpu, mask);
+	return 0;
 }
