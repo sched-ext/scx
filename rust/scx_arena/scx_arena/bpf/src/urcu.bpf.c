@@ -77,21 +77,15 @@ int scx_urcu_pending(struct scx_urcu *urcu)
 	return READ_ONCE(urcu->head[0]) || READ_ONCE(urcu->head[1]);
 }
 
-__hidden
-void scx_urcu_free(struct scx_urcu *urcu, void __arena *payload)
+static __always_inline bool scx_urcu_enqueue(struct scx_urcu *urcu,
+					    void __arena *payload,
+					    scx_urcu_node_t *node,
+					    u64 recycle)
 {
-	scx_urcu_node_t *node;
 	u32 side, i;
 
-	arena_subprog_init();
-
-	node = scx_urcu_node_get(urcu);
-	if (unlikely(!node)) {
-		scx_bpf_error("urcu node allocation failed");
-		return;
-	}
-
 	node->payload = payload;
+	node->recycle = recycle;
 
 	side = READ_ONCE(urcu->active) & 1;
 	bpf_for(i, 0, SCX_URCU_CAS_TRIES) {
@@ -121,11 +115,37 @@ void scx_urcu_free(struct scx_urcu *urcu, void __arena *payload)
 				bpf_ringbuf_submit(e, 0);
 			}
 		}
+		return true;
+	}
+	return false;
+}
+
+__hidden
+void scx_urcu_free_embedded(struct scx_urcu *urcu, void __arena *payload,
+			    scx_urcu_node_t *node)
+{
+	arena_subprog_init();
+	if (!scx_urcu_enqueue(urcu, payload, node, 0))
+		scx_bpf_error("urcu free CAS exhausted");
+}
+
+__hidden
+void scx_urcu_free(struct scx_urcu *urcu, void __arena *payload)
+{
+	scx_urcu_node_t *node;
+
+	arena_subprog_init();
+
+	node = scx_urcu_node_get(urcu);
+	if (unlikely(!node)) {
+		scx_bpf_error("urcu node allocation failed");
 		return;
 	}
 
-	scx_urcu_node_put(urcu, node);
-	scx_bpf_error("urcu free CAS exhausted");
+	if (!scx_urcu_enqueue(urcu, payload, node, 1)) {
+		scx_urcu_node_put(urcu, node);
+		scx_bpf_error("urcu free CAS exhausted");
+	}
 }
 
 /*
@@ -147,13 +167,18 @@ int scx_urcu_reclaim(struct scx_urcu *urcu)
 	 */
 	bpf_for(i, 0, SCX_URCU_RECLAIM_BATCH) {
 		scx_urcu_node_t *node = (scx_urcu_node_t *)urcu->head[side];
+		u64 next, recycle;
+		void __arena *payload;
 
 		if (!node)
 			break;
-		urcu->head[side] = node->next;
-
-		arena_free(node->payload);
-		scx_urcu_node_put(urcu, node);
+		next = node->next;
+		payload = node->payload;
+		recycle = node->recycle;
+		urcu->head[side] = next;
+		arena_free(payload);
+		if (recycle)
+			scx_urcu_node_put(urcu, node);
 	}
 
 	if (urcu->head[side])

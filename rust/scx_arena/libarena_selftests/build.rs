@@ -32,6 +32,7 @@ fn main() {
         .add_source(&source("lvqueue.bpf.c"))
         .add_source(&source("minheap.bpf.c"))
         .add_source(&source("urcu.bpf.c"))
+        .add_source(&source("sdt_cgroup.bpf.c"))
         .add_source(&source("sdt_task.bpf.c"))
         .add_source(&source("topology.bpf.c"))
         .add_source(&selftest("st_arena_topology_timer.bpf.c"))

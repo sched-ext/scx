@@ -21,6 +21,8 @@ struct scx_task_map_val {
 };
 
 static size_t task_ctx_size;
+static size_t task_alloc_size;
+static struct scx_urcu scx_task_urcu;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -42,7 +44,7 @@ void __arena *scx_task_alloc(struct task_struct *p)
 		return NULL;
 	}
 
-	data = arena_calloc(1, task_ctx_size);
+	data = arena_calloc(1, task_alloc_size);
 	if (unlikely(!data)) {
 		scx_bpf_error("arena_calloc failed");
 		return NULL;
@@ -64,7 +66,13 @@ int scx_task_init(__u64 data_size, __u64 align)
 		return -EINVAL;
 	}
 
-	task_ctx_size = data_size > align ? data_size : align;
+	if (unlikely(data_size > ~0ULL - (align - 1) - sizeof(struct scx_urcu_node))) {
+		bpf_printk("task context size overflow");
+		return -EOVERFLOW;
+	}
+
+	task_ctx_size = (data_size + align - 1) & ~(align - 1);
+	task_alloc_size = task_ctx_size + sizeof(struct scx_urcu_node);
 	return 0;
 }
 
@@ -118,8 +126,6 @@ void scx_task_free(struct task_struct *p)
 	arena_free(data);
 }
 
-static struct scx_urcu scx_task_urcu;
-
 /*
  * The deferred counterpart of scx_task_free(): queue @p's allocation, if any,
  * for freeing after a grace period, currently provided by the scx_urcu
@@ -142,7 +148,8 @@ void scx_task_free_rcu(struct task_struct *p)
 	if (unlikely(!data))
 		return;
 
-	scx_urcu_free(&scx_task_urcu, data);
+	scx_urcu_free_embedded(&scx_task_urcu, data,
+				 (scx_urcu_node_t *)((u8 __arena *)data + task_ctx_size));
 }
 
 /* scx_urcu driver programs, discovered by name and run by the userspace side */
