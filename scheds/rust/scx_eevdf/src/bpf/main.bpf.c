@@ -903,22 +903,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 		return -E2BIG;
 	}
 
-	/*
-	 * Frame the masks over the cid space, with the helpers, before any
-	 * bit is set.
-	 */
-	err = scx_cid_idle_init_masks(&eevdf_idle, nr_cids, smt_enabled);
-	if (err)
-		return err;
 	cmask_init(queued_cids, 0, nr_cids);
 	bpf_arena_for(cid, 0, nr_place_tiers)
 		cmask_init(place_tier_mask(cid), 0, nr_cids);
 	bpf_arena_for(cid, 0, nr_capacity_tiers)
 		cmask_init(capacity_tier_mask(cid), 0, nr_cids);
 
-	nr_words = scx_cid_idle_nr_words(&eevdf_idle);
-
 	init_topology();
+	err = scx_cid_idle_init(&eevdf_idle, smt_enabled,
+				 SCX_CID_IDLE_SPLIT_SHARD,
+				 &topos[0].ranges, sizeof(*topos));
+	if (err)
+		return err;
 	now = bpf_ktime_get_ns();
 
 	/* sched_init(): the idle pull budget starts open by a migration cost. */
@@ -974,8 +970,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 			topo->capacity_tier = nr_capacity_tiers - 1;
 		__cmask_set(cid, place_tier_mask(topo->place_tier));
 		__cmask_set(cid, capacity_tier_mask(topo->capacity_tier));
-
-		cid_idle_set(cid);
 
 		ht = bpf_map_lookup_elem(&hrticks, &cid);
 		if (!ht) {

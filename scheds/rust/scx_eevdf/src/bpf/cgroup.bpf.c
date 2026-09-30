@@ -649,14 +649,16 @@ arm:
  */
 static void bw_kick_idle(void)
 {
-	u32 words = (nr_cids + 63) / 64, k;
+	u32 cursor = 0, word;
 
-	bpf_for(k, 0, words) {
-		u64 w = scx_cid_idle_word(&eevdf_idle, k);
+	while (cursor < nr_cids && can_loop) {
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle, NULL, 0,
+						     nr_cids, &cursor, &word);
 
 		if (!w)
 			continue;
-		scx_bpf_kick_cid(k * 64 + __builtin_ctzll(w), SCX_KICK_IDLE);
+		scx_bpf_kick_cid(word * 64 + __builtin_ctzll(w),
+				 SCX_KICK_IDLE);
 		return;
 	}
 }

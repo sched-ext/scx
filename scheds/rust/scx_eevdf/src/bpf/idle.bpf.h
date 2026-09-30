@@ -32,10 +32,9 @@
  * ops.update_idle() only fires on real idle transitions. A cid that was
  * claimed for a task and kicked, and then found nothing to run, goes back
  * to idle without a transition and would keep its bit cleared for good:
- * ops.dispatch() re-arms the bit whenever a cid is about to idle. The
- * re-arm can be wrong the other way when a task lands on the cid before
- * it idles. The next idle claim or ops.update_idle(cid, false) clears
- * that stale hint; a claim of a busy cid is bounced back to ops.enqueue().
+ * ops.dispatch() re-arms the bit when it runs from the idle task. A
+ * successful claim excludes other claimers, but the target CPU may become
+ * busy before the task arrives.
  */
 static bool cid_idle_test(s32 cid)
 {
@@ -98,7 +97,8 @@ static bool test_idle_cores(s32 cid)
 		return false;
 	topo = cid_topo(cid);
 
-	return scx_cid_idle_has_core(&eevdf_idle, topo->ranges.llc_base);
+	return scx_cid_idle_has_core(&eevdf_idle, topo->ranges.llc_base,
+				      topo->ranges.node_base);
 }
 
 static void set_idle_cores(s32 cid, bool has_idle_core)
@@ -109,6 +109,7 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
 		return;
 	topo = cid_topo(cid);
 	scx_cid_idle_set_core_hint(&eevdf_idle, topo->ranges.llc_base,
+				    topo->ranges.node_base,
 				    has_idle_core);
 }
 
@@ -130,7 +131,7 @@ static void cid_idle_set(s32 cid)
 	if (!cid_valid(cid))
 		return;
 
-	scx_cid_idle_set_ranges(&eevdf_idle, cid, &cid_topo(cid)->ranges);
+	scx_cid_idle_set(&eevdf_idle, cid);
 }
 
 /*
@@ -191,23 +192,29 @@ static __always_inline s32 first_idle_cid(const struct task_struct *p, u64 w,
 	return -EBUSY;
 }
 
-/* Scan idle cids without an asymmetric-packing tier restriction. */
-static __always_inline s32
-scan_idle_unranked_range(const struct task_struct *p, u32 base, u32 nr,
-			 bool restricted, bool whole_core)
+/*
+ * Walk segments in CID order, skipping empty ones in wide ranges.
+ *
+ * A global function: the verifier checks the segment walk once, not once
+ * per caller and caller loop iteration.
+ */
+__noinline s32
+scan_idle_tier_range(const struct task_struct *p __arg_trusted,
+		     const struct scx_cmask __arena *tier __arg_arena,
+		     u32 base, u32 nr, u32 flags)
 {
-	u32 k, last;
+	u32 cursor = base, word;
 
 	if (!nr)
 		return -EBUSY;
-	last = (base + nr - 1) / 64;
-	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = scx_cid_idle_scan_word(&eevdf_idle, NULL, k, base, nr);
+	while (cursor < base + nr && can_loop) {
+		u64 w = scx_cid_idle_scan_word(&eevdf_idle, tier,
+						base, nr, &cursor, &word);
 		s32 cid;
 
 		if (!w)
 			continue;
-		cid = first_idle_cid(p, w, k, restricted, whole_core);
+		cid = first_idle_cid(p, w, word, flags & 1, flags & 2);
 		if (cid >= 0)
 			return cid;
 	}
@@ -215,29 +222,22 @@ scan_idle_unranked_range(const struct task_struct *p, u32 base, u32 nr,
 	return -EBUSY;
 }
 
+/* Scan idle cids without an asymmetric-packing tier restriction. */
+static __always_inline s32
+scan_idle_unranked_range(const struct task_struct *p, u32 base, u32 nr,
+			 bool restricted, bool whole_core)
+{
+	return scan_idle_tier_range(p, NULL, base, nr,
+				    restricted | (whole_core << 1));
+}
+
 /* scan_idle_range() restricted by CPU capacity rather than packing priority. */
 static __always_inline s32
 scan_idle_capacity_range(const struct task_struct *p, u32 t, u32 base, u32 nr,
 			 bool restricted, bool whole_core)
 {
-	u32 k, last;
-
-	if (!nr)
-		return -EBUSY;
-	last = (base + nr - 1) / 64;
-	bpf_arena_for(k, base / 64, last + 1) {
-		u64 w = scx_cid_idle_scan_word(&eevdf_idle, capacity_tier_mask(t),
-					    k, base, nr);
-		s32 cid;
-
-		if (!w)
-			continue;
-		cid = first_idle_cid(p, w, k, restricted, whole_core);
-		if (cid >= 0)
-			return cid;
-	}
-
-	return -EBUSY;
+	return scan_idle_tier_range(p, capacity_tier_mask(t), base, nr,
+				    restricted | (whole_core << 1));
 }
 
 static __always_inline u32 sis_idle_scan_nr(s32 cid)
