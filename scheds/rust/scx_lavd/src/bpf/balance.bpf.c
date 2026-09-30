@@ -21,7 +21,7 @@ extern const volatile u8	mig_delta_pct;
 extern const volatile u8	no_fast_lb;
 extern const volatile u64	lb_low_util_wall;
 
-u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
+u64 __attribute__ ((noinline)) calc_mig_delta(u64 base_share_invr, int nz_qlen,
 					      u64 mig_delta_factor)
 {
 	/*
@@ -31,12 +31,12 @@ u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
 	 * shift-based heuristic.
 	 */
 	if (mig_delta_factor > 0)
-		return avg_load_invr * mig_delta_factor / LAVD_SCALE;
+		return base_share_invr * mig_delta_factor / LAVD_SCALE;
 	if (nz_qlen >= sys_stat.nr_active_cpdoms)
-		return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT_OL;
+		return base_share_invr >> LAVD_CPDOM_MIG_SHIFT_OL;
 	if (nz_qlen == 0)
-		return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT_UL;
-	return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT;
+		return base_share_invr >> LAVD_CPDOM_MIG_SHIFT_UL;
+	return base_share_invr >> LAVD_CPDOM_MIG_SHIFT;
 }
 
 /*
@@ -49,8 +49,8 @@ int __attribute__((noinline))
 classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 	       u64 total_cap_sum, int nz_qlen, u64 mig_delta_factor)
 {
+	u64 fair_share_invr = 0, other_share_invr, base_share_invr;
 	u64 x_mig_delta = 0;
-	u64 fair_share_invr = 0;
 	u64 stealer_threshold = 0;
 	u64 stealee_threshold = 0;
 
@@ -63,14 +63,26 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 		stealer_threshold = avg - x_mig_delta;
 		stealee_threshold = avg + x_mig_delta;
 	} else if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
+		/*
+		 * Size the band by the domain's fair share, but no wider than
+		 * the share of all the other active domains. A domain can never
+		 * carry more than that above its own fair share. A wider band,
+		 * as a big cluster holding most of the capacity would get, sets
+		 * its stealee threshold above the most load the domain can
+		 * ever carry, so it is never marked overloaded however idle the
+		 * others are. A lone active domain has no other share to cap by
+		 * and keeps its band.
+		 */
 		fair_share_invr = total_load_invr *
 			     cpdomc->cap_sum_active_cpus /
 			     total_cap_sum;
+		other_share_invr = total_load_invr - fair_share_invr;
+		base_share_invr = other_share_invr?
+					min(fair_share_invr, other_share_invr) :
+					fair_share_invr;
 
-		x_mig_delta = calc_mig_delta(
-				fair_share_invr, nz_qlen,
-				mig_delta_factor);
-
+		x_mig_delta = calc_mig_delta(base_share_invr, nz_qlen,
+					     mig_delta_factor);
 		stealer_threshold = fair_share_invr - x_mig_delta;
 		stealee_threshold = fair_share_invr + x_mig_delta;
 	}
