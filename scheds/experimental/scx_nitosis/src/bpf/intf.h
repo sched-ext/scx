@@ -59,6 +59,8 @@ enum cell_stat_idx {
  * own cpu, so none may share a cacheline with its neighbor.
  */
 struct cpu_ctx {
+	/* When the per-cid DSQ went from empty to non-empty; 0 while empty. */
+	u64 pinned_waiting_since;
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
 	u64 running_ns[MAX_CELLS];
