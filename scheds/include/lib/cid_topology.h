@@ -9,6 +9,9 @@ struct scx_cid_ranges {
 	u32 core_base;
 	u32 core_nr;
 	u32 core_idx;
+	u32 cluster_base;
+	u32 cluster_nr;
+	u32 cluster_idx;
 	u32 shard_base;
 	u32 shard_nr;
 	u32 shard_idx;
@@ -23,17 +26,20 @@ struct scx_cid_ranges {
 /* State for a walk from the highest CID to the lowest. */
 struct scx_cid_range_builder {
 	s32 last_core;
+	s32 last_cluster;
 	s32 last_shard;
 	s32 last_llc;
 	s32 last_node;
 	u32 core_nr;
+	u32 cluster_nr;
 	u32 shard_nr;
 	u32 llc_nr;
 	u32 node_nr;
 };
 
 #define SCX_CID_RANGE_BUILDER_INIT { \
-	.last_core = -1, .last_shard = -1, .last_llc = -1, \
+	.last_core = -1, .last_cluster = -1, .last_shard = -1, \
+	.last_llc = -1, \
 	.last_node = -1 \
 }
 
@@ -48,8 +54,16 @@ scx_cid_ranges_build(struct scx_cid_ranges __arena *out,
 		     struct scx_cid_range_builder *builder,
 		     const struct scx_cid_topo *topo, u32 cid)
 {
+	s32 cluster_cid = topo->llc_cid;
+	s32 cluster_idx = topo->llc_idx;
 	s32 shard_cid = topo->llc_cid;
 	s32 shard_idx = topo->llc_idx;
+
+	/* Kernels without CID clusters use one cluster per LLC. */
+	if (bpf_core_field_exists(topo->cluster_cid)) {
+		cluster_cid = topo->cluster_cid;
+		cluster_idx = topo->cluster_idx;
+	}
 
 	/* Kernels without CID shards use one segment per LLC. */
 	if (bpf_core_field_exists(topo->shard_cid)) {
@@ -57,11 +71,14 @@ scx_cid_ranges_build(struct scx_cid_ranges __arena *out,
 		shard_idx = topo->shard_idx;
 	}
 
-	if (topo->core_cid < 0 || shard_cid < 0 ||
+	if (topo->core_cid < 0 || cluster_cid < 0 || shard_cid < 0 ||
 	    topo->llc_cid < 0 || topo->node_cid < 0) {
 		out->core_base = cid;
 		out->core_nr = 1;
 		out->core_idx = cid;
+		out->cluster_base = cid;
+		out->cluster_nr = 1;
+		out->cluster_idx = cid;
 		out->shard_base = cid;
 		out->shard_nr = 1;
 		out->shard_idx = cid;
@@ -77,6 +94,10 @@ scx_cid_ranges_build(struct scx_cid_ranges __arena *out,
 	if (topo->core_cid != builder->last_core) {
 		builder->last_core = topo->core_cid;
 		builder->core_nr = cid + 1 - topo->core_cid;
+	}
+	if (cluster_cid != builder->last_cluster) {
+		builder->last_cluster = cluster_cid;
+		builder->cluster_nr = cid + 1 - cluster_cid;
 	}
 	if (shard_cid != builder->last_shard) {
 		builder->last_shard = shard_cid;
@@ -94,6 +115,9 @@ scx_cid_ranges_build(struct scx_cid_ranges __arena *out,
 	out->core_base = topo->core_cid;
 	out->core_nr = builder->core_nr;
 	out->core_idx = topo->core_idx;
+	out->cluster_base = cluster_cid;
+	out->cluster_nr = builder->cluster_nr;
+	out->cluster_idx = cluster_idx;
 	out->shard_base = shard_cid;
 	out->shard_nr = builder->shard_nr;
 	out->shard_idx = shard_idx;

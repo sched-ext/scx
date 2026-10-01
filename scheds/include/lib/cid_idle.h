@@ -47,7 +47,8 @@
  * Winning a claim excludes other claimers, but does not guarantee that the
  * target CPU stays idle until the task arrives.
  *
- * scx_cid_idle_pick() searches the anchor CID's core, LLC, node, or all CIDs.
+ * scx_cid_idle_pick() searches the anchor CID's core, cluster, LLC, node, or
+ * all CIDs. On kernels without CID cluster topology, cluster means LLC.
  * SCX_CID_IDLE_SAME_CORE tries the specified cid first, then its siblings.
  * Wider scopes start after the target cid and wrap. The picker checks task
  * affinity and claims the chosen CID.
@@ -58,6 +59,12 @@
  * SCX_CID_IDLE_ANY_CPU accepts either a lone idle sibling or a whole idle core.
  * These scopes include smaller domains, so a node scan can revisit its target
  * LLC. A successful claim reserves one CID, not the whole core.
+ *
+ * Two scopes can cover the same CIDs, such as a cluster of one core, a
+ * cluster that falls back to its LLC, an LLC that spans its node, or a single
+ * node that spans the system.
+ * scx_cid_idle_scope_same() detects this, so a caller widening its search
+ * can skip a scope that would only repeat the previous scan.
  *
  * Example idle cid management lifecycle:
  *
@@ -96,47 +103,57 @@
  *           scx_cid_idle_rearm(&idle_state, cid);
  *   }
  *
- *   // ops.select_cid(): try the previous core, then widen the search.
+ *   // Widen the search: core, cluster, LLC, node, then all CIDs. Skip a
+ *   // scope that covers the same CIDs as the one before it.
+ *   static s32 example_pick(struct task_struct *p, s32 prev_cid,
+ *                           enum scx_cid_idle_kind kind)
+ *   {
+ *           s32 cid;
+ *
+ *           cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
+ *                                   SCX_CID_IDLE_SAME_CORE, kind);
+ *           if (cid < 0 &&
+ *               !scx_cid_idle_scope_same(&idle_state, prev_cid,
+ *                                        SCX_CID_IDLE_SAME_CORE,
+ *                                        SCX_CID_IDLE_SAME_CLUSTER))
+ *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
+ *                                           SCX_CID_IDLE_SAME_CLUSTER,
+ *                                           kind);
+ *           if (cid < 0 &&
+ *               !scx_cid_idle_scope_same(&idle_state, prev_cid,
+ *                                        SCX_CID_IDLE_SAME_CLUSTER,
+ *                                        SCX_CID_IDLE_SAME_LLC))
+ *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
+ *                                           SCX_CID_IDLE_SAME_LLC, kind);
+ *           if (cid < 0 &&
+ *               !scx_cid_idle_scope_same(&idle_state, prev_cid,
+ *                                        SCX_CID_IDLE_SAME_LLC,
+ *                                        SCX_CID_IDLE_SAME_NODE))
+ *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
+ *                                           SCX_CID_IDLE_SAME_NODE, kind);
+ *           if (cid < 0 &&
+ *               !scx_cid_idle_scope_same(&idle_state, prev_cid,
+ *                                        SCX_CID_IDLE_SAME_NODE,
+ *                                        SCX_CID_IDLE_ANYWHERE))
+ *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
+ *                                           SCX_CID_IDLE_ANYWHERE, kind);
+ *           return cid;
+ *   }
+ *
+ *   // ops.select_cid(): prefer a whole idle core, then any idle CID.
  *   s32 BPF_STRUCT_OPS(example_select_cid, struct task_struct *p,
  *                      s32 prev_cid, u64 wake_flags)
  *   {
- *           s32 cid = -EBUSY;
+ *           s32 cid;
  *
  *           TOUCH_ARENA();
  *           if (idle_state.smt_enabled) {
- *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
- *                                           SCX_CID_IDLE_SAME_CORE,
- *                                           SCX_CID_IDLE_FULL_CORE);
- *                   if (cid < 0)
- *                           cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
- *                                   SCX_CID_IDLE_SAME_LLC,
- *                                   SCX_CID_IDLE_FULL_CORE);
- *                   if (cid < 0)
- *                           cid = scx_cid_idle_pick(&idle_state, p,
- *                                   prev_cid, SCX_CID_IDLE_SAME_NODE,
- *                                   SCX_CID_IDLE_FULL_CORE);
- *                   if (cid < 0)
- *                           cid = scx_cid_idle_pick(&idle_state, p,
- *                                   prev_cid, SCX_CID_IDLE_ANYWHERE,
- *                                   SCX_CID_IDLE_FULL_CORE);
+ *                   cid = example_pick(p, prev_cid,
+ *                                      SCX_CID_IDLE_FULL_CORE);
  *                   if (cid >= 0)
  *                           return cid;
  *           }
- *           cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
- *                                   SCX_CID_IDLE_SAME_CORE,
- *                                   SCX_CID_IDLE_ANY_CPU);
- *           if (cid < 0)
- *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
- *                           SCX_CID_IDLE_SAME_LLC,
- *                           SCX_CID_IDLE_ANY_CPU);
- *           if (cid < 0)
- *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
- *                                           SCX_CID_IDLE_SAME_NODE,
- *                                           SCX_CID_IDLE_ANY_CPU);
- *           if (cid < 0)
- *                   cid = scx_cid_idle_pick(&idle_state, p, prev_cid,
- *                                           SCX_CID_IDLE_ANYWHERE,
- *                                           SCX_CID_IDLE_ANY_CPU);
+ *           cid = example_pick(p, prev_cid, SCX_CID_IDLE_ANY_CPU);
  *           return cid >= 0 ? cid : prev_cid;
  *   }
  */
@@ -181,6 +198,7 @@ scx_cid_idle_ranges(const struct scx_cid_idle_state *state, u32 cid)
 
 enum scx_cid_idle_scope {
 	SCX_CID_IDLE_SAME_CORE,
+	SCX_CID_IDLE_SAME_CLUSTER,
 	SCX_CID_IDLE_SAME_LLC,
 	SCX_CID_IDLE_SAME_NODE,
 	SCX_CID_IDLE_ANYWHERE,
@@ -193,6 +211,8 @@ enum scx_cid_idle_kind {
 
 enum scx_cid_idle_split {
 	SCX_CID_IDLE_SPLIT_CORE,
+	SCX_CID_IDLE_SPLIT_CLUSTER,
+	/* Shards are work partitions and may divide a cluster. */
 	SCX_CID_IDLE_SPLIT_SHARD,
 	SCX_CID_IDLE_SPLIT_LLC,
 	SCX_CID_IDLE_SPLIT_NODE,
@@ -206,6 +226,10 @@ scx_cid_idle_split_range(const struct scx_cid_ranges __arena *ranges,
 	case SCX_CID_IDLE_SPLIT_CORE:
 		*base = ranges->core_base;
 		*nr = ranges->core_nr;
+		break;
+	case SCX_CID_IDLE_SPLIT_CLUSTER:
+		*base = ranges->cluster_base;
+		*nr = ranges->cluster_nr;
 		break;
 	case SCX_CID_IDLE_SPLIT_SHARD:
 		*base = ranges->shard_base;
@@ -232,6 +256,8 @@ scx_cid_idle_split_index(const struct scx_cid_ranges __arena *ranges,
 	switch (split) {
 	case SCX_CID_IDLE_SPLIT_CORE:
 		return ranges->core_idx;
+	case SCX_CID_IDLE_SPLIT_CLUSTER:
+		return ranges->cluster_idx;
 	case SCX_CID_IDLE_SPLIT_SHARD:
 		return ranges->shard_idx;
 	case SCX_CID_IDLE_SPLIT_LLC:
@@ -892,44 +918,79 @@ scx_cid_idle_pick_range(struct scx_cid_idle_state *state,
 	return -EBUSY;
 }
 
+/* Resolve @scope around @anchor to the CID range [@base, @base + @nr). */
+static __always_inline int
+scx_cid_idle_scope_range(const struct scx_cid_idle_state *state, s32 anchor,
+			 enum scx_cid_idle_scope scope, u32 *base, u32 *nr)
+{
+	const struct scx_cid_ranges __arena *ranges;
+
+	if (scope == SCX_CID_IDLE_ANYWHERE) {
+		*base = 0;
+		*nr = state->nr_cids;
+	} else {
+		if (anchor < 0 || (u32)anchor >= state->nr_cids)
+			return -EINVAL;
+		ranges = scx_cid_idle_ranges(state, anchor);
+		if (scope == SCX_CID_IDLE_SAME_CORE) {
+			*base = ranges->core_base;
+			*nr = ranges->core_nr;
+		} else if (scope == SCX_CID_IDLE_SAME_CLUSTER) {
+			*base = ranges->cluster_base;
+			*nr = ranges->cluster_nr;
+		} else if (scope == SCX_CID_IDLE_SAME_LLC) {
+			*base = ranges->llc_base;
+			*nr = ranges->llc_nr;
+		} else if (scope == SCX_CID_IDLE_SAME_NODE) {
+			*base = ranges->node_base;
+			*nr = ranges->node_nr;
+		} else {
+			return -EINVAL;
+		}
+	}
+	if (!*nr || *base >= state->nr_cids ||
+	    *nr > state->nr_cids - *base)
+		return -EINVAL;
+	return 0;
+}
+
+/*
+ * Return true when @a and @b cover the same CIDs around @anchor, so that
+ * picking in the second scope after the first one failed would only repeat
+ * the scan.
+ */
+static __always_inline bool
+scx_cid_idle_scope_same(const struct scx_cid_idle_state *state, s32 anchor,
+			enum scx_cid_idle_scope a, enum scx_cid_idle_scope b)
+{
+	u32 a_base, a_nr, b_base, b_nr;
+
+	if (!state->ranges || !state->nr_cids)
+		return false;
+	if (scx_cid_idle_scope_range(state, anchor, a, &a_base, &a_nr) ||
+	    scx_cid_idle_scope_range(state, anchor, b, &b_base, &b_nr))
+		return false;
+	return a_base == b_base && a_nr == b_nr;
+}
+
 /* Pick and claim an idle CID in the requested topology scope. */
 static __always_inline s32
 scx_cid_idle_pick(struct scx_cid_idle_state *state,
 		  const struct task_struct *p, s32 anchor,
 		  enum scx_cid_idle_scope scope, enum scx_cid_idle_kind kind)
 {
-	const struct scx_cid_ranges __arena *ranges;
 	u32 base, nr, start;
 	s32 cid;
+	int ret;
 
 	if (!state->ranges || !state->nr_cids)
 		return -EBUSY;
 	if (kind != SCX_CID_IDLE_ANY_CPU &&
 	    kind != SCX_CID_IDLE_FULL_CORE)
 		return -EINVAL;
-	if (scope == SCX_CID_IDLE_ANYWHERE) {
-		base = 0;
-		nr = state->nr_cids;
-	} else {
-		if (anchor < 0 || (u32)anchor >= state->nr_cids)
-			return -EINVAL;
-		ranges = scx_cid_idle_ranges(state, anchor);
-		if (scope == SCX_CID_IDLE_SAME_CORE) {
-			base = ranges->core_base;
-			nr = ranges->core_nr;
-		} else if (scope == SCX_CID_IDLE_SAME_LLC) {
-			base = ranges->llc_base;
-			nr = ranges->llc_nr;
-		} else if (scope == SCX_CID_IDLE_SAME_NODE) {
-			base = ranges->node_base;
-			nr = ranges->node_nr;
-		} else {
-			return -EINVAL;
-		}
-	}
-	if (!nr || base >= state->nr_cids ||
-	    nr > state->nr_cids - base)
-		return -EINVAL;
+	ret = scx_cid_idle_scope_range(state, anchor, scope, &base, &nr);
+	if (ret)
+		return ret;
 
 	/* Try @anchor first in its core; wider scopes start after it. */
 	if (anchor >= 0 && (u32)anchor >= base &&
