@@ -314,18 +314,18 @@ u64 btnode_split_internal(bt_node __arg_arena *btn_new, bt_node __arg_arena *btn
 	keycopies = BT_LEAFSZ - off - 1;
 
 	/* We have numkeys + 1 values. */
-	arrcpy(&btn_new->keys[0], &btn_old->keys[off + 1], keycopies);
-	arrcpy(&btn_new->values[0], &btn_old->values[off + 1], keycopies + 1);
+	arrcpy(&btn_new->keys[0], &btn_old->keys[off + 1], keycopies - 1);
+	arrcpy(&btn_new->values[0], &btn_old->values[off + 1], keycopies);
 	btn_new->numkeys = keycopies - 1;
 
 	/* Update the parent pointer for the children of the new node. */
-	for (i = 0; i <= keycopies && can_loop; i++) {
+	for (i = 0; i < keycopies && can_loop; i++) {
 		btn_child = (bt_node *)btn_new->values[i];
 		btn_child->parent = btn_new;
 	}
 
 	/* Wipe away the removed and copied keys. */
-	arrzero(&btn_old->keys[off], keycopies + 1);
+	arrzero(&btn_old->keys[off], keycopies);
 	arrzero(&btn_old->values[off + 1], keycopies);
 	btn_old->numkeys = off;
 
