@@ -88,6 +88,82 @@ static bool smt_prefer(s32 a, s32 b)
 	return cid_topo(a)->place_tier < cid_topo(b)->place_tier;
 }
 
+extern struct sched_domain *sd_llc __ksym __weak;
+extern int sd_llc_id __ksym __weak;
+extern int sd_share_id __ksym __weak;
+
+/*
+ * fair.c's cpus_share_cache(): are @a and @b in one LLC? Compare the kernel's
+ * per_cpu(sd_llc_id) where it can be read: the cid ranges are fixed at init,
+ * while a sched domain rebuild, such as a cpuset partition change, can split
+ * an LLC without restarting the scheduler.
+ */
+static __always_inline bool same_idle_llc(s32 a, s32 b)
+{
+	int *ida, *idb;
+
+	if (a == b)
+		return true;
+	if (&sd_llc_id) {
+		ida = bpf_per_cpu_ptr(&sd_llc_id, cid_topo(a)->cpu);
+		idb = bpf_per_cpu_ptr(&sd_llc_id, cid_topo(b)->cpu);
+		if (ida && idb)
+			return *ida == *idb;
+	}
+
+	return cid_topo(a)->ranges.llc_base == cid_topo(b)->ranges.llc_base;
+}
+
+/*
+ * fair.c's cpus_share_resources(): are @a and @b in the same lowest
+ * cache-sharing domain? Read per_cpu(sd_share_id) itself rather than derive it
+ * from the cid ranges, for the same reason as above.
+ *
+ * A kernel without sd_share_id has no cluster scheduling, so its cpus that
+ * share a cache share resources too. A kernel without cid clusters has the
+ * deferral but not the cluster-first scan it makes room for, see
+ * cid_cluster_active(), so it keeps taking a cache-affine cpu outright.
+ */
+static __always_inline bool same_share_domain(s32 a, s32 b)
+{
+	int *ida, *idb;
+
+	if (!&sd_share_id ||
+	    !bpf_core_field_exists(struct scx_cid_topo, cluster_cid))
+		return true;
+	ida = bpf_per_cpu_ptr(&sd_share_id, cid_topo(a)->cpu);
+	idb = bpf_per_cpu_ptr(&sd_share_id, cid_topo(b)->cpu);
+	if (!ida || !idb)
+		return true;
+
+	return *ida == *idb;
+}
+
+/*
+ * fair.c's select_idle_cpu() test for scanning the target's cluster first: the
+ * group of per_cpu(sd_llc) holding the cpu carries SD_CLUSTER. Read the live
+ * domain for the same reason as above. The scan walks the cid cluster, so it
+ * also has to be one the kernel would keep, see init_topology().
+ */
+static __always_inline bool cid_cluster_active(s32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+	struct sched_domain **sdp, *sd;
+	struct sched_group *sg;
+
+	if (!topo->cluster_nested || !&sd_llc)
+		return false;
+	sdp = bpf_per_cpu_ptr(&sd_llc, topo->cpu);
+	if (!sdp)
+		return false;
+	sd = *sdp;
+	if (!sd)
+		return false;
+	sg = BPF_CORE_READ(sd, groups);
+
+	return sg && (BPF_CORE_READ(sg, flags) & SD_CLUSTER);
+}
+
 /* fair.c's sd_balance_shared::has_idle_cores hint, keyed by LLC base cid. */
 static bool test_idle_cores(s32 cid)
 {
@@ -339,6 +415,9 @@ enum pick_idle_flags {
 
 	/* Restrict the scan to the LLC containing @prev_cid */
 	PICK_IDLE_LLC_ONLY	= 1 << 3,
+
+	/* Search @prev_cid's cluster before the rest of its LLC */
+	PICK_IDLE_CLUSTER_FIRST = 1 << 4,
 };
 
 /*

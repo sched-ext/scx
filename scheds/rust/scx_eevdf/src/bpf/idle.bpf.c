@@ -50,10 +50,9 @@
  *            with an asymmetric-capacity domain, scan it and stop, returning
  *            the target if no idle cid is found. Without that domain, try a
  *            fully idle core in the LLC, if the LLC hint says there is one;
- *            an idle SMT sibling of prev; then any idle cid, over the
- *            word-at-a-time scans in idle.bpf.h, bounded by SIS_UTIL's
- *            nr_idle_scan and walked from the target so successive wakeups
- *            cover the whole domain
+ *            an idle SMT sibling of prev; then any idle cid, searching the
+ *            target cluster before the rest of its LLC. The scans use
+ *            idle.bpf.h's word-at-a-time masks and share SIS_UTIL's budget.
  *                 |
  *                 v
  *            claimed one? -> direct dispatch to its local DSQ with
@@ -102,8 +101,9 @@
  * The window matters only when something has bounded it, see sis_idle_scan_nr():
  * a budget spent on the front of the domain every time would leave the cids
  * above it unreachable for as long as the budget lasts, where a window that
- * moves with the target reaches all of them over successive wakeups. With @nr
- * covering the whole domain this is the plain scan, one extra mask per word.
+ * moves with the target reaches all of them over successive wakeups. A full
+ * LLC window keeps its original cid order; a full cluster window wraps from
+ * the target.
  *
  * @range packs the domain as span:base and @win the window as nr:start, two
  * u32 halves each: a subprogram takes five arguments at most, and this one is
@@ -112,6 +112,7 @@
  */
 #define SCAN_WINDOW_RESTRICTED	(1ULL << 0)
 #define SCAN_WINDOW_WHOLE_CORE	(1ULL << 1)
+#define SCAN_WINDOW_WRAP_FULL	(1ULL << 2)
 
 __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 				u64 range, u64 win, u64 flags)
@@ -130,13 +131,13 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 		start = base;
 
 	/*
-	 * A window that covers the domain is the domain, and is taken in cid
-	 * order, which is what this scan has always done. Reading it from the
-	 * target instead would move every wakeup's placement on every machine,
-	 * which is a change of its own and not one the budget needs.
+	 * An unbounded LLC window retains its original cid order. The cluster
+	 * window wraps from the target even when it covers the full cluster,
+	 * matching the start of select_idle_cpu()'s first pass.
 	 */
 	if (nr >= span) {
-		start = base;
+		if (!(flags & SCAN_WINDOW_WRAP_FULL))
+			start = base;
 		nr = span;
 	}
 	head = MIN(nr, base + span - start);
@@ -163,6 +164,122 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 	}
 
 	return -EBUSY;
+}
+
+/*
+ * The window of a domain that holds the next @budget cids @p may run on,
+ * counted from @start and wrapping as scan_idle_window() does. fair.c's
+ * select_idle_cpu() walks sched_domain_span() & p->cpus_ptr, so a CPU outside
+ * the task's affinity does not use up its SIS_UTIL budget.
+ *
+ * Returns the cids of @budget it used in the upper 32 bits and the length of
+ * the window in the lower 32 bits.
+ */
+__noinline u64 allowed_window(struct task_struct *p __arg_trusted, u64 range,
+			      u32 start, u32 budget)
+{
+	u32 base = (u32)range, span = range >> 32;
+	u32 nr = 0, used = 0, i;
+
+	TOUCH_ARENA();
+
+	if (start < base || start >= base + span)
+		start = base;
+	bpf_arena_for(i, 0, span) {
+		u32 cid = start + i;
+
+		if (cid >= base + span)
+			cid -= span;
+		if (cid_allowed(p, cid)) {
+			if (used == budget)
+				break;
+			used++;
+		}
+		nr++;
+	}
+
+	return (u64)used << 32 | nr;
+}
+
+/*
+ * The scan window for the next domain of a budgeted walk, see
+ * allowed_window(). Without @count_allowed every cid counts.
+ */
+static __always_inline u32 window_nr(struct task_struct *p, u32 base, u32 span,
+				     u32 start, u32 *budget, bool count_allowed)
+{
+	u64 w;
+	u32 nr;
+
+	if (!span || !*budget)
+		return 0;
+	if (!count_allowed) {
+		nr = MIN(span, *budget);
+		*budget -= nr;
+		return nr;
+	}
+	w = allowed_window(p, (u64)span << 32 | base, start, *budget);
+	*budget -= w >> 32;
+
+	return (u32)w;
+}
+
+/*
+ * The three windows idle_llc_windows() returns, packed into one value: a
+ * window is at most the cids of an LLC.
+ */
+#define LLC_WIN_BITS		20
+#define LLC_WIN_DOMAIN(w)	((u32)((w) & ((1ULL << LLC_WIN_BITS) - 1)))
+#define LLC_WIN_SUFFIX(w)	LLC_WIN_DOMAIN((w) >> LLC_WIN_BITS)
+#define LLC_WIN_PREFIX(w)	LLC_WIN_DOMAIN((w) >> (2 * LLC_WIN_BITS))
+
+/*
+ * Size the windows of a budgeted walk of @cid's LLC: its cluster, or the whole
+ * LLC without @cluster_first, then the cids after it and the cids before it.
+ *
+ * A restricted task spends the budget only on the cids it may run on, so they
+ * have to be counted when the budget can run out before the LLC does. When it
+ * is no smaller than the task's whole affinity, it cannot run out at all and
+ * the windows are the whole domains.
+ *
+ * A function of its own to keep the budget accounting out of the topology
+ * scan's BPF stack frame, and a packed return value to keep the windows out
+ * of it too: the frames from ops.enqueue() down to the bitmap scan add up to
+ * the verifier's 512 byte limit.
+ */
+__noinline u64 idle_llc_windows(struct task_struct *p __arg_trusted,
+				s32 cid, u32 flags, bool cluster_first)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+	u32 llc_base = topo->ranges.llc_base;
+	u32 dom_base, dom_nr, sfx_base, sfx_nr, pfx_nr;
+	u32 scan_nr, budget, dom_win, sfx_win, pfx_win;
+	bool restricted = is_restricted(p);
+	bool count_allowed;
+
+	TOUCH_ARENA();
+	if (cluster_first) {
+		dom_base = topo->ranges.cluster_base;
+		dom_nr = topo->ranges.cluster_nr;
+	} else {
+		dom_base = llc_base;
+		dom_nr = topo->ranges.llc_nr;
+	}
+	sfx_base = dom_base + dom_nr;
+	sfx_nr = llc_base + topo->ranges.llc_nr - sfx_base;
+	pfx_nr = dom_base - llc_base;
+	scan_nr = (flags & PICK_IDLE_WHOLE_CORE) || !(flags & PICK_IDLE_LLC_ONLY) ?
+		UINT_MAX : sis_idle_scan_nr(cid);
+	if (restricted && scan_nr >= (u32)p->nr_cpus_allowed)
+		scan_nr = UINT_MAX;
+	count_allowed = restricted && scan_nr < topo->ranges.llc_nr;
+	budget = scan_nr;
+	dom_win = window_nr(p, dom_base, dom_nr, cid + 1, &budget, count_allowed);
+	sfx_win = window_nr(p, sfx_base, sfx_nr, sfx_base, &budget, count_allowed);
+	pfx_win = window_nr(p, llc_base, pfx_nr, llc_base, &budget, count_allowed);
+
+	return (u64)dom_win | (u64)sfx_win << LLC_WIN_BITS |
+	       (u64)pfx_win << (2 * LLC_WIN_BITS);
 }
 
 /*
@@ -270,13 +387,13 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
  * between select_idle_core() and select_idle_cpu().
  *
  * An idle @prev_cid wins before capacity tiers are walked. Otherwise, each
- * capacity tier considers a cid in the same LLC, then the same node, then any
- * cid. On uniform-capacity systems there is one unranked pass instead. This
- * keeps a task where its cache is warm instead of moving it for a transient
- * capacity advantage. The domain order is the one select_idle_sibling()
- * applies, with the node on top since this scan covers them all. Each domain
- * is a contiguous range, so a wakeup reads the words of its own LLC before
- * anything else.
+ * capacity tier considers the target cluster, the rest of its LLC, then the
+ * same node and any cid. On uniform-capacity systems there is one unranked
+ * pass instead. This keeps a task where its cache is warm instead of moving
+ * it for a transient capacity advantage. The domain order is the one
+ * select_idle_sibling() applies, with the node on top since this scan covers
+ * them all. Each domain is a contiguous range, so a wakeup reads its cluster
+ * before the rest of the LLC.
  *
  * The idle state is claimed only for the cid that is returned. -EAGAIN
  * means a candidate was found but claimed by someone else first. @flags
@@ -293,10 +410,11 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	bool llc_only = flags & PICK_IDLE_LLC_ONLY;
 	struct cid_topo __arena *prev;
 	bool restricted;
+	bool cluster_first;
 	s32 best = -EBUSY;
 	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
-	u32 scan_nr = whole_core || !llc_only ? UINT_MAX : sis_idle_scan_nr(prev_cid);
-	u32 llc_scan_nr;
+	u64 windows;
+	u64 scan_flags;
 	u32 t;
 	/* Only an asymmetric machine asks task_fits_cid() anything. */
 	task_ctx_t *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
@@ -308,7 +426,6 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
 	restricted = is_restricted(p);
-	llc_scan_nr = MIN(prev->ranges.llc_nr, scan_nr);
 	if (is_prev_allowed && cid_idle_test(prev_cid) &&
 	    (!whole_core || core_is_idle(prev_cid)) &&
 	    task_fits_cid(tctx, prev_cid, now)) {
@@ -316,16 +433,45 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 		goto claim;
 	}
 
+	/*
+	 * The LLC is walked as select_idle_cpu() walks it: the cluster of
+	 * @prev_cid from the cid after it, then the rest of the LLC wrapping
+	 * from the end of the cluster. Without a cluster to search first, the
+	 * cluster is the whole LLC and the rest is empty. The SIS_UTIL budget
+	 * spans all of it, and the windows do not depend on the tier.
+	 */
+	cluster_first = (flags & PICK_IDLE_CLUSTER_FIRST) && cid_cluster_active(prev_cid);
+	windows = idle_llc_windows(p, prev_cid, flags, cluster_first);
+	scan_flags = (restricted ? SCAN_WINDOW_RESTRICTED : 0) |
+		     (whole_core ? SCAN_WINDOW_WHOLE_CORE : 0);
+
 	bpf_arena_for(t, 0, nr_tiers) {
-		/*
-		 * A domain that is the whole of the next one is not scanned
-		 * twice.
-		 */
-		best = scan_idle_window(p, t,
-					(u64)prev->ranges.llc_nr << 32 | prev->ranges.llc_base,
-					(u64)llc_scan_nr << 32 | (u32)(prev_cid + 1),
-					(restricted ? SCAN_WINDOW_RESTRICTED : 0) |
-					(whole_core ? SCAN_WINDOW_WHOLE_CORE : 0));
+		/* Read from the arena at each use to keep them off the stack. */
+		u32 llc_base = prev->ranges.llc_base;
+		u32 llc_end = llc_base + prev->ranges.llc_nr;
+		u32 dom_base = cluster_first ? prev->ranges.cluster_base : llc_base;
+		u32 dom_end = cluster_first ?
+			      dom_base + prev->ranges.cluster_nr : llc_end;
+
+		best = scan_idle_window(p, t, (u64)(dom_end - dom_base) << 32 | dom_base,
+					(u64)LLC_WIN_DOMAIN(windows) << 32 | (u32)(prev_cid + 1),
+					scan_flags | (cluster_first ? SCAN_WINDOW_WRAP_FULL : 0));
+		if (best < 0 && LLC_WIN_SUFFIX(windows)) {
+			llc_end = prev->ranges.llc_base + prev->ranges.llc_nr;
+			dom_end = cluster_first ?
+				  prev->ranges.cluster_base + prev->ranges.cluster_nr :
+				  llc_end;
+			best = scan_idle_window(p, t, (u64)(llc_end - dom_end) << 32 | dom_end,
+						(u64)LLC_WIN_SUFFIX(windows) << 32 | dom_end,
+						scan_flags);
+		}
+		if (best < 0 && LLC_WIN_PREFIX(windows)) {
+			llc_base = prev->ranges.llc_base;
+			dom_base = cluster_first ? prev->ranges.cluster_base : llc_base;
+			best = scan_idle_window(p, t, (u64)(dom_base - llc_base) << 32 | llc_base,
+						(u64)LLC_WIN_PREFIX(windows) << 32 | llc_base,
+						scan_flags);
+		}
 		if (best < 0 && !llc_only && numa_enabled && prev->ranges.node_nr > prev->ranges.llc_nr)
 			best = asym_capacity ?
 				scan_idle_capacity_range(p, t, prev->ranges.node_base,
@@ -353,18 +499,21 @@ claim:
 	return best;
 }
 
-/* fair.c's select_idle_smt(): scan the previous CPU's SMT siblings. */
-static s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
+/*
+ * fair.c's select_idle_smt(): scan the previous CPU's SMT siblings. Not
+ * inlined, to keep its loop out of pick_idle_cid()'s BPF stack frame, which
+ * is on the deepest call chain of ops.enqueue().
+ */
+static __noinline s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
 			   s32 target)
 {
-	struct cid_topo __arena *prev, *dst;
+	struct cid_topo __arena *prev;
 	u32 sibling;
 
 	if (!smt_enabled || !cid_valid(prev_cid) || !cid_valid(target))
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
-	dst = cid_topo(target);
-	if (prev->ranges.llc_base != dst->ranges.llc_base)
+	if (!same_idle_llc(prev_cid, target))
 		return -EBUSY;
 
 	bpf_arena_for(sibling, prev->ranges.core_base, prev->ranges.core_base + prev->ranges.core_nr) {
@@ -413,7 +562,8 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 {
 	u32 flags = (!is_restricted(p) || cid_allowed(p, target) ?
 		     PICK_IDLE_PREV_ALLOWED : 0) |
-		    (!llc_extend ? PICK_IDLE_LLC_ONLY : 0);
+		    (!llc_extend ? PICK_IDLE_LLC_ONLY : 0) |
+		    PICK_IDLE_CLUSTER_FIRST;
 	s32 cid = -EBUSY;
 	int i;
 
@@ -723,12 +873,17 @@ static s32 wake_affine_cid(const struct task_struct *p, task_ctx_t *tctx,
  * The front of select_idle_sibling(): try its computed @target first, then
  * an idle cache-affine @prev_cid. pick_idle_cid() supplies the remaining
  * whole-core and idle-cid scan around @target.
+ *
+ * A cache-affine candidate in another share domain is not taken outright: like
+ * select_idle_sibling(), hold it back so the scan around @target searches its
+ * own cluster first, and fall back to it only if that finds nothing.
  */
 static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, task_ctx_t *tctx,
 				   s32 prev_cid, s32 target, bool *direct, u64 now)
 {
 	s32 cid;
 	s32 recent = -1;
+	s32 prev_aff = -1, recent_aff = -1;
 
 	if (cid_idle_test(target) && cid_allowed(p, target) &&
 	    asym_fits_cid(tctx, target, now)) {
@@ -743,39 +898,53 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 		return target;
 
 	if (prev_cid != target &&
-	    cid_topo(prev_cid)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
+	    same_idle_llc(prev_cid, target) &&
 	    cid_idle_test(prev_cid) && cid_allowed(p, prev_cid) &&
 	    asym_fits_cid(tctx, prev_cid, now)) {
-		cid = claim_idle_cid(p, prev_cid);
-		if (cid >= 0) {
-			*direct = true;
-			return cid;
+		if (same_share_domain(prev_cid, target)) {
+			cid = claim_idle_cid(p, prev_cid);
+			if (cid >= 0) {
+				*direct = true;
+				return cid;
+			}
+		} else {
+			prev_aff = prev_cid;
 		}
 	}
 	if (prev_cid != target &&
-	    cid_topo(prev_cid)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
+	    same_idle_llc(prev_cid, target) &&
 	    cid_allowed(p, prev_cid) && asym_fits_cid(tctx, prev_cid, now) &&
-	    cid_sched_idle_target(p, prev_cid))
-		return prev_cid;
+	    cid_sched_idle_target(p, prev_cid)) {
+		if (same_share_domain(prev_cid, target))
+			return prev_cid;
+		prev_aff = prev_cid;
+	}
 
 	/* Check and rotate p->recent_used_cpu at the same point fair.c does. */
 	recent = tctx->recent_used_cid;
 	tctx->recent_used_cid = prev_cid;
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
-	    cid_topo(recent)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
+	    same_idle_llc(recent, target) &&
 	    cid_idle_test(recent) && cid_allowed(p, recent) &&
 	    asym_fits_cid(tctx, recent, now)) {
-		cid = claim_idle_cid(p, recent);
-		if (cid >= 0) {
-			*direct = true;
-			return cid;
+		if (same_share_domain(recent, target)) {
+			cid = claim_idle_cid(p, recent);
+			if (cid >= 0) {
+				*direct = true;
+				return cid;
+			}
+		} else {
+			recent_aff = recent;
 		}
 	}
 	if (cid_valid(recent) && recent != prev_cid && recent != target &&
-	    cid_topo(recent)->ranges.llc_base == cid_topo(target)->ranges.llc_base &&
+	    same_idle_llc(recent, target) &&
 	    cid_allowed(p, recent) && asym_fits_cid(tctx, recent, now) &&
-	    cid_sched_idle_target(p, recent))
-		return recent;
+	    cid_sched_idle_target(p, recent)) {
+		if (same_share_domain(recent, target))
+			return recent;
+		recent_aff = recent;
+	}
 
 	/*
 	 * With an asymmetric-capacity domain around @target, fair.c returns
@@ -787,8 +956,44 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 		return select_idle_capacity_cid(p, tctx, target, now, direct);
 
 	cid = pick_idle_cid(p, prev_cid, target);
-	if (cid >= 0)
+	if (cid >= 0) {
 		*direct = true;
+		return cid;
+	}
+
+	/*
+	 * @prev_cid and the recent-used cid were cache-affine but in another
+	 * share domain, so the walk around @target got first refusal on them.
+	 * It came back empty, so take them now, @prev_cid first:
+	 *
+	 *	if ((unsigned int)prev_aff < nr_cpumask_bits)
+	 *		return prev_aff;
+	 *	if ((unsigned int)recent_used_cpu < nr_cpumask_bits)
+	 *		return recent_used_cpu;
+	 *
+	 * fair.c hands the cpu back without looking at it again, so claiming is
+	 * only worth an attempt here: a cid taken since is still the best
+	 * placement left, just no longer a direct dispatch. fair.c carries the
+	 * deferred recent-used cid in recent_used_cpu itself, clearing it where
+	 * the outer test fails; @recent stays live for the @prev_cid
+	 * comparisons above, so keep the deferral separate.
+	 */
+	if (cid_valid(prev_aff)) {
+		cid = claim_idle_cid(p, prev_aff);
+		if (cid >= 0) {
+			*direct = true;
+			return cid;
+		}
+		return prev_aff;
+	}
+	if (cid_valid(recent_aff)) {
+		cid = claim_idle_cid(p, recent_aff);
+		if (cid >= 0) {
+			*direct = true;
+			return cid;
+		}
+		return recent_aff;
+	}
 
 	return cid;
 }

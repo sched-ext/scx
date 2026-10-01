@@ -246,6 +246,7 @@ struct cid_topo {
 	u32 place_tier;		/* SD_ASYM_PACKING priority tier */
 	u32 capacity_tier;	/* CPU capacity tier */
 	u32 smt_asym_packing;	/* SMT domain follows SD_ASYM_PACKING */
+	u32 cluster_nested;	/* cluster between core and LLC in size */
 	u64 cap;		/* capacity, 1024 = fastest */
 	struct scx_cid_ranges ranges; /* core, LLC and node CID ranges */
 	u32 llc_place_tier;	/* best SD_ASYM_PACKING tier in the LLC */

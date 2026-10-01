@@ -85,9 +85,9 @@
  * backwards on purpose: scx_bpf_cid_topo() reports the base cid of each
  * domain, so seeing the highest cid of a range first is what gives the
  * length of the range without a second pass. The kernel domain widths are
- * translated into the smallest topology range that contains them, since
- * this scheduler only models core, LLC, node and machine; a cluster domain
- * is rounded up to its LLC.
+ * translated into the smallest core, LLC, node or machine range that
+ * contains them, so a cluster-wide domain is rounded up to its LLC. Clusters
+ * matter only to idle selection, see cid_cluster_active().
  *
  * Nothing in this file runs again while the scheduler is attached.
  */
@@ -97,11 +97,11 @@
 /*
  * Fill the topology of every cid.
  *
- * Cids are assigned in topological order (node, then LLC, then core), so
- * the cids of a core, an LLC or a node are always contiguous. Walking the
- * cid space backwards means the highest cid of a range is visited first,
- * which is enough to derive the length of the range from its base, the
- * cid scx_bpf_cid_topo() reports for the domain.
+ * Cids are assigned in topological order (node, then LLC, then cluster,
+ * then core), so the cids of a core, a cluster, an LLC or a node are always
+ * contiguous. Walking the cid space backwards means the highest cid of a
+ * range is visited first, which is enough to derive the length of the range
+ * from its base, the cid scx_bpf_cid_topo() reports for the domain.
  */
 static void init_topology(void)
 {
@@ -128,6 +128,12 @@ static void init_topology(void)
 		}
 
 		topo->cpu = cpu >= 0 ? cpu : 0;
+		/*
+		 * A cid cluster no wider than the core, or as wide as the
+		 * LLC, is one the kernel degenerates away.
+		 */
+		topo->cluster_nested = topo->ranges.cluster_nr > topo->ranges.core_nr &&
+				       topo->ranges.cluster_nr < topo->ranges.llc_nr;
 		if (cpu >= 0 && (u32)cpu < nr_cpu_ids) {
 			topo->cap = cpu_cap_in[cpu];
 			topo->place_tier = cpu_place_tier_in[cpu];
