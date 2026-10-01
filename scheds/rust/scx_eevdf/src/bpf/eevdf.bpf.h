@@ -396,6 +396,7 @@ struct cid_ctx {
 	u64 user_eval_at;
 	bool user_busy;
 	u32 sis_idle_scan;	/* nr_idle_scan, meaningful at llc_base */
+	u32 asym_idle_scan;	/* same, at asym_capacity_base, see asym_domain_shared() */
 };
 
 /*

@@ -972,6 +972,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 		}
 		if (cid == (s32)cid_topo(cid)->ranges.llc_base)
 			cctx->sis_idle_scan = cid_topo(cid)->ranges.llc_nr;
+		if (cid == (s32)cid_topo(cid)->asym_capacity_base)
+			cctx->asym_idle_scan = cid_topo(cid)->asym_capacity_nr;
 	}
 
 	/*

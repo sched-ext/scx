@@ -114,6 +114,62 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
 }
 
 /*
+ * fair.c keeps the wakeup scan's shared state, nr_idle_scan and
+ * has_idle_cores, on the asymmetric-capacity domain when the target has one
+ * that is not built from NUMA, and on the LLC otherwise. Domain widths are
+ * rounded to cid ranges, see init_topology(): an asymmetric domain wider than
+ * the LLC and within a node is the node, and one wider than the node is a NUMA
+ * domain. One the width of the LLC shares the LLC's state.
+ */
+static __always_inline bool asym_domain_shared(s32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+
+	return (sched_asym_capacity || force_asym_capacity) &&
+	       topo->asym_capacity_nr > topo->ranges.llc_nr &&
+	       topo->asym_capacity_nr <= topo->ranges.node_nr;
+}
+
+/*
+ * test_idle_cores() for select_idle_capacity(). The hints are kept per LLC, so
+ * the domain's hint is set while any of its LLCs has one, and the mask of a
+ * node's LLC hints answers that in a word test.
+ */
+static bool asym_test_idle_cores(s32 cid)
+{
+	u32 node_base;
+
+	if (!cid_valid(cid))
+		return false;
+	if (!asym_domain_shared(cid))
+		return test_idle_cores(cid);
+	node_base = cid_topo(cid)->ranges.node_base;
+
+	return node_base < eevdf_idle.nr_cids &&
+	       !cmask_empty(eevdf_idle.node_core_llcs[node_base]);
+}
+
+/* set_idle_cores(cpu, false) for select_idle_capacity(). */
+static void asym_clear_idle_cores(s32 cid)
+{
+	struct cid_topo __arena *topo;
+	u32 i;
+
+	if (!cid_valid(cid))
+		return;
+	if (!asym_domain_shared(cid)) {
+		set_idle_cores(cid, false);
+		return;
+	}
+	topo = cid_topo(cid);
+	bpf_arena_for(i, topo->asym_capacity_base,
+		      topo->asym_capacity_base + topo->asym_capacity_nr) {
+		if (cid_valid(i) && i == cid_topo(i)->ranges.llc_base)
+			set_idle_cores(i, false);
+	}
+}
+
+/*
  * Claim the idle state of @cid, returning true if this caller is the one
  * that took it out of the idle state. Claiming keeps concurrent wakeups
  * from aiming at the same cid.
@@ -248,6 +304,26 @@ static __always_inline u32 sis_idle_scan_nr(s32 cid)
 		return UINT_MAX;
 	topo = cid_topo(cid);
 	return READ_ONCE(cid_ctx(topo->ranges.llc_base)->sis_idle_scan);
+}
+
+/*
+ * The budget of select_idle_capacity(), which reads nr_idle_scan from the
+ * asymmetric-capacity domain. A domain built from NUMA has no shared state
+ * and the scan is not bounded there.
+ */
+static __always_inline u32 asym_idle_scan_nr(s32 cid)
+{
+	struct cid_topo __arena *topo;
+
+	if (!sis_util || !cid_valid(cid))
+		return UINT_MAX;
+	topo = cid_topo(cid);
+	if (topo->asym_capacity_nr > topo->ranges.node_nr)
+		return UINT_MAX;
+	if (!asym_domain_shared(cid))
+		return sis_idle_scan_nr(cid);
+
+	return READ_ONCE(cid_ctx(topo->asym_capacity_base)->asym_idle_scan);
 }
 
 /* Flags for pick_idle_cid_topology() */

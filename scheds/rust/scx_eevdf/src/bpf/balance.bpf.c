@@ -737,9 +737,11 @@ __noinline u64 busy_balance_avg_load(u32 base, u32 nr, u64 now,
  *   nr_idle_scan = llc_weight * y / 1024
  *
  * so the scan shrinks quadratically and reaches zero at 100 / 117, about
- * 85% utilization. This runs only from periodic balance on the LLC owner.
+ * 85% utilization. This runs only from periodic balance on the LLC owner. With
+ * @asym the range is an asymmetric-capacity domain wider than the LLC, see
+ * asym_domain_shared().
  */
-static __noinline void update_sis_idle_scan(u32 base, u32 nr, u64 sum)
+static __noinline void update_sis_idle_scan(u32 base, u32 nr, u64 sum, bool asym)
 {
 	u64 x, scaled, y;
 
@@ -750,6 +752,10 @@ static __noinline void update_sis_idle_scan(u32 base, u32 nr, u64 sum)
 		 BUSY_BALANCE_IMBALANCE_PCT;
 	scaled /= 10000 * 1024;
 	y = 1024 - MIN(scaled, 1024ULL);
+	if (asym) {
+		WRITE_ONCE(cid_ctx(base)->asym_idle_scan, nr * y / 1024);
+		return;
+	}
 	WRITE_ONCE(cid_ctx(base)->sis_idle_scan, nr * y / 1024);
 	__sync_fetch_and_add(&sis_scan_sum, nr * y / 1024);
 	__sync_fetch_and_add(&nr_sis_updates, 1);
@@ -1013,8 +1019,16 @@ busy_balance_from_range(s32 dst_cid, u32 base, u32 nr, u32 start, u64 now,
 	if (!nr)
 		return -1;
 	env->avg_norm = busy_balance_avg_load(base, nr, now, &sum_util);
+	/*
+	 * update_idle_cpu_scan() runs for every domain with shared state: the
+	 * LLC, and the asymmetric-capacity domain where it is a wider one.
+	 */
 	if (level == BUSY_BALANCE_LLC)
-		update_sis_idle_scan(base, nr, sum_util);
+		update_sis_idle_scan(base, nr, sum_util, false);
+	else if (asym_domain_shared(dst_cid) &&
+		 base == cid_topo(dst_cid)->asym_capacity_base &&
+		 nr == cid_topo(dst_cid)->asym_capacity_nr)
+		update_sis_idle_scan(base, nr, sum_util, true);
 	env->dst_norm = cid_load(dst_cid, now) * 1024 /
 			MAX(READ_ONCE(cid_ctx(dst_cid)->busy_balance_scan_cap), 1ULL);
 	if (env->dst_norm >= env->avg_norm)

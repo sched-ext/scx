@@ -181,12 +181,12 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 {
 	struct cid_topo __arena *target_topo = cid_topo(target);
 	bool restricted = is_restricted(p);
-	bool has_idle_core = smt_enabled && test_idle_cores(target);
+	bool has_idle_core = smt_enabled && asym_test_idle_cores(target);
 	u32 start_cpu = target_topo->cpu;
 	u64 best_cap = 0;
 	s32 best = -EBUSY;
 	u32 best_rank = 3;
-	u32 scan_nr = sis_idle_scan_nr(target);
+	u32 scan_nr = asym_idle_scan_nr(target);
 	u32 off;
 
 	TOUCH_ARENA();
@@ -243,7 +243,7 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 	 * best, as the tail of select_idle_capacity() does.
 	 */
 	if (has_idle_core && best_rank > 0)
-		set_idle_cores(target, false);
+		asym_clear_idle_cores(target);
 
 	if (best >= 0) {
 		s32 claimed = claim_idle_cid(p, best);
