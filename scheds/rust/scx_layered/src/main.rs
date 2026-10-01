@@ -3138,13 +3138,18 @@ impl<'a> Scheduler<'a> {
         }
 
         for (iface, netdev) in self.netdevs.iter_mut() {
-            let node = self
-                .topo
-                .nodes
-                .values()
-                .find(|n| n.id == netdev.node())
-                .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
-            let node_cpus = node.span.clone();
+            // Without a known NUMA node, consider all the CPUs local.
+            let node_cpus = match netdev.node() {
+                Some(id) => self
+                    .topo
+                    .nodes
+                    .values()
+                    .find(|n| n.id == id)
+                    .ok_or_else(|| anyhow!("Failed to get netdev node"))?
+                    .span
+                    .clone(),
+                None => self.topo.span.clone(),
+            };
             for (irq, irqmask) in netdev.irqs.iter_mut() {
                 irqmask.clear_all();
                 for cpu in available_cpus.iter() {
