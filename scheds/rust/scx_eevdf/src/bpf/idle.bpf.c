@@ -101,9 +101,8 @@
  * The window matters only when something has bounded it, see sis_idle_scan_nr():
  * a budget spent on the front of the domain every time would leave the cids
  * above it unreachable for as long as the budget lasts, where a window that
- * moves with the target reaches all of them over successive wakeups. A full
- * LLC window keeps its original cid order; a full cluster window wraps from
- * the target.
+ * moves with the target reaches all of them over successive wakeups. A window
+ * that covers the domain wraps from @start the same way.
  *
  * @range packs the domain as span:base and @win the window as nr:start, two
  * u32 halves each: a subprogram takes five arguments at most, and this one is
@@ -112,7 +111,6 @@
  */
 #define SCAN_WINDOW_RESTRICTED	(1ULL << 0)
 #define SCAN_WINDOW_WHOLE_CORE	(1ULL << 1)
-#define SCAN_WINDOW_WRAP_FULL	(1ULL << 2)
 
 __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 				u64 range, u64 win, u64 flags)
@@ -130,20 +128,11 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 	if (start < base || start >= base + span)
 		start = base;
 
-	/*
-	 * An unbounded LLC window retains its original cid order. The cluster
-	 * window wraps from the target even when it covers the full cluster,
-	 * matching the start of select_idle_cpu()'s first pass.
-	 */
-	if (nr >= span) {
-		if (!(flags & SCAN_WINDOW_WRAP_FULL))
-			start = base;
-		nr = span;
-	}
+	nr = MIN(nr, span);
 	head = MIN(nr, base + span - start);
 
 	/*
-	 * A shorter window is taken as the two ranges for_each_cpu_wrap() walks,
+	 * The window is taken as the two ranges for_each_cpu_wrap() walks,
 	 * in that order: from @start to the end of the domain, then from its
 	 * base. Scanning their union in one pass would hand back the lowest cid
 	 * of both wherever they share a bitmap word, which is the wrong end of
@@ -455,7 +444,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 
 		best = scan_idle_window(p, t, (u64)(dom_end - dom_base) << 32 | dom_base,
 					(u64)LLC_WIN_DOMAIN(windows) << 32 | (u32)(prev_cid + 1),
-					scan_flags | (cluster_first ? SCAN_WINDOW_WRAP_FULL : 0));
+					scan_flags);
 		if (best < 0 && LLC_WIN_SUFFIX(windows)) {
 			llc_end = prev->ranges.llc_base + prev->ranges.llc_nr;
 			dom_end = cluster_first ?
