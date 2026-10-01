@@ -47,8 +47,10 @@
  *          select_idle_sibling_cid()       the search itself
  *            the target, the previous cid, the recently used cid - each
  *            taken only if idle and, on an asymmetric machine, big enough
- *            a fully idle core in the LLC, if the LLC hint says there is
- *            one; an idle SMT sibling of prev; then any idle cid, over the
+ *            with an asymmetric-capacity domain, scan it and stop, returning
+ *            the target if no idle cid is found. Without that domain, try a
+ *            fully idle core in the LLC, if the LLC hint says there is one;
+ *            an idle SMT sibling of prev; then any idle cid, over the
  *            word-at-a-time scans in idle.bpf.h, bounded by SIS_UTIL's
  *            nr_idle_scan and walked from the target so successive wakeups
  *            cover the whole domain
@@ -167,12 +169,15 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
  * fair.c's select_idle_capacity() searches the asymmetric-capacity domain in
  * CPU-number order, wrapping at @target. It runs before the ordinary LLC idle
  * scan. Cids are topology ordered, so translate the wrapped CPU walk back to
- * cids. A fully idle core is preferred when one exists; the regular tiered
- * picker remains the fallback for capacity misfits.
+ * cids. A fully idle core is preferred when one exists; idle CPUs that do not
+ * fit the task are ranked by capacity.
+ *
+ * fair.c returns the CPU it settles on without claiming anything. A cid whose
+ * claim is lost to another wakeup is still returned, with @direct left clear.
  */
 static __noinline s32
 select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
-			 s32 target, u64 now)
+			 s32 target, u64 now, bool *direct)
 {
 	struct cid_topo __arena *target_topo = cid_topo(target);
 	bool restricted = is_restricted(p);
@@ -212,10 +217,13 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 		core = !has_idle_core || core_is_idle(cid);
 		fits = task_fits_cid(tctx, cid, now);
 		if (core && fits) {
-			cid = claim_idle_cid(p, cid);
-			if (cid >= 0)
-				return cid;
-			continue;
+			s32 claimed = claim_idle_cid(p, cid);
+
+			if (claimed >= 0) {
+				*direct = true;
+				return claimed;
+			}
+			return cid;
 		}
 
 		/* Idle-core misfit, fitting SMT thread, then thread misfit. */
@@ -229,7 +237,24 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 		}
 	}
 
-	return best >= 0 ? claim_idle_cid(p, best) : -EBUSY;
+	/*
+	 * This path never reaches the whole-core scan that clears a stale
+	 * idle-core hint, so clear it here unless an idle core was ranked
+	 * best, as the tail of select_idle_capacity() does.
+	 */
+	if (has_idle_core && best_rank > 0)
+		set_idle_cores(target, false);
+
+	if (best >= 0) {
+		s32 claimed = claim_idle_cid(p, best);
+
+		if (claimed >= 0) {
+			*direct = true;
+			return claimed;
+		}
+	}
+
+	return best;
 }
 
 /*
@@ -752,13 +777,14 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 	    cid_sched_idle_target(p, recent))
 		return recent;
 
-	if (asym_capacity) {
-		cid = select_idle_capacity_cid(p, tctx, target, now);
-		if (cid >= 0) {
-			*direct = true;
-			return cid;
-		}
-	}
+	/*
+	 * With an asymmetric-capacity domain around @target, fair.c returns
+	 * what select_idle_capacity() found, or the target, and never runs
+	 * the scans below. A negative result leaves the caller the target.
+	 */
+	if (asym_capacity && (sched_asym_capacity || force_asym_capacity) &&
+	    cid_topo(target)->asym_capacity_nr)
+		return select_idle_capacity_cid(p, tctx, target, now, direct);
 
 	cid = pick_idle_cid(p, prev_cid, target);
 	if (cid >= 0)
