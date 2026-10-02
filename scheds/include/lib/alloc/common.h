@@ -33,10 +33,6 @@ int arena_fls(__u64 word);
 
 extern volatile u64 asan_violated;
 
-#ifndef div_round_up
-#define div_round_up(a, b) (((a) + (b) - 1) / (b))
-#endif
-
 #ifndef round_up
 #define round_up(a, b) ((((a) + (b) - 1) / (b)) * b)
 #endif

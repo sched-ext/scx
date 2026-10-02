@@ -29,6 +29,8 @@
 #include "bpf_arena_common.bpf.h"
 #include "const-defs.h"
 
+#define div_round_up(a, b) (((a) + (b) - 1) / (b))
+
 #define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
 #define PF_WQ_WORKER			0x00000020	/* I'm a workqueue worker */

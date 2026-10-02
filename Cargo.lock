@@ -3862,6 +3862,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
+name = "libarena-rs"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d483af2657d7668a14e7039a4c0b91b00adf0b4dbc0026aa63e2e811df95172d"
+dependencies = [
+ "tar",
+]
+
+[[package]]
 name = "libbpf-cargo"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5806,9 +5815,24 @@ name = "scx_arena"
 version = "1.1.3"
 dependencies = [
  "anyhow",
+ "libarena-rs",
  "libbpf-rs 0.27.2",
  "libbpf-sys",
  "libc",
+ "scx_cargo",
+ "scx_utils",
+ "simplelog",
+ "tar",
+]
+
+[[package]]
+name = "scx_arena_libarena_selftests"
+version = "1.1.3"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libbpf-rs 0.27.2",
+ "scx_arena",
  "scx_cargo",
  "scx_utils",
  "simplelog",

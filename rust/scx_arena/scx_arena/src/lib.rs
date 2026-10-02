@@ -11,11 +11,16 @@ mod bpf_skel;
 
 mod arenalib;
 pub use arenalib::ArenaLib;
+mod scx_libarena;
+pub use scx_libarena::ScxLibArena;
 
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::ErrorKind;
+
+#[cfg(feature = "build-support")]
+pub mod build_support;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;

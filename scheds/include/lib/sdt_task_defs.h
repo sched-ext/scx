@@ -6,10 +6,6 @@
  */
 #pragma once
 
-#ifndef div_round_up
-#define div_round_up(a, b) (((a) + (b) - 1) / (b))
-#endif
-
 #ifndef round_up
 #define round_up(a, b) (div_round_up((a), (b)) * (b))
 #endif
