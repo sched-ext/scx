@@ -138,7 +138,7 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 	 * of both wherever they share a bitmap word, which is the wrong end of
 	 * the window and the opposite of the locality the window is for.
 	 */
-	bpf_for(seg, 0, 2) {
+	bpf_arena_for(seg, 0, 2) {
 		u32 sbase = seg ? base : start;
 		u32 snr = seg ? nr - head : head;
 		s32 cid;
