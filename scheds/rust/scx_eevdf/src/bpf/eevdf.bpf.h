@@ -246,6 +246,7 @@ struct cid_topo {
 	u32 place_tier;		/* SD_ASYM_PACKING priority tier */
 	u32 capacity_tier;	/* CPU capacity tier */
 	u32 smt_asym_packing;	/* SMT domain follows SD_ASYM_PACKING */
+	u32 cluster_nested;	/* cluster between core and LLC in size */
 	u64 cap;		/* capacity, 1024 = fastest */
 	struct scx_cid_ranges ranges; /* core, LLC and node CID ranges */
 	u32 llc_place_tier;	/* best SD_ASYM_PACKING tier in the LLC */
@@ -396,6 +397,7 @@ struct cid_ctx {
 	u64 user_eval_at;
 	bool user_busy;
 	u32 sis_idle_scan;	/* nr_idle_scan, meaningful at llc_base */
+	u32 asym_idle_scan;	/* same, at asym_capacity_base, see asym_domain_shared() */
 };
 
 /*
@@ -595,6 +597,21 @@ static __always_inline bool cid_allowed(const struct task_struct *p, s32 cid)
  * Weight of a nice 0 task on the kernel's own scale, NICE_0_LOAD after
  * scale_load_down(), which is what calc_delta_fair() divides by.
  */
+/*
+ * WF_CURRENT_CPU, which enum scx_wake_flags does not expose. Waking through
+ * wake_up_poll_on_current_cpu() or complete_on_current_cpu() asks for the
+ * wakee on the waking CPU, and select_task_rq_fair() obeys before it consults
+ * anything else:
+ *
+ *	if ((wake_flags & WF_CURRENT_CPU) &&
+ *	    cpumask_test_cpu(cpu, p->cpus_ptr))
+ *		return cpu;
+ *
+ * select_task_rq_scx() passes @wake_flags through untouched, so the bit is
+ * there to be read even without a name for it.
+ */
+#define SCX_WAKE_CURRENT_CPU	0x40ULL
+
 #define NICE_0_WEIGHT	1024
 
 /*

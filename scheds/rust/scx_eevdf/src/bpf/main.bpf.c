@@ -419,7 +419,30 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 	/*
 	 * Attempt a migration on wakeup (task was not running) and only if
 	 * ops.select_cid() has not been called already.
+	 *
+	 * A wakeup can reach here without that call because the kernel queued
+	 * it on the cpu the task was still running on, before select_task_rq()
+	 * is reached at all:
+	 *
+	 *	if (smp_load_acquire(&p->on_cpu) &&
+	 *	    ttwu_queue_wakelist(p, task_cpu(p), wake_flags))
+	 *		goto unlock;
+	 *
+	 * That is a wakeup fair.c does not place either: the task goes back to
+	 * the cpu it was on, whose runqueue it is about to have to itself.
+	 * Scanning here would move a task fair.c leaves alone, and the scan is
+	 * the most expensive thing this callback does. A re-enqueue is a
+	 * different matter, see the comment at the call site.
+	 *
+	 * A task that cannot migrate is left to the scan: the kernel skips
+	 * ops.select_cid() for it too, and the scan is a single test of its own
+	 * cid there, which dispatches it straight to the cpu it is pinned to
+	 * instead of queueing it behind a dispatch.
 	 */
+	if ((enq_flags & SCX_ENQ_WAKEUP) && !(enq_flags & SCX_ENQ_REENQ) &&
+	    !is_pcpu_task(p) && cid_allowed(p, scx_bpf_task_cid(p)))
+		return false;
+
 	return !__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p);
 }
 
@@ -457,7 +480,7 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 	 * instead of being queued. This is before every shortcut below, which
 	 * all put the task somewhere it would run from.
 	 */
-	hdr = task_bw_throttled(tctx, prev_cid, now);
+	hdr = task_bw_throttled(tctx, prev_cid, now, true);
 	if (hdr && cid_park(p, tctx, hdr, prev_cid)) {
 		tctx->dispatch_migrate_cid = -1;
 		tctx->pressure_migrate = false;
@@ -653,6 +676,20 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	cid_queued_set(prev_cid);
+
+	/*
+	 * queued_cid_should_preempt() arms the hrtick for the running task when
+	 * a wakee loses to it. A displaced task skips that test, and finds
+	 * nothing published as running: ops.stopping() has cleared @curr_w and
+	 * hrtick_start() does nothing. Arm it here anyway for a task that
+	 * scx_bpf_task_running() reports as running while another one runs,
+	 * as it does for the tasks the kernel puts back on leaving bypass mode
+	 * after the scheduler attaches. The running task may have been restored
+	 * with a slice this scheduler never issued, and a low-weight one would
+	 * otherwise run all of it.
+	 */
+	if (displaced)
+		hrtick_start(prev_cid, tnow);
 	if ((enq_flags & SCX_ENQ_LAST) &&
 	    cid_queue_nr(prev_cid) == 1) {
 		cid = idle_peer_cid(p, prev_cid);
@@ -714,7 +751,7 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 		 * run out, and the only way a task that never blocks is ever
 		 * asked about its cgroup's limit again.
 		 */
-		prev_throttled = ptctx && task_bw_throttled(ptctx, cid, now);
+		prev_throttled = ptctx && task_bw_throttled(ptctx, cid, now, true);
 		if (prev_throttled)
 			scx_bpf_task_set_slice(prev, 0);
 
@@ -935,6 +972,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)
 		}
 		if (cid == (s32)cid_topo(cid)->ranges.llc_base)
 			cctx->sis_idle_scan = cid_topo(cid)->ranges.llc_nr;
+		if (cid == (s32)cid_topo(cid)->asym_capacity_base)
+			cctx->asym_idle_scan = cid_topo(cid)->asym_capacity_nr;
 	}
 
 	/*

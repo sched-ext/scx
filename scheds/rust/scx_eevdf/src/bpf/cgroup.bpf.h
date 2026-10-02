@@ -43,7 +43,7 @@ struct grp_hdr {
 	u64 period;		/* the period, cfs_bandwidth->period */
 	u64 burst;		/* what it may carry into one, cfs_bandwidth->burst */
 	u64 period_start;	/* when the period it is in began */
-	u64 pool;		/* what is left of its bandwidth in it, cfs_b->runtime */
+	u64 pool;		/* what is left of its bandwidth in it, cfs_b->runtime, see bw_pool_ns() */
 	u64 throttled;		/* whether it has run out, cfs_rq->throttled */
 	u64 throttled_at;	/* when it did */
 	u64 throttled_ns;	/* how long it has spent out of bandwidth */
@@ -96,6 +96,7 @@ typedef struct grp_q __arena grp_q_t;
  * serializes; read from everywhere.
  */
 #define BW_QUOTA_INF		((u64)~0ULL)	/* cpu.max "max", RUNTIME_INF */
+#define BW_GEN_SYNCING		((u64)~0ULL)	/* a cid is in grp_bw_sync_gen() */
 
 static u64 bw_nr_limited;
 
@@ -285,8 +286,58 @@ static void grp_bw_unthrottle(struct grp_hdr __arena *hdr, u64 now)
  * takes its next one from wherever it starts again, as fair.c's period timer
  * does once it has been let stop.
  */
+/*
+ * The pool is taken from and given back to by compare and swap, and replaced
+ * outright when cpu.max is written, see grp_bw_set(). A swap must not succeed
+ * against a replaced pool that happens to hold the amount it read, so the
+ * word carries the low bits of the generation that wrote it above the amount:
+ * a replaced pool differs even where the amounts are equal. 48 bits of
+ * nanoseconds are 78 hours of runtime in one period, and an amount beyond
+ * that is held to it.
+ */
+#define BW_POOL_BITS		48
+#define BW_POOL_MAX		((1ULL << BW_POOL_BITS) - 1)
+
+static __always_inline u64 bw_pool_ns(u64 word)
+{
+	return word & BW_POOL_MAX;
+}
+
+/* @word with its amount replaced by @ns. */
+static __always_inline u64 bw_pool_set_ns(u64 word, u64 ns)
+{
+	return (word & ~BW_POOL_MAX) | MIN(ns, BW_POOL_MAX);
+}
+
+/* A pool of @ns written under generation @gen. */
+static __always_inline u64 bw_pool_new(u64 gen, u64 ns)
+{
+	return gen << BW_POOL_BITS | MIN(ns, BW_POOL_MAX);
+}
+
+/*
+ * Is @word the pool that generation @gen wrote? grp_bw_set() moves the
+ * generation and then replaces the pool, and in between the pool is still the
+ * old limit's: nothing may be taken from it or given back to it as the new
+ * one's.
+ */
+static __always_inline bool bw_pool_is_gen(u64 word, u64 gen)
+{
+	return word >> BW_POOL_BITS == (gen & (~0ULL >> BW_POOL_BITS));
+}
+
+/*
+ * How often grp_bw_assign() tries: it starts over when another cid moved the
+ * pool first, and while grp_bw_set() has moved the generation and not yet
+ * written its pool, which is two stores away unless that op was preempted. A
+ * cid that gives up gets nothing, and is throttled until the next refill at
+ * worst.
+ */
+#define BW_ASSIGN_TRIES		64
+
 static void grp_bw_refill(struct grp_hdr __arena *hdr, u64 now)
 {
+	u64 gen = READ_ONCE(hdr->bw_gen);
 	u64 period = READ_ONCE(hdr->period);
 	u64 start = READ_ONCE(hdr->period_start);
 	u64 quota, burst, pool;
@@ -300,33 +351,106 @@ static void grp_bw_refill(struct grp_hdr __arena *hdr, u64 now)
 	burst = READ_ONCE(hdr->burst);
 	while (can_loop) {
 		pool = READ_ONCE(hdr->pool);
+		/*
+		 * The limit moved, or is moving: the quota read above may not
+		 * be this pool's, and grp_bw_set() fills the new pool itself.
+		 */
+		if (READ_ONCE(hdr->bw_gen) != gen ||
+		    !bw_pool_is_gen(pool, gen))
+			return;
 		if (__sync_val_compare_and_swap(&hdr->pool, pool,
-						MIN(pool + quota, quota + burst)) == pool)
+						bw_pool_set_ns(pool,
+							MIN(bw_pool_ns(pool) + quota,
+							    quota + burst))) == pool)
 			break;
 	}
 
 	grp_bw_unthrottle(hdr, now);
 }
 
-/*
- * Hand a cid that has run out @want of the group's bandwidth, and a slice
- * ahead of it so that it does not come back for every charge,
- * assign_cfs_rq_runtime(). Returns what there was to give.
- */
-static u64 grp_bw_assign(struct grp_hdr __arena *hdr, u64 want)
-{
-	u64 pool, take;
+static void grp_bw_sync_gen(grp_q_t *gq, struct grp_hdr __arena *hdr);
 
-	while (can_loop) {
+/*
+ * Hand @gq's cid, which has run out, @want of the group's bandwidth, and
+ * @ahead more so that it does not come back for every charge,
+ * assign_cfs_rq_runtime(). Returns what there was to give.
+ *
+ * The limit may move meanwhile. The generation is checked between reading the
+ * pool and taking from it, see grp_bw_set(): a cid that finds it moved drops
+ * what it held and takes from the new pool, once that pool is there.
+ */
+static u64 grp_bw_assign(grp_q_t *gq, struct grp_hdr __arena *hdr, u64 want,
+			 u64 ahead)
+{
+	u64 pool, take, gen;
+	u32 i;
+
+	bpf_arena_for(i, 0, BW_ASSIGN_TRIES) {
 		pool = READ_ONCE(hdr->pool);
-		if (!pool)
+		gen = READ_ONCE(hdr->bw_gen);
+		if (READ_ONCE(gq->bw_gen) != gen) {
+			grp_bw_sync_gen(gq, hdr);
+			continue;
+		}
+		/* grp_bw_set() is between its two stores: look again. */
+		if (!bw_pool_is_gen(pool, gen))
+			continue;
+		if (!bw_pool_ns(pool))
 			return 0;
-		take = MIN(pool, want + BW_SLICE_NS);
+		take = MIN(bw_pool_ns(pool), want + ahead);
 		if (__sync_val_compare_and_swap(&hdr->pool, pool, pool - take) == pool)
 			return take;
 	}
 
 	return 0;
+}
+
+/*
+ * Add @delta to what @gq's cid holds of its group's bandwidth and return the
+ * result. The owner of the cid charges it, and other cids admit tasks to it,
+ * see grp_bw_admit(), so it moves by compare and swap.
+ */
+static s64 grp_rem_add(grp_q_t *gq, s64 delta)
+{
+	s64 old;
+
+	while (can_loop) {
+		old = READ_ONCE(gq->runtime_remaining);
+		if (__sync_val_compare_and_swap(&gq->runtime_remaining, old,
+						old + delta) == old)
+			return old + delta;
+	}
+
+	return READ_ONCE(gq->runtime_remaining);
+}
+
+/*
+ * What a cid holds was taken under one cpu.max. tg_set_cfs_bandwidth()
+ * resets every cfs_rq of the group when the limit moves, and so a change of
+ * generation drops it.
+ */
+static void grp_bw_sync_gen(grp_q_t *gq, struct grp_hdr __arena *hdr)
+{
+	u64 gen = READ_ONCE(hdr->bw_gen), old;
+
+	/*
+	 * Several cids can get here for one @gq, see grp_bw_admit(). Only the
+	 * one that takes the generation resets the runtime, and the others
+	 * wait for it, so that none of them resets what another has already
+	 * taken from the pool under the new limit.
+	 */
+	while (can_loop) {
+		old = READ_ONCE(gq->bw_gen);
+		if (old == gen)
+			return;
+		if (old == BW_GEN_SYNCING ||
+		    __sync_val_compare_and_swap(&gq->bw_gen, old,
+						BW_GEN_SYNCING) != old)
+			continue;
+		WRITE_ONCE(gq->runtime_remaining, 0);
+		WRITE_ONCE(gq->bw_gen, gen);
+		return;
+	}
 }
 
 /*
@@ -352,27 +476,59 @@ static void grp_bw_charge(grp_q_t *gq, u64 delta, u64 now)
 
 	for (i = 0; gq && i < GRP_MAX_DEPTH; i++, gq = gq->parent) {
 		struct grp_hdr __arena *hdr = gq->hdr;
-		u64 gen;
+		u64 got;
 		s64 rem;
 
 		if (!hdr || !grp_bw_limited(hdr))
 			continue;
 
 		grp_bw_refill(hdr, now);
+		grp_bw_sync_gen(gq, hdr);
 
-		gen = READ_ONCE(hdr->bw_gen);
-		if (READ_ONCE(gq->bw_gen) != gen) {
-			WRITE_ONCE(gq->runtime_remaining, 0);
-			WRITE_ONCE(gq->bw_gen, gen);
+		rem = grp_rem_add(gq, -(s64)delta);
+		if (rem < 0) {
+			got = grp_bw_assign(gq, hdr, -rem, BW_SLICE_NS);
+			if (got)
+				rem = grp_rem_add(gq, got);
 		}
-
-		rem = READ_ONCE(gq->runtime_remaining) - (s64)delta;
-		if (rem < 0)
-			rem += grp_bw_assign(hdr, -rem);
-		WRITE_ONCE(gq->runtime_remaining, rem);
 		if (rem < 0)
 			grp_bw_throttle(hdr, now);
 	}
+}
+
+/*
+ * May @gq's cid run its group's tasks? Only with runtime in hand, as a
+ * cfs_rq runs only while its runtime_remaining is positive. A cid in debt
+ * pays it off from the pool first and takes just enough to be positive,
+ * the way distribute_cfs_runtime() unthrottles at a refill only the cfs_rqs
+ * it can bring back, and the next charge takes a slice ahead. Without this
+ * the tasks let go at a refill would run on every cid at once, each until
+ * its tick found the pool empty, overrunning the quota by a tick per cid in
+ * every period.
+ *
+ * Only an op holding @gq's runqueue, or one handing a task to that cid,
+ * takes from the pool. Without @take, a remote look reports whether the cid
+ * holds runtime or the pool has some.
+ */
+static bool grp_bw_admit(grp_q_t *gq, struct grp_hdr __arena *hdr, bool take)
+{
+	bool current = READ_ONCE(gq->bw_gen) == READ_ONCE(hdr->bw_gen);
+	s64 rem = current ? READ_ONCE(gq->runtime_remaining) : 0;
+	u64 got;
+
+	if (rem > 0)
+		return true;
+	if (!take)
+		return bw_pool_ns(READ_ONCE(hdr->pool)) != 0;
+
+	grp_bw_sync_gen(gq, hdr);
+	/* Another cid may have admitted a task to this one since the look above. */
+	rem = READ_ONCE(gq->runtime_remaining);
+	if (rem > 0)
+		return true;
+	got = grp_bw_assign(gq, hdr, (u64)(-rem) + 1, 0);
+
+	return got && grp_rem_add(gq, got) > 0;
 }
 
 /*
@@ -427,15 +583,18 @@ static void task_bw_charge(task_ctx_t *tctx, s32 cid, u64 delta)
 }
 
 /*
- * The nearest group at or above the one @tctx is in on @cid that has run out
- * of bandwidth, NULL when none has: a group that is out of bandwidth takes
- * everything under it with it, as a throttled cfs_rq does.
+ * The nearest group at or above the one @tctx is in on @cid that @cid cannot
+ * run for, NULL when there is none: a group that is out of bandwidth on a cid
+ * takes everything under it with it, as a throttled cfs_rq does. With @take,
+ * a cid in debt pays it off from the pool, see grp_bw_admit(). A group with
+ * no slot is never held, since its backlog could not be found again.
  *
  * Periods turn over here as well as on the charge, so that a group whose tasks
  * are all waiting, and which therefore charges nothing, is found runnable
  * again by the first of them to ask.
  */
-static struct grp_hdr __arena *task_bw_throttled(task_ctx_t *tctx, s32 cid, u64 now)
+static struct grp_hdr __arena *task_bw_throttled(task_ctx_t *tctx, s32 cid,
+						 u64 now, bool take)
 {
 	grp_q_t *gq;
 	int i;
@@ -447,11 +606,14 @@ static struct grp_hdr __arena *task_bw_throttled(task_ctx_t *tctx, s32 cid, u64 
 	for (i = 0; gq && i < GRP_MAX_DEPTH; i++, gq = gq->parent) {
 		struct grp_hdr __arena *hdr = gq->hdr;
 
-		if (!hdr || !grp_bw_limited(hdr))
+		if (!hdr || !grp_bw_limited(hdr) || !grp_bw_enforced(hdr))
 			continue;
 		grp_bw_refill(hdr, now);
-		if (READ_ONCE(hdr->throttled))
+		if (!grp_bw_admit(gq, hdr, take)) {
+			if (take)
+				grp_bw_throttle(hdr, now);
 			return hdr;
+		}
 	}
 
 	return NULL;

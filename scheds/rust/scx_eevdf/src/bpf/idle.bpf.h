@@ -88,6 +88,82 @@ static bool smt_prefer(s32 a, s32 b)
 	return cid_topo(a)->place_tier < cid_topo(b)->place_tier;
 }
 
+extern struct sched_domain *sd_llc __ksym __weak;
+extern int sd_llc_id __ksym __weak;
+extern int sd_share_id __ksym __weak;
+
+/*
+ * fair.c's cpus_share_cache(): are @a and @b in one LLC? Compare the kernel's
+ * per_cpu(sd_llc_id) where it can be read: the cid ranges are fixed at init,
+ * while a sched domain rebuild, such as a cpuset partition change, can split
+ * an LLC without restarting the scheduler.
+ */
+static __always_inline bool same_idle_llc(s32 a, s32 b)
+{
+	int *ida, *idb;
+
+	if (a == b)
+		return true;
+	if (&sd_llc_id) {
+		ida = bpf_per_cpu_ptr(&sd_llc_id, cid_topo(a)->cpu);
+		idb = bpf_per_cpu_ptr(&sd_llc_id, cid_topo(b)->cpu);
+		if (ida && idb)
+			return *ida == *idb;
+	}
+
+	return cid_topo(a)->ranges.llc_base == cid_topo(b)->ranges.llc_base;
+}
+
+/*
+ * fair.c's cpus_share_resources(): are @a and @b in the same lowest
+ * cache-sharing domain? Read per_cpu(sd_share_id) itself rather than derive it
+ * from the cid ranges, for the same reason as above.
+ *
+ * A kernel without sd_share_id has no cluster scheduling, so its cpus that
+ * share a cache share resources too. A kernel without cid clusters has the
+ * deferral but not the cluster-first scan it makes room for, see
+ * cid_cluster_active(), so it keeps taking a cache-affine cpu outright.
+ */
+static __always_inline bool same_share_domain(s32 a, s32 b)
+{
+	int *ida, *idb;
+
+	if (!&sd_share_id ||
+	    !bpf_core_field_exists(struct scx_cid_topo, cluster_cid))
+		return true;
+	ida = bpf_per_cpu_ptr(&sd_share_id, cid_topo(a)->cpu);
+	idb = bpf_per_cpu_ptr(&sd_share_id, cid_topo(b)->cpu);
+	if (!ida || !idb)
+		return true;
+
+	return *ida == *idb;
+}
+
+/*
+ * fair.c's select_idle_cpu() test for scanning the target's cluster first: the
+ * group of per_cpu(sd_llc) holding the cpu carries SD_CLUSTER. Read the live
+ * domain for the same reason as above. The scan walks the cid cluster, so it
+ * also has to be one the kernel would keep, see init_topology().
+ */
+static __always_inline bool cid_cluster_active(s32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+	struct sched_domain **sdp, *sd;
+	struct sched_group *sg;
+
+	if (!topo->cluster_nested || !&sd_llc)
+		return false;
+	sdp = bpf_per_cpu_ptr(&sd_llc, topo->cpu);
+	if (!sdp)
+		return false;
+	sd = *sdp;
+	if (!sd)
+		return false;
+	sg = BPF_CORE_READ(sd, groups);
+
+	return sg && (BPF_CORE_READ(sg, flags) & SD_CLUSTER);
+}
+
 /* fair.c's sd_balance_shared::has_idle_cores hint, keyed by LLC base cid. */
 static bool test_idle_cores(s32 cid)
 {
@@ -111,6 +187,62 @@ static void set_idle_cores(s32 cid, bool has_idle_core)
 	scx_cid_idle_set_core_hint(&eevdf_idle, topo->ranges.llc_base,
 				    topo->ranges.node_base,
 				    has_idle_core);
+}
+
+/*
+ * fair.c keeps the wakeup scan's shared state, nr_idle_scan and
+ * has_idle_cores, on the asymmetric-capacity domain when the target has one
+ * that is not built from NUMA, and on the LLC otherwise. Domain widths are
+ * rounded to cid ranges, see init_topology(): an asymmetric domain wider than
+ * the LLC and within a node is the node, and one wider than the node is a NUMA
+ * domain. One the width of the LLC shares the LLC's state.
+ */
+static __always_inline bool asym_domain_shared(s32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(cid);
+
+	return (sched_asym_capacity || force_asym_capacity) &&
+	       topo->asym_capacity_nr > topo->ranges.llc_nr &&
+	       topo->asym_capacity_nr <= topo->ranges.node_nr;
+}
+
+/*
+ * test_idle_cores() for select_idle_capacity(). The hints are kept per LLC, so
+ * the domain's hint is set while any of its LLCs has one, and the mask of a
+ * node's LLC hints answers that in a word test.
+ */
+static bool asym_test_idle_cores(s32 cid)
+{
+	u32 node_base;
+
+	if (!cid_valid(cid))
+		return false;
+	if (!asym_domain_shared(cid))
+		return test_idle_cores(cid);
+	node_base = cid_topo(cid)->ranges.node_base;
+
+	return node_base < eevdf_idle.nr_cids &&
+	       !cmask_empty(eevdf_idle.node_core_llcs[node_base]);
+}
+
+/* set_idle_cores(cpu, false) for select_idle_capacity(). */
+static void asym_clear_idle_cores(s32 cid)
+{
+	struct cid_topo __arena *topo;
+	u32 i;
+
+	if (!cid_valid(cid))
+		return;
+	if (!asym_domain_shared(cid)) {
+		set_idle_cores(cid, false);
+		return;
+	}
+	topo = cid_topo(cid);
+	bpf_arena_for(i, topo->asym_capacity_base,
+		      topo->asym_capacity_base + topo->asym_capacity_nr) {
+		if (cid_valid(i) && i == cid_topo(i)->ranges.llc_base)
+			set_idle_cores(i, false);
+	}
 }
 
 /*
@@ -250,6 +382,26 @@ static __always_inline u32 sis_idle_scan_nr(s32 cid)
 	return READ_ONCE(cid_ctx(topo->ranges.llc_base)->sis_idle_scan);
 }
 
+/*
+ * The budget of select_idle_capacity(), which reads nr_idle_scan from the
+ * asymmetric-capacity domain. A domain built from NUMA has no shared state
+ * and the scan is not bounded there.
+ */
+static __always_inline u32 asym_idle_scan_nr(s32 cid)
+{
+	struct cid_topo __arena *topo;
+
+	if (!sis_util || !cid_valid(cid))
+		return UINT_MAX;
+	topo = cid_topo(cid);
+	if (topo->asym_capacity_nr > topo->ranges.node_nr)
+		return UINT_MAX;
+	if (!asym_domain_shared(cid))
+		return sis_idle_scan_nr(cid);
+
+	return READ_ONCE(cid_ctx(topo->asym_capacity_base)->asym_idle_scan);
+}
+
 /* Flags for pick_idle_cid_topology() */
 enum pick_idle_flags {
 	/* @prev_cid is in @p's allowed set and can be returned as is */
@@ -263,6 +415,9 @@ enum pick_idle_flags {
 
 	/* Restrict the scan to the LLC containing @prev_cid */
 	PICK_IDLE_LLC_ONLY	= 1 << 3,
+
+	/* Search @prev_cid's cluster before the rest of its LLC */
+	PICK_IDLE_CLUSTER_FIRST = 1 << 4,
 };
 
 /*

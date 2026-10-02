@@ -79,10 +79,10 @@
  *
  *   ops.stopping()   charge the service to every level -> pool empty
  *                    -> the group throttles
- *   ops.enqueue()    throttled? -> cid_park(): the task leaves its pack
- *                    and its group's load and waits in the cgroup's own
- *                    backlog, ordered by vruntime so the least served
- *                    comes back first
+ *   ops.enqueue()    no runtime on its cid? -> cid_park(): the task
+ *                    leaves its pack and its group's load and waits in
+ *                    the cgroup's own backlog, in the order it was put
+ *                    there
  *   period ends      grp_bw_refill() -> bw_unpark() from the next
  *                    ops.dispatch(), a few tasks at a time; and from one
  *                    bpf_timer for the case where every cid is asleep and
@@ -224,12 +224,35 @@ static void grp_bw_return(grp_q_t *gq)
 	 * given back: it is not this limit's time to hand out.
 	 */
 	if (READ_ONCE(gq->bw_gen) != READ_ONCE(hdr->bw_gen)) {
-		WRITE_ONCE(gq->runtime_remaining, 0);
+		__sync_val_compare_and_swap(&gq->runtime_remaining, rem, 0);
 		return;
 	}
 
-	WRITE_ONCE(gq->runtime_remaining, (s64)NSEC_PER_MSEC);
-	__sync_fetch_and_add(&hdr->pool, rem - NSEC_PER_MSEC);
+	/* Other cids admit tasks to it: give back only what was there. */
+	if (__sync_val_compare_and_swap(&gq->runtime_remaining, rem,
+					(s64)NSEC_PER_MSEC) != rem)
+		return;
+
+	/*
+	 * The limit may move while the pool is credited. grp_bw_set() bumps
+	 * the generation before it replaces the pool, so a credit that
+	 * checks the generation after reading the pool either sees the bump
+	 * and drops the slice, or lands before the pool is replaced, or fails
+	 * its compare and swap on the replaced pool and sees the bump then.
+	 * The replaced pool fails the swap whatever amount it holds, see
+	 * bw_pool_ns().
+	 */
+	while (can_loop) {
+		u64 pool = READ_ONCE(hdr->pool);
+		u64 gen = READ_ONCE(hdr->bw_gen);
+
+		if (READ_ONCE(gq->bw_gen) != gen || !bw_pool_is_gen(pool, gen))
+			return;
+		if (__sync_val_compare_and_swap(&hdr->pool, pool,
+						bw_pool_set_ns(pool, bw_pool_ns(pool) + rem -
+							       NSEC_PER_MSEC)) == pool)
+			return;
+	}
 }
 
 /*
@@ -718,13 +741,20 @@ static int bw_timer_fire(void *map, int *key, struct bw_timer *bt)
  * It waits in its cgroup's backlog rather than in the cid's queue: the pick
  * descends an AVL tree by deadline, pruning on the least eligible vruntime of
  * a subtree, and has no way to step over a task, so a task that may not run
- * has to be somewhere else. The backlog is ordered by the vruntime it stopped
- * at, so the least served of the group's tasks is the first to go back.
+ * has to be somewhere else.
+ *
+ * The backlog is in the order tasks were put in it, as fair.c unthrottles
+ * its cfs_rqs in the order they throttled. A refill lets go only as many tasks
+ * as its runtime admits, and one that cannot run on its cid goes to the back,
+ * so every task is let go within a bounded number of periods. Vruntimes would
+ * not do: tasks from different cids' packs do not compare, and the same few
+ * would go first every period while the others waited past the watchdog.
  */
 static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 		     struct grp_hdr __arena *hdr, s32 cid)
 {
 	cid_edq_task_t *at = cid_edq_task(tctx);
+	u64 parked_at;
 	int ret;
 
 	/*
@@ -754,8 +784,9 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 	at->enq_flags = 0;
 	at->cid = cid;
 	WRITE_ONCE(at->state, CID_EDQ_PARKED);
-	ret = scx_edq_insert(&hdr->bq, &at->common, tctx->se.vruntime,
-			      tctx->se.vruntime, at->slice);
+	parked_at = scx_bpf_now();
+	ret = scx_edq_insert(&hdr->bq, &at->common, parked_at, parked_at,
+			      at->slice);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_PARKED,
 					    CID_EDQ_NONE);
@@ -825,7 +856,7 @@ static __noinline bool bw_unpark_one(struct grp_hdr __arena *hdr, u64 now)
 	 * chain again rather than the one backlog it came from, or a child
 	 * would run while an ancestor is throttled until the tick noticed.
 	 */
-	out = task_bw_throttled(tctx, cid, now);
+	out = task_bw_throttled(tctx, cid, now, true);
 	if (out) {
 		scx_edq_task_drop(&at->common);
 		cid_park(p, tctx, out, cid);
@@ -892,7 +923,12 @@ __noinline int bw_unpark(u64 now)
 		grp_bw_refill(hdr, now);
 		if (READ_ONCE(hdr->throttled))
 			continue;
-		while (READ_ONCE(hdr->nr_parked) && n < BW_UNPARK_BATCH && can_loop) {
+		/*
+		 * A task let go onto a cid that cannot get runtime goes back
+		 * and throttles the group: stop there rather than pop it again.
+		 */
+		while (READ_ONCE(hdr->nr_parked) && !READ_ONCE(hdr->throttled) &&
+		       n < BW_UNPARK_BATCH && can_loop) {
 			if (!bw_unpark_one(hdr, now))
 				break;
 			n++;
@@ -951,6 +987,65 @@ static bool cgrp_is_idle(struct cgroup *cgrp)
 		return false;
 
 	return idle > 0;
+}
+
+/*
+ * Set the cpu.max of @hdr's cgroup, tg_set_bandwidth(): the cgroup may run
+ * for @quota_us of every @period_us, and carry what it leaves unused into the
+ * next period, up to @burst_us. The kernel keeps "max" as RUNTIME_INF and
+ * refuses a quota or a period below a millisecond, so zero stands for no
+ * limit here.
+ *
+ * The limits are kept in nanoseconds, what the rest of the scheduler times in.
+ * A cgroup nested deeper than GRP_MAX_DEPTH has no block of its own to keep
+ * them in, and runs under the limits of the ancestor whose block it shares.
+ */
+static void grp_bw_set(struct grp_hdr __arena *hdr, u64 period_us,
+		       u64 quota_us, u64 burst_us)
+{
+	u64 quota, period, burst, now, gen;
+	bool was, limited;
+
+	quota = quota_us == BW_QUOTA_INF ? 0 : quota_us * NSEC_PER_USEC;
+	period = MAX(period_us * NSEC_PER_USEC, NSEC_PER_MSEC);
+	burst = quota ? burst_us * NSEC_PER_USEC : 0;
+	now = scx_bpf_now();
+
+	/*
+	 * A limit that is new or has moved starts a period of its own, as
+	 * tg_set_cfs_bandwidth() refills the group and restarts its timer. The
+	 * period and the burst go in before the quota that makes them count.
+	 */
+	was = grp_bw_limited(hdr);
+	if (quota)
+		grp_bw_register(hdr);
+	WRITE_ONCE(hdr->period, period);
+	WRITE_ONCE(hdr->burst, burst);
+	WRITE_ONCE(hdr->period_start, now);
+	WRITE_ONCE(hdr->quota, quota);
+	/*
+	 * Whatever the cids are holding was taken under the old limit. The
+	 * generation moves before the pool is replaced: a cid that takes from
+	 * the pool or gives back to it checks the generation in between, see
+	 * grp_bw_assign() and grp_bw_return(), and that the pool is the one
+	 * this generation wrote, see bw_pool_is_gen(), so nothing crosses from
+	 * one limit's pool into the other's.
+	 */
+	__sync_fetch_and_add(&hdr->bw_gen, 1);
+	gen = READ_ONCE(hdr->bw_gen);
+	WRITE_ONCE(hdr->pool, bw_pool_new(gen, quota));
+	grp_bw_unthrottle(hdr, now);
+
+	limited = quota != 0;
+	if (limited != was)
+		bw_nr_limited += limited ? 1 : -1;
+	/*
+	 * A cgroup that is no longer limited keeps its slot until its tasks
+	 * have been let go: they wait in a backlog the drain reaches through
+	 * it. The unthrottle above is what lets that happen.
+	 */
+	if (!limited && !READ_ONCE(hdr->nr_parked))
+		grp_bw_unregister(hdr);
 }
 
 /*
@@ -1039,6 +1134,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_cpuctl_init, struct cgroup *cgrp,
 		}
 	}
 	cgc->depth = depth;
+
+	/*
+	 * A cgroup that already has a cpu.max when the scheduler is loaded is
+	 * held to it from the start. ops.cpuctl_set_bandwidth() only reports
+	 * changes, and the init arguments carry the limit on kernels that
+	 * have the callback.
+	 */
+	if (cpu_max_enabled && bpf_core_field_exists(args->bw_quota_us) &&
+	    args->bw_quota_us != BW_QUOTA_INF)
+		grp_bw_set(hdr, args->bw_period_us, args->bw_quota_us,
+			   args->bw_burst_us);
 
 	return 0;
 }
@@ -1154,62 +1260,20 @@ void BPF_STRUCT_OPS(eevdf_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
 }
 
 /*
- * Somebody wrote cpu.max, tg_set_bandwidth(): the cgroup may run for
- * @quota_us of every @period_us, and carry what it leaves unused into the next
- * period, up to @burst_us. The kernel keeps "max" as RUNTIME_INF and refuses a
- * quota or a period below a millisecond, so zero stands for no limit here.
- *
- * The limits are kept in nanoseconds, what the rest of the scheduler times in.
- * A cgroup nested deeper than GRP_MAX_DEPTH has no block of its own to keep
- * them in, and runs under the limits of the ancestor whose block it shares.
+ * Somebody wrote cpu.max: hand it to grp_bw_set().
  */
 void BPF_STRUCT_OPS(eevdf_cpuctl_set_bandwidth, struct cgroup *cgrp,
 		    u64 period_us, u64 quota_us, u64 burst_us)
 {
-	u64 quota, period, burst, now;
-	struct grp_hdr __arena *hdr;
 	struct cgrp_ctx *cgc;
-	bool was, limited;
 
 	TOUCH_ARENA();
 
 	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
 	if (!cgc || !cgc->hdr)
 		return;
-	hdr = cgc->hdr;
 
-	quota = quota_us == BW_QUOTA_INF ? 0 : quota_us * NSEC_PER_USEC;
-	period = MAX(period_us * NSEC_PER_USEC, NSEC_PER_MSEC);
-	burst = quota ? burst_us * NSEC_PER_USEC : 0;
-	now = scx_bpf_now();
-
-	/*
-	 * A limit that is new or has moved starts a period of its own, as
-	 * tg_set_cfs_bandwidth() refills the group and restarts its timer. The
-	 * period and the burst go in before the quota that makes them count.
-	 */
-	was = grp_bw_limited(hdr);
-	if (quota)
-		grp_bw_register(hdr);
-	WRITE_ONCE(hdr->period, period);
-	WRITE_ONCE(hdr->burst, burst);
-	WRITE_ONCE(hdr->period_start, now);
-	WRITE_ONCE(hdr->pool, quota);
-	/* Whatever the cids are holding was taken under the old limit. */
-	__sync_fetch_and_add(&hdr->bw_gen, 1);
-	WRITE_ONCE(hdr->quota, quota);
-	grp_bw_unthrottle(hdr, now);
-
-	limited = quota != 0;
-	if (limited != was)
-		bw_nr_limited += limited ? 1 : -1;
-	/*
-	 * A cgroup that is no longer limited keeps its slot until its tasks
-	 * have been let go: they wait in a backlog the drain reaches through
-	 * it. The unthrottle above is what lets that happen.
-	 */
-	if (!limited && !READ_ONCE(hdr->nr_parked))
-		grp_bw_unregister(hdr);
+	grp_bw_set(cgc->hdr, period_us, quota_us, burst_us);
 }
 
 /*
