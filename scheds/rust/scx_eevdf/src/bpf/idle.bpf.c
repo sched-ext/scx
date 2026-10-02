@@ -292,12 +292,14 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 	u64 best_cap = 0;
 	s32 best = -EBUSY;
 	u32 best_rank = 3;
+	bool best_idle = false;
 	u32 scan_nr = asym_idle_scan_nr(target);
 	u32 off;
 
 	TOUCH_ARENA();
 	if ((!sched_asym_capacity && !force_asym_capacity) ||
-	    !target_topo->asym_capacity_nr || scx_cid_idle_empty(&eevdf_idle))
+	    !target_topo->asym_capacity_nr ||
+	    (scx_cid_idle_empty(&eevdf_idle) && !READ_ONCE(nr_sched_idle_curr)))
 		return -EBUSY;
 
 	bpf_arena_for(off, 0, nr_cpu_ids) {
@@ -305,7 +307,7 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 		u64 cap;
 		s32 cid;
 		u32 rank;
-		bool core, fits;
+		bool core, fits, idle;
 
 		if (cpu >= nr_cpu_ids)
 			cpu -= nr_cpu_ids;
@@ -318,12 +320,14 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 		/* select_idle_capacity() spends the hint only without an idle core. */
 		if (!has_idle_core && scan_nr != UINT_MAX && !scan_nr--)
 			break;
-		if (!cid_idle_test(cid))
+		/* choose_idle_cpu(): idle, or running only SCHED_IDLE work. */
+		idle = cid_idle_test(cid);
+		if (!idle && !cid_sched_idle_target(p, cid))
 			continue;
-		core = !has_idle_core || core_is_idle(cid);
+		core = !has_idle_core || (idle && core_is_idle(cid));
 		fits = task_fits_cid(tctx, cid, now);
 		if (core && fits) {
-			s32 claimed = claim_idle_cid(p, cid);
+			s32 claimed = idle ? claim_idle_cid(p, cid) : -EBUSY;
 
 			if (claimed >= 0) {
 				*direct = true;
@@ -340,6 +344,7 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 			best = cid;
 			best_rank = rank;
 			best_cap = cap;
+			best_idle = idle;
 		}
 	}
 
@@ -351,7 +356,7 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 	if (has_idle_core && best_rank > 0)
 		asym_clear_idle_cores(target);
 
-	if (best >= 0) {
+	if (best >= 0 && best_idle) {
 		s32 claimed = claim_idle_cid(p, best);
 
 		if (claimed >= 0) {
@@ -514,6 +519,43 @@ static __noinline s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
 		cid = claim_idle_cid(p, sibling);
 		if (cid >= 0)
 			return cid;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * select_idle_smt() while some cid runs SCHED_IDLE work: choose_idle_cpu()
+ * takes the first sibling of @prev_cid that is idle or runs only such work,
+ * in sibling order. An idle one is claimed and sets @direct. The plain
+ * select_idle_smt() above looks at idle siblings only and serves the common
+ * case, where there is no SCHED_IDLE work to find.
+ */
+static __noinline s32 select_idle_smt_any(const struct task_struct *p,
+					  s32 prev_cid, s32 target, bool *direct)
+{
+	struct cid_topo __arena *prev;
+	u32 sibling;
+
+	if (!smt_enabled || !cid_valid(prev_cid) || !cid_valid(target) ||
+	    !same_idle_llc(prev_cid, target))
+		return -EBUSY;
+	prev = cid_topo(prev_cid);
+
+	bpf_arena_for(sibling, prev->ranges.core_base, prev->ranges.core_base + prev->ranges.core_nr) {
+		if (sibling == (u32)prev_cid || !cid_allowed(p, sibling))
+			continue;
+		if (cid_idle_test(sibling)) {
+			s32 cid = claim_idle_cid(p, sibling);
+
+			if (cid >= 0) {
+				*direct = true;
+				return cid;
+			}
+			continue;
+		}
+		if (cid_sched_idle_target(p, sibling))
+			return sibling;
 	}
 
 	return -EBUSY;
@@ -859,39 +901,87 @@ static s32 wake_affine_cid(const struct task_struct *p, task_ctx_t *tctx,
 }
 
 /*
+ * The walk select_idle_cpu() makes of @target's LLC: the cluster of @target
+ * from the cid after it, wrapping, then the cids after the cluster and the
+ * cids before it. Without @cluster_first the cluster is the whole LLC.
+ * llc_walk_cid() gives the cid at a position of the walk and llc_walk_pos()
+ * the position of a cid of that LLC.
+ */
+static __always_inline u32 llc_walk_cid(s32 target, bool cluster_first, u32 pos)
+{
+	struct cid_topo __arena *topo = cid_topo(target);
+	u32 llc_base = topo->ranges.llc_base;
+	u32 dom_base = cluster_first ? topo->ranges.cluster_base : llc_base;
+	u32 dom_nr = cluster_first ? topo->ranges.cluster_nr : topo->ranges.llc_nr;
+	u32 start = (u32)target + 1 < dom_base + dom_nr ? (u32)target + 1 : dom_base;
+	u32 rest = llc_base + topo->ranges.llc_nr - dom_base;
+
+	if (pos < dom_nr)
+		return start + pos < dom_base + dom_nr ? start + pos :
+							 start + pos - dom_nr;
+	if (pos < rest)
+		return dom_base + pos;
+
+	return llc_base + pos - rest;
+}
+
+static __always_inline u32 llc_walk_pos(s32 target, bool cluster_first, u32 cid)
+{
+	struct cid_topo __arena *topo = cid_topo(target);
+	u32 llc_base = topo->ranges.llc_base;
+	u32 dom_base = cluster_first ? topo->ranges.cluster_base : llc_base;
+	u32 dom_nr = cluster_first ? topo->ranges.cluster_nr : topo->ranges.llc_nr;
+	u32 start = (u32)target + 1 < dom_base + dom_nr ? (u32)target + 1 : dom_base;
+
+	if (cid >= dom_base + dom_nr)
+		return cid - dom_base;
+	if (cid >= dom_base)
+		return cid >= start ? cid - start : cid + dom_nr - start;
+
+	return llc_base + topo->ranges.llc_nr - dom_base + cid - llc_base;
+}
+
+/*
  * The scan of select_idle_cpu() takes a CPU that runs only SCHED_IDLE work as
  * readily as an idle one,
  *
- *	if ((available_idle_cpu(cpu) || sched_idle_cpu(cpu)) &&
- *	    sched_cpu_cookie_match(cpu_rq(cpu), p))
+ *	if (choose_idle_cpu(cpu, p) && sched_cpu_cookie_match(cpu_rq(cpu), p))
  *		return cpu;
  *
  * and select_idle_core() keeps one as the fallback when no core is wholly
- * idle. pick_idle_cid() looks only at idle cids, and returns at once when
- * none is idle, which is when this matters most. So look for one in
- * @target's LLC once that has failed, from the cid after @target and within
- * the SIS_UTIL budget the idle scan honored. A truly idle cid is still
- * preferred, as select_idle_core() prefers it. A global function, so the
- * loop is verified once.
+ * idle. The idle scans read the idle masks, which hold no such cid, so find
+ * the first one here, over the walk and the windows the idle scan covers:
+ * the same order, and the same SIS_UTIL budget counted on the cids @p may
+ * run on. With @has_idle_core the walk is not bounded, as in fair.c.
+ *
+ * A global function, so the loop is verified once.
  */
-__noinline s32 sched_idle_scan(struct task_struct *p __arg_trusted, s32 target)
+__noinline s32 sched_idle_scan(struct task_struct *p __arg_trusted, s32 target,
+			       bool cluster_first, bool has_idle_core)
 {
-	u32 base, nr, i;
+	u64 windows;
+	u32 nr, i;
 
 	if (!p || !READ_ONCE(nr_sched_idle_curr) || !cid_valid(target))
 		return -EBUSY;
-	base = cid_topo(target)->ranges.llc_base;
-	nr = cid_topo(target)->ranges.llc_nr;
-	if (sis_util)
-		nr = MIN(nr, sis_idle_scan_nr(target));
+	/* select_idle_cpu() gives up on a zero budget before any walk. */
+	if (!sis_idle_scan_nr(target))
+		return -EBUSY;
+	windows = idle_llc_windows(p, target, PICK_IDLE_LLC_ONLY |
+				   (has_idle_core ? PICK_IDLE_WHOLE_CORE : 0),
+				   cluster_first);
+	/*
+	 * A window is cut short only where the budget ran out, which leaves
+	 * the ones after it empty: their cids are consecutive in the walk.
+	 */
+	nr = LLC_WIN_DOMAIN(windows) + LLC_WIN_SUFFIX(windows) +
+	     LLC_WIN_PREFIX(windows);
 
-	bpf_for(i, 1, nr + 1) {
-		u32 llc_nr = cid_topo(target)->ranges.llc_nr;
-		s32 cid;
+	bpf_arena_for(i, 0, nr) {
+		s32 cid = llc_walk_cid(target, cluster_first, i);
 
-		if (!llc_nr)
+		if (!cid_valid(cid))
 			break;
-		cid = base + (target - base + i) % llc_nr;
 		if (cid_allowed(p, cid) && cid_sched_idle_target(p, cid))
 			return cid;
 	}
@@ -914,6 +1004,7 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 	s32 cid;
 	s32 recent = -1;
 	s32 prev_aff = -1, recent_aff = -1;
+	s32 sched_idle = -EBUSY;
 
 	if (cid_idle_test(target) && cid_allowed(p, target) &&
 	    asym_fits_cid(tctx, target, now)) {
@@ -985,17 +1076,49 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 	    cid_topo(target)->asym_capacity_nr)
 		return select_idle_capacity_cid(p, tctx, target, now, direct);
 
+	/*
+	 * select_idle_cpu() takes the first CPU of its walk that is idle or
+	 * runs only SCHED_IDLE work. The idle scan below cannot see the
+	 * latter, so find the first of them and take it if no idle cid comes
+	 * before it in the walk. While the LLC has an idle core, a core wins
+	 * wherever it is and such a cid is only the fallback.
+	 *
+	 * Without an idle core, select_idle_smt() comes before the walk and
+	 * takes a sibling of @prev_cid that is idle or runs only SCHED_IDLE
+	 * work. Try it here, ahead of the early return below.
+	 */
+	if (READ_ONCE(nr_sched_idle_curr)) {
+		bool cluster_first = cid_cluster_active(target);
+		bool has_idle_core = smt_enabled && test_idle_cores(target);
+
+		if (!has_idle_core && !asym_capacity) {
+			cid = select_idle_smt_any(p, prev_cid, target, direct);
+			if (cid >= 0)
+				return cid;
+		}
+
+		sched_idle = sched_idle_scan((struct task_struct *)p, target,
+					     cluster_first, has_idle_core);
+		if (sched_idle >= 0 && !has_idle_core) {
+			cid = scx_cid_idle_empty(&eevdf_idle) ? -EBUSY :
+			      pick_idle_cid_topology((struct task_struct *)p, target,
+						     PICK_IDLE_LLC_ONLY |
+						     PICK_IDLE_CLUSTER_FIRST |
+						     PICK_IDLE_NO_CLAIM);
+			if (cid < 0 ||
+			    llc_walk_pos(target, cluster_first, sched_idle) <
+			    llc_walk_pos(target, cluster_first, cid))
+				return sched_idle;
+		}
+	}
+
 	cid = pick_idle_cid(p, prev_cid, target);
 	if (cid >= 0) {
 		*direct = true;
 		return cid;
 	}
-	if (READ_ONCE(nr_sched_idle_curr)) {
-		s32 sched_idle = sched_idle_scan((struct task_struct *)p, target);
-
-		if (sched_idle >= 0)
-			return sched_idle;
-	}
+	if (sched_idle >= 0)
+		return sched_idle;
 
 	/*
 	 * @prev_cid and the recent-used cid were cache-affine but in another
