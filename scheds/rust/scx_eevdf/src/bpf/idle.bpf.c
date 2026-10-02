@@ -1484,7 +1484,7 @@ s32 BPF_STRUCT_OPS(eevdf_select_cid, struct task_struct *p, s32 prev_cid, u64 wa
 	 * woken for a task that may not run goes back to sleep having done
 	 * nothing. Leave it where it is and let ops.enqueue() put it aside.
 	 */
-	if (task_bw_throttled(tctx, prev_cid, now))
+	if (task_bw_throttled(tctx, prev_cid, now, false))
 		return prev_cid;
 
 	/*

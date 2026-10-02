@@ -1463,7 +1463,7 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 		 */
 		if (bw_enabled() && tctx) {
 			keep_charge(p, cid, cid_clock_task_owned(cid, now));
-			if (task_bw_throttled(tctx, cid, now))
+			if (task_bw_throttled(tctx, cid, now, true))
 				scx_bpf_task_set_slice(p, 0);
 		}
 	}

@@ -480,7 +480,7 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 	 * instead of being queued. This is before every shortcut below, which
 	 * all put the task somewhere it would run from.
 	 */
-	hdr = task_bw_throttled(tctx, prev_cid, now);
+	hdr = task_bw_throttled(tctx, prev_cid, now, true);
 	if (hdr && cid_park(p, tctx, hdr, prev_cid)) {
 		tctx->dispatch_migrate_cid = -1;
 		tctx->pressure_migrate = false;
@@ -751,7 +751,7 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 		 * run out, and the only way a task that never blocks is ever
 		 * asked about its cgroup's limit again.
 		 */
-		prev_throttled = ptctx && task_bw_throttled(ptctx, cid, now);
+		prev_throttled = ptctx && task_bw_throttled(ptctx, cid, now, true);
 		if (prev_throttled)
 			scx_bpf_task_set_slice(prev, 0);
 
