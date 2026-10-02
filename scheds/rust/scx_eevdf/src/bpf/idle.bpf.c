@@ -92,6 +92,27 @@
 #include "queue.bpf.h"
 #include "task.bpf.h"
 
+#define for_each_core_cid(cid, topo) \
+	bpf_arena_for(cid, (topo)->ranges.core_base, \
+		      core_end_cid(topo))
+
+#define for_each_llc_offset(offset, topo) \
+	bpf_arena_for(offset, 0, (topo)->ranges.llc_nr)
+#define for_each_node_offset(offset, topo) \
+	bpf_arena_for(offset, 0, (topo)->ranges.node_nr)
+#define for_each_system_cid(cid) bpf_arena_for(cid, 0, nr_cids)
+#define for_each_fork_domain_cid(cid, env, nr) \
+	bpf_arena_for(cid, (env)->base, (env)->base + (nr))
+
+#define CID_RANGE(base, count) ((u64)(count) << 32 | (base))
+#define CID_RANGE_BASE(range) ((u32)(range))
+#define CID_RANGE_COUNT(range) ((range) >> 32)
+
+static __always_inline u32 core_end_cid(const struct cid_topo __arena *topo)
+{
+	return topo->ranges.core_base + topo->ranges.core_nr;
+}
+
 /*
  * Scan a domain for an idle cid, over a window of @nr of its cids counted from
  * @start and wrapping, which is what select_idle_cpu() walks:
@@ -115,8 +136,8 @@
 __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 				u64 range, u64 win, u64 flags)
 {
-	u32 base = (u32)range, span = range >> 32;
-	u32 start = (u32)win, nr = win >> 32;
+	u32 base = CID_RANGE_BASE(range), span = CID_RANGE_COUNT(range);
+	u32 start = CID_RANGE_BASE(win), nr = CID_RANGE_COUNT(win);
 	bool restricted = flags & SCAN_WINDOW_RESTRICTED;
 	bool whole_core = flags & SCAN_WINDOW_WHOLE_CORE;
 	u32 seg, head;
@@ -167,7 +188,7 @@ __noinline s32 scan_idle_window(struct task_struct *p __arg_trusted, u32 t,
 __noinline u64 allowed_window(struct task_struct *p __arg_trusted, u64 range,
 			      u32 start, u32 budget)
 {
-	u32 base = (u32)range, span = range >> 32;
+	u32 base = CID_RANGE_BASE(range), span = CID_RANGE_COUNT(range);
 	u32 nr = 0, used = 0, i;
 
 	TOUCH_ARENA();
@@ -187,15 +208,16 @@ __noinline u64 allowed_window(struct task_struct *p __arg_trusted, u64 range,
 		nr++;
 	}
 
-	return (u64)used << 32 | nr;
+	return CID_RANGE(nr, used);
 }
 
 /*
  * The scan window for the next domain of a budgeted walk, see
  * allowed_window(). Without @count_allowed every cid counts.
  */
-static __always_inline u32 window_nr(struct task_struct *p, u32 base, u32 span,
-				     u32 start, u32 *budget, bool count_allowed)
+static __always_inline u32 budgeted_window_count(struct task_struct *p,
+						 u32 base, u32 span, u32 start,
+						 u32 *budget, bool count_allowed)
 {
 	u64 w;
 	u32 nr;
@@ -207,69 +229,141 @@ static __always_inline u32 window_nr(struct task_struct *p, u32 base, u32 span,
 		*budget -= nr;
 		return nr;
 	}
-	w = allowed_window(p, (u64)span << 32 | base, start, *budget);
-	*budget -= w >> 32;
+	w = allowed_window(p, CID_RANGE(base, span), start, *budget);
+	*budget -= CID_RANGE_COUNT(w);
 
-	return (u32)w;
+	return CID_RANGE_BASE(w);
 }
 
 /*
- * The three windows idle_llc_windows() returns, packed into one value: a
- * window is at most the cids of an LLC.
+ * budgeted_llc_scan_counts() packs three counts of cid positions to scan:
+ * the target cluster (or whole LLC), the cids after it, and the cids before
+ * it. A zero count means that region is empty or the budget ran out first.
  */
-#define LLC_WIN_BITS		20
-#define LLC_WIN_DOMAIN(w)	((u32)((w) & ((1ULL << LLC_WIN_BITS) - 1)))
-#define LLC_WIN_SUFFIX(w)	LLC_WIN_DOMAIN((w) >> LLC_WIN_BITS)
-#define LLC_WIN_PREFIX(w)	LLC_WIN_DOMAIN((w) >> (2 * LLC_WIN_BITS))
+#define LLC_SCAN_COUNT_BITS		20
+#define LLC_SCAN_TARGET_DOMAIN_COUNT(w)	((u32)((w) & ((1ULL << LLC_SCAN_COUNT_BITS) - 1)))
+#define LLC_SCAN_AFTER_CLUSTER_COUNT(w)	LLC_SCAN_TARGET_DOMAIN_COUNT((w) >> LLC_SCAN_COUNT_BITS)
+#define LLC_SCAN_BEFORE_CLUSTER_COUNT(w) \
+	LLC_SCAN_TARGET_DOMAIN_COUNT((w) >> (2 * LLC_SCAN_COUNT_BITS))
+#define LLC_SCAN_REACHES_AFTER_CLUSTER(w) LLC_SCAN_AFTER_CLUSTER_COUNT(w)
+#define LLC_SCAN_REACHES_BEFORE_CLUSTER(w) LLC_SCAN_BEFORE_CLUSTER_COUNT(w)
 
 /*
- * Size the windows of a budgeted walk of @cid's LLC: its cluster, or the whole
- * LLC without @cluster_first, then the cids after it and the cids before it.
+ * Allocate the scan budget across @cid's cluster, or the whole LLC without
+ * @cluster_first, then the cids after it and the cids before it.
  *
  * A restricted task spends the budget only on the cids it may run on, so they
  * have to be counted when the budget can run out before the LLC does. When it
  * is no smaller than the task's whole affinity, it cannot run out at all and
- * the windows are the whole domains.
+ * the counts cover the whole domains.
  *
  * A function of its own to keep the budget accounting out of the topology
- * scan's BPF stack frame, and a packed return value to keep the windows out
+ * scan's BPF stack frame, and a packed return value to keep the counts out
  * of it too: the frames from ops.enqueue() down to the bitmap scan add up to
  * the verifier's 512 byte limit.
  */
-__noinline u64 idle_llc_windows(struct task_struct *p __arg_trusted,
-				s32 cid, u32 flags, bool cluster_first)
+__noinline u64 budgeted_llc_scan_counts(struct task_struct *p __arg_trusted,
+					s32 cid, u32 flags, bool cluster_first)
 {
 	struct cid_topo __arena *topo = cid_topo(cid);
 	u32 llc_base = topo->ranges.llc_base;
-	u32 dom_base, dom_nr, sfx_base, sfx_nr, pfx_nr;
-	u32 scan_nr, budget, dom_win, sfx_win, pfx_win;
+	u32 target_base, target_nr, after_base, after_nr, before_nr;
+	u32 scan_nr, budget, target_count, after_count, before_count;
 	bool restricted = is_restricted(p);
 	bool count_allowed;
 
 	TOUCH_ARENA();
 	if (cluster_first) {
-		dom_base = topo->ranges.cluster_base;
-		dom_nr = topo->ranges.cluster_nr;
+		target_base = topo->ranges.cluster_base;
+		target_nr = topo->ranges.cluster_nr;
 	} else {
-		dom_base = llc_base;
-		dom_nr = topo->ranges.llc_nr;
+		target_base = llc_base;
+		target_nr = topo->ranges.llc_nr;
 	}
-	sfx_base = dom_base + dom_nr;
-	sfx_nr = llc_base + topo->ranges.llc_nr - sfx_base;
-	pfx_nr = dom_base - llc_base;
+	after_base = target_base + target_nr;
+	after_nr = llc_base + topo->ranges.llc_nr - after_base;
+	before_nr = target_base - llc_base;
 	scan_nr = (flags & PICK_IDLE_WHOLE_CORE) || !(flags & PICK_IDLE_LLC_ONLY) ?
 		UINT_MAX : sis_idle_scan_nr(cid);
 	if (restricted && scan_nr >= (u32)p->nr_cpus_allowed)
 		scan_nr = UINT_MAX;
 	count_allowed = restricted && scan_nr < topo->ranges.llc_nr;
 	budget = scan_nr;
-	dom_win = window_nr(p, dom_base, dom_nr, cid + 1, &budget, count_allowed);
-	sfx_win = window_nr(p, sfx_base, sfx_nr, sfx_base, &budget, count_allowed);
-	pfx_win = window_nr(p, llc_base, pfx_nr, llc_base, &budget, count_allowed);
+	target_count = budgeted_window_count(p, target_base, target_nr, cid + 1,
+					     &budget, count_allowed);
+	after_count = budgeted_window_count(p, after_base, after_nr, after_base,
+					    &budget, count_allowed);
+	before_count = budgeted_window_count(p, llc_base, before_nr, llc_base,
+					     &budget, count_allowed);
 
-	return (u64)dom_win | (u64)sfx_win << LLC_WIN_BITS |
-	       (u64)pfx_win << (2 * LLC_WIN_BITS);
+	return (u64)target_count | (u64)after_count << LLC_SCAN_COUNT_BITS |
+	       (u64)before_count << (2 * LLC_SCAN_COUNT_BITS);
 }
+
+static __always_inline s32 scan_idle_node(struct task_struct *p, u32 tier,
+					  const struct cid_topo __arena *topo,
+					  bool restricted, bool whole_core)
+{
+	return asym_capacity ?
+		scan_idle_capacity_range(p, tier, topo->ranges.node_base,
+					 topo->ranges.node_nr, restricted, whole_core) :
+		scan_idle_unranked_range(p, topo->ranges.node_base,
+					  topo->ranges.node_nr, restricted, whole_core);
+}
+
+static __always_inline s32 scan_idle_system(struct task_struct *p, u32 tier,
+					    bool restricted, bool whole_core)
+{
+	return asym_capacity ?
+		scan_idle_capacity_range(p, tier, 0, nr_cids, restricted, whole_core) :
+		scan_idle_unranked_range(p, 0, nr_cids, restricted, whole_core);
+}
+
+static __always_inline s32
+scan_idle_target_domain(struct task_struct *p, u32 tier,
+			struct cid_topo __arena *topo, s32 prev_cid,
+			u64 scan_counts, u64 scan_flags, bool cluster_first)
+{
+	u32 llc_base = topo->ranges.llc_base;
+	u32 llc_end = llc_base + topo->ranges.llc_nr;
+	u32 dom_base = cluster_first ? topo->ranges.cluster_base : llc_base;
+	u32 dom_end = cluster_first ?
+		      dom_base + topo->ranges.cluster_nr : llc_end;
+
+	return scan_idle_window(p, tier, CID_RANGE(dom_base, dom_end - dom_base),
+				CID_RANGE((u32)(prev_cid + 1), LLC_SCAN_TARGET_DOMAIN_COUNT(scan_counts)),
+				scan_flags);
+}
+
+static __always_inline s32
+scan_idle_llc_after_cluster(struct task_struct *p, u32 tier,
+			    struct cid_topo __arena *topo, u64 scan_counts,
+			    u64 scan_flags, bool cluster_first)
+{
+	u32 llc_end = topo->ranges.llc_base + topo->ranges.llc_nr;
+	u32 dom_end = cluster_first ?
+		      topo->ranges.cluster_base + topo->ranges.cluster_nr : llc_end;
+
+	return scan_idle_window(p, tier, CID_RANGE(dom_end, llc_end - dom_end),
+				CID_RANGE(dom_end, LLC_SCAN_AFTER_CLUSTER_COUNT(scan_counts)), scan_flags);
+}
+
+static __always_inline s32
+scan_idle_llc_before_cluster(struct task_struct *p, u32 tier,
+			     struct cid_topo __arena *topo, u64 scan_counts,
+			     u64 scan_flags, bool cluster_first)
+{
+	u32 llc_base = topo->ranges.llc_base;
+	u32 dom_base = cluster_first ? topo->ranges.cluster_base : llc_base;
+
+	return scan_idle_window(p, tier, CID_RANGE(llc_base, dom_base - llc_base),
+				CID_RANGE(llc_base, LLC_SCAN_BEFORE_CLUSTER_COUNT(scan_counts)), scan_flags);
+}
+
+#define NODE_SCAN_NEEDED(topo) \
+	(numa_enabled && (topo)->ranges.node_nr > (topo)->ranges.llc_nr)
+#define SYSTEM_SCAN_NEEDED(topo) \
+	((numa_enabled ? (topo)->ranges.node_nr : (topo)->ranges.llc_nr) < nr_cids)
 
 /*
  * fair.c's select_idle_capacity() searches the asymmetric-capacity domain in
@@ -405,14 +499,14 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	bool is_prev_allowed = flags & PICK_IDLE_PREV_ALLOWED;
 	bool whole_core = flags & PICK_IDLE_WHOLE_CORE;
 	bool llc_only = flags & PICK_IDLE_LLC_ONLY;
-	struct cid_topo __arena *prev;
+	struct cid_topo __arena *prev_topo;
 	bool restricted;
 	bool cluster_first;
 	s32 best = -EBUSY;
 	u32 nr_tiers = asym_capacity ? nr_capacity_tiers : 1;
-	u64 windows;
+	u64 llc_scan_counts;
 	u64 scan_flags;
-	u32 t;
+	u32 tier;
 	/* Only an asymmetric machine asks task_fits_cid() anything. */
 	task_ctx_t *tctx = asym_capacity ? try_lookup_task_ctx(p) : NULL;
 	u64 now = asym_capacity ? scx_bpf_now() : 0;
@@ -421,7 +515,7 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 
 	if (!cid_valid(prev_cid))
 		return -EBUSY;
-	prev = cid_topo(prev_cid);
+	prev_topo = cid_topo(prev_cid);
 	restricted = is_restricted(p);
 	if (is_prev_allowed && cid_idle_test(prev_cid) &&
 	    (!whole_core || core_is_idle(prev_cid)) &&
@@ -435,53 +529,28 @@ __noinline s32 pick_idle_cid_topology(struct task_struct *p __arg_trusted,
 	 * @prev_cid from the cid after it, then the rest of the LLC wrapping
 	 * from the end of the cluster. Without a cluster to search first, the
 	 * cluster is the whole LLC and the rest is empty. The SIS_UTIL budget
-	 * spans all of it, and the windows do not depend on the tier.
+	 * spans all of it, and the scan counts do not depend on the tier.
 	 */
 	cluster_first = (flags & PICK_IDLE_CLUSTER_FIRST) && cid_cluster_active(prev_cid);
-	windows = idle_llc_windows(p, prev_cid, flags, cluster_first);
+	llc_scan_counts = budgeted_llc_scan_counts(p, prev_cid, flags, cluster_first);
 	scan_flags = (restricted ? SCAN_WINDOW_RESTRICTED : 0) |
 		     (whole_core ? SCAN_WINDOW_WHOLE_CORE : 0);
 
-	bpf_arena_for(t, 0, nr_tiers) {
-		/* Read from the arena at each use to keep them off the stack. */
-		u32 llc_base = prev->ranges.llc_base;
-		u32 llc_end = llc_base + prev->ranges.llc_nr;
-		u32 dom_base = cluster_first ? prev->ranges.cluster_base : llc_base;
-		u32 dom_end = cluster_first ?
-			      dom_base + prev->ranges.cluster_nr : llc_end;
-
-		best = scan_idle_window(p, t, (u64)(dom_end - dom_base) << 32 | dom_base,
-					(u64)LLC_WIN_DOMAIN(windows) << 32 | (u32)(prev_cid + 1),
-					scan_flags);
-		if (best < 0 && LLC_WIN_SUFFIX(windows)) {
-			llc_end = prev->ranges.llc_base + prev->ranges.llc_nr;
-			dom_end = cluster_first ?
-				  prev->ranges.cluster_base + prev->ranges.cluster_nr :
-				  llc_end;
-			best = scan_idle_window(p, t, (u64)(llc_end - dom_end) << 32 | dom_end,
-						(u64)LLC_WIN_SUFFIX(windows) << 32 | dom_end,
-						scan_flags);
-		}
-		if (best < 0 && LLC_WIN_PREFIX(windows)) {
-			llc_base = prev->ranges.llc_base;
-			dom_base = cluster_first ? prev->ranges.cluster_base : llc_base;
-			best = scan_idle_window(p, t, (u64)(dom_base - llc_base) << 32 | llc_base,
-						(u64)LLC_WIN_PREFIX(windows) << 32 | llc_base,
-						scan_flags);
-		}
-		if (best < 0 && !llc_only && numa_enabled && prev->ranges.node_nr > prev->ranges.llc_nr)
-			best = asym_capacity ?
-				scan_idle_capacity_range(p, t, prev->ranges.node_base,
-							 prev->ranges.node_nr, restricted, whole_core) :
-				scan_idle_unranked_range(p, prev->ranges.node_base,
-						       prev->ranges.node_nr, restricted, whole_core);
-		if (best < 0 && !llc_only &&
-		    (numa_enabled ? prev->ranges.node_nr : prev->ranges.llc_nr) < nr_cids)
-			best = asym_capacity ?
-				scan_idle_capacity_range(p, t, 0, nr_cids,
-							 restricted, whole_core) :
-				scan_idle_unranked_range(p, 0, nr_cids,
-						       restricted, whole_core);
+	bpf_arena_for(tier, 0, nr_tiers) {
+		best = scan_idle_target_domain(p, tier, prev_topo, prev_cid,
+					llc_scan_counts, scan_flags, cluster_first);
+		if (best < 0 && LLC_SCAN_REACHES_AFTER_CLUSTER(llc_scan_counts))
+			best = scan_idle_llc_after_cluster(p, tier, prev_topo,
+						   llc_scan_counts, scan_flags,
+						   cluster_first);
+		if (best < 0 && LLC_SCAN_REACHES_BEFORE_CLUSTER(llc_scan_counts))
+			best = scan_idle_llc_before_cluster(p, tier, prev_topo,
+						    llc_scan_counts, scan_flags,
+						    cluster_first);
+		if (best < 0 && !llc_only && NODE_SCAN_NEEDED(prev_topo))
+			best = scan_idle_node(p, tier, prev_topo, restricted, whole_core);
+		if (best < 0 && !llc_only && SYSTEM_SCAN_NEEDED(prev_topo))
+			best = scan_idle_system(p, tier, restricted, whole_core);
 		if (best >= 0)
 			break;
 	}
@@ -513,7 +582,7 @@ static __noinline s32 select_idle_smt(const struct task_struct *p, s32 prev_cid,
 	if (!same_idle_llc(prev_cid, target))
 		return -EBUSY;
 
-	bpf_arena_for(sibling, prev->ranges.core_base, prev->ranges.core_base + prev->ranges.core_nr) {
+	for_each_core_cid(sibling, prev) {
 		s32 cid;
 
 		if (sibling == (u32)prev_cid || !cid_idle_test(sibling) ||
@@ -545,7 +614,7 @@ static __noinline s32 select_idle_smt_any(const struct task_struct *p,
 		return -EBUSY;
 	prev = cid_topo(prev_cid);
 
-	bpf_arena_for(sibling, prev->ranges.core_base, prev->ranges.core_base + prev->ranges.core_nr) {
+	for_each_core_cid(sibling, prev) {
 		if (sibling == (u32)prev_cid || !cid_allowed(p, sibling))
 			continue;
 		if (cid_idle_test(sibling)) {
@@ -967,7 +1036,7 @@ static __always_inline u32 llc_walk_pos(s32 target, bool cluster_first, u32 cid)
 __noinline s32 sched_idle_scan(struct task_struct *p __arg_trusted, s32 target,
 			       bool cluster_first, bool has_idle_core)
 {
-	u64 windows;
+	u64 scan_counts;
 	u32 nr, i;
 
 	if (!p || !READ_ONCE(nr_sched_idle_curr) || !cid_valid(target))
@@ -975,15 +1044,16 @@ __noinline s32 sched_idle_scan(struct task_struct *p __arg_trusted, s32 target,
 	/* select_idle_cpu() gives up on a zero budget before any walk. */
 	if (!sis_idle_scan_nr(target))
 		return -EBUSY;
-	windows = idle_llc_windows(p, target, PICK_IDLE_LLC_ONLY |
+	scan_counts = budgeted_llc_scan_counts(p, target, PICK_IDLE_LLC_ONLY |
 				   (has_idle_core ? PICK_IDLE_WHOLE_CORE : 0),
 				   cluster_first);
 	/*
 	 * A window is cut short only where the budget ran out, which leaves
 	 * the ones after it empty: their cids are consecutive in the walk.
 	 */
-	nr = LLC_WIN_DOMAIN(windows) + LLC_WIN_SUFFIX(windows) +
-	     LLC_WIN_PREFIX(windows);
+	nr = LLC_SCAN_TARGET_DOMAIN_COUNT(scan_counts) +
+	     LLC_SCAN_AFTER_CLUSTER_COUNT(scan_counts) +
+	     LLC_SCAN_BEFORE_CLUSTER_COUNT(scan_counts);
 
 	bpf_arena_for(i, 0, nr) {
 		s32 cid = llc_walk_cid(target, cluster_first, i);
@@ -1311,22 +1381,83 @@ commit:
 	env->best_local = local;
 }
 
-/* Pick the idlest immediate child group of @range, as fair.c does. */
-static __noinline u64
-fork_pick_child(const struct task_struct *p, u64 range, s32 anchor, u32 level,
-		u64 now)
+static __always_inline void fork_pick_start_group(struct fork_pick_env *env,
+						   u32 cid, bool restricted)
 {
-	struct fork_pick_env *env;
-	bool restricted = is_restricted(p);
-	u32 zero = 0;
-	u32 nr = range >> 32;
-	u32 i;
+	if (env->level == FORK_CHILD_NODE) {
+		env->group_base = cid_topo(cid)->ranges.node_base;
+		env->group_nr = cid_topo(cid)->ranges.node_nr;
+	} else if (env->level == FORK_CHILD_LLC) {
+		env->group_base = cid_topo(cid)->ranges.llc_base;
+		env->group_nr = cid_topo(cid)->ranges.llc_nr;
+	} else {
+		env->group_base = cid_topo(cid)->ranges.core_base;
+		env->group_nr = cid_topo(cid)->ranges.core_nr;
+	}
+	env->group_end = env->group_base + env->group_nr;
+	env->group_allowed = !restricted;
+	env->idle = 0;
+	env->load = 0;
+	env->util = 0;
+	env->cap = 0;
+	env->runnable = 0;
+	env->group_recent = env->level == FORK_CHILD_CORE ?
+		READ_ONCE(cid_ctx(env->group_base)->fork_place_at) : 0;
+	if (env->group_recent &&
+	    (s64)(env->now - env->group_recent) >= UTIL_HALF_LIFE_NS)
+		env->group_recent = 0;
+}
 
-	env = bpf_map_lookup_elem(&fork_pick_scratch, &zero);
-	if (!env || !nr)
-		return range;
-	env->base = (u32)range;
-	env->nr = nr;
+static __always_inline void fork_pick_accumulate(const struct task_struct *p,
+						 struct fork_pick_env *env,
+						 u32 cid, bool restricted, u64 now)
+{
+	/*
+	 * update_sg_wakeup_stats() accumulates load and idleness over
+	 * sched_group_span(group) intersected with p->cpus_ptr, while
+	 * group_capacity remains the capacity of the whole group.
+	 */
+	env->cap += MAX(cid_topo(cid)->cap, 1ULL);
+	if (restricted && !cid_allowed(p, cid))
+		return;
+	if (restricted) {
+		struct pack __arena *pk = cid_pack(cid);
+		u32 running = READ_ONCE(pk->curr_w) != 0;
+		u32 edq_nr = cid_queue_nr(cid);
+		u32 local_nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cid);
+		u32 nr = edq_nr + local_nr + running;
+
+		env->group_allowed++;
+		/*
+		 * DELAY_DEQUEUE can leave the running task represented in a
+		 * queue too. The pack has only that task when its total weight
+		 * equals the running weight, so do not count the two
+		 * representations as two runnable tasks.
+		 */
+		if (running && (edq_nr || local_nr) &&
+		    READ_ONCE(pk->vsum_w) == READ_ONCE(pk->curr_w))
+			nr--;
+		/* Cover a task between EDQ dispatch and ops.running(). */
+		if (!nr && READ_ONCE(pk->vsum_w))
+			nr = 1;
+		env->runnable += nr;
+	}
+	if (cid_idle_test(cid) && !cid_queued_test(cid))
+		env->idle++;
+	if (restricted) {
+		env->load += cid_load(cid, now);
+		env->util += cid_util(cid, now);
+	} else {
+		env->load += READ_ONCE(cid_pack(cid)->vsum_w);
+	}
+}
+
+static __always_inline void fork_pick_init(struct fork_pick_env *env, u64 range,
+					   s32 anchor, u32 level, u64 now,
+					   bool restricted)
+{
+	env->base = CID_RANGE_BASE(range);
+	env->nr = CID_RANGE_COUNT(range);
 	env->anchor = anchor;
 	env->level = level;
 	env->now = now;
@@ -1351,77 +1482,36 @@ fork_pick_child(const struct task_struct *p, u64 range, s32 anchor, u32 level,
 	env->best_base = 0;
 	env->best_nr = 0;
 	env->best_local = 0;
+}
+
+/* Pick the idlest immediate child group of @range, as fair.c does. */
+static __noinline u64
+fork_pick_child(const struct task_struct *p, u64 range, s32 anchor, u32 level,
+		u64 now)
+{
+	struct fork_pick_env *env;
+	bool restricted = is_restricted(p);
+	u32 zero = 0;
+	u32 nr = CID_RANGE_COUNT(range);
+	u32 cid;
+
+	env = bpf_map_lookup_elem(&fork_pick_scratch, &zero);
+	if (!env || !nr)
+		return range;
+	fork_pick_init(env, range, anchor, level, now, restricted);
 
 	TOUCH_ARENA();
-	bpf_arena_for(i, env->base, env->base + nr) {
-		if (!cid_valid(i))
+	for_each_fork_domain_cid(cid, env, nr) {
+		if (!cid_valid(cid))
 			break;
-		if (!env->group_nr || i == env->group_end) {
+		if (!env->group_nr || cid == env->group_end) {
 			fork_pick_commit(env);
-			if (env->level == FORK_CHILD_NODE) {
-				env->group_base = cid_topo(i)->ranges.node_base;
-				env->group_nr = cid_topo(i)->ranges.node_nr;
-			} else if (env->level == FORK_CHILD_LLC) {
-				env->group_base = cid_topo(i)->ranges.llc_base;
-				env->group_nr = cid_topo(i)->ranges.llc_nr;
-			} else {
-				env->group_base = cid_topo(i)->ranges.core_base;
-				env->group_nr = cid_topo(i)->ranges.core_nr;
-			}
-			env->group_end = env->group_base + env->group_nr;
-			env->group_allowed = !restricted;
-			env->idle = 0;
-			env->load = 0;
-			env->util = 0;
-			env->cap = 0;
-			env->runnable = 0;
-			env->group_recent = env->level == FORK_CHILD_CORE ?
-				READ_ONCE(cid_ctx(env->group_base)->fork_place_at) : 0;
-			if (env->group_recent &&
-			    (s64)(env->now - env->group_recent) >= UTIL_HALF_LIFE_NS)
-				env->group_recent = 0;
+			fork_pick_start_group(env, cid, restricted);
 		}
-		/*
-		 * update_sg_wakeup_stats() accumulates load and idleness over
-		 * sched_group_span(group) intersected with p->cpus_ptr, while
-		 * group_capacity remains the capacity of the whole group.
-		 */
-		env->cap += MAX(cid_topo(i)->cap, 1ULL);
-		if (restricted && !cid_allowed(p, i))
-			continue;
-		if (restricted) {
-			struct pack __arena *pk = cid_pack(i);
-			u32 running = READ_ONCE(pk->curr_w) != 0;
-			u32 edq_nr = cid_queue_nr(i);
-			u32 local_nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | i);
-			u32 nr = edq_nr + local_nr + running;
-
-			env->group_allowed++;
-			/*
-			 * DELAY_DEQUEUE can leave the running task represented in a
-			 * queue too. The pack has only that task when its total weight
-			 * equals the running weight, so do not count the two
-			 * representations as two runnable tasks.
-			 */
-			if (running && (edq_nr || local_nr) &&
-			    READ_ONCE(pk->vsum_w) == READ_ONCE(pk->curr_w))
-				nr--;
-			/* Cover a task between EDQ dispatch and ops.running(). */
-			if (!nr && READ_ONCE(pk->vsum_w))
-				nr = 1;
-			env->runnable += nr;
-		}
-		if (cid_idle_test(i) && !cid_queued_test(i))
-			env->idle++;
-		if (restricted) {
-			env->load += cid_load(i, now);
-			env->util += cid_util(i, now);
-		} else {
-			env->load += READ_ONCE(cid_pack(i)->vsum_w);
-		}
+		fork_pick_accumulate(p, env, cid, restricted, now);
 	}
 	fork_pick_commit(env);
-	return env->best_nr ? (u64)env->best_nr << 32 | env->best_base : range;
+	return env->best_nr ? CID_RANGE(env->best_base, env->best_nr) : range;
 }
 
 /* Choose fair.c's shallowest-idle or least-loaded CPU in @range. */
@@ -1429,7 +1519,7 @@ static __noinline s32
 fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 {
 	bool restricted = is_restricted(p);
-	u32 base = range, nr = range >> 32;
+	u32 base = CID_RANGE_BASE(range), nr = CID_RANGE_COUNT(range);
 	u64 best_idle_load = 0, best_idle_cap = 1, best_idle_stamp = 0;
 	u64 best_load = 0, best_cap = 1;
 	u64 best_recent = 0;
@@ -1498,33 +1588,33 @@ static s32 find_idlest_fork_cid(const struct task_struct *p, s32 anchor,
 				u64 now)
 {
 	struct cid_topo __arena *topo = cid_topo(anchor);
-	u64 range = (u64)topo->fork_nr << 32 | topo->fork_base;
+	u64 range = CID_RANGE(topo->fork_base, topo->fork_nr);
 	u64 child;
 	s32 cid;
 
 	if (topo->fork_nr > topo->ranges.node_nr) {
 		child = fork_pick_child(p, range, anchor, FORK_CHILD_NODE, now);
-		if (child >> 32)
+		if (CID_RANGE_COUNT(child))
 			range = child;
 	}
-	if (!cid_in_range(anchor, (u32)range, range >> 32))
-		anchor = (u32)range;
+	if (!cid_in_range(anchor, CID_RANGE_BASE(range), CID_RANGE_COUNT(range)))
+		anchor = CID_RANGE_BASE(range);
 	topo = cid_topo(anchor);
-	if ((range >> 32) > topo->ranges.llc_nr) {
+	if (CID_RANGE_COUNT(range) > topo->ranges.llc_nr) {
 		child = fork_pick_child(p, range, anchor, FORK_CHILD_LLC, now);
-		if (child >> 32)
+		if (CID_RANGE_COUNT(child))
 			range = child;
 	}
-	if (!cid_in_range(anchor, (u32)range, range >> 32))
-		anchor = (u32)range;
+	if (!cid_in_range(anchor, CID_RANGE_BASE(range), CID_RANGE_COUNT(range)))
+		anchor = CID_RANGE_BASE(range);
 	topo = cid_topo(anchor);
-	if ((range >> 32) > topo->ranges.core_nr) {
+	if (CID_RANGE_COUNT(range) > topo->ranges.core_nr) {
 		child = fork_pick_child(p, range, anchor, FORK_CHILD_CORE, now);
-		if (child >> 32)
+		if (CID_RANGE_COUNT(child))
 			range = child;
 	}
-	if (!cid_in_range(anchor, (u32)range, range >> 32))
-		anchor = (u32)range;
+	if (!cid_in_range(anchor, CID_RANGE_BASE(range), CID_RANGE_COUNT(range)))
+		anchor = CID_RANGE_BASE(range);
 
 	cid = fork_pick_cid(p, range, now);
 	if (cid >= 0) {
@@ -1601,7 +1691,7 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 	struct cid_topo __arena *topo = cid_topo(cid);
 	u32 i;
 
-	bpf_arena_for(i, 0, topo->ranges.llc_nr) {
+	for_each_llc_offset(i, topo) {
 		s32 c = topo->ranges.llc_base + i;
 
 		if (cid_allowed(p, c))
@@ -1609,7 +1699,7 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 	}
 
 	if (numa_enabled && topo->ranges.node_nr > topo->ranges.llc_nr) {
-		bpf_arena_for(i, 0, topo->ranges.node_nr) {
+		for_each_node_offset(i, topo) {
 			s32 c = topo->ranges.node_base + i;
 
 			if (cid_allowed(p, c))
@@ -1617,7 +1707,7 @@ static s32 nearest_allowed_cid(const struct task_struct *p, s32 cid)
 		}
 	}
 
-	bpf_arena_for(i, 0, nr_cids) {
+	for_each_system_cid(i) {
 		if (cid_allowed(p, i))
 			return i;
 	}
