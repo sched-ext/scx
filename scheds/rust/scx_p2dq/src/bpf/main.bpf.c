@@ -57,7 +57,9 @@ UEI_DEFINE(uei);
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
 const volatile struct {
+	/* nr_cpus is the CPU ID span; it is not the online CPU count. */
 	u32 nr_cpus;
+	u32 nr_online_cpus;
 	u32 nr_llcs;
 	u32 nr_nodes;
 
@@ -65,6 +67,7 @@ const volatile struct {
 	bool has_little_cores;
 } topo_config = {
 	.nr_cpus = 64,
+	.nr_online_cpus = 64,
 	.nr_llcs = 32,
 	.nr_nodes = 32,
 
@@ -190,6 +193,8 @@ u64 llc_ids[MAX_LLCS];
 u32 cpu_core_ids[MAX_CPUS];
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
+/* Set by userspace for CPUs present in Topology::all_cpus. */
+u8 cpu_online[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
 u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 
@@ -439,7 +444,7 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 
 static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
 {
-	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_cpus;
+	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_online_cpus;
 }
 
 static u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
@@ -491,7 +496,7 @@ static int llc_create_atqs(struct llc_ctx *llcx)
 
 	if (topo_config.nr_llcs > 1) {
 		llcx->mig_atq = (scx_atq_t *)scx_atq_create_size(false,
-								 topo_config.nr_cpus);
+									 topo_config.nr_online_cpus);
 		if (!llcx->mig_atq) {
 			scx_bpf_error("ATQ failed to create ATQ for LLC %u",
 				      llcx->id);
@@ -547,7 +552,7 @@ static int llc_create_dhqs(struct llc_ctx *llcx)
 		 * for queued tasks under load without excessive memory usage.
 		 * Max imbalance controls strand balance for cross-LLC load balancing.
 		 */
-		u64 dhq_capacity = topo_config.nr_cpus * 4;
+		u64 dhq_capacity = topo_config.nr_online_cpus * 4;
 		llc_pair_dhqs[dhq_index] = (scx_dhq_t *)scx_dhq_create_balanced(
 			false,                          /* vtime mode */
 			dhq_capacity,                   /* fixed capacity */
@@ -632,6 +637,11 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
+static __always_inline bool cpu_is_online(s32 cpu)
+{
+	return cpu >= 0 && cpu < topo_config.nr_cpus && cpu_online[cpu];
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -654,7 +664,7 @@ static struct llc_ctx *lookup_llc_ctx(u32 llc_id)
 
 static struct llc_ctx *lookup_cpu_llc_ctx(s32 cpu)
 {
-	if (cpu >= topo_config.nr_cpus || cpu < 0) {
+	if (!cpu_is_online(cpu)) {
 		scx_bpf_error("invalid CPU");
 		return NULL;
 	}
@@ -1164,6 +1174,8 @@ static __always_inline s32 find_idle_cpu_in_target_llc(struct task_struct *p, u3
 
 	/* Try idle core first (both SMT siblings idle) */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
 		struct cpu_ctx *cpuc = lookup_cpu_ctx(cpu);
 		if (!cpuc || cpuc->llc_id != target_llc_id)
 			continue;
@@ -1176,6 +1188,8 @@ static __always_inline s32 find_idle_cpu_in_target_llc(struct task_struct *p, u3
 
 	/* No idle core, try any idle CPU */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
 		struct cpu_ctx *cpuc = lookup_cpu_ctx(cpu);
 		if (!cpuc || cpuc->llc_id != target_llc_id)
 			continue;
@@ -1247,6 +1261,8 @@ static __always_inline s32 pick_idle_thermal_aware(struct bpf_cpumask *mask,
 
 	/* First pass: try to find unthrottled idle CPU */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
 			continue;
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
@@ -1260,6 +1276,9 @@ static __always_inline s32 pick_idle_thermal_aware(struct bpf_cpumask *mask,
 	/* Second pass: allow throttled CPUs, prefer least throttled */
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
 		u32 capacity;
+
+		if (!cpu_is_online(cpu))
+			continue;
 
 		if (mask && !bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
 			continue;
@@ -1304,6 +1323,9 @@ static __always_inline s32 select_best_idle_cpu(struct task_struct *p,
 
 	bpf_for(cpu, 0, topo_config.nr_cpus) {
 		u32 capacity, energy_cost, score;
+
+		if (!cpu_is_online(cpu))
+			continue;
 
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
 			continue;
@@ -2796,6 +2818,8 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 		bpf_for(other_cpu, 0, topo_config.nr_cpus) {
 			struct bpf_cpumask *llc_cpumask;
 
+			if (!cpu_is_online(other_cpu))
+				continue;
 			if (other_cpu == cpu)
 				continue;
 
@@ -2939,7 +2963,8 @@ check_llc_dsq:
 			u32 shard_idx;
 			bpf_for(shard_idx, 0, llcx->nr_shards) {
 				u32 offset = cpuc->id % llcx->nr_shards;
-				shard_idx = wrap_index(offset + shard_idx, 0, llcx->nr_shards);
+				shard_idx = wrap_index(offset + shard_idx, 0,
+						       llcx->nr_shards - 1);
 				// TODO: should probably take min vtime to be fair
 				if (shard_idx < MAX_LLC_SHARDS && shard_idx < llcx->nr_shards) {
 					u64 shard_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_idx]);
@@ -3224,7 +3249,7 @@ static int init_llc(u32 llc_index)
 {
 	struct llc_ctx *llcx;
 	u32 llc_id = llc_ids[llc_index];
-	int i, ret;
+	int ret;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
 	if (!llcx) {
@@ -3293,24 +3318,61 @@ static int init_llc(u32 llc_index)
 		return ret;
 	}
 
-	// Initialize CPU sharding fields
-	llcx->nr_shards = p2dq_config.llc_shards;
+	/* Shards are initialized after init_cpu() populates nr_cpus. */
+	llcx->nr_shards = 0;
 
-	if (p2dq_config.llc_shards > 1) {
-		llcx->nr_shards = min(min(p2dq_config.llc_shards, llcx->nr_cpus), MAX_LLC_SHARDS);
+	return 0;
+}
 
-		bpf_for(i, 0, llcx->nr_shards) {
-			u64 shard_dsq = shard_dsq_id(llc_id, i);
-			if (i < MAX_LLC_SHARDS) // verifier
-				llcx->shard_dsqs[i] = shard_dsq;
+static int init_llc_shards(u32 llc_index)
+{
+	struct llc_ctx *llcx;
+	u32 llc_id = llc_ids[llc_index];
+	int i, ret;
 
-			ret = scx_bpf_create_dsq(shard_dsq, llcx->node_id);
-			if (ret) {
-				scx_bpf_error("failed to create shard DSQ %llu for LLC %u shard %u",
-					      shard_dsq, llc_id, i);
-				return ret;
-			}
+	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
+	if (!llcx) {
+		scx_bpf_error("No llc %u", llc_id);
+		return -ENOENT;
+	}
+
+	if (p2dq_config.llc_shards <= 1)
+		return 0;
+
+	llcx->nr_shards = min(min(p2dq_config.llc_shards, llcx->nr_cpus),
+				      MAX_LLC_SHARDS);
+
+	bpf_for(i, 0, llcx->nr_shards) {
+		u64 shard_dsq = shard_dsq_id(llc_id, i);
+		if (i < MAX_LLC_SHARDS) // verifier
+			llcx->shard_dsqs[i] = shard_dsq;
+
+		ret = scx_bpf_create_dsq(shard_dsq, llcx->node_id);
+		if (ret) {
+			scx_bpf_error("failed to create shard DSQ %llu for LLC %u shard %u",
+				      shard_dsq, llc_id, i);
+			return ret;
 		}
+	}
+
+	return 0;
+}
+
+/* Populate LLC NUMA ids before init_llc() creates node-aware resources. */
+static int init_llc_nodes(void)
+{
+	struct llc_ctx *llcx;
+	int cpu;
+
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(cpu))
+			continue;
+		llcx = lookup_llc_ctx(cpu_llc_ids[cpu]);
+		if (!llcx) {
+			scx_bpf_error("No llc %llu for cpu %u", cpu_llc_ids[cpu], cpu);
+			return -ENOENT;
+		}
+		llcx->node_id = cpu_node_ids[cpu];
 	}
 
 	return 0;
@@ -3354,12 +3416,16 @@ static s32 init_cpu(int cpu)
 	struct llc_ctx *llcx;
 	struct cpu_ctx *cpuc;
 
+	if (!cpu_is_online(cpu))
+		return 0;
+
 	if (!(cpuc = lookup_cpu_ctx(cpu)))
 		return -ENOENT;
 
 	cpuc->id = cpu;
 	cpuc->llc_id = cpu_llc_ids[cpu];
 	cpuc->node_id = cpu_node_ids[cpu];
+	cpuc->core_id = cpu_core_ids[cpu];
 	if (big_core_ids[cpu] == 1)
 		cpu_ctx_set_flag(cpuc, CPU_CTX_F_IS_BIG);
 	else
@@ -3642,6 +3708,10 @@ static s32 p2dq_init_impl()
 		return -EINVAL;
 	}
 
+	ret = init_llc_nodes();
+	if (ret)
+		return ret;
+
 	// First we initialize LLCs because DSQs are created at the LLC level.
 	bpf_for(i, 0, topo_config.nr_llcs) {
 		ret = init_llc(i);
@@ -3656,13 +3726,23 @@ static s32 p2dq_init_impl()
 	}
 
 	bpf_for(i, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(i))
+			continue;
 		ret = init_cpu(i);
+		if (ret)
+			return ret;
+	}
+
+	bpf_for(i, 0, topo_config.nr_llcs) {
+		ret = init_llc_shards(i);
 		if (ret)
 			return ret;
 	}
 
 	// Create DSQs for the LLCs
 	bpf_for(i, 0, topo_config.nr_cpus) {
+		if (!cpu_is_online(i))
+			continue;
 		if (!(cpuc = lookup_cpu_ctx(i)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 			return -EINVAL;
@@ -3687,7 +3767,6 @@ static s32 p2dq_init_impl()
 			    shard_id < llcx->nr_shards)
 				cpuc->llc_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_id]);
 		}
-
 		dsq_id = cpu_dsq_id(i);
 		dbg("CFG creating affn CPU[%d]DSQ[%llu]", i, dsq_id);
 		ret = scx_bpf_create_dsq(dsq_id, llcx->node_id);
