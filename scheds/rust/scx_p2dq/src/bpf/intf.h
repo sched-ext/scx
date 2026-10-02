@@ -46,6 +46,8 @@ enum consts {
 	PELT_HALFLIFE_MS	= 32,		// 32ms half-life for exponential decay
 	PELT_PERIOD_MS		= 1,		// 1ms update period (simplified from kernel's 1024us)
 	PELT_MAX_UTIL		= 1024,		// Maximum utilization value
+	PELT_UTIL_SHIFT		= 10,		// capacity/frequency scale denominator
+	PELT_UTIL_SCALE		= 1 << PELT_UTIL_SHIFT,
 	PELT_DECAY_SHIFT	= 7,		// Decay factor: (127/128) ≈ 0.98 per ms
 	PELT_SUM_MAX		= 131072,	// Maximum sum value (128 * 1024)
 
