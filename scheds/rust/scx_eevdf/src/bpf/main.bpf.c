@@ -631,28 +631,27 @@ queue:
 
 	/*
 	 * Queue the task for @prev_cid, ordered by deadline unless it wins
-	 * wakeup preemption below.
+	 * wakeup preemption below. Any cid of the node can take it from
+	 * there, but only while dispatching.
 	 *
-	 * Any cid of the node can take it from there, but only while
-	 * dispatching: if @prev_cid went idle in the meantime and the rest
-	 * of the node is idle too, nothing would ever look at it. Kick
-	 * @prev_cid, which either wakes it or lets the local insertion interrupt
-	 * what it is running, see queued_cid_should_preempt().
+	 * SCX_ENQ_LAST says the task is the only sched_ext work left for a
+	 * CPU that has already picked a lower class, the idle task. The kernel
+	 * keeps it runnable but requires the BPF scheduler to trigger a
+	 * follow-up scheduling event: without one, @prev_cid goes idle with the
+	 * task queued, and it waits until some other cid steals it, which a
+	 * machine whose other cids stay busy may not do for a long time. A
+	 * rejected active-balance handoff can reach this path, but it is not
+	 * the only source of the flag.
 	 *
-	 * SCX_ENQ_LAST says the task is the only sched_ext work available to a
-	 * CPU that is about to run a higher scheduling class. The kernel keeps
-	 * it runnable but requires the BPF scheduler to trigger a follow-up
-	 * scheduling event. A rejected active-balance handoff can reach this
-	 * path, but it is not the only source of the flag.
-	 *
-	 * If the task is the only waiter, the queue can exist for less than a
-	 * tick: the higher-class task blocks, @prev_cid takes its waiter back,
-	 * and an idle cid never observes the transient imbalance. Tell one idle
-	 * peer at enqueue time. It is also told to ignore hotness for this pull,
-	 * since otherwise the one guaranteed dispatch can reject the waiter and
-	 * go idle again. Restrict this to a depth of one: deeper queues survive
-	 * until the tick path notices them, and wakeup-heavy loads should not pay
-	 * an idle scan and a cache-cold migration on every enqueue.
+	 * If the task is the only waiter, tell one idle peer at enqueue time,
+	 * so that the CPU the task could not run on is not left idle beside it.
+	 * The peer is also told to ignore hotness for this pull, since
+	 * otherwise the one guaranteed dispatch can reject the waiter and go
+	 * idle again. Restrict this to a depth of one: deeper queues survive
+	 * until the tick path notices them, and wakeup-heavy loads should not
+	 * pay an idle scan and a cache-cold migration on every enqueue. Without
+	 * such a peer, kick @prev_cid itself: once it is idle, its dispatch
+	 * takes the task back.
 	 *
 	 * A preempting wakee is either the EEVDF pick or PREEMPT_SHORT's
 	 * one-shot short buddy. Put it directly on the rq-owned local DSQ so
@@ -718,12 +717,13 @@ queue:
 	 */
 	if (displaced)
 		hrtick_start(prev_cid, tnow);
-	if ((enq_flags & SCX_ENQ_LAST) &&
-	    cid_queue_nr(prev_cid) == 1) {
-		cid = idle_peer_cid(p, prev_cid);
+	if (enq_flags & SCX_ENQ_LAST) {
+		cid = cid_queue_nr(prev_cid) == 1 ? idle_peer_cid(p, prev_cid) : -1;
 		if (cid >= 0 && cid != prev_cid) {
 			WRITE_ONCE(cid_ctx(cid)->force_steal, 1);
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+		} else {
+			scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
 		}
 	}
 }
