@@ -274,18 +274,25 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 	 * balancer or an idle pull, carries a vruntime that means nothing
 	 * against this cid's pack: taken from a pack that was far ahead it
 	 * would wait here until the pack climbs past it, seconds under
-	 * load. Carry the lag instead, the way a migration does in
-	 * place_entity(): how far the task was from the pack it left is how
-	 * far it is placed from the pack it joins.
+	 * load. Carry the lag instead, the way a migration does: dequeued
+	 * without sleeping, it keeps what is left of its request, and
+	 * place_entity() places it from its lag, inflated so that it is
+	 * what the join leaves, and only on a runqueue with something on it,
+	 *
+	 *	if (sched_feat(PLACE_LAG) && nr_queued && se->vlag) {
+	 *		...
+	 *		lag *= load + weight;
+	 *		...
+	 *		lag = div64_long(lag, load);
+	 *
+	 * which is place_task() for a task that did not sleep. A move made
+	 * here is the one arrival in a new pack that does not otherwise go
+	 * through it.
 	 */
-	if (tctx->se.vpack && cid_valid(cid) &&
+	if (!placed && tctx->se.vpack && cid_valid(cid) &&
 	    tctx->se.vpack != task_pack(tctx, cid)) {
-		s64 lag = task_lag_at(p, tctx, tctx->se.vpack, now);
-
-		set_vruntime(&tctx->se,
-			     pack_vref_place(task_pack(tctx, cid),
-					     tctx->last_run_at) - lag,
-			     false);
+		place_task(cid, p, tctx, now, false);
+		placed = true;
 	}
 
 	/*
