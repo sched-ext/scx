@@ -676,6 +676,20 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	cid_queued_set(prev_cid);
+
+	/*
+	 * queued_cid_should_preempt() arms the hrtick for the running task when
+	 * a wakee loses to it. A displaced task skips that test, and finds
+	 * nothing published as running: ops.stopping() has cleared @curr_w and
+	 * hrtick_start() does nothing. Arm it here anyway for a task that
+	 * scx_bpf_task_running() reports as running while another one runs,
+	 * as it does for the tasks the kernel puts back on leaving bypass mode
+	 * after the scheduler attaches. The running task may have been restored
+	 * with a slice this scheduler never issued, and a low-weight one would
+	 * otherwise run all of it.
+	 */
+	if (displaced)
+		hrtick_start(prev_cid, tnow);
 	if ((enq_flags & SCX_ENQ_LAST) &&
 	    cid_queue_nr(prev_cid) == 1) {
 		cid = idle_peer_cid(p, prev_cid);
