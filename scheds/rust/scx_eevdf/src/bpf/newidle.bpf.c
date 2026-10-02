@@ -277,7 +277,7 @@ cid_edq_move_usable_task_to_local(s32 dst_cid, s32 src_cid, u64 now,
 			continue;
 		}
 		p = scx_bpf_tid_to_task(at->tid);
-		if (!p || !cid_allowed(p, dst_cid)) {
+		if (!p || !cid_allowed(p, dst_cid) || task_is_blocked(p)) {
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
@@ -327,7 +327,8 @@ static __noinline u32 detach_one_queued_task(s32 dst_cid, s32 src_cid,
 					       p->cpus_ptr);
 		if (!movable)
 			pinned = true;
-		else if (task_hot((task_ctx_t *)at, src_cid, dst_cid, now))
+		else if (task_is_blocked(p) ||
+			 task_hot((task_ctx_t *)at, src_cid, dst_cid, now))
 			movable = false;
 		if (!movable) {
 			scx_edq_task_drop(&at->common);

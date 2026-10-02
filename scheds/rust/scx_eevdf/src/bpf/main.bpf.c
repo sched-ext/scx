@@ -294,6 +294,14 @@ const volatile bool no_delay_dequeue;
 const volatile bool no_delay_requeue;
 
 /*
+ * Proxy execution: a task that blocks on a mutex stays runnable as a donor,
+ * and when it is picked its scheduling context runs the mutex owner. User
+ * space sets SCX_OPS_ENQ_BLOCKED and @proxy_exec together, and leaves both
+ * off on a kernel without the feature. See task_is_blocked().
+ */
+const volatile bool proxy_exec;
+
+/*
  * Notice the end of a request at the tick that follows it rather than
  * when it happens, without the timer fair.c runs as HRTICK, see
  * hrtick_start().
@@ -451,8 +459,8 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cid = scx_bpf_task_cid(p), cid;
 	struct grp_hdr __arena *hdr;
 	task_ctx_t *tctx;
-	bool displaced, pressure_migrate;
-	u64 dl, now, tnow;
+	bool displaced, pressure_migrate, blocked;
+	u64 dl, now, tnow, slice;
 
 	TOUCH_ARENA();
 
@@ -474,6 +482,7 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	if (displaced)
 		WRITE_ONCE(cid_ctx(prev_cid)->requeue_pending, 0);
+	blocked = enq_flags & SCX_ENQ_BLOCKED;
 
 	/*
 	 * A task whose cgroup is out of bandwidth waits for its next period
@@ -499,6 +508,19 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx->dispatch_migrate_cid = -1;
 	pressure_migrate = tctx->pressure_migrate;
 	tctx->pressure_migrate = false;
+
+	/*
+	 * A proxy-execution donor that has just blocked on a mutex is put back
+	 * on its own cid with the vruntime and deadline it had, as fair.c leaves
+	 * it on its runqueue: blocking does not dequeue it there. None of the
+	 * shortcuts below apply. Each of them moves the task, and only proxy
+	 * execution moves a donor, to the cid of the mutex owner, where it
+	 * arrives here again and is queued the same way. The donor's wakeup
+	 * when the mutex is handed over does not come through here: the task is
+	 * still queued and only its dispatch is reconsidered.
+	 */
+	if (blocked)
+		goto queue;
 	if (!(enq_flags & SCX_ENQ_WAKEUP) && pressure_migrate &&
 	    cid_valid(cid) && cid != prev_cid && cid_allowed(p, cid)) {
 		place_task(cid, p, tctx, now, false);
@@ -579,6 +601,7 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
+queue:
 	tnow = cid_clock_task_owned(prev_cid, now);
 	place_task(prev_cid, p, tctx, now, enq_flags & SCX_ENQ_WAKEUP);
 
@@ -652,6 +675,15 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 	 * local task has already requested rescheduling; later wakees retain
 	 * their deadline order on the per-cid EDQ.
 	 */
+	/*
+	 * A donor goes on with the request it was in, as it does in fair.c,
+	 * where blocking on the mutex leaves it on the runqueue in the middle
+	 * of its slice: the deadline was kept by place_task(), and so is what
+	 * is left of the slice. One that used its slice up starts a new one,
+	 * which is where fair.c would have issued a new request.
+	 */
+	slice = blocked && p->scx.slice ? p->scx.slice : task_request(p);
+
 	if (!displaced) {
 		bool cancel_protect = false;
 
@@ -663,13 +695,12 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 						     tnow);
 			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
-					   task_request(p),
-					   enq_flags | SCX_ENQ_PREEMPT);
+					   slice, enq_flags | SCX_ENQ_PREEMPT);
 			return;
 		}
 	}
 
-	if (!cid_queue_insert(p, tctx, prev_cid, task_request(p), dl,
+	if (!cid_queue_insert(p, tctx, prev_cid, slice, dl,
 			      tctx->se.vruntime, enq_flags)) {
 		if (displaced)
 			cid_queued_check(prev_cid);

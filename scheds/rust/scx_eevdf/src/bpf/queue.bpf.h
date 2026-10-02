@@ -113,8 +113,15 @@ static __noinline bool cid_edq_dispatch_popped(cid_edq_task_t *at,
 	 * scheduler error. A changed affinity belongs to a scheduler-property
 	 * workflow: drop this old pop and let the core's matching enqueue place the
 	 * task again, as fair's sched_change dequeue/enqueue pair does.
+	 *
+	 * A proxy-execution donor is the exception. Proxy execution moves it to
+	 * the cid of the mutex owner whatever its affinity, since it only runs
+	 * the owner there, and the kernel lets it be dispatched on the cid it
+	 * sits on. Dropping it here would leave it out of every queue until the
+	 * owner released the mutex on its own.
 	 */
-	if (is_restricted(p) && !cid_allowed(p, dst_cid)) {
+	if (is_restricted(p) && !cid_allowed(p, dst_cid) &&
+	    !(task_is_blocked(p) && scx_bpf_task_cid(p) == dst_cid)) {
 		scx_edq_task_drop(&at->common);
 		return false;
 	}
