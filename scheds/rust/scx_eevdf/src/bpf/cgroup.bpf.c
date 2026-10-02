@@ -954,6 +954,57 @@ static bool cgrp_is_idle(struct cgroup *cgrp)
 }
 
 /*
+ * Set the cpu.max of @hdr's cgroup, tg_set_bandwidth(): the cgroup may run
+ * for @quota_us of every @period_us, and carry what it leaves unused into the
+ * next period, up to @burst_us. The kernel keeps "max" as RUNTIME_INF and
+ * refuses a quota or a period below a millisecond, so zero stands for no
+ * limit here.
+ *
+ * The limits are kept in nanoseconds, what the rest of the scheduler times in.
+ * A cgroup nested deeper than GRP_MAX_DEPTH has no block of its own to keep
+ * them in, and runs under the limits of the ancestor whose block it shares.
+ */
+static void grp_bw_set(struct grp_hdr __arena *hdr, u64 period_us,
+		       u64 quota_us, u64 burst_us)
+{
+	u64 quota, period, burst, now;
+	bool was, limited;
+
+	quota = quota_us == BW_QUOTA_INF ? 0 : quota_us * NSEC_PER_USEC;
+	period = MAX(period_us * NSEC_PER_USEC, NSEC_PER_MSEC);
+	burst = quota ? burst_us * NSEC_PER_USEC : 0;
+	now = scx_bpf_now();
+
+	/*
+	 * A limit that is new or has moved starts a period of its own, as
+	 * tg_set_cfs_bandwidth() refills the group and restarts its timer. The
+	 * period and the burst go in before the quota that makes them count.
+	 */
+	was = grp_bw_limited(hdr);
+	if (quota)
+		grp_bw_register(hdr);
+	WRITE_ONCE(hdr->period, period);
+	WRITE_ONCE(hdr->burst, burst);
+	WRITE_ONCE(hdr->period_start, now);
+	WRITE_ONCE(hdr->pool, quota);
+	/* Whatever the cids are holding was taken under the old limit. */
+	__sync_fetch_and_add(&hdr->bw_gen, 1);
+	WRITE_ONCE(hdr->quota, quota);
+	grp_bw_unthrottle(hdr, now);
+
+	limited = quota != 0;
+	if (limited != was)
+		bw_nr_limited += limited ? 1 : -1;
+	/*
+	 * A cgroup that is no longer limited keeps its slot until its tasks
+	 * have been let go: they wait in a backlog the drain reaches through
+	 * it. The unthrottle above is what lets that happen.
+	 */
+	if (!limited && !READ_ONCE(hdr->nr_parked))
+		grp_bw_unregister(hdr);
+}
+
+/*
  * A cgroup the cpu controller is putting under this scheduler, either one
  * that already existed when it was loaded or one just created, parents
  * before their children: give it a queue on every cid, each adding to its
@@ -1039,6 +1090,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_cpuctl_init, struct cgroup *cgrp,
 		}
 	}
 	cgc->depth = depth;
+
+	/*
+	 * A cgroup that already has a cpu.max when the scheduler is loaded is
+	 * held to it from the start. ops.cpuctl_set_bandwidth() only reports
+	 * changes, and the init arguments carry the limit on kernels that
+	 * have the callback.
+	 */
+	if (cpu_max_enabled && bpf_core_field_exists(args->bw_quota_us) &&
+	    args->bw_quota_us != BW_QUOTA_INF)
+		grp_bw_set(hdr, args->bw_period_us, args->bw_quota_us,
+			   args->bw_burst_us);
 
 	return 0;
 }
@@ -1154,62 +1216,20 @@ void BPF_STRUCT_OPS(eevdf_cpuctl_set_idle, struct cgroup *cgrp, bool idle)
 }
 
 /*
- * Somebody wrote cpu.max, tg_set_bandwidth(): the cgroup may run for
- * @quota_us of every @period_us, and carry what it leaves unused into the next
- * period, up to @burst_us. The kernel keeps "max" as RUNTIME_INF and refuses a
- * quota or a period below a millisecond, so zero stands for no limit here.
- *
- * The limits are kept in nanoseconds, what the rest of the scheduler times in.
- * A cgroup nested deeper than GRP_MAX_DEPTH has no block of its own to keep
- * them in, and runs under the limits of the ancestor whose block it shares.
+ * Somebody wrote cpu.max: hand it to grp_bw_set().
  */
 void BPF_STRUCT_OPS(eevdf_cpuctl_set_bandwidth, struct cgroup *cgrp,
 		    u64 period_us, u64 quota_us, u64 burst_us)
 {
-	u64 quota, period, burst, now;
-	struct grp_hdr __arena *hdr;
 	struct cgrp_ctx *cgc;
-	bool was, limited;
 
 	TOUCH_ARENA();
 
 	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
 	if (!cgc || !cgc->hdr)
 		return;
-	hdr = cgc->hdr;
 
-	quota = quota_us == BW_QUOTA_INF ? 0 : quota_us * NSEC_PER_USEC;
-	period = MAX(period_us * NSEC_PER_USEC, NSEC_PER_MSEC);
-	burst = quota ? burst_us * NSEC_PER_USEC : 0;
-	now = scx_bpf_now();
-
-	/*
-	 * A limit that is new or has moved starts a period of its own, as
-	 * tg_set_cfs_bandwidth() refills the group and restarts its timer. The
-	 * period and the burst go in before the quota that makes them count.
-	 */
-	was = grp_bw_limited(hdr);
-	if (quota)
-		grp_bw_register(hdr);
-	WRITE_ONCE(hdr->period, period);
-	WRITE_ONCE(hdr->burst, burst);
-	WRITE_ONCE(hdr->period_start, now);
-	WRITE_ONCE(hdr->pool, quota);
-	/* Whatever the cids are holding was taken under the old limit. */
-	__sync_fetch_and_add(&hdr->bw_gen, 1);
-	WRITE_ONCE(hdr->quota, quota);
-	grp_bw_unthrottle(hdr, now);
-
-	limited = quota != 0;
-	if (limited != was)
-		bw_nr_limited += limited ? 1 : -1;
-	/*
-	 * A cgroup that is no longer limited keeps its slot until its tasks
-	 * have been let go: they wait in a backlog the drain reaches through
-	 * it. The unthrottle above is what lets that happen.
-	 */
-	if (!limited && !READ_ONCE(hdr->nr_parked))
-		grp_bw_unregister(hdr);
+	grp_bw_set(cgc->hdr, period_us, quota_us, burst_us);
 }
 
 /*
