@@ -301,6 +301,9 @@ select_idle_capacity_cid(const struct task_struct *p, task_ctx_t *tctx,
 	    !target_topo->asym_capacity_nr ||
 	    (scx_cid_idle_empty(&eevdf_idle) && !READ_ONCE(nr_sched_idle_curr)))
 		return -EBUSY;
+	/* A zero budget ends select_idle_capacity() before the idle-core hint. */
+	if (!scan_nr)
+		return -EBUSY;
 
 	bpf_arena_for(off, 0, nr_cpu_ids) {
 		u32 cpu = start_cpu + off;
@@ -626,7 +629,12 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid, s32 target)
 		bool has_idle_core = smt_enabled && test_idle_cores(target);
 		bool whole_scanned = false;
 
-		if (has_idle_core) {
+		/*
+		 * select_idle_cpu() returns on a zero SIS_UTIL budget before
+		 * it looks at the idle-core hint, so the hint does not buy
+		 * the whole-core scan there. The hint is left as it is.
+		 */
+		if (has_idle_core && sis_idle_scan_nr(target)) {
 			cid = pick_idle_cid_topology((struct task_struct *)p, target,
 						   flags | PICK_IDLE_WHOLE_CORE |
 						   PICK_IDLE_LLC_ONLY);
