@@ -144,8 +144,7 @@ _Static_assert(_Alignof(struct ravg_data) >= _Alignof(u64),
 
 static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg_data *from)
 {
-	#pragma unroll
-	for (u32 i = 0; i < sizeof(*to) / sizeof(u64); i++)
+	for (u32 i = 0; i < sizeof(*to) / sizeof(u64) && can_loop; i++)
 		((__u64_alias_t __arena *)to)[i] = ((__u64_alias_t *)from)[i];
 
 	return 0;
@@ -154,8 +153,7 @@ static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg
 
 static RAVG_FN_ATTRS int ravg_from_arena(struct ravg_data *to, struct ravg_data __arena *from)
 {
-	#pragma unroll
-	for (u32 i = 0; i < sizeof(*to) / sizeof(u64); i++)
+	for (u32 i = 0; i < sizeof(*to) / sizeof(u64) && can_loop; i++)
 		((__u64_alias_t *)to)[i] = ((__u64_alias_t __arena *)from)[i];
 
 	return 0;
