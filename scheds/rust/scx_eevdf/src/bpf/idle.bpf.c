@@ -859,6 +859,47 @@ static s32 wake_affine_cid(const struct task_struct *p, task_ctx_t *tctx,
 }
 
 /*
+ * The scan of select_idle_cpu() takes a CPU that runs only SCHED_IDLE work as
+ * readily as an idle one,
+ *
+ *	if ((available_idle_cpu(cpu) || sched_idle_cpu(cpu)) &&
+ *	    sched_cpu_cookie_match(cpu_rq(cpu), p))
+ *		return cpu;
+ *
+ * and select_idle_core() keeps one as the fallback when no core is wholly
+ * idle. pick_idle_cid() looks only at idle cids, and returns at once when
+ * none is idle, which is when this matters most. So look for one in
+ * @target's LLC once that has failed, from the cid after @target and within
+ * the SIS_UTIL budget the idle scan honored. A truly idle cid is still
+ * preferred, as select_idle_core() prefers it. A global function, so the
+ * loop is verified once.
+ */
+__noinline s32 sched_idle_scan(struct task_struct *p __arg_trusted, s32 target)
+{
+	u32 base, nr, i;
+
+	if (!p || !READ_ONCE(nr_sched_idle_curr) || !cid_valid(target))
+		return -EBUSY;
+	base = cid_topo(target)->ranges.llc_base;
+	nr = cid_topo(target)->ranges.llc_nr;
+	if (sis_util)
+		nr = MIN(nr, sis_idle_scan_nr(target));
+
+	bpf_for(i, 1, nr + 1) {
+		u32 llc_nr = cid_topo(target)->ranges.llc_nr;
+		s32 cid;
+
+		if (!llc_nr)
+			break;
+		cid = base + (target - base + i) % llc_nr;
+		if (cid_allowed(p, cid) && cid_sched_idle_target(p, cid))
+			return cid;
+	}
+
+	return -EBUSY;
+}
+
+/*
  * The front of select_idle_sibling(): try its computed @target first, then
  * an idle cache-affine @prev_cid. pick_idle_cid() supplies the remaining
  * whole-core and idle-cid scan around @target.
@@ -948,6 +989,12 @@ static __always_inline s32 select_idle_sibling_cid(const struct task_struct *p, 
 	if (cid >= 0) {
 		*direct = true;
 		return cid;
+	}
+	if (READ_ONCE(nr_sched_idle_curr)) {
+		s32 sched_idle = sched_idle_scan((struct task_struct *)p, target);
+
+		if (sched_idle >= 0)
+			return sched_idle;
 	}
 
 	/*
