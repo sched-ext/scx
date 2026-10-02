@@ -865,7 +865,8 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	/* NOTE: There is a sticky domain. */
 
 	/*
-	 * If there is no idle CPU, stay on the sticky CPU or domain.
+	 * If there is no idle CPU even partially,
+	 * stay on the sticky CPU or domain.
 	 */
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	if (!init_idle_i_mask(ctx, idle_cpumask))
@@ -881,13 +882,13 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	/* NOTE: There is at least one idle CPU. */
 
 	/*
-	 * If SMT is enabled and the sticky CPU is fully idle, stay on it.
+	 * If the sticky CPU is fully idle, stay on it.
 	 */
-	if (is_smt_active) {
+	if (is_smt_active)
 		idle_smtmask = scx_bpf_get_idle_smtmask();
-		i_smt_empty = bpf_cpumask_empty(idle_smtmask);
-	} else
-		i_smt_empty = true;
+	else
+		idle_smtmask = idle_cpumask;
+	i_smt_empty = bpf_cpumask_empty(idle_smtmask);
 
 	if (!i_smt_empty && sticky_cpu >= 0 &&
 	    bpf_cpumask_test_cpu(sticky_cpu, idle_smtmask) &&
@@ -898,8 +899,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	}
 
 	/*
-	 * If SMT is enabled and there is a fully idle CPU
-	 * in the sticky domain, stay on it.
+	 * If there is a fully idle CPU in the sticky domain, stay on it.
 	 */
 	if (!i_smt_empty) {
 		if (!init_idle_ato_masks(ctx, idle_smtmask))
@@ -1047,7 +1047,7 @@ unlock_out:
 	/*
 	 * Clean up.
 	 */
-	if (idle_smtmask)
+	if (is_smt_active && idle_smtmask)
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 	if (idle_cpumask)
 		scx_bpf_put_idle_cpumask(idle_cpumask);
