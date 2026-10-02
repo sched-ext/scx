@@ -27,7 +27,7 @@ global functions are on a chain alike.
 
 Output. For each root, the six deepest chains, one per line:
 
-  544 6 calls: lavd_enqueue[160+mg=160] > pick_idle_cpu[104+mg=112] > ...
+  544 6 calls: lavd_enqueue[152+mg=160] > pick_idle_cpu[104+mg=112] > ...
 
 The first number is the chain's total, then the number of frames, then the
 frames from the root down. In each frame, the first number is the deepest

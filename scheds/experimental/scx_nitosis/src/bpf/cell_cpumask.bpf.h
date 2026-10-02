@@ -20,8 +20,7 @@
 #include "intf.h"
 
 /* Return whether @cpu is set in serialized cell_cpumask_data. */
-static inline int cell_cpumask_data_test_cpu(const struct cell_cpumask_data *data, u32 cpu,
-					     bool *setp)
+static inline int cell_cpumask_data_test_cpu(const struct cell_cpumask_data *data, u32 cpu, bool *setp)
 {
 	u32 byte_idx = cpu / 8;
 	u32 bit_idx = cpu % 8;

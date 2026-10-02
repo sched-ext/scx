@@ -40,9 +40,12 @@ char _license[] SEC("license") = "GPL";
 const volatile u32 nr_possible_cpus = 1;
 
 const volatile u64 slice_ns;
+/* Debt a task may carry over its domain clock at enqueue, in slices. */
+#define VTIME_DEBT_CAP_SLICES 16
+/* Longest the per-cid DSQ may go unserved while non-empty, in slices. */
+#define PINNED_MAX_WAIT_SLICES 8
 const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
-const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
@@ -79,7 +82,8 @@ static __always_inline struct cell_cmasks __arena *cell_cmasks_alloc(u32 nr_cids
 
 	if (!gen)
 		return NULL;
-	bpf_for(i, 0, MAX_CELLS) {
+	bpf_for(i, 0, MAX_CELLS)
+	{
 		cmask_init(&gen->mask[i].cmask, 0, nr_cids);
 		cmask_init(&gen->borrowable[i].cmask, 0, nr_cids);
 	}
@@ -112,8 +116,7 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp, u32 ances
 	struct cgroup *cg;
 
 	if (!(cg = bpf_cgroup_ancestor(cgrp, ancestor))) {
-		scx_bpf_error("Failed to get ancestor level %d for cgid %llu", ancestor,
-			      cgrp->kn->id);
+		scx_bpf_error("Failed to get ancestor level %d for cgid %llu", ancestor, cgrp->kn->id);
 		return NULL;
 	}
 
@@ -139,20 +142,16 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
 	struct cgroup *cgrp;
 
-	if (!cpu_controller_disabled) {
-		cgrp = scx_bpf_task_cgroup(p);
-	} else {
-		/*
-		 * When CPU controller is disabled, scx_bpf_task_cgroup() returns
-		 * root. Use p->cgroups->dfl_cgrp to get the task's actual cgroup
-		 * in the default (unified) hierarchy.
-		 *
-		 * p->cgroups is RCU-protected, so we need RCU lock.
-		 */
-		scoped_guard(rcu)
-		{
-			cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
-		}
+	/*
+	 * scx_bpf_task_cgroup() returns the root cgroup when the CPU controller is
+	 * disabled. Cell management instead tracks the task's actual cgroup in the
+	 * default (unified) hierarchy directly through p->cgroups->dfl_cgrp.
+	 *
+	 * p->cgroups is RCU-protected, so we need RCU lock.
+	 */
+	scoped_guard(rcu)
+	{
+		cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
 	}
 
 	if (!cgrp)
@@ -239,8 +238,7 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	 * later via apply_cell_config). We don't abort on these
 	 * tasks by checking cpuset_seq vs applied_cpuset_seq.
 	 */
-	if (tctx->cell != 0 && reject_multicpu_pinning && !all_cell_cpus_allowed &&
-	    cmask_weight(allowed) > 1) {
+	if (tctx->cell != 0 && reject_multicpu_pinning && !all_cell_cpus_allowed && cmask_weight(allowed) > 1) {
 		if (READ_ONCE(cpuset_seq) != READ_ONCE(applied_cpuset_seq)) {
 			cstat_inc(CSTAT_PIN_SKIP, tctx->cell, cur_cpu_ctx());
 		} else {
@@ -280,11 +278,15 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 		if (cid >= cmask_end(allowed))
 			return -EINVAL;
 
-		tctx->dsq = get_cid_dsq_id(cid);
-		if (dsq_is_invalid(tctx->dsq))
+		dsq_id_t cid_dsq = get_cid_dsq_id(cid);
+
+		if (dsq_is_invalid(cid_dsq))
 			return -EINVAL;
 
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctxs[cid].vtime_now));
+		/* Only re-base when the task actually changes domain. */
+		if (cid_dsq.raw != tctx->dsq.raw || tctx->all_cell_cpus_allowed)
+			scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctxs[cid].vtime_now));
+		tctx->dsq = cid_dsq;
 		tctx->all_cell_cpus_allowed = false;
 		return 0;
 	}
@@ -298,23 +300,36 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	}
 
 	/* Non-LLC aware version */
-	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
-	if (dsq_is_invalid(tctx->dsq))
+	dsq_id_t cell_dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
+	if (dsq_is_invalid(cell_dsq))
 		return -EINVAL;
 
-	scx_bpf_task_set_dsq_vtime(p, cell_llc_vtime_read(&cells[tctx->cell],
-							  FAKE_FLAT_CELL_LLC));
+	/* Only re-base when the task actually changes domain. */
+	if (cell_dsq.raw != tctx->dsq.raw || !tctx->all_cell_cpus_allowed)
+		scx_bpf_task_set_dsq_vtime(p, cell_llc_vtime_read(&cells[tctx->cell], FAKE_FLAT_CELL_LLC));
+	tctx->dsq = cell_dsq;
 	tctx->all_cell_cpus_allowed = true;
 
 	return 0;
 }
 
 /*
+ * A pinned task is placed on a per-cid DSQ and takes its basis from that cid's
+ * clock, which belongs to whichever cell owns the cid. Charge that cell rather
+ * than the task's own, so stopping() advances the clocks the task is compared
+ * against. Otherwise a task pinned outside its cell never advances them and its
+ * vtime ratchets ahead until it loses every comparison.
+ */
+static __always_inline void set_pinned_vtime_charge_cid(struct task_ctx __arena *tctx, struct cpu_ctx __arena *cctx)
+{
+	tctx->vtime_charge_cell = cctx->cell;
+}
+
+/*
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
  */
-static inline int update_task_cell(struct task_struct *p, struct task_ctx __arena *tctx,
-				   struct cgroup *cg)
+static inline int update_task_cell(struct task_struct *p, struct task_ctx __arena *tctx, struct cgroup *cg)
 {
 	struct cgrp_ctx __arena *cgc;
 
@@ -347,9 +362,8 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx __aren
 		}
 
 		if (!cgc) {
-			scx_bpf_error(
-				"cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x, tctx->cgid %llu)",
-				cg->kn->id, p->pid, p->flags, tctx->cgid);
+			scx_bpf_error("cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x, tctx->cgid %llu)",
+				      cg->kn->id, p->pid, p->flags, tctx->cgid);
 			return -ENOENT;
 		}
 	}
@@ -371,8 +385,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx __aren
 /*
  * Get task's cgroup, update its cell, and release the cgroup.
  */
-static __always_inline int refresh_task_cell(struct task_struct *p,
-					     struct task_ctx __arena *tctx)
+static __always_inline int refresh_task_cell(struct task_struct *p, struct task_ctx __arena *tctx)
 {
 	struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
 	if (!cgrp)
@@ -381,38 +394,35 @@ static __always_inline int refresh_task_cell(struct task_struct *p,
 }
 
 /* True when the task's cell/cpumask mapping is stale, read-only */
-static __always_inline bool task_needs_refresh(struct task_struct *p,
-					       struct task_ctx __arena *tctx)
+static __always_inline bool task_needs_refresh(struct task_struct *p, struct task_ctx __arena *tctx)
 {
+	u64 current_cgid;
+
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq))
 		return true;
 
 	/*
-	 * When not using CPU controller, check if task's cgroup changed.
-	 * The cgroup is already initialized by tp_cgroup_mkdir which
-	 * fires before the task can be scheduled in the new cgroup.
+	 * Check if task's cgroup changed. The cgroup is already initialized by
+	 * tp_cgroup_mkdir which fires before the task can be scheduled in the
+	 * new cgroup.
 	 */
-	if (cpu_controller_disabled) {
-		u64 current_cgid;
-
-		scoped_guard(rcu)
-		{
-			current_cgid = p->cgroups->dfl_cgrp->kn->id;
-		}
-
-		if (current_cgid != tctx->cgid)
-			return true;
+	scoped_guard(rcu)
+	{
+		current_cgid = p->cgroups->dfl_cgrp->kn->id;
 	}
+
+	if (current_cgid != tctx->cgid)
+		return true;
 
 	return false;
 }
 
 /* Check if we need to update the cell/cpumask mapping */
-static __always_inline int maybe_refresh_cell(struct task_struct *p,
-					      struct task_ctx __arena *tctx)
+static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task_ctx __arena *tctx)
 {
 	if (task_needs_refresh(p, tctx))
 		return refresh_task_cell(p, tctx);
+
 	return 0;
 }
 
@@ -422,16 +432,14 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
  * The core is not wholly idle either way and a stale set range could trap the
  * core-idle scans.
  */
-static __always_inline bool claim_idle_cid_masks(struct mitosis_topo __arena *t, s32 cid,
-						  struct scx_cmask __arena *im)
+static __always_inline bool claim_idle_cid_masks(struct mitosis_topo __arena *t, s32 cid, struct scx_cmask __arena *im)
 {
 	if (t->smt_active) {
 		s32 core = t->cid[cid].core_idx;
 		struct scx_cmask __arena *ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
 
 		if (core >= 0)
-			cmask_clear_range(ism, t->core_cids[core].base,
-					  t->core_cids[core].nr);
+			cmask_clear_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
 	}
 	return cmask_test_and_clear(cid, im);
 }
@@ -446,9 +454,8 @@ static inline bool claim_idle_cid(s32 cid)
  * Locate @prev_cid's shard when it falls inside the scan window, MAX_CPUS
  * otherwise.
  */
-static __always_inline u32 pick_prev_shard(struct mitosis_topo __arena *t,
-					   struct scx_cmask __arena *cand, u32 shard_base,
-					   u32 nr_shards, s32 prev_cid)
+static __always_inline u32 pick_prev_shard(struct mitosis_topo __arena *t, struct scx_cmask __arena *cand,
+					   u32 shard_base, u32 nr_shards, s32 prev_cid)
 {
 	if (prev_cid >= 0 && cmask_test(prev_cid, cand)) {
 		u32 ps = t->cid[prev_cid].shard_idx;
@@ -477,13 +484,13 @@ static __always_inline u32 pick_start_shard(u32 shard_base, u32 nr_shards, u32 p
  * mask (or idle_smt mask when @idle_core) with @cand and claiming with bounded
  * retries. Returns the claimed cid, -EBUSY if nothing was claimed.
  */
-static __always_inline s32 pick_idle_scan(struct mitosis_topo __arena *t,
-					  struct scx_cmask __arena *cand, u32 shard_base,
-					  u32 nr_shards, u32 start_shard, bool idle_core)
+static __always_inline s32 pick_idle_scan(struct mitosis_topo __arena *t, struct scx_cmask __arena *cand,
+					  u32 shard_base, u32 nr_shards, u32 start_shard, bool idle_core)
 {
 	u32 i;
 
-	bpf_for(i, 0, nr_shards) {
+	bpf_for(i, 0, nr_shards)
+	{
 		u32 si = shard_base + (start_shard - shard_base + i) % nr_shards;
 		struct scx_cmask __arena *im = &idle_masks[si].cmask;
 		struct scx_cmask __arena *scan;
@@ -495,7 +502,8 @@ static __always_inline s32 pick_idle_scan(struct mitosis_topo __arena *t,
 			scan = im;
 
 		end = scan->base + scan->nr_cids;
-		bpf_for(r, 0, IDLE_PICK_RETRIES) {
+		bpf_for(r, 0, IDLE_PICK_RETRIES)
+		{
 			s32 cid = cmask_any_and_distribute(scan, cand);
 
 			if (cid < 0 || cid >= end)
@@ -513,8 +521,7 @@ static __always_inline s32 pick_idle_scan(struct mitosis_topo __arena *t,
  * then a scan of the idle_smt masks. No-op without SMT. A real subprog, the
  * scan inlines a lot of state, see pick_idle_cid_partial().
  */
-static __noinline s32 pick_idle_cid_cores(struct scx_cmask __arena *cand, u32 shard_base,
-					  u32 nr_shards, s32 prev_cid)
+static __noinline s32 pick_idle_cid_cores(struct scx_cmask __arena *cand, u32 shard_base, u32 nr_shards, s32 prev_cid)
 {
 	struct mitosis_topo __arena *t = topo;
 	u32 pshard;
@@ -532,8 +539,7 @@ static __noinline s32 pick_idle_cid_cores(struct scx_cmask __arena *cand, u32 sh
 			return prev_cid;
 	}
 
-	return pick_idle_scan(t, cand, shard_base, nr_shards,
-			      pick_start_shard(shard_base, nr_shards, pshard), true);
+	return pick_idle_scan(t, cand, shard_base, nr_shards, pick_start_shard(shard_base, nr_shards, pshard), true);
 }
 
 /*
@@ -542,8 +548,7 @@ static __noinline s32 pick_idle_cid_cores(struct scx_cmask __arena *cand, u32 sh
  * 512 byte stack limit once LLC awareness stacks a second pick level into
  * select_cid.
  */
-static __noinline s32 pick_idle_cid_partial(struct scx_cmask __arena *cand, u32 shard_base,
-					    u32 nr_shards, s32 prev_cid)
+static __noinline s32 pick_idle_cid_partial(struct scx_cmask __arena *cand, u32 shard_base, u32 nr_shards, s32 prev_cid)
 {
 	struct mitosis_topo __arena *t = topo;
 	u32 pshard;
@@ -560,8 +565,7 @@ static __noinline s32 pick_idle_cid_partial(struct scx_cmask __arena *cand, u32 
 			return prev_cid;
 	}
 
-	return pick_idle_scan(t, cand, shard_base, nr_shards,
-			      pick_start_shard(shard_base, nr_shards, pshard), false);
+	return pick_idle_scan(t, cand, shard_base, nr_shards, pick_start_shard(shard_base, nr_shards, pshard), false);
 }
 
 /*
@@ -577,8 +581,8 @@ static __noinline s32 pick_idle_cid_partial(struct scx_cmask __arena *cand, u32 
  *
  * Returns the claimed cid, -EBUSY if nothing idle was found.
  */
-static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand,
-						u32 shard_base, u32 nr_shards, s32 prev_cid)
+static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand, u32 shard_base, u32 nr_shards,
+						s32 prev_cid)
 {
 	s32 cid = pick_idle_cid_cores(cand, shard_base, nr_shards, prev_cid);
 
@@ -587,9 +591,8 @@ static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand,
 	return pick_idle_cid_partial(cand, shard_base, nr_shards, prev_cid);
 }
 
-static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid,
-					  struct cpu_ctx __arena *cctx,
-					  struct task_ctx __arena *tctx)
+static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid, struct cpu_ctx __arena *cctx,
+					 struct task_ctx __arena *tctx)
 {
 	struct mitosis_topo __arena *t = topo;
 	s32 cid;
@@ -635,8 +638,7 @@ static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid,
  *
  * Returns: cid >= 0 on success, -EBUSY if no idle cid found.
  */
-static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid,
-					     struct cpu_ctx __arena *cctx,
+static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid, struct cpu_ctx __arena *cctx,
 					     struct task_ctx __arena *tctx, bool kick)
 {
 	s32 cid;
@@ -660,8 +662,7 @@ static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid
 	}
 	/* cid == -EBUSY: no idle cid in cell, try borrowing */
 	if (enable_borrowing) {
-		struct scx_cmask __arena *borrowable =
-			&READ_ONCE(cell_masks)->borrowable[tctx->cell].cmask;
+		struct scx_cmask __arena *borrowable = &READ_ONCE(cell_masks)->borrowable[tctx->cell].cmask;
 
 		cid = pick_idle_cid_shards(borrowable, 0, topo->nr_shards, prev_cid);
 		if (cid >= 0) {
@@ -682,8 +683,7 @@ static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid
  * Switch task to a new cid's DSQ with vtime reset. Returns new_cid on success,
  * -1 on failure (tctx unchanged).
  */
-static __always_inline s32 update_pinned_dsq(struct task_struct *p,
-					     struct task_ctx __arena *tctx, s32 new_cid)
+static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_ctx __arena *tctx, s32 new_cid)
 {
 	s32 current_cid = get_cid_from_dsq(tctx->dsq);
 	if (current_cid < 0)
@@ -697,8 +697,7 @@ static __always_inline s32 update_pinned_dsq(struct task_struct *p,
 	return new_cid;
 }
 
-static __always_inline s32 select_pinned_cid(struct task_struct *p, s32 prev_cid,
-					     struct task_ctx __arena *tctx,
+static __always_inline s32 select_pinned_cid(struct task_struct *p, s32 prev_cid, struct task_ctx __arena *tctx,
 					     bool *idle_cid_cleared)
 {
 	s32 cid;
@@ -766,7 +765,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cid, struct task_struct *p, s32 prev_cid, u64 
 			return prev_cid;
 
 		if (idle_cid_cleared || claim_idle_cid(cid)) {
-			tctx->vtime_charge_cell = tctx->cell;
+			set_pinned_vtime_charge_cid(tctx, &cpu_ctxs[cid]);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
 		return cid;
@@ -790,8 +789,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cid, struct task_struct *p, s32 prev_cid, u64 
 	return cid;
 }
 
-static __always_inline s32 enqueue_pinned_cid(struct task_struct *p,
-					      struct task_ctx __arena *tctx)
+static __always_inline s32 enqueue_pinned_cid(struct task_struct *p, struct task_ctx __arena *tctx)
 {
 	/*
 	 * Dynamic affinity balancing: if the current cid has tasks queued,
@@ -816,6 +814,19 @@ static __always_inline s32 enqueue_pinned_cid(struct task_struct *p,
 		cid = new_cid;
 	}
 	return cid;
+}
+
+static __always_inline u64 cap_vtime_debt(u64 vtime, u64 basis_vtime)
+{
+	/*
+	 * A task can legitimately owe at most one weighted slice over the clock
+	 * it competes against; anything beyond that is an accounting gap (a
+	 * clock that did not follow the task) and would only starve the task.
+	 * Cap the debt instead of carrying or aborting on it.
+	 */
+	if (time_after(vtime, basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns))
+		vtime = basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns;
+	return vtime;
 }
 
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
@@ -896,8 +907,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 			basis_vtime = cell_llc_vtime_read(&cells[tctx->cell], llc);
 		} else {
-			basis_vtime = cell_llc_vtime_read(&cells[tctx->cell],
-							  FAKE_FLAT_CELL_LLC);
+			basis_vtime = cell_llc_vtime_read(&cells[tctx->cell], FAKE_FLAT_CELL_LLC);
 		}
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
@@ -908,6 +918,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		cctx = &cpu_ctxs[cid];
 		/* Task is pinned to specific cids, use per-cid DSQ */
+		set_pinned_vtime_charge_cid(tctx, cctx);
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
@@ -918,12 +929,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 	tctx->basis_vtime = basis_vtime;
 
-	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
-		scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
-			      p->pid, p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime,
-			      tctx->cell);
-		return;
-	}
+	vtime = cap_vtime_debt(vtime, basis_vtime);
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
@@ -932,6 +938,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = basis_vtime - slice_ns;
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
+	if (!tctx->all_cell_cpus_allowed && !READ_ONCE(cctx->pinned_waiting_since))
+		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 
 	/*
 	 * Account after insertion: cell reconfiguration can orphan the selected
@@ -955,6 +963,13 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Kick the cid if needed */
 	if ((!__COMPAT_is_enq_cpu_selected(enq_flags) || (enq_flags & SCX_ENQ_LAST)) && cid >= 0)
 		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+}
+
+static __always_inline bool pinned_dsq_overdue(struct cpu_ctx __arena *cctx)
+{
+	u64 since = READ_ONCE(cctx->pinned_waiting_since);
+
+	return since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
@@ -981,8 +996,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 	if (dsq_is_invalid(cell_dsq) || dsq_is_invalid(cid_dsq))
 		return;
 
-	if (enable_llc_awareness && READ_ONCE(cells[cell].llcs_to_drain) &&
-	    !try_draining_work(cell, llc, cctx)) {
+	if (enable_llc_awareness && READ_ONCE(cells[cell].llcs_to_drain) && !try_draining_work(cell, llc, cctx)) {
 		cstat_inc(CSTAT_DRAIN_CNT, cell, cctx);
 		return;
 	}
@@ -995,12 +1009,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		found = true;
 	}
 
-	/* Peek at cid DSQ head, prefer if lower vtime */
+	/*
+	 * Peek at cid DSQ head, prefer if lower vtime. Under a deep cell
+	 * backlog the pinned head can lose every comparison for a full round
+	 * of the queue, so also bound how long the per-cid DSQ goes unserved.
+	 */
 	p = dsq_peek(cid_dsq.raw);
-	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
-		min_vtime = p->scx.dsq_vtime;
-		min_vtime_dsq = cid_dsq;
-		found = true;
+	if (p) {
+		bool overdue = pinned_dsq_overdue(cctx);
+
+		if (!found || overdue || time_before(p->scx.dsq_vtime, min_vtime)) {
+			min_vtime = p->scx.dsq_vtime;
+			min_vtime_dsq = cid_dsq;
+			found = true;
+		}
+	} else {
+		WRITE_ONCE(cctx->pinned_waiting_since, 0);
 	}
 
 	/* If we failed to find an eligible task, try the sibling LLC DSQs. */
@@ -1045,6 +1069,12 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 
 	/* Try the winner first */
 	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		/*
+		 * Served the per-cid DSQ: restart its wait clock. If it is now
+		 * empty the next dispatch's peek clears it.
+		 */
+		if (min_vtime_dsq.raw == cid_dsq.raw)
+			WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 		if (enable_llc_awareness && min_vtime_dsq.raw == cell_dsq.raw) {
 			cell_llc_nr_queued_dec(&cells[cell], llc);
 		}
@@ -1061,8 +1091,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
  * cgroup hierarchy.
  */
 u32 level_cells[MAX_CG_DEPTH];
-static inline void advance_cell_llc_vtime(struct cell __arena *cell, u32 llc_idx,
-					      u64 task_vtime)
+static inline void advance_cell_llc_vtime(struct cell __arena *cell, u32 llc_idx, u64 task_vtime)
 {
 	if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), task_vtime))
 		WRITE_ONCE(cell->llcs[llc_idx].vtime_now, task_vtime);
@@ -1197,8 +1226,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 }
 
 SEC("fentry/cpuset_write_resmask")
-int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of, char *buf, size_t nbytes,
-	     loff_t off, ssize_t retval)
+int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of, char *buf, size_t nbytes, loff_t off,
+	     ssize_t retval)
 {
 	/*
 	 * On a write to cpuset.cpus, userspace must re-read cpusets and push a
@@ -1258,7 +1287,6 @@ __weak int init_cgrp_ctx(struct cgroup *cgrp __arg_trusted)
 
 /*
  * Initialize cgroup and all its ancestors. Handles dying cgroups gracefully.
- * Used when CPU controller is disabled since SCX cgroup callbacks won't fire.
  */
 static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 {
@@ -1292,50 +1320,31 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	return init_cgrp_ctx(cgrp);
 }
 
-/*
- * SCX cgroup callbacks - called by the SCX framework when the CPU controller
- * is enabled.
- */
-s32 BPF_STRUCT_OPS(mitosis_cpuctl_init, struct cgroup *cgrp,
-		   struct scx_cgroup_init_args *args)
+s32 BPF_STRUCT_OPS(mitosis_cpuctl_init, struct cgroup *cgrp, struct scx_cgroup_init_args *args)
 {
-	if (cpu_controller_disabled)
-		return 0;
-	return init_cgrp_ctx(cgrp);
+	// Cell management uses tracepoint cgroup tracking.
+	return 0;
 }
 
 void BPF_STRUCT_OPS(mitosis_cpuctl_exit, struct cgroup *cgrp)
 {
-	if (cpu_controller_disabled)
-		return;
+	// Cell management uses tracepoint cgroup tracking.
+	return;
 }
 
-void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *from,
-		    struct cgroup *to)
+void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *from, struct cgroup *to)
 {
-	struct task_ctx __arena *tctx;
-
-	if (cpu_controller_disabled)
-		return;
-
-	if (!(tctx = lookup_task_ctx(p)))
-		return;
-
-	update_task_cell(p, tctx, to);
+	// Cell management uses tracepoint cgroup tracking.
+	return;
 }
 
-/*
- * Tracepoint fallbacks - only active when CPU controller is disabled.
- * These provide cgroup tracking when SCX cgroup callbacks don't fire.
- */
+/* Tracepoints provide cgroup lifecycle tracking for cell management. */
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
 	scx_arena_subprog_init();
 
 	int ret;
-	if (!cpu_controller_disabled)
-		return 0;
 
 	/*
 	 * Tracepoints attach before the struct_ops, so mkdirs can fire before
@@ -1348,9 +1357,8 @@ int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 
 	ret = init_cgrp_ctx_with_ancestors(cgrp);
 	if (ret) {
-		scx_bpf_error(
-			"tp_cgroup_mkdir: init_cgrp_ctx_with_ancestors failed for cgid %llu: %d",
-			cgrp->kn->id, ret);
+		scx_bpf_error("tp_cgroup_mkdir: init_cgrp_ctx_with_ancestors failed for cgid %llu: %d", cgrp->kn->id,
+			      ret);
 	}
 	return 0;
 }
@@ -1358,9 +1366,6 @@ int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 SEC("tp_btf/cgroup_rmdir")
 int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	if (!cpu_controller_disabled)
-		return 0;
-
 	return 0;
 }
 
@@ -1378,8 +1383,7 @@ void BPF_STRUCT_OPS(mitosis_set_cmask, struct task_struct *p, struct scx_cmask _
 s32 validate_userspace_data()
 {
 	if (nr_possible_cpus > MAX_CPUS) {
-		scx_bpf_error("nr_possible_cpus %d exceeds MAX_CPUS %d", nr_possible_cpus,
-			      MAX_CPUS);
+		scx_bpf_error("nr_possible_cpus %d exceeds MAX_CPUS %d", nr_possible_cpus, MAX_CPUS);
 		return -EINVAL;
 	}
 	return 0;
@@ -1428,7 +1432,8 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 	 * an RCU critical section, which this sleepable path is not implicitly
 	 * in.
 	 */
-	scoped_guard(rcu) {
+	scoped_guard(rcu)
+	{
 		/*
 		 * Seed the allowed mask from the task's current affinity.
 		 * ops.set_cmask() keeps it in sync from here on.
@@ -1450,68 +1455,34 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 	return ret;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
-			     struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
 	struct cgroup *cgrp __free(cgroup) = NULL;
 	int ret;
 
 	/*
-	 * When CPU controller is disabled, args->cgroup is root, so we need
-	 * to get the task's actual cgroup for both logging and cell assignment.
-	 * We also need to ensure the cgroup hierarchy is initialized since
-	 * SCX cgroup callbacks won't fire.
+	 * Get the task's actual default-hierarchy cgroup and ensure its hierarchy
+	 * has storage before assigning the task to a cell.
 	 */
-	if (cpu_controller_disabled) {
-		cgrp = task_cgroup(p);
-		if (!cgrp) {
-			scx_bpf_error("task_cgroup() failed");
-			return -ENOENT;
-		}
-
-		/* Ensure cgroup hierarchy is initialized (handles ancestors + this cgroup) */
-		ret = init_cgrp_ctx_with_ancestors(cgrp);
-		if (ret) {
-			scx_bpf_error("init_cgrp_ctx_with_ancestors() failed");
-			return ret;
-		}
-
-		ret = init_task_impl(p, cgrp);
-		if (ret) {
-			scx_bpf_error("init_task_impl failed");
-			return ret;
-		}
-		return 0;
-	}
-	/*
-	 * Extra refcount bump below can be dropped and args->cgroup can be used
-	 * directly when minimum kernel version advances to >= v7.4, per the patch
-	 * https://lore.kernel.org/bpf/95d7ccc17681aa3a4a2eeb1b073f00f7@kernel.org.
-	 */
-	cgrp = bpf_cgroup_from_id(args->cgroup->kn->id);
+	cgrp = task_cgroup(p);
 	if (!cgrp) {
-		/*
-		 * The ID lookup fails for a cgroup that has already been
-		 * removed, which can happen for an exiting task getting
-		 * initialized during scheduler load. Fall back to the root
-		 * cgroup. This lands the task in the root cell even when the
-		 * dying cgroup's ctx, which update_task_cell() would have
-		 * preferred, is still around.
-		 */
-		if (!(exiting_task_workaround_enabled && (p->flags & PF_EXITING))) {
-			scx_bpf_error("bpf_cgroup_from_id() failed");
-			return -ENOENT;
-		}
-
-		cgrp = bpf_cgroup_from_id(root_cgid);
-		if (!cgrp)
-			return -ENOENT;
+		scx_bpf_error("task_cgroup() failed");
+		return -ENOENT;
 	}
-	ret = init_task_impl(p, cgrp);
+
+	/* Ensure cgroup hierarchy is initialized (handles ancestors + this cgroup) */
+	ret = init_cgrp_ctx_with_ancestors(cgrp);
 	if (ret) {
-		scx_bpf_error("init_task_impl() failed");
+		scx_bpf_error("init_cgrp_ctx_with_ancestors() failed");
 		return ret;
 	}
+
+	ret = init_task_impl(p, cgrp);
+	if (ret) {
+		scx_bpf_error("init_task_impl failed");
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -1532,7 +1503,8 @@ static void dump_cmask(struct scx_cmask __arena *m)
 	u32 nr_words = (topo->nr_cids + 63) / 64;
 	u32 w;
 
-	bpf_for(w, 0, nr_words) {
+	bpf_for(w, 0, nr_words)
+	{
 		u64 word = m->bits[nr_words - w - 1];
 
 		if (w)
@@ -1573,10 +1545,11 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 			u64 drain_mask = READ_ONCE(cell->llcs_to_drain);
 			u64 llcs_with_cpus = READ_ONCE(cell->llcs_with_cpus);
 
-			scx_bpf_dump("CELL[%d] llcs_to_drain=%llx llcs_with_cpus=%llx\n", i,
-				     drain_mask, llcs_with_cpus);
+			scx_bpf_dump("CELL[%d] llcs_to_drain=%llx llcs_with_cpus=%llx\n", i, drain_mask,
+				     llcs_with_cpus);
 
-			bpf_for(llc, 0, topo->nr_llcs) {
+			bpf_for(llc, 0, topo->nr_llcs)
+			{
 				u64 bit;
 				s32 nr_queued;
 				u32 tracked_nr_queued;
@@ -1588,15 +1561,13 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 				bit = 1LLU << llc;
 				nr_queued = scx_bpf_dsq_nr_queued(dsq_id.raw);
 				tracked_nr_queued = READ_ONCE(cell->llcs[llc].nr_queued);
-				if (!nr_queued && !tracked_nr_queued && !(drain_mask & bit) &&
-				    !(llcs_with_cpus & bit))
+				if (!nr_queued && !tracked_nr_queued && !(drain_mask & bit) && !(llcs_with_cpus & bit))
 					continue;
 
 				scx_bpf_dump(
 					"CELL[%d] LLC[%d] vtime=%llu nr_queued=%d drain=%d has_cpus=%d tracked_nr_queued=%u\n",
-					i, llc, cell_llc_vtime_read(cell, llc), nr_queued,
-					!!(drain_mask & bit), !!(llcs_with_cpus & bit),
-					tracked_nr_queued);
+					i, llc, cell_llc_vtime_read(cell, llc), nr_queued, !!(drain_mask & bit),
+					!!(llcs_with_cpus & bit), tracked_nr_queued);
 			}
 		} else {
 			dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);
@@ -1604,24 +1575,22 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 				return;
 
 			scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-				     cell_llc_vtime_read(cell, FAKE_FLAT_CELL_LLC),
-				     scx_bpf_dsq_nr_queued(dsq_id.raw));
+				     cell_llc_vtime_read(cell, FAKE_FLAT_CELL_LLC), scx_bpf_dsq_nr_queued(dsq_id.raw));
 		}
 	}
 
-	bpf_for(i, 0, topo->nr_cids) {
+	bpf_for(i, 0, topo->nr_cids)
+	{
 		cpu_ctx = &cpu_ctxs[i];
 		dsq_id = get_cid_dsq_id(i);
 		if (dsq_is_invalid(dsq_id))
 			return;
 		if (enable_llc_awareness) {
-			scx_bpf_dump("CID[%d] cell=%d llc=%d vtime=%llu nr_queued=%d\n", i,
-				     cpu_ctx->cell, cpu_ctx->llc, READ_ONCE(cpu_ctx->vtime_now),
-				     scx_bpf_dsq_nr_queued(dsq_id.raw));
+			scx_bpf_dump("CID[%d] cell=%d llc=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell, cpu_ctx->llc,
+				     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
 		} else {
 			scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
-				     READ_ONCE(cpu_ctx->vtime_now),
-				     scx_bpf_dsq_nr_queued(dsq_id.raw));
+				     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
 		}
 	}
 }
@@ -1633,10 +1602,9 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_st
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
-	scx_bpf_dump(
-		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u llc=%d dsq=%llx all_cell_cpus_allowed=%d\n",
-		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell, tctx->llc, tctx->dsq.raw,
-		tctx->all_cell_cpus_allowed);
+	scx_bpf_dump("Task[%d] vtime=%llu basis_vtime=%llu cell=%u llc=%d dsq=%llx all_cell_cpus_allowed=%d\n", p->pid,
+		     p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell, tctx->llc, tctx->dsq.raw,
+		     tctx->all_cell_cpus_allowed);
 	scx_bpf_dump("Task[%d] CIDS=", p->pid);
 	dump_cmask(&tctx->allowed);
 	scx_bpf_dump("\n");
@@ -1650,9 +1618,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	u32 i;
 	s32 ret;
 
-	cells = bpf_arena_alloc_pages(&arena, NULL,
-				      div_round_up(MAX_CELLS * sizeof(struct cell),
-						   PAGE_SIZE), NUMA_NO_NODE, 0);
+	cells = bpf_arena_alloc_pages(&arena, NULL, div_round_up(MAX_CELLS * sizeof(struct cell), PAGE_SIZE),
+				      NUMA_NO_NODE, 0);
 	if (!cells)
 		return -ENOMEM;
 
@@ -1686,14 +1653,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		return -EINVAL;
 	}
 
-	topo = bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(struct mitosis_topo),
-				     PAGE_SIZE), NUMA_NO_NODE, 0);
+	topo = bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(struct mitosis_topo), PAGE_SIZE), NUMA_NO_NODE,
+				     0);
 	if (!(t = topo))
 		return -ENOMEM;
 
 	t->nr_cids = nr_cids;
 
-	bpf_arena_for(i, 0, nr_cids) {
+	bpf_arena_for(i, 0, nr_cids)
+	{
 		struct scx_cid_topo ct = {};
 		struct scx_cid_topo __arena *dst = &t->cid[i];
 
@@ -1758,7 +1726,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Shards are LLC-aligned, an LLC is a contiguous shard run. */
-	bpf_for(i, 0, nr_llcs) {
+	bpf_for(i, 0, nr_llcs)
+	{
 		s32 base = t->llc_cids[i].base;
 		s32 last = base + t->llc_cids[i].nr - 1;
 
@@ -1767,12 +1736,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Offline-possible cpus have no topology, collect the cids that do. */
-	topo_cids = bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(union cell_cmask),
-					  PAGE_SIZE), NUMA_NO_NODE, 0);
+	topo_cids =
+		bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(union cell_cmask), PAGE_SIZE), NUMA_NO_NODE, 0);
 	if (!topo_cids)
 		return -ENOMEM;
 	cmask_init(topo_cids, 0, nr_cids);
-	bpf_for(i, 0, nr_cids) {
+	bpf_for(i, 0, nr_cids)
+	{
 		if (t->cid[i].core_idx >= 0)
 			__cmask_set(i, topo_cids);
 	}
@@ -1786,10 +1756,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	idle_smt_masks = bpf_arena_alloc_pages(&arena, NULL, mask_pgs, NUMA_NO_NODE, 0);
 	if (!idle_smt_masks)
 		return -ENOMEM;
-	bpf_for(i, 0, nr_shards) {
+	bpf_for(i, 0, nr_shards)
+	{
 		cmask_init(&idle_masks[i].cmask, t->shard_cids[i].base, t->shard_cids[i].nr);
-		cmask_init(&idle_smt_masks[i].cmask, t->shard_cids[i].base,
-			   t->shard_cids[i].nr);
+		cmask_init(&idle_smt_masks[i].cmask, t->shard_cids[i].base, t->shard_cids[i].nr);
 	}
 
 	/*
@@ -1803,8 +1773,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	gen = cell_cmasks_alloc(nr_cids);
 	if (!gen)
 		return -ENOMEM;
-	bpf_for(i, 0, MAX_CELLS)
-		cmask_copy(&gen->mask[i].cmask, topo_cids);
+	bpf_for(i, 0, MAX_CELLS) cmask_copy(&gen->mask[i].cmask, topo_cids);
 	cell_cmasks_publish(gen);
 
 	/* Per-cid contexts, read directly by userspace for stats. */
@@ -1816,7 +1785,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	nr_cid_ctxs = nr_cids;
 
 	/* Per-cid DSQs and the per-cid LLC cache in cpu_ctx. */
-	bpf_for(i, 0, nr_cids) {
+	bpf_for(i, 0, nr_cids)
+	{
 		dsq_id_t dsq_id = get_cid_dsq_id(i);
 		struct cpu_ctx __arena *cpu_ctx;
 
@@ -1831,19 +1801,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		cpu_ctx = &cpu_ctxs[i];
 		cpu_ctx->cpu = scx_bpf_cid_to_cpu(i);
 		if (enable_llc_awareness)
-			cpu_ctx->llc = t->cid[i].llc_idx >= 0 ?
-				t->cid[i].llc_idx : LLC_INVALID;
+			cpu_ctx->llc = t->cid[i].llc_idx >= 0 ? t->cid[i].llc_idx : LLC_INVALID;
 		else
 			cpu_ctx->llc = FAKE_FLAT_CELL_LLC;
 	}
 
 	/*
-	 * When CPU controller is disabled, initialize cgrp_ctx for all existing
-	 * cgroups. This replicates SCX cgroup_init callback behavior - all
-	 * cgroups get initialized in hierarchical order during scheduler attach.
-	 * The tracepoint handles new cgroups created after attach.
+	 * Initialize cgrp_ctx for all existing cgroups. This replicates SCX
+	 * cgroup_init callback behavior - all cgroups get initialized in
+	 * hierarchical order during scheduler attach. The tracepoint handles new
+	 * cgroups created after attach.
 	 */
-	if (cpu_controller_disabled) {
+	{
 		struct cgroup *iter_root __free(cgroup) = NULL;
 
 		scoped_guard(rcu)
@@ -1929,7 +1898,8 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 	struct cpu_ctx __arena *cctx;
 	u32 cell_id, cpu;
 
-	bpf_for(cell_id, 0, num_cells) {
+	bpf_for(cell_id, 0, num_cells)
+	{
 		struct cell_cpumask_data *cpumask_data;
 		struct scx_cmask __arena *cell_mask;
 
@@ -1941,13 +1911,13 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 
 		cell_mask = &gen->mask[cell_id].cmask;
 
-		bpf_for(cpu, 0, nr_possible_cpus) {
+		bpf_for(cpu, 0, nr_possible_cpus)
+		{
 			bool cpu_in_cell;
 			s32 cid;
 
 			if (cell_cpumask_data_test_cpu(cpumask_data, cpu, &cpu_in_cell)) {
-				scx_bpf_error("failed to decode cpumask for cell_id %d",
-					      cell_id);
+				scx_bpf_error("failed to decode cpumask for cell_id %d", cell_id);
 				return -EINVAL;
 			}
 
@@ -1987,13 +1957,13 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 
 			borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
 			if (!borrowable_data) {
-				scx_bpf_error("cell_id %d out of bounds for borrowable",
-					      cell_id);
+				scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
 				return -EINVAL;
 			}
 
 			borrowable = &gen->borrowable[cell_id].cmask;
-			bpf_for(cpu, 0, nr_possible_cpus) {
+			bpf_for(cpu, 0, nr_possible_cpus)
+			{
 				bool cpu_in;
 				s32 cid;
 
@@ -2084,15 +2054,14 @@ int apply_cell_config(void *ctx)
 	 * scx_urcu frees must run inside an RCU read section so that the
 	 * reclaim grace period waits them out, see scx_urcu_free().
 	 */
-	scoped_guard(rcu)
-		cell_cmasks_publish(gen);
+	scoped_guard(rcu) cell_cmasks_publish(gen);
 
-	bpf_for(cell_id, 0, num_cells) {
+	bpf_for(cell_id, 0, num_cells)
+	{
 		scoped_guard(rcu)
 		{
 			if (refresh_cell_llc_draining(cell_id)) {
-				scx_bpf_error("failed to refresh LLC draining for cell_id %d",
-					      cell_id);
+				scx_bpf_error("failed to refresh LLC draining for cell_id %d", cell_id);
 				return -EINVAL;
 			}
 		}

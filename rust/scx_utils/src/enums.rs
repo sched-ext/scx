@@ -16,6 +16,7 @@ pub struct Enums {
     pub SCX_RQ_CLK_VALID: u64,
     pub SCX_RQ_IN_WAKEUP: u64,
     pub SCX_RQ_IN_BALANCE: u64,
+    pub SCX_RQ_IN_DISPATCH: u64,
     pub SCX_DSQ_FLAG_BUILTIN: u64,
     pub SCX_DSQ_FLAG_LOCAL_ON: u64,
     pub SCX_DSQ_INVALID: u64,
@@ -41,10 +42,15 @@ pub struct Enums {
     pub SCX_KICK_IDLE: u64,
     pub SCX_KICK_PREEMPT: u64,
     pub SCX_KICK_WAIT: u64,
+    pub SCX_KICK_PREEMPT_LAZY: u64,
+    pub SCX_KICK_ALL_FLAGS: u64,
     pub SCX_ENQ_WAKEUP: u64,
     pub SCX_ENQ_HEAD: u64,
     pub SCX_ENQ_PREEMPT: u64,
+    pub SCX_ENQ_PREEMPT_LAZY: u64,
     pub SCX_ENQ_IMMED: u64,
+    pub SCX_ENQ_RESCUE: u64,
+    pub SCX_ENQ_BLOCKED: u64,
     pub SCX_ENQ_REENQ: u64,
     pub SCX_ENQ_LAST: u64,
     pub SCX_ENQ_CLEAR_OPSS: u64,
@@ -65,6 +71,7 @@ lazy_static::lazy_static! {
         SCX_RQ_CLK_VALID: read_enum("scx_rq_flags","SCX_RQ_CLK_VALID").unwrap_or(0),
         SCX_RQ_IN_WAKEUP: read_enum("scx_rq_flags","SCX_RQ_IN_WAKEUP").unwrap_or(0),
         SCX_RQ_IN_BALANCE: read_enum("scx_rq_flags","SCX_RQ_IN_BALANCE").unwrap_or(0),
+        SCX_RQ_IN_DISPATCH: read_enum("scx_rq_flags","SCX_RQ_IN_DISPATCH").unwrap_or(0),
         SCX_DSQ_FLAG_BUILTIN: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_BUILTIN").unwrap_or(0),
         SCX_DSQ_FLAG_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_LOCAL_ON").unwrap_or(0),
         SCX_DSQ_INVALID: read_enum("scx_dsq_id_flags","SCX_DSQ_INVALID").unwrap_or(0),
@@ -90,10 +97,15 @@ lazy_static::lazy_static! {
         SCX_KICK_IDLE: read_enum("scx_kick_flags","SCX_KICK_IDLE").unwrap_or(0),
         SCX_KICK_PREEMPT: read_enum("scx_kick_flags","SCX_KICK_PREEMPT").unwrap_or(0),
         SCX_KICK_WAIT: read_enum("scx_kick_flags","SCX_KICK_WAIT").unwrap_or(0),
+        SCX_KICK_PREEMPT_LAZY: read_enum("scx_kick_flags","SCX_KICK_PREEMPT_LAZY").unwrap_or(0),
+        SCX_KICK_ALL_FLAGS: read_enum("scx_kick_flags","SCX_KICK_ALL_FLAGS").unwrap_or(0),
         SCX_ENQ_WAKEUP: read_enum("scx_enq_flags","SCX_ENQ_WAKEUP").unwrap_or(0),
         SCX_ENQ_HEAD: read_enum("scx_enq_flags","SCX_ENQ_HEAD").unwrap_or(0),
         SCX_ENQ_PREEMPT: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT").unwrap_or(0),
+        SCX_ENQ_PREEMPT_LAZY: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT_LAZY").unwrap_or(0),
         SCX_ENQ_IMMED: read_enum("scx_enq_flags","SCX_ENQ_IMMED").unwrap_or(0),
+        SCX_ENQ_RESCUE: read_enum("scx_enq_flags","SCX_ENQ_RESCUE").unwrap_or(0),
+        SCX_ENQ_BLOCKED: read_enum("scx_enq_flags","SCX_ENQ_BLOCKED").unwrap_or(0),
         SCX_ENQ_REENQ: read_enum("scx_enq_flags","SCX_ENQ_REENQ").unwrap_or(0),
         SCX_ENQ_LAST: read_enum("scx_enq_flags","SCX_ENQ_LAST").unwrap_or(0),
         SCX_ENQ_CLEAR_OPSS: read_enum("scx_enq_flags","SCX_ENQ_CLEAR_OPSS").unwrap_or(0),
@@ -118,6 +130,7 @@ macro_rules! import_enums {
         rodata.__SCX_RQ_CLK_VALID = $crate::scx_enums.SCX_RQ_CLK_VALID;
         rodata.__SCX_RQ_IN_WAKEUP = $crate::scx_enums.SCX_RQ_IN_WAKEUP;
         rodata.__SCX_RQ_IN_BALANCE = $crate::scx_enums.SCX_RQ_IN_BALANCE;
+        rodata.__SCX_RQ_IN_DISPATCH = $crate::scx_enums.SCX_RQ_IN_DISPATCH;
         rodata.__SCX_DSQ_FLAG_BUILTIN = $crate::scx_enums.SCX_DSQ_FLAG_BUILTIN;
         rodata.__SCX_DSQ_FLAG_LOCAL_ON = $crate::scx_enums.SCX_DSQ_FLAG_LOCAL_ON;
         rodata.__SCX_DSQ_INVALID = $crate::scx_enums.SCX_DSQ_INVALID;
@@ -143,10 +156,15 @@ macro_rules! import_enums {
         rodata.__SCX_KICK_IDLE = $crate::scx_enums.SCX_KICK_IDLE;
         rodata.__SCX_KICK_PREEMPT = $crate::scx_enums.SCX_KICK_PREEMPT;
         rodata.__SCX_KICK_WAIT = $crate::scx_enums.SCX_KICK_WAIT;
+        rodata.__SCX_KICK_PREEMPT_LAZY = $crate::scx_enums.SCX_KICK_PREEMPT_LAZY;
+        rodata.__SCX_KICK_ALL_FLAGS = $crate::scx_enums.SCX_KICK_ALL_FLAGS;
         rodata.__SCX_ENQ_WAKEUP = $crate::scx_enums.SCX_ENQ_WAKEUP;
         rodata.__SCX_ENQ_HEAD = $crate::scx_enums.SCX_ENQ_HEAD;
         rodata.__SCX_ENQ_PREEMPT = $crate::scx_enums.SCX_ENQ_PREEMPT;
+        rodata.__SCX_ENQ_PREEMPT_LAZY = $crate::scx_enums.SCX_ENQ_PREEMPT_LAZY;
         rodata.__SCX_ENQ_IMMED = $crate::scx_enums.SCX_ENQ_IMMED;
+        rodata.__SCX_ENQ_RESCUE = $crate::scx_enums.SCX_ENQ_RESCUE;
+        rodata.__SCX_ENQ_BLOCKED = $crate::scx_enums.SCX_ENQ_BLOCKED;
         rodata.__SCX_ENQ_REENQ = $crate::scx_enums.SCX_ENQ_REENQ;
         rodata.__SCX_ENQ_LAST = $crate::scx_enums.SCX_ENQ_LAST;
         rodata.__SCX_ENQ_CLEAR_OPSS = $crate::scx_enums.SCX_ENQ_CLEAR_OPSS;

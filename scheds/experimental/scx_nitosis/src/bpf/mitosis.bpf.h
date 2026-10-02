@@ -34,7 +34,10 @@ extern struct cell __arena *cells;
  * dereference arena pointers handed to them never emit one and get rejected at
  * the first addr_space_cast without this.
  */
-#define MITOSIS_TOUCH_ARENA() do { asm volatile("" :: "r"(&arena)); } while (0)
+#define MITOSIS_TOUCH_ARENA()                   \
+	do {                                    \
+		asm volatile("" ::"r"(&arena)); \
+	} while (0)
 
 enum mitosis_constants {
 
@@ -48,8 +51,7 @@ enum mitosis_constants {
 	IDLE_PICK_RETRIES = 16,
 
 	/* fixed backing size of one task cmask, capacity for MAX_CPUS cids */
-	TASK_CMASK_SIZE = sizeof(struct scx_cmask) +
-			  CMASK_NR_WORDS(MAX_CPUS) * sizeof(u64),
+	TASK_CMASK_SIZE = sizeof(struct scx_cmask) + CMASK_NR_WORDS(MAX_CPUS) * sizeof(u64),
 };
 
 /*
@@ -100,8 +102,7 @@ extern struct mitosis_topo __arena *topo;
  */
 union shard_cmask {
 	struct scx_cmask cmask;
-	u8 storage[sizeof(struct scx_cmask) +
-		   CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS) * sizeof(u64)];
+	u8 storage[sizeof(struct scx_cmask) + CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS) * sizeof(u64)];
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 extern union shard_cmask __arena *idle_masks;
@@ -142,8 +143,8 @@ extern struct cell_cmasks __arena *cell_masks;
 extern struct cpu_ctx __arena *cpu_ctxs;
 
 /* in mitosis.bpf.c, shared with llc_aware.bpf.h */
-static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand,
-						u32 shard_base, u32 nr_shards, s32 prev_cid);
+static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand, u32 shard_base, u32 nr_shards,
+						s32 prev_cid);
 
 /*
  * task_ctx is the per-task information kept by scx_nitosis
@@ -169,7 +170,7 @@ struct task_ctx {
 	 * lending cell's per-CPU DSQ vtime with this task's execution.
 	 */
 	bool borrowed;
-	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
+	/* Last known cgroup ID for detecting cgroup moves. */
 	u64 cgid;
 	/* Which LLC this task is assigned to */
 	s32 llc;
@@ -213,8 +214,7 @@ static inline struct task_struct *dsq_peek(u64 dsq_id)
 	return NULL;
 }
 
-static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx __arena *cctx,
-			     s64 delta)
+static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx __arena *cctx, s64 delta)
 {
 	cctx->cstats[cell][idx] += delta;
 }
