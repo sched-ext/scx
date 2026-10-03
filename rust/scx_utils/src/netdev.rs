@@ -14,7 +14,7 @@ use anyhow::Result;
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NetDev {
     iface: String,
-    node: usize,
+    node: Option<usize>,
     pub irqs: BTreeMap<usize, Cpumask>,
     irq_hints: BTreeMap<usize, Cpumask>,
     original_irqs: BTreeMap<usize, Cpumask>,
@@ -25,7 +25,8 @@ impl NetDev {
         &self.iface
     }
 
-    pub fn node(&self) -> usize {
+    /// NUMA node of the device, or None if unknown or without online CPUs.
+    pub fn node(&self) -> Option<usize> {
         self.node
     }
 
@@ -56,6 +57,18 @@ impl NetDev {
     }
 }
 
+/// Read the NUMA node of a device from @path. Return None if it is unknown
+/// (-1), missing, invalid or has no online CPUs.
+fn read_numa_node(path: &Path, node_root: &Path) -> Option<usize> {
+    let node: i64 = read_from_file(path).ok()?;
+    let node = usize::try_from(node).ok()?;
+
+    // The kernel's per-node cpulist contains only online CPUs.
+    let cpulist = fs::read_to_string(node_root.join(format!("node{node}/cpulist"))).ok()?;
+    let cpus = crate::read_cpulist(&cpulist).ok()?;
+    (!cpus.is_empty()).then_some(node)
+}
+
 pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
     let mut netdevs: BTreeMap<String, NetDev> = BTreeMap::new();
 
@@ -76,7 +89,7 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
 
         let node_path_raw = format!("/sys/class/net/{iface}/device/numa_node");
         let node_path = Path::new(&node_path_raw);
-        let node = read_from_file(node_path).unwrap_or(0_usize);
+        let node = read_numa_node(node_path, Path::new("/sys/devices/system/node"));
         let mut irqs = BTreeMap::new();
         let mut irq_hints = BTreeMap::new();
 
