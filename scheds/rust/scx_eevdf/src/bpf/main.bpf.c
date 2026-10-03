@@ -659,6 +659,18 @@ queue:
 	 * synchronously under the rq lock, instead of queueing it here and
 	 * delivering an SCX_KICK_PREEMPT later through irq_work.
 	 *
+	 * The reschedule is a lazy one, as fair.c asks for,
+	 *
+	 *	preempt:
+	 *		...
+	 *		resched_curr_lazy(rq);
+	 *
+	 * so that the running task gives the CPU up at its next return to
+	 * user space or tick. A waker on its way to block, as a pipe writer
+	 * is, gets there first and is not preempted at all. Where the kernel
+	 * has no SCX_ENQ_PREEMPT_LAZY it reads as 0, and SCX_ENQ_PREEMPT
+	 * stands in.
+	 *
 	 * Do not combine this with SCX_ENQ_IMMED. A running task can have a
 	 * protected slice, in which case the kernel refuses the preemption.
 	 * An IMMED insertion would then bounce @p back through ops.enqueue(),
@@ -691,7 +703,7 @@ queue:
 						     tnow);
 			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
-					   slice, enq_flags | SCX_ENQ_PREEMPT);
+					   slice, enq_flags | (SCX_ENQ_PREEMPT_LAZY ?: SCX_ENQ_PREEMPT));
 			return;
 		}
 	}
