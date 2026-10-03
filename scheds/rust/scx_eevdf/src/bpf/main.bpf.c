@@ -740,6 +740,8 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 		return;
 	now = scx_bpf_now();
 	tnow = cid_clock_task_owned(cid, now);
+	/* The pick dequeues the delayed members it would run, see delay_keep(). */
+	delay_prune(cid, now, false);
 
 	/*
 	 * Tasks that were waiting on their cgroup's cpu.max go back in the
@@ -916,6 +918,9 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 			hrtick_start(cid, tnow);
 		return;
 	}
+
+	/* An idle cid's picks go through its delayed members. */
+	delay_prune(cid, now, true);
 
 	/*
 	 * Nothing to run: the CPU is going idle. ops.update_idle() will not

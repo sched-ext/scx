@@ -825,6 +825,159 @@ static void delay_settle(task_ctx_t *tctx, u64 now)
 }
 
 /*
+ * DELAY_DEQUEUE, as fair.c does it: a task that blocks over-served is left
+ * in the tree,
+ *
+ *	if (sched_feat(DELAY_DEQUEUE) && delay &&
+ *	    !entity_eligible(cfs_rq, se)) {
+ *		...
+ *		set_delayed(se);
+ *		return false;
+ *	}
+ *
+ * still counted in the weighted average V while it sleeps, until the pick
+ * that would run it dequeues it or its wakeup requeues it. A pack keeps
+ * such a task as a member the same way, in one of @pk->delayed. Taken out
+ * of V the moment it blocked instead, it left a lower V behind, and the
+ * task picked next looked over-served: a pipe partner it woke preempted it
+ * on every other wakeup, which fair.c never does.
+ */
+
+/*
+ * The lag a delayed member leaves with, update_entity_lag():
+ *
+ *	if (se->sched_delayed) {
+ *		vlag = max(vlag, se->vlag);
+ *		if (sched_feat(DELAY_ZERO))
+ *			vlag = min(vlag, 0);
+ *	}
+ *
+ * The debt it blocked with is what it owes at most, and it leaves with no
+ * credit.
+ */
+static s64 delay_lag_at(task_ctx_t *tctx, u64 vref)
+{
+	s64 limit = tctx->delay_limit;
+	s64 lag;
+
+	lag = (s64)(vref - tctx->se.vruntime);
+	if (lag > limit)
+		lag = limit;
+	else if (lag < -limit)
+		lag = -limit;
+	if (lag < tctx->se.vlag)
+		lag = tctx->se.vlag;
+
+	return lag < 0 ? lag : 0;
+}
+
+static s64 delay_lag(task_ctx_t *tctx, pack_t *pk, u64 now)
+{
+	return delay_lag_at(tctx, pack_vref_place(pk, cid_clock_task_at(pk->cid, now)));
+}
+
+/*
+ * Keep @tctx, which is blocking, a member of @pk. False when the pack has
+ * no slot left, and the task leaves with a debt instead, see
+ * delay_settle().
+ */
+static bool delay_keep(pack_t *pk, task_ctx_t *tctx)
+{
+	u32 i;
+
+	bpf_for(i, 0, DELAY_SLOTS) {
+		if (!READ_ONCE(pk->delayed[i]) &&
+		    !__sync_val_compare_and_swap(&pk->delayed[i], 0,
+						 (u64)tctx)) {
+			tctx->delay_slot = i;
+			__sync_fetch_and_add(&pk->delayed_w, tctx->se.vjoin_w);
+			WRITE_ONCE(tctx->delayed, 1);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Release @tctx's slot in @pk, which it no longer holds as a delayed
+ * member.
+ */
+static void delay_unslot(pack_t *pk, task_ctx_t *tctx)
+{
+	u32 slot = tctx->delay_slot;
+
+	if (!pk)
+		return;
+	__sync_fetch_and_sub(&pk->delayed_w, tctx->se.vjoin_w);
+	if (slot < DELAY_SLOTS)
+		__sync_val_compare_and_swap(&pk->delayed[slot], (u64)tctx, 0);
+}
+
+/*
+ * Take the delayed @tctx out of its pack for good, with the lag
+ * delay_lag() gives it. Whoever clears @tctx->delayed does it, the pick
+ * on its cid or what the task does elsewhere meanwhile; 0 for the other.
+ *
+ * Global functions, this one and delay_wake(): verified once, rather than
+ * at each of the paths that reach them, which took ops.dispatch() past
+ * the verifier's instruction limit.
+ */
+__noinline int delay_dequeue(task_ctx_t *tctx __arg_arena, u64 now)
+{
+	pack_t *pk;
+
+	TOUCH_ARENA();
+
+	if (!tctx || __sync_val_compare_and_swap(&tctx->delayed, 1, 0) != 1)
+		return 0;
+	pk = tctx->se.vpack;
+	if (pk)
+		tctx->se.vlag = delay_lag(tctx, pk, now);
+	delay_unslot(pk, tctx);
+	task_vref_leave(tctx);
+
+	return 1;
+}
+
+/*
+ * The pick on @cid, for its delayed members: pick_next_entity() dequeues a
+ * delayed entity when pick_eevdf() chooses it, which it only does once the
+ * entity is eligible, and an idle cid's picks go through all of them. Take
+ * out the members that are eligible, or all of them with @all.
+ *
+ * A global function: verified once, not at both of ops.dispatch()'s calls,
+ * which took that program past the verifier's instruction limit.
+ */
+__noinline int delay_prune(s32 cid, u64 now, u32 all)
+{
+	pack_t *pk;
+	u64 tnow;
+	u32 i;
+
+	TOUCH_ARENA();
+
+	if (!cid_valid(cid))
+		return 0;
+	pk = cid_pack(cid);
+	tnow = cid_clock_task_at(cid, now);
+	bpf_for(i, 0, DELAY_SLOTS) {
+		task_ctx_t *t = (task_ctx_t *)READ_ONCE(pk->delayed[i]);
+
+		if (!t)
+			continue;
+		if (!READ_ONCE(t->delayed) || t->se.vpack != pk) {
+			__sync_val_compare_and_swap(&pk->delayed[i], (u64)t, 0);
+			continue;
+		}
+		if (all || !time_after(t->se.vruntime, pack_vref_place(pk, tnow)))
+			delay_dequeue(t, now);
+	}
+
+	return 0;
+}
+
+/*
  * The cid a waking task goes back to without being placed, or -1.
  *
  * ttwu_runnable() runs before select_task_rq(). A delayed task is still on
@@ -861,6 +1014,16 @@ static s32 delay_requeue_cid(const struct task_struct *p,
 {
 	s32 cid = tctx->delay_cid;
 
+	/*
+	 * A delayed member is still on its pack, ttwu_runnable() exactly:
+	 * it goes back there whatever its lag, see delay_keep().
+	 */
+	if (!no_delay_requeue && READ_ONCE(tctx->delayed) && tctx->se.vpack) {
+		cid = tctx->se.vpack->cid;
+		if (is_restricted(p) && !cid_allowed(p, cid))
+			return -1;
+		return cid;
+	}
 	if (no_delay_requeue || !cid_valid(cid))
 		return -1;
 	if (is_restricted(p) && !cid_allowed(p, cid))
@@ -869,6 +1032,54 @@ static s32 delay_requeue_cid(const struct task_struct *p,
 		return -1;
 
 	return cid;
+}
+
+/*
+ * A delayed member waking on the pack it is still a member of is
+ * requeue_delayed_entity(): it keeps its place, vruntime and deadline,
+ * unless the lag update_entity_lag() gives it has moved, and is then placed
+ * again from that lag. Waking anywhere else, it is dequeued from its pack
+ * first, and placed like any other task. Returns 1 when the task was
+ * requeued where it was and needs no placement.
+ *
+ * The lag is taken against the reference as last charged, without the
+ * running task's progress since: the requeue is done before anything calls
+ * update_curr(),
+ *
+ *	if (flags & ENQUEUE_DELAYED) {
+ *		requeue_delayed_entity(se);
+ *		return;
+ *	}
+ *
+ * and only wakeup_preempt_fair() brings the running task up to date after
+ * it. Against the projected reference, a task that blocked a moment ago
+ * came back at no lag, eligible, and preempted the task that woke it.
+ */
+__noinline int delay_wake(task_ctx_t *tctx __arg_arena, pack_t *pk __arg_arena,
+			  u64 now)
+{
+	u64 vref;
+	s64 lag;
+
+	TOUCH_ARENA();
+
+	if (!tctx || !READ_ONCE(tctx->delayed))
+		return 0;
+	if (!pk || tctx->se.vpack != pk) {
+		delay_dequeue(tctx, now);
+		return 0;
+	}
+	vref = pack_vref(pk);
+	lag = delay_lag_at(tctx, vref);
+	if (__sync_val_compare_and_swap(&tctx->delayed, 1, 0) != 1)
+		return 0;
+	delay_unslot(pk, tctx);
+	if ((s64)(vref - tctx->se.vruntime) == lag)
+		return 1;
+	tctx->se.vlag = lag;
+	task_vref_leave(tctx);
+
+	return 0;
 }
 
 /*
@@ -920,6 +1131,9 @@ static void place_task(s32 cid, const struct task_struct *p,
 	/* The pack's progress is in its own task clock. */
 	u64 tnow = cid_valid(cid) ? cid_clock_task_at(cid, now) : now;
 	pack_t *pk = cid_valid(cid) ? task_pack(tctx, cid) : NULL;
+
+	if (READ_ONCE(tctx->delayed) && delay_wake(tctx, pk, now))
+		return;
 
 	/*
 	 * A displaced current task keeps its position on its own cid. When
@@ -1008,6 +1222,9 @@ static void reweight_task(const struct task_struct *p, task_ctx_t *tctx,
 
 	if (w == old)
 		return;
+	/* A delayed member takes its new weight off its pack. */
+	if (READ_ONCE(tctx->delayed))
+		delay_dequeue(tctx, scx_bpf_now());
 	if (dequeued && tctx->se.vpack)
 		tctx->se.vlag = task_lag_at(p, tctx, tctx->se.vpack, scx_bpf_now());
 	task_rescale(tctx, w);

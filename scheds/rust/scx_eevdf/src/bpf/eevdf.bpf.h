@@ -180,6 +180,9 @@ struct task_ctx {
 	u64 runnable_at;	/* when the last wakeup made the task runnable */
 	u64 runnable_est;	/* fraction of wall time runnable, see task_runnable_update() */
 	u64 last_sleep_at;	/* last block, used to decay WA_WEIGHT task load */
+	u32 delayed;		/* asleep and still a member of @se.vpack, see delay_keep() */
+	u32 delay_slot;		/* its slot in the pack's @delayed */
+	s64 delay_limit;	/* lag_limit() when it blocked */
 	s32 delay_cid;		/* pack a negative @vlag is owed to, see delay_settle() */
 	u64 delay_vref;		/* its reference when the task left it */
 	u64 delay_w;		/* its weight without the task */
@@ -311,6 +314,9 @@ struct newidle_stats {
 	u32 ratio[NEWIDLE_LEVELS];
 };
 
+/* Delayed members a pack keeps track of; more fall back to delay_settle(). */
+#define DELAY_SLOTS	8
+
 /*
  * A pack, cfs_rq: the entities queued on one cid, in deadline order, and the
  * one running there, with the reference all of them are placed against and
@@ -318,6 +324,7 @@ struct newidle_stats {
  */
 struct pack {
 	u64 vsum_w;
+	u64 delayed_w;		/* of @vsum_w, the members asleep, see delay_keep() */
 	u64 vref;
 	u64 vref_rem;
 	u64 empty_gen;		/* bumped when the last member leaves */
@@ -329,6 +336,8 @@ struct pack {
 	u64 curr_request;	/* request for which it was picked */
 	u64 curr_vprot;		/* protected vruntime, see set_protect_slice() */
 	s32 cid;		/* the cid whose task clock the pack runs in */
+	/* members asleep but kept in the reference, see delay_keep() */
+	u64 delayed[DELAY_SLOTS];
 	struct scx_edq edq;
 };
 
@@ -464,6 +473,18 @@ static __always_inline struct cid_ctx __arena *cid_ctx(s32 cid)
 static __always_inline pack_t *cid_pack(s32 cid)
 {
 	return &cctxs[cid].pack;
+}
+
+/*
+ * The weight of @pk's members that are runnable: what is there to run, not
+ * the members DELAY_DEQUEUE keeps while they sleep. fair.c counts those in
+ * h_nr_queued and the load average, but not in h_nr_runnable.
+ */
+static __always_inline u64 pack_runnable_w(pack_t *pk)
+{
+	u64 w = READ_ONCE(pk->vsum_w), d = READ_ONCE(pk->delayed_w);
+
+	return w > d ? w - d : 0;
 }
 
 /*

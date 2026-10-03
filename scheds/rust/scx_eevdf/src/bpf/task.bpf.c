@@ -202,8 +202,6 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 		lag = task_lag_at(p, tctx, pk, now);
 		tctx->se.vlag = lag;
 	}
-	task_vref_leave(tctx);
-
 	/*
 	 * A task that blocks over-served is what fair.c keeps in the tree,
 	 *
@@ -215,10 +213,22 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 	 *	}
 	 *
 	 * and only for a sleep: a task dequeued for a change of its
-	 * parameters is put straight back. Remember what is needed to pay
-	 * the debt off with the pack's progress when the task returns, see
-	 * delay_settle(). The reference is read after the task has left,
-	 * since that is the value that goes on moving.
+	 * parameters is put straight back, and an exiting one is not left
+	 * behind either. It stays a member of its pack, see delay_keep().
+	 */
+	if (!no_delay_dequeue && (deq_flags & SCX_DEQ_SLEEP) && lag < 0 &&
+	    pk && tctx->se.vpack == pk && !(p->flags & PF_EXITING)) {
+		tctx->delay_limit = (s64)lag_limit(p, tctx);
+		if (delay_keep(pk, tctx))
+			return;
+	}
+	task_vref_leave(tctx);
+
+	/*
+	 * A pack with no slot left lets the task go and remembers what is
+	 * needed to pay the debt off with the pack's progress when the task
+	 * returns, see delay_settle(). The reference is read after the task
+	 * has left, since that is the value that goes on moving.
 	 */
 	if (!no_delay_dequeue && (deq_flags & SCX_DEQ_SLEEP) && lag < 0 &&
 	    pk) {
@@ -519,6 +529,9 @@ void BPF_STRUCT_OPS(eevdf_set_cmask, struct task_struct *p,
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	if (READ_ONCE(tctx->delayed) && tctx->se.vpack &&
+	    !cmask_test(tctx->se.vpack->cid, cmask))
+		delay_dequeue(tctx, scx_bpf_now());
 	cid = tctx->delay_cid;
 	if (cid_valid(cid) && !cmask_test(cid, cmask))
 		delay_settle(tctx, scx_bpf_now());
@@ -552,6 +565,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init_task, struct task_struct *p,
 	WRITE_ONCE(at->slice, 0);
 	WRITE_ONCE(at->enq_flags, 0);
 	WRITE_ONCE(tctx->se.vpack, NULL);
+	WRITE_ONCE(tctx->delayed, 0);
 	tctx->delay_cid = -1;
 	tctx->recent_used_cid = -1;
 	WRITE_ONCE(tctx->grp, NULL);
@@ -583,6 +597,8 @@ void BPF_STRUCT_OPS(eevdf_exit_task, struct task_struct *p,
 		return;
 	tctx = ref->tctx;
 	ref->tctx = NULL;
+	if (READ_ONCE(tctx->delayed))
+		delay_dequeue(tctx, scx_bpf_now());
 	ret = scx_edq_task_detach(&tctx->se.edq.common);
 	if (ret) {
 		scx_bpf_error("EDQ detach failed for pid %d: %d", p->pid, ret);
