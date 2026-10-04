@@ -1,6 +1,7 @@
 .agent/
 docs/*
 !docs/README.md
+!docs/STRUCTURE.md
 !docs/archive/
 !docs/archive/**
 !docs/ANALYSIS_DIABLO_CHOP_2026-08-02.md
@@ -15,10 +16,19 @@ docs/*
 !docs/TOOLING.md
 !docs/KERNEL_TOOL_INVENTORY_2026-08-23.md
 !docs/KOVAAKS_KICK_ABBA_2026-09-28.md
+!docs/AUDIT_PREDICT_VERIFY_2026-08-22.md
+!docs/research/
+!docs/research/**
+!docs/meeting/
+!docs/meeting/index.html
+docs/research/**/__pycache__/
+docs/research/**/*.pyc
+docs/research/**/build/
 
 # Benchmark binaries and local captures
 bench/*
 !bench/.gitignore
+!bench/README.md
 !bench/*.sh
 !bench/*.c
 !bench/scx_cake_bench_capture.sh

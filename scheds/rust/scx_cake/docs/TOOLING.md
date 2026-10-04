@@ -1,5 +1,12 @@
 # scx_cake troubleshooting tooling
 
+This is a **2026-09-02 inventory**, not a current installation or command
+availability guarantee. Start with the [bench index](../bench/README.md) for
+in-tree tool status and the [documentation map](README.md) for current research.
+Paths in the tables mix in-tree `bench/` tools with companion-repository
+`bench/` and `runs/` paths; resolve them in the owning repository before use.
+Use the maintained `cakebench` interface for measurements and permission handling.
+
 Every tool installed on the dev box (2026-09-02, 9800X3D, kernel 7.2.2-cachyos)
 that can measure scheduling, CPU, IO, networking, GPU, or a game, with what it
 detects and how it is run here. Tiers: **validity** (is the arm what it claims),
@@ -18,7 +25,7 @@ scoped helpers are listed where root is needed.
 | `bench/wake_migsplit.py`, `bench/wake_occupant.py` | wake latency split by migrated/not; who occupied the target CPU | cold-vs-warm placement cost, occupant class | `python3 bench/wake_migsplit.py <perf.data>` | diagnostic |
 | `bench/migrate_cause.py`, `bench/percpu_wake.py` | migration causes; per-CPU wake counts | routing skew | see file docstrings | diagnostic |
 | placement census (`cake_stats` PERCPU_ARRAY, probe commits) | which select_cpu arm placed each wake; holds >300 µs / >1 ms by queue kind | the arm behind a hold; local-DSQ (unstealable) share | build a PROBE commit, attach, read the `arms` lines at detach | diagnostic |
-| `cake-bpfstats` (helper) | kernel `bpf_stats_enabled` + `bpftool prog show`: run count and ns/run per struct_ops callback | scheduler self-cost on the game's cores (1.1.3 0.8% of a CPU, nightly 2.2-2.8%) | `sudo -n /usr/local/libexec/cake-bpfstats enable`, attach 12 s, `... show > x.json`, `... disable` | diagnostic |
+| `cake-bpfstats` (helper) | kernel `bpf_stats_enabled` + `bpftool prog show`: run count and ns/run per struct_ops callback | scheduler self-cost on the game's cores (1.1.3 0.8% of a CPU, nightly 2.2-2.8%) | through the maintained capture harness; it owns stats enable/read/restore | diagnostic |
 | `bench/rt_displace_capture.sh` | 30 s system-wide sched trace + samplers on one clock for §G93 (RT displacements of the game's threads) | the hold length per displacer, hop vs stay, the burst after | `bench/rt_displace_capture.sh 30` (user; tracefs events readable, schedstats on) | measurement |
 | `bench/rt_displace.py` | joins the trace into T1–T5: holds, outcomes, burst-after-hop vs after-stay, wake-side occupant split | the §G93 gate inequality | `rt_displace.py -i perf.data --tids sched_a.txt --main TID` | measurement |
 | `bench/frame_attrib.py` | joins a MangoHud frame log with the same trace: per frame, the frame thread's run / RT hold / preempt / wait / block ms, hops, the compositor's longest burst; slow frames classed (rt_displaced, preempted, wait, kwin_late, idle_wait, cpu_bound) | which class owns the 1 % / 0.1 % lows, scheduler share vs compositor share | `frame_attrib.py --log mangohud.csv -i perf.data --main TID --kwin TID [--log-start S]` | measurement |

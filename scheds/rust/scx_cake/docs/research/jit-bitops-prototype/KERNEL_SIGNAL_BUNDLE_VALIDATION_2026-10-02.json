@@ -1,0 +1,97 @@
+{
+  "created": "2026-10-03T03:02:44.742513+00:00",
+  "patch": "0001-cake-kernel-full-signals-experimental-cachyos-7.2.8.patch",
+  "sha256": "081d13aa37735b023c7109ce450b68a4e9ded155f83f347a6ea77fbb3468718e",
+  "files": {
+    "arch/x86/net/bpf_jit_comp.c": {
+      "before_sha256": "16c89fcd141c3386a0967d2caf63601092a0f4b7f3d2d9f4048f1490d2a26c75",
+      "after_sha256": "20f81c95173015321af6197ac922448a21ecb0718f42df23f760af84ee815882"
+    },
+    "drivers/dma-buf/dma-fence.c": {
+      "before_sha256": "dd990e0c96a12c0a5794efb3e07230abcd1d7fb94b71f40ec7d5b94c7c586b0b",
+      "after_sha256": "943721c82f13c28985ad2cb538bc70a836dc9186f67030fca569a5104bcd9ddc"
+    },
+    "drivers/dma-buf/sync_file.c": {
+      "before_sha256": "105f0913633a872f85c47120266beedd308bc5192a4d36950240bac2ca87c2fe",
+      "after_sha256": "e02fba3f0a3c065278e106ff9df4f6b277e5f9a98ee8ed590e5fd453f14f3610"
+    },
+    "drivers/gpu/drm/drm_syncobj.c": {
+      "before_sha256": "87bb07d2b2558a906be68fad3a536139b3c96e715cd0b06db501547d990318a3",
+      "after_sha256": "9867eca3116aafdca0c31b4210cc3fa67be7eb9999887b16591bb24c2efbcb5f"
+    },
+    "drivers/input/evdev.c": {
+      "before_sha256": "8405e9aa72effd33bb69213d0bca8335a9586746c88a3c58ac4b57247f497d5f",
+      "after_sha256": "68b8b880621874c99aea052db467516616920512a33cf92b165cd43daaa7ff97"
+    },
+    "fs/eventfd.c": {
+      "before_sha256": "ceea005bec9ca9eeabced64eeb4d8d3377be31382b9ff8824a1aa6989ea9b546",
+      "after_sha256": "3cfeac7c3f48f34fbbf6ee5decca6a373ad61cef80f419e278bc101ebfbf37a8"
+    },
+    "fs/eventpoll.c": {
+      "before_sha256": "97a193bd04baa7c502de3ac039ac52cd271d9268fe50978f093c286bfefffdfe",
+      "after_sha256": "fd301b164da6562c08168cbe242c10c138f64c5d34597f424f56f082fe884abf"
+    },
+    "include/linux/eventfd.h": {
+      "before_sha256": "3e4be8a75902ad79fb7f777a4e7e653850aa9cd592aceaf41f1ed5c905fda293",
+      "after_sha256": "82ec58df95d661629b1697d74f3914bd703f60b7c9e71e220414dcd66e0ceb12"
+    },
+    "include/linux/filter.h": {
+      "before_sha256": "4b0ba3487c632e62661a053ddc648e4f3cf32d028ee27fced6306aa745f400ad",
+      "after_sha256": "16fbd3c11ab8b25f371f65e2f04c4587bf5e66e5cf8923ae0b18db9dd1875ebe"
+    },
+    "include/linux/sched/ext.h": {
+      "before_sha256": "a570147bc50059f23764ba831948caacce5d486af15ffaccf40b3a993414d137",
+      "after_sha256": "573204b8fa6aa05860562b7b1590da04cc1ba42ff80e7d05e451d6cbbc94ec41"
+    },
+    "include/linux/sched/wake_signal.h": {
+      "before_sha256": null,
+      "after_sha256": "996421bc7ca14498429970405522bb5b51adf8c8fd822fec61b61f28c472e290"
+    },
+    "kernel/bpf/helpers.c": {
+      "before_sha256": "ccdef35d186b6ca93abf4032b2f776930635ebf89deff7139f55ae897dabe115",
+      "after_sha256": "86e746e97a25a750a466951a1f88b1bab8b3d4c20f657af7932d5a7c63260bcb"
+    },
+    "kernel/bpf/verifier.c": {
+      "before_sha256": "2ac66e116d13ffb5689de71bd8c7a338a8a9aa7ce3a35b4197f731accd9e286f",
+      "after_sha256": "7b3b476399fd7b04f0a02322f446b7c995b27e7902d2996ec045aa605ee8577e"
+    },
+    "kernel/sched/core.c": {
+      "before_sha256": "8de9cba3dffab247241e767f86028e49e2445f54ad5623329484d8708ee8a526",
+      "after_sha256": "fffa89c194ba171bbd27bd197d90c0e3cfd3a64b847bebd1ab98a8d9122b2fd7"
+    },
+    "kernel/sched/ext/ext.c": {
+      "before_sha256": "6f2513a6820d6c37eb05efab17791413ab417ac06114ba583bfcf561c072f5d6",
+      "after_sha256": "be588f3b28f811d48efa8eafad718566c22e2c40c1f0dce757a03077a044a907"
+    },
+    "kernel/sched/ext/ext.h": {
+      "before_sha256": "6ca7d93490cc0628df1158fecd22a7bb4c46bca77bd96521659d0ee6af179559",
+      "after_sha256": "0e50c1e2f9e43bb718941dc6651ba7811296a471f3f2afa3758787bf914c156c"
+    },
+    "kernel/sched/ext/internal.h": {
+      "before_sha256": "286e71c1355d3a71fdd19844674d3c0ee8bbb6f57592f4da062e5bb27bd732b7",
+      "after_sha256": "50d9edd3bae922e506e6fcfe19c2bb9ea50c6354f3c09f9b48a0ac1afbaf754e"
+    },
+    "kernel/sched/sched.h": {
+      "before_sha256": "59faad6dae04953390cc85635a36370b61513f13847326e8406134c825beb245",
+      "after_sha256": "305bc507324fc0faa2f05fa6e18aae7d0f507f0308f935964d18f62c109f8512"
+    },
+    "kernel/sched/wait.c": {
+      "before_sha256": "05a9c8d9b1b4cb3a63e1dd59744adf24c8912d108307f46d7e3a6b1f26013e5f",
+      "after_sha256": "65daef1a24cfdbb8fe1394aa0340c50b2469ffc8eca12d6894f57ffbd5791f30"
+    },
+    "tools/testing/selftests/bpf/prog_tests/scalar_bitops.c": {
+      "before_sha256": null,
+      "after_sha256": "47ceeb69e5bbd5eda645446aa57d8bc8db351ec6c108da21b8aa8c907b47f32f"
+    },
+    "tools/testing/selftests/bpf/progs/scalar_bitops.c": {
+      "before_sha256": null,
+      "after_sha256": "0df5a5d0458877dff10f77745a75fb68c52333d4ab45129d39da21fbc2f8282c"
+    }
+  },
+  "clean_apply": true,
+  "zero_fuzz_and_offset": true,
+  "reverse_check": true,
+  "fixture_excluded": true,
+  "workspace": "/home/ritz/Documents/Repo/scx/target_signals_20261002",
+  "note": "Reconstructed after user cargo clean; functional kernel implementation previously passed production VM activation and 20-case contract; restored source differs in formatting only. Additional debug matrix was interrupted."
+}

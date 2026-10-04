@@ -1,42 +1,85 @@
-# scx_cake/docs — what is here, and where the rest went
+# Cake documentation and folder map
 
-**2026-09-15 tidy:** root holds live material only (cited from `STATE.md`, source,
-or backing an open experiment). Completed dated reviews and analyses moved to
-[`archive/`](archive/) and are tracked there. Untracked 2026-05/06 bulk data and
-scratch (`*_2026-05-23.*`, `research/`, `superpowers/`, `glm-5.2-findings/`) went to
-the vault tarball below and were removed here. Earlier restructures: 2026-08-18
-(root pruned to live files) and 2026-08-06 (261 MB / 149 files to the vault).
+Reviewed 2026-09-29. Start with current source and status; dated documents retain
+claims about the exact builds they examined. Paths are kept stable for existing
+citations and evidence manifests.
 
-`docs/*` is gitignored (`.gitignore:2`). `docs/archive/` and an explicit
-whitelist of docs-root files are tracked; anything else here exists only on
-this machine. **If a doc is worth citing from `STATE.md`,
-whitelist and track it** — a citation to an untracked file is a dangling
-reference for everyone else.
+## Start here
 
-## Start here, not in a dated file
+See the [structure map and complete file inventory](STRUCTURE.md) for a diagram,
+Git/local-file distinctions, and proposed improvements to the physical layout.
 
-| Question | Where |
+| Need | Document |
 |---|---|
-| Current state, scoreboard, open gaps | [`../STATE.md`](../STATE.md) |
-| Which experiment to run next | the `§` registry in [`../STATE.md`](../STATE.md) |
-| Rules, design laws, invariants | [`../CLAUDE.md`](../CLAUDE.md) |
-| How the scheduler behaves | [`../DESIGN.md`](../DESIGN.md) |
-| How to build / bench | the `sched-ext-dev` skill |
+| Build, supported flags, hardware limits | [User README](../README.md) |
+| Current scheduling behavior | [Design](../DESIGN.md) |
+| Current status and open validation | [State](../STATE.md), newest entry first |
+| Local development rules | Repository-root `CLAUDE.md` and `.agents/AGENTS.md` (local files, not distributed docs) |
+| Measurement method and result limits | [Performance](PERFORMANCE.md) |
+| September 28 nightly game evidence | [KovaaK's A/B report](KOVAAKS_KICK_ABBA_2026-09-28.md) |
+| Instruction costs and JIT proposal | [Cost audit](AUDIT_OPERATION_COST_2026-09-15.md), [research index](research/README.md) |
+| Unary fastcall patch and further kernel optimizations | [Release/VM findings and scoped next experiments](research/jit-bitops-prototype/FASTCALL_KERNEL_REVIEW_2026-10-01.md) |
+| Kernel DSQ caching prototype and simulation | [Direct index implementation, results and open debug gate](research/jit-bitops-prototype/DSQ_DIRECT_INDEX_2026-10-02.md) |
+| Meeting presentation | [Local meeting page](meeting/index.html) |
+| Tools and commands | [Bench index](../bench/README.md), [tool inventory](TOOLING.md) |
+| Previous decisions and rejected ideas | [Archive index](archive/README.md) |
 
-## Layout
+The old `sched-ext-dev` skill path in historical notes is absent in this checkout.
+This session used the installed `sched-ext-development` skill. Consult the skills
+available in your environment instead of assuming that old path exists.
 
-| Location | Holds |
+## Folder ownership
+
+| Location | Purpose and handling |
 |---|---|
-| `docs/` (root) | live material only: standing references (`TOOLING.md`, `KERNEL_TOOL_INVENTORY`, `RT_PLACEMENT_LOGIC`, `PERFORMANCE.md`), the current cost audit (`AUDIT_OPERATION_COST_2026-09-15.md`), registered research, and the dated files `STATE.md` cites |
-| [`archive/`](archive/) | completed dated reviews, audits, plans and the EEVDF campaign gate log; tracked, so a `STATE.md` citation into it resolves for everyone |
+| `src/`, `src/bpf/` | Maintained Rust loader and BPF scheduler source; the root README maps individual files |
+| `Cargo.toml`, `build.rs` | Package definition and BPF build integration |
+| `src/bpf_skel.rs`, `src/bpf_intf.rs` | Source wrappers including generated files from Cargo OUT_DIR; keep the wrappers in source |
+| `tests/` | CLI integration tests; additional unit tests are in Rust source |
+| [bench/](../bench/README.md) | Offline models and diagnostics, plus explicit retired launcher stubs |
+| `veristat/` | Retained verifier fixture (`9950x.json`), not a live topology certification |
+| `.cargo/` | Local Cargo configuration; currently sets target-cpu=native when applicable. Build from the workspace root as documented for normal builds |
+| `.codegraph/` | Local generated code index, not policy documentation or measurement evidence |
+| `docs/` | Standing references and named dated evidence cited by current records |
+| [research/](research/README.md) | Self-contained investigations and experimental patch bundles; each declares its validation limits |
+| `docs/meeting/` | Presentation derived from the research; technical status belongs in the linked research README |
+| [archive/](archive/README.md) | Historical reviews, plans and the old state ledger |
+| Repository `target/` | Build outputs and isolated candidate worktrees; preserve candidates referenced by experiments |
+| Sibling `scx_cake_bench/` | Maintained measurement tooling, receipts, captures, run outputs and historical vault |
 
-Conclusions live in `STATE.md` (ledger + `§` registry). Records pruned from
-`archive/` on 2026-08-18 are in git history:
+## Standing references and dated research
 
-```bash
-git log --oneline --diff-filter=D --name-only -- "scheds/rust/scx_cake/docs/archive/" | head -40
-git show "<deleting-commit>^:scheds/rust/scx_cake/docs/archive/<file>.md"
-```
+| Document | Role |
+|---|---|
+| [Operation cost audit](AUDIT_OPERATION_COST_2026-09-15.md) | Cost ladder and hardware/BPF/JIT evidence distinctions; includes September 29 additions |
+| [Kernel tool inventory](KERNEL_TOOL_INVENTORY_2026-08-23.md) | Dated kernel capabilities survey; verify against the target kernel |
+| [RT placement](RT_PLACEMENT_LOGIC_2026-07-24.md) | Dated placement rationale |
+| [Predict/verify audit](AUDIT_PREDICT_VERIFY_2026-08-22.md) | Historical cost/design reasoning |
+| [ADPF/LLF research](RESEARCH_ADPF_LLF_2026-08-09.md) | Candidate mechanisms, not accepted default behavior |
+| [New constructs](RESEARCH_NEW_CONSTRUCTS_2026-08-17.md) | Candidate mechanism survey |
+| [Construct theory](THEORY_CONSTRUCTS_ABC_2026-08-17.md) | Supporting theory |
+| [Signals audit](SIGNALS_AUDIT_2026-08-17.md) | Dated signal inventory |
+| [G21/G23 review](REVIEW_G21_G23_2026-08-02.md) | Dated construct review |
+| [Diablo analysis](ANALYSIS_DIABLO_CHOP_2026-08-02.md) | Historical workload diagnosis |
+
+## Keeping this organized
+
+Put runnable source in `src/`, reusable diagnostics in `bench/`, and a new
+investigation in `docs/research/<topic>/` with a README recording its source base,
+question, evidence, result and pending gates. Store bulk measurement output in
+`scx_cake_bench/runs/`; link it instead of copying captures into docs. Keep raw
+hash-bound research artifacts at their recorded paths.
+
+Update STATE for current conclusions and README/DESIGN only when supported
+behavior changes. Archive a completed investigation only after updating inbound
+links; retain dates, negative results and raw-evidence references. Do not delete
+scratch or candidates merely because their conclusion was summarized.
+
+The package ignore rules now expose research sources, retained evidence, patches
+and the meeting page to Git, while excluding research builds and Python caches.
+New files are **eligible for tracking, not automatically staged or committed**.
+Check `git status --short --untracked-files=all` before sharing; local absolute
+paths in provenance identify this machine and are not portable dependencies.
 
 ## The vault (bulk data and untracked scratch)
 
@@ -51,15 +94,18 @@ Under `~/Documents/Repo/scx_cake_bench/history/imported_from_scx_repo/`, followi
 Restore:
 
 ```bash
-zstd -dc <tarball> | tar -xf - -C /tmp
+mkdir -p /home/ritz/Documents/Repo/scx_cake_bench/history/restored_docs
+zstd -dc <tarball> | tar -xf - -C /home/ritz/Documents/Repo/scx_cake_bench/history/restored_docs
 ```
 
-## Selection rule
 
-Root keeps a doc only while it is live: cited from a canonical file or source,
-or backing an open experiment. A completed campaign's evidence moves to
-`archive/`; scratch whose conclusions are registered in `STATE.md`'s `§` registry is
-deleted — git history and the vault are the backstop.
+The earlier September 15 cleanup archived old `research/` scratch. The current
+`research/` directory contains new September 29 investigations, not restored old
+scratch. Older deleted documents can also be recovered from Git history:
 
-Note: `APP_SIMULATION.md` is cited in older material as a local path; the real
-file lives in the companion repo at `scx_cake_bench/docs/APP_SIMULATION.md`.
+```sh
+git log --oneline --diff-filter=D --name-only -- scheds/rust/scx_cake/docs/archive/
+```
+
+`APP_SIMULATION.md` references in older notes refer to the companion repository's
+`scx_cake_bench/docs/APP_SIMULATION.md`.

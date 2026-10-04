@@ -1,0 +1,128 @@
+{
+  "ctz_nonzero": {
+    "bpf_operations_excluding_exit": 9,
+    "operations": [
+      "r2 = r1",
+      "r2 = -r2",
+      "r1 &= r2",
+      "r2 = 0x218a392cd3d5dbf ll",
+      "r1 *= r2",
+      "r1 >>= 0x3a",
+      "r2 = 0x0 ll",
+      "r2 += r1",
+      "w0 = *(u8 *)(r2 + 0x0)",
+      "exit"
+    ]
+  },
+  "ctz_defined": {
+    "bpf_operations_excluding_exit": 11,
+    "operations": [
+      "r0 = 0x40",
+      "if r1 == 0x0 goto +0xb <ctz_defined+0x68>",
+      "r2 = r1",
+      "r2 = -r2",
+      "r1 &= r2",
+      "r2 = 0x218a392cd3d5dbf ll",
+      "r1 *= r2",
+      "r1 >>= 0x3a",
+      "r2 = 0x40 ll",
+      "r2 += r1",
+      "w0 = *(u8 *)(r2 + 0x0)",
+      "exit"
+    ]
+  },
+  "popcount": {
+    "bpf_operations_excluding_exit": 19,
+    "operations": [
+      "r2 = r1",
+      "r2 >>= 0x1",
+      "r3 = 0x5555555555555555 ll",
+      "r2 &= r3",
+      "r1 -= r2",
+      "r2 = 0x3333333333333333 ll",
+      "r0 = r1",
+      "r0 &= r2",
+      "r1 >>= 0x2",
+      "r1 &= r2",
+      "r0 += r1",
+      "r1 = r0",
+      "r1 >>= 0x4",
+      "r0 += r1",
+      "r1 = 0xf0f0f0f0f0f0f0f ll",
+      "r0 &= r1",
+      "r1 = 0x101010101010101 ll",
+      "r0 *= r1",
+      "r0 >>= 0x38",
+      "exit"
+    ]
+  },
+  "clz_defined": {
+    "bpf_operations_excluding_exit": 40,
+    "operations": [
+      "r0 = 0x40",
+      "if r1 == 0x0 goto +0x2a <clz_defined+0x160>",
+      "r2 = r1",
+      "r2 >>= 0x1",
+      "r1 |= r2",
+      "r2 = r1",
+      "r2 >>= 0x2",
+      "r1 |= r2",
+      "r2 = r1",
+      "r2 >>= 0x4",
+      "r1 |= r2",
+      "r2 = r1",
+      "r2 >>= 0x8",
+      "r1 |= r2",
+      "r2 = r1",
+      "r2 >>= 0x10",
+      "r1 |= r2",
+      "r2 = r1",
+      "r2 >>= 0x20",
+      "r1 |= r2",
+      "r1 ^= -0x1",
+      "r2 = 0x5555555555555555 ll",
+      "r3 = r1",
+      "r3 >>= 0x1",
+      "r3 &= r2",
+      "r1 -= r3",
+      "r2 = 0x3333333333333333 ll",
+      "r0 = r1",
+      "r0 &= r2",
+      "r1 >>= 0x2",
+      "r1 &= r2",
+      "r0 += r1",
+      "r1 = r0",
+      "r1 >>= 0x4",
+      "r0 += r1",
+      "r1 = 0xf0f0f0f0f0f0f0f ll",
+      "r0 &= r1",
+      "r1 = 0x101010101010101 ll",
+      "r0 *= r1",
+      "r0 >>= 0x38",
+      "exit"
+    ]
+  },
+  "lowest_bit": {
+    "bpf_operations_excluding_exit": 3,
+    "operations": [
+      "r0 = r1",
+      "r1 = -r1",
+      "r0 &= r1",
+      "exit"
+    ]
+  },
+  "rotate": {
+    "bpf_operations_excluding_exit": 8,
+    "operations": [
+      "r3 = r2",
+      "r3 &= 0x3f",
+      "r0 = r1",
+      "r0 <<= r3",
+      "w2 = -w2",
+      "r2 &= 0x3f",
+      "r1 >>= r2",
+      "r0 |= r1",
+      "exit"
+    ]
+  }
+}

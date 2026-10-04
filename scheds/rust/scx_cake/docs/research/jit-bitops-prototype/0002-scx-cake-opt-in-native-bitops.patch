@@ -1,0 +1,103 @@
+diff --git a/scheds/rust/scx_cake/src/bpf/cake.bpf.c b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+index 94024f0bd..77f904a43 100644
+--- a/scheds/rust/scx_cake/src/bpf/cake.bpf.c
++++ b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+@@ -9,6 +9,25 @@
+ #include <scx/common.bpf.h>
+ #include "intf.h"
+ 
++extern u64 bpf_ctz64(u64 x) __weak __ksym;
++extern u64 bpf_popcnt64(u64 x) __weak __ksym;
++const volatile bool cake_native_bitops;
++
++static __always_inline u32 cake_ctz64(u64 word)
++{
++	if (cake_native_bitops && bpf_ksym_exists(bpf_ctz64))
++		/* Callers supply nonzero masks; retain the verifier's 0..63 bound. */
++		return (u32)bpf_ctz64(word) & 63;
++	return (u32)__builtin_ctzll(word);
++}
++
++static __always_inline u32 cake_popcnt64(u64 word)
++{
++	if (cake_native_bitops && bpf_ksym_exists(bpf_popcnt64))
++		return (u32)bpf_popcnt64(word);
++	return (u32)__builtin_popcountll(word);
++}
++
+ /* on_cpu changed from int to u8. An unsigned local int lets CO-RE narrow
+  * the load to u8 without poisoning an unused signed read. On old kernels
+  * the width stays unchanged; signedness does not affect our zero test. */
+@@ -1377,7 +1396,7 @@ static __always_inline u64 cake_smt_expand(u64 seats)
+ 		       ((seats & cake_smt_right) >> shift);
+ 
+ 	for (i = 0; i < 64 && seats; i++) {
+-		u32 c = (u32)__builtin_ctzll(seats);
++		u32 c = cake_ctz64(seats);
+ 		s32 sib = cpu_sibling[c & (MAX_CPUS - 1)];
+ 
+ 		if (sib >= 0 && sib < 64)
+@@ -1410,7 +1429,7 @@ static __always_inline s32 cake_pick_cold(u64 w, u64 cores, u64 seats, u64 noisy
+ 		best = w;
+ 	if (best & ~seats)
+ 		best &= ~seats;
+-	return (s32)__builtin_ctzll(cake_rank_tier(cake_prefer_irq_clean(best, noisy)));
++	return (s32)cake_ctz64(cake_rank_tier(cake_prefer_irq_clean(best, noisy)));
+ }
+ 
+ /* PROBE hold attribution -- not for scoring. */
+@@ -1765,7 +1784,7 @@ static __noinline bool cake_system_serial(u32 wc)
+ 	u32 c = wc & (MAX_CPUS - 1);
+ 
+ 	if (cake_one_word)
+-		return (u32)__builtin_popcountll(cake_idle_word() & cpu_llc_word[c]) * 4 >=
++		return cake_popcnt64(cake_idle_word() & cpu_llc_word[c]) * 4 >=
+ 		       cpu_llc_online3[c];
+ 	return (u32)cake_idle_nr * 4 >= nr_cpu_online3;
+ }
+diff --git a/scheds/rust/scx_cake/src/main.rs b/scheds/rust/scx_cake/src/main.rs
+index 19424ca88..f29529bcf 100644
+--- a/scheds/rust/scx_cake/src/main.rs
++++ b/scheds/rust/scx_cake/src/main.rs
+@@ -57,6 +57,10 @@ fn configure_acquire_census(skel: &mut OpenBpfSkel<'_>, probe_on: bool) {
+ #[derive(Debug, PartialEq, Eq, Parser)]
+ #[command(after_help = toggle_help())]
+ struct Opts {
++    /// Use experimental kernel bitops; fail if the required kfuncs are absent.
++    #[clap(long)]
++    native_bitops: bool,
++
+     /// Print startup core topology and platform performance preferences without attaching.
+     #[clap(long)]
+     print_topology: bool,
+@@ -137,6 +141,21 @@ impl<'a> Scheduler<'a> {
+         let queued_wakeup = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP != 0;
+         let dsq_peek = compat::ksym_exists("scx_bpf_dsq_peek").unwrap_or(false);
+ 
++        if opts.native_bitops {
++            #[cfg(target_arch = "x86_64")]
++            anyhow::ensure!(
++                std::is_x86_feature_detected!("bmi1") && std::is_x86_feature_detected!("popcnt"),
++                "--native-bitops requires an x86 CPU with BMI1 and POPCNT"
++            );
++            #[cfg(not(target_arch = "x86_64"))]
++            anyhow::bail!("--native-bitops currently requires x86_64");
++            anyhow::ensure!(
++                compat::ksym_exists("bpf_ctz64")? && compat::ksym_exists("bpf_popcnt64")?,
++                "--native-bitops requires bpf_ctz64 and bpf_popcnt64 in the running kernel"
++            );
++        }
++        info!("Native bitops {}", opts.native_bitops);
++
+         info!(
+             "{} {}",
+             SCHEDULER_NAME,
+@@ -193,6 +212,8 @@ impl<'a> Scheduler<'a> {
+             .as_mut()
+             .context("BPF rodata unavailable for CPU topology")?;
+ 
++        rodata.cake_native_bitops = opts.native_bitops;
++
+         // The CPU id span the steal ring and neighbour probe scan: rodata, so the
+         // verifier folds it. It must cover the kernel's nr_cpu_ids, which counts
+         // POSSIBLE CPUs; the topology lists present ones only. ops.init refuses less.

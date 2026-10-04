@@ -1,0 +1,1211 @@
+{
+  "schema": 1,
+  "date": "2026-10-02",
+  "basis": "Source semantics plus separately retained host capability/clock query evidence; no game latency measurement",
+  "sources": {
+    "cake": {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+      "sha256": "9c12e59b99c96071b14f4c5f987932382cc4e8815bd84743d38f03c0cc148f60"
+    },
+    "loader": {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/main.rs",
+      "sha256": "e27322e5c3528f4fab22cde90b86e96e0cac785d6c8576385a2646beb49b37bf"
+    },
+    "ext": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c",
+      "sha256": "2de633c51bc1c8b0217358ddd462f784015f9aad0bac8127fc9286ac2ff4b1aa"
+    },
+    "ops": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/internal.h",
+      "sha256": "005c8251c88503d80c05ee71fb88d74e921044171a20f3af22384fd7f8fa311b"
+    },
+    "core": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+      "sha256": "8de9cba3dffab247241e767f86028e49e2445f54ad5623329484d8708ee8a526"
+    },
+    "rq": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/sched.h",
+      "sha256": "59faad6dae04953390cc85635a36370b61513f13847326e8406134c825beb245"
+    },
+    "irqtime": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/cputime.c",
+      "sha256": "5c9a5f92d5b359c6051ea93860a2bbb286a6feea84568c2b6351fb826b022aaa"
+    },
+    "irq": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/irq/handle.c",
+      "sha256": "beeec315712e7971083ce7cb4b1c9038519b2ddafbd43f598e9612946d0a1078"
+    },
+    "softirq": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/softirq.c",
+      "sha256": "47499de6cbf75e470dcfa195d4d5500d3157e2735570b30319d484c0928ec8af"
+    },
+    "apic": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/arch/x86/kernel/apic/apic.c",
+      "sha256": "e187313fbae0c6941331be18e51ac6fb3f2b5e33bc11caf84f6b621b7c215a40"
+    },
+    "schedclock": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/clock.c",
+      "sha256": "efea491eb3617f77cd57349b7a3902678fdc848911ec8372631e3a4cf6315de7"
+    },
+    "bpfclock": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/bpf/helpers.c",
+      "sha256": "86e746e97a25a750a466951a1f88b1bab8b3d4c20f657af7932d5a7c63260bcb"
+    },
+    "traceclock": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/trace/trace_clock.c",
+      "sha256": "248c74bf37738d2c48781a798e6237386b81e5794eeff59f7852e0af300b6a94"
+    },
+    "perf": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/arch/x86/kernel/cpu/aperfmperf.c",
+      "sha256": "ee8e954e63528bb25421fc6b571e0c668de79004f89b32a7497e835afba89125"
+    },
+    "fence": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/dma-fence.c",
+      "sha256": "dd990e0c96a12c0a5794efb3e07230abcd1d7fb94b71f40ec7d5b94c7c586b0b"
+    },
+    "syncfile": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/sync_file.c",
+      "sha256": "105f0913633a872f85c47120266beedd308bc5192a4d36950240bac2ca87c2fe"
+    },
+    "syncobj": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/gpu/drm/drm_syncobj.c",
+      "sha256": "87bb07d2b2558a906be68fad3a536139b3c96e715cd0b06db501547d990318a3"
+    },
+    "futex": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/futex/waitwake.c",
+      "sha256": "81f34cfefa5259b18d4c07dc049ea67ac3a32f7b2194cf1f9a84893cfca80acf"
+    },
+    "ntsync": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/misc/ntsync.c",
+      "sha256": "32002e6c0467cdb385cef514f5fa8afff7d2632a35c0c98e2436bff834ca0675"
+    },
+    "epoll": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/fs/eventpoll.c",
+      "sha256": "97a193bd04baa7c502de3ac039ac52cd271d9268fe50978f093c286bfefffdfe"
+    },
+    "input": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/input.c",
+      "sha256": "b3ecf6d187bfa59ac0d0c534c49b7d92d9c56aff5a8bea0668d337b9d03f27a5"
+    },
+    "evdev": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/evdev.c",
+      "sha256": "8405e9aa72effd33bb69213d0bca8335a9586746c88a3c58ac4b57247f497d5f"
+    },
+    "hid": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/hid/usbhid/hid-core.c",
+      "sha256": "80125a41841e2899b86c05c7548559543f881c3821fe8ec29ef0f5c918342b0e"
+    },
+    "nvidia": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-fence.c",
+      "sha256": "e8ad3de2e7aacbce943bfacbaa91a3520811cceb024a418631de023ba3da795d"
+    },
+    "nvcrtc": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-crtc.c",
+      "sha256": "e786f78bd2dd17e219a4320df990706c140b1b3dcc82e73f7b5eb39539b9d6f7"
+    },
+    "nvkapi": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia-modeset_kapi_src_nvkms-kapi-sync.c",
+      "sha256": "09fa351c8202e78e790d8d903ac48caaa3360d20210a5151f9ddf97cbdb1b499"
+    },
+    "kwininput": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_connection.cpp",
+      "sha256": "d791ea424db3e4a3fef9f0ee38f697ec1710aa583b62a435a4f668d827f1318d"
+    },
+    "kwinbackend": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_libinputbackend.cpp",
+      "sha256": "c05479cd19969a14f0551bf3d820ae4410894404dfdbe95ce0af915fde8c8586"
+    },
+    "kwinevents": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_events.cpp",
+      "sha256": "e1dcce8fe27e00d1b9d8a3b8108fa25cb986337a16b1ce618b0f5fa7fcf71dee"
+    },
+    "kwinrender": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-renderloop.cpp",
+      "sha256": "ac95f7a27f0c687c58e0fa4c676607bc629eb50d94217f98b5ac9d4a8a136bad"
+    },
+    "kwintransaction": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_wayland_transaction.cpp",
+      "sha256": "3e7e2714c47fc0c4de7821a93ce09ee3ce0caacddcf24088fc6b08c96f04633e"
+    },
+    "kwinsync": {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_core_syncobjtimeline.cpp",
+      "sha256": "541cef4a25a5607701f6c6d42aafc69bd2e092958ccba209117ea8b95dd0ac34"
+    },
+    "presentation": {
+      "path": "/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml",
+      "sha256": "dffac93bcb2bb1d8c385e72b8a8c2c0d4d79a336866322f3ba886dce2b27b1e2"
+    },
+    "protocolsync": {
+      "path": "/usr/share/wayland-protocols/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml",
+      "sha256": "5ede41a56eced6aa635caa7ab2996066bff9fd211620dbf9f73aafab740bec71"
+    },
+    "inputstamp": {
+      "path": "/usr/share/wayland-protocols/unstable/input-timestamps/input-timestamps-unstable-v1.xml",
+      "sha256": "92d9911f070407d470458f59ffdee5406ce3b6368270a93e6ecd9f4f71368bb0"
+    }
+  },
+  "signals": [
+    {
+      "id": "irq_depth",
+      "signal": "Cake live handler depth",
+      "locations": [
+        {
+          "source": "cake",
+          "symbol": "cake_irq_edge",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            969,
+            984,
+            991,
+            998,
+            1005
+          ]
+        },
+        {
+          "source": "irq",
+          "symbol": "trace_irq_handler_entry",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/irq/handle.c",
+          "lines": [
+            201
+          ]
+        },
+        {
+          "source": "softirq",
+          "symbol": "trace_softirq_entry",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/softirq.c",
+          "lines": [
+            621
+          ]
+        }
+      ],
+      "update_rule": "Increment/decrement at attached generic hardirq-action and softirq handler boundaries; event driven.",
+      "clock_or_units": "Counter; observer timestamps only if added.",
+      "accuracy_and_staleness": "Own CPU writes; remote load can race. Generic IRQ actions do not cover all APIC/NMI/firmware work. Missing attachment is not quiet.",
+      "access_and_cost": "Already in Cake: BPF entry/exit execution plus one padded-slot read; cache coherence cost unmeasured.",
+      "cake_use": "Refine candidate choice; compare broader kernel snapshot against current writer cost.",
+      "invalidation": "Attach/detach, nesting, CPU lifecycle, coverage change.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "irq_vectors",
+      "signal": "Architecture timer/IPI interference",
+      "locations": [
+        {
+          "source": "apic",
+          "symbol": "trace_local_timer_entry",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/arch/x86/kernel/apic/apic.c",
+          "lines": [
+            1067
+          ]
+        }
+      ],
+      "update_rule": "At architecture vector entry/exit; no fixed publication period.",
+      "clock_or_units": "Trace clock or BPF observation clock.",
+      "accuracy_and_staleness": "Earlier boundary than a generic device action, different coverage. Avoid double-counting nested intervals.",
+      "access_and_cost": "Trace events available; extra observers cost per vector. Production summary would need kernel ownership.",
+      "cake_use": "Identify missing interference; fold into a bounded candidate hint only if beneficial.",
+      "invalidation": "Architecture/config, nested IRQ, detach/hotplug.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "irq_total",
+      "signal": "Accounted IRQ duration",
+      "locations": [
+        {
+          "source": "irqtime",
+          "symbol": "void irqtime_account_irq(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/cputime.c",
+          "lines": [
+            59
+          ]
+        },
+        {
+          "source": "rq",
+          "symbol": "static inline u64 irq_time_read(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/sched.h",
+          "lines": [
+            3627
+          ]
+        }
+      ],
+      "update_rule": "Accumulates at IRQ accounting boundaries, including entry/exit; running interval may not yet be charged.",
+      "clock_or_units": "Duration ns derived from sched_clock_cpu; not a MONOTONIC epoch timestamp.",
+      "accuracy_and_staleness": "Fine units; excludes ksoftirqd task execution. Requires enabled accounting and coherent reads; no hard maximum publication lag.",
+      "access_and_cost": "Existing internal counter; proposed bounded kfunc, no text parse. No measured reader/writer ns cost.",
+      "cake_use": "Short-window CPU interference estimate without adding a new time source to every event.",
+      "invalidation": "Availability, CPU online generation, baseline for counter differences.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "irq_proc",
+      "signal": "Cake chronic IRQ mask",
+      "locations": [
+        {
+          "source": "loader",
+          "symbol": "fn read_irq_ticks(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/main.rs",
+          "lines": [
+            1249
+          ]
+        },
+        {
+          "source": "loader",
+          "symbol": "struct SinkMonitor",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/main.rs",
+          "lines": [
+            1339
+          ]
+        }
+      ],
+      "update_rule": "One-second loop; sampling adapts to 1\u20134 seconds; mark/unmark requires 2/3 confirming windows.",
+      "clock_or_units": "USER_HZ ticks; host CLK_TCK=100, 10 ms units.",
+      "accuracy_and_staleness": "Slow aggregate intentionally hysteretic; interval is not a guaranteed freshness bound if loader is delayed.",
+      "access_and_cost": "Text parsing/cold userspace update; BPF reads cached mask.",
+      "cake_use": "Chronic interference only; keep distinct from immediate handler depth.",
+      "invalidation": "CPU topology, unknown samples, process stalls, attachment generation.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "cpu_current",
+      "signal": "Current task on a CPU",
+      "locations": [
+        {
+          "source": "ext",
+          "symbol": "struct task_struct *scx_bpf_cpu_curr(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c",
+          "lines": [
+            10489
+          ]
+        },
+        {
+          "source": "cake",
+          "symbol": "struct task_struct *cake_cpu_curr(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            523
+          ]
+        }
+      ],
+      "update_rule": "Core changes rq->curr on scheduling transition; query reads current pointer.",
+      "clock_or_units": "Identity/state, not a timestamp.",
+      "accuracy_and_staleness": "RCU protects lifetime, not a stable occupant or a reserved CPU. IRQ can execute while the interrupted task remains curr.",
+      "access_and_cost": "Existing kfunc/compat wrapper; candidate-local remote read. No need to poll through userspace.",
+      "cake_use": "Observe occupant/RT interference while keeping authoritative idle claims.",
+      "invalidation": "Context switch, migration, task exit, CPU hotplug.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "rq_clock",
+      "signal": "Cake cached scheduler time",
+      "locations": [
+        {
+          "source": "ext",
+          "symbol": "__bpf_kfunc u64 scx_bpf_now(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c",
+          "lines": [
+            10585
+          ]
+        },
+        {
+          "source": "rq",
+          "symbol": "static inline void scx_rq_clock_update(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/sched.h",
+          "lines": [
+            1881,
+            1900
+          ]
+        },
+        {
+          "source": "cake",
+          "symbol": "u64 cake_now_rq(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            418
+          ]
+        }
+      ],
+      "update_rule": "Cached after rq clock update until rq unpin/unlock invalidates; otherwise fresh sched_clock_cpu read.",
+      "clock_or_units": "ns; scheduler clock family, same-CPU ordering only.",
+      "accuracy_and_staleness": "Repeated calls can return identical values; cross-CPU deltas may be negative. Not interchangeable with MONOTONIC.",
+      "access_and_cost": "Existing fast kfunc. Cache savings trade timestamp freshness; no cost measured here.",
+      "cake_use": "Existing internal accounting; exclude from external GPU/input timestamp joins.",
+      "invalidation": "CPU provenance, cache validity, clocksource/suspend events.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "mono_clock",
+      "signal": "Cake cross-component observation clock",
+      "locations": [
+        {
+          "source": "cake",
+          "symbol": "u64 cake_now(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            390
+          ]
+        },
+        {
+          "source": "bpfclock",
+          "symbol": "BPF_CALL_0(bpf_ktime_get_ns)",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/bpf/helpers.c",
+          "lines": [
+            178
+          ]
+        }
+      ],
+      "update_rule": "Read on call; kernel timekeeping supplies current clock conversion.",
+      "clock_or_units": "CLOCK_MONOTONIC ns; implementation uses mono_fast accessor.",
+      "accuracy_and_staleness": "Host reports 1 ns resolution, not accuracy. Frequency discipline applies; suspend excluded; fast accessor has exceptional timekeeping caveats.",
+      "access_and_cost": "Existing BPF helper; reuse event timestamp rather than repeat reads. No measured BPF read latency here.",
+      "cake_use": "Common domain for readiness/publication/consumption timestamps.",
+      "invalidation": "Boot/session generation; reject impossible negative/outlier deltas rather than silently counting zero.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "jiffies_age",
+      "signal": "Cake approximate task age",
+      "locations": [
+        {
+          "source": "cake",
+          "symbol": "u64 cake_task_age(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            403
+          ]
+        },
+        {
+          "source": "loader",
+          "symbol": "fn coarse_tick_ns(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/main.rs",
+          "lines": [
+            1479
+          ]
+        }
+      ],
+      "update_rule": "jiffies-based approximation with offset measured at Cake attach; host coarse resolution is 1 ms.",
+      "clock_or_units": "jiffies * nominal tick + one-time MONOTONIC offset.",
+      "accuracy_and_staleness": "Lifetime approximation only; tick quantization, NO_HZ batching and calibration mean it is not an exact cross-component clock.",
+      "access_and_cost": "Existing cheap cached conversion; fallback precise read when tick rejected.",
+      "cake_use": "Keep for its documented age use; never repurpose for device/deadline measurements.",
+      "invalidation": "Attach, suspend/clock changes; long-duration error has not been characterized.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "task_runtime",
+      "signal": "Task CPU service consumed",
+      "locations": [
+        {
+          "source": "core",
+          "symbol": "static void update_rq_clock_task(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+          "lines": [
+            812
+          ]
+        },
+        {
+          "source": "cake",
+          "symbol": "p->se.sum_exec_runtime",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            637,
+            647,
+            657,
+            666,
+            679,
+            1709,
+            1903,
+            1930,
+            3240,
+            3278,
+            3292
+          ]
+        }
+      ],
+      "update_rule": "Updated by scheduler execution accounting; current running segment may be pending until accounting runs.",
+      "clock_or_units": "Accumulated service ns, not wall-clock epoch.",
+      "accuracy_and_staleness": "IRQ/steal subtraction belongs to kernel accounting. Runtime does not reveal frame completion or wall-clock waiting.",
+      "access_and_cost": "Existing task field read; lifetime and concurrent updates matter.",
+      "cake_use": "Keep service budgets separate from readiness age and wall time.",
+      "invalidation": "Task lifetime, last accounting update; never subtract IRQ twice.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "wake",
+      "signal": "Task accepted wake/placement",
+      "locations": [
+        {
+          "source": "core",
+          "symbol": "trace_sched_waking(p)",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+          "lines": [
+            4305,
+            4322
+          ]
+        },
+        {
+          "source": "core",
+          "symbol": "trace_sched_wakeup(p)",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+          "lines": [
+            3748
+          ]
+        },
+        {
+          "source": "ops",
+          "symbol": "s32 (*select_cpu)",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/internal.h",
+          "lines": [
+            314
+          ]
+        }
+      ],
+      "update_rule": "Event-driven during successful wake path; waking precedes normal CPU choice, wakeup occurs later.",
+      "clock_or_units": "No intrinsic timestamp in state; use the chosen observer clock.",
+      "accuracy_and_staleness": "Reason absent; some paths skip select_cpu and already-runnable events need no wake. Current PID in IRQ is not cause ownership.",
+      "access_and_cost": "Existing callback receives actual task; new typed metadata can ride existing wake with no daemon round trip.",
+      "cake_use": "Read cause before first placement, and handle enqueue/next service where selection is skipped.",
+      "invalidation": "Task/dependency generation, duplicate/failed wakes, concurrent causes.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "run_stop",
+      "signal": "Task selected, running, preempted or blocked",
+      "locations": [
+        {
+          "source": "ext",
+          "symbol": "static void set_next_task_scx(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c",
+          "lines": [
+            3026
+          ]
+        },
+        {
+          "source": "core",
+          "symbol": "trace_sched_switch(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+          "lines": [
+            7274
+          ]
+        },
+        {
+          "source": "ops",
+          "symbol": "void (*stopping)",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/internal.h",
+          "lines": [
+            442,
+            896
+          ]
+        }
+      ],
+      "update_rule": "At scheduling transitions; Cake receives its class callbacks. All-class sched_switch covers RT as well.",
+      "clock_or_units": "Timestamp at callback/switch boundary; execution-accounting clock is distinct.",
+      "accuracy_and_staleness": "running/sched_switch precede actual application resume. stopping can mean preempted, not blocked or done.",
+      "access_and_cost": "Reuse Cake notifications; trace observer only for other classes/research.",
+      "cake_use": "Maintain scheduling state without an extra cross-process state query.",
+      "invalidation": "Migration, class change, CPU hotplug, task exit; record transition generation.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "cpuperf",
+      "signal": "CPU performance estimate",
+      "locations": [
+        {
+          "source": "ext",
+          "symbol": "__bpf_kfunc u32 scx_bpf_cpuperf_cur(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c",
+          "lines": [
+            10180
+          ]
+        },
+        {
+          "source": "perf",
+          "symbol": "void arch_scale_freq_tick(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/arch/x86/kernel/cpu/aperfmperf.c",
+          "lines": [
+            474
+          ]
+        }
+      ],
+      "update_rule": "Kfunc reads arch_scale_freq_capacity; x86 reference updates scale from APERF/MPERF intervals on tick path.",
+      "clock_or_units": "Normalized capacity, not instantaneous GHz or a timestamp.",
+      "accuracy_and_staleness": "Host HZ=1000 is nominal active tick cadence; NO_HZ/idle/disabled invariance can leave older/default scale. No general 1 ms freshness guarantee.",
+      "access_and_cost": "Existing kfunc; recomputing ratios or polling cpufreq in BPF would duplicate work.",
+      "cake_use": "Optional candidate service-capacity hint, only if it improves choices.",
+      "invalidation": "Architecture path, active sampling, CPU topology/power state.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "clockevent",
+      "signal": "Next programmed CPU timer",
+      "locations": [
+        {
+          "source": "cake",
+          "symbol": "bool cake_cpu_tick_soon(",
+          "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+          "lines": [
+            949
+          ]
+        }
+      ],
+      "update_rule": "clock_event_device next_event changes when timer programming changes.",
+      "clock_or_units": "ktime/MONOTONIC deadline.",
+      "accuracy_and_staleness": "Advisory remote snapshot; not all future interrupts, not necessarily a periodic scheduler tick, and hardware may fire late.",
+      "access_and_cost": "Cake already uses weak tick_cpu_device symbol and one search clock read.",
+      "cake_use": "Predict a nearby programmed event without broad timer polling.",
+      "invalidation": "Reprogramming, tick stop, device replacement, suspend/hotplug.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "gpu_semaphore",
+      "signal": "NVIDIA timeline progress",
+      "locations": [
+        {
+          "source": "nvidia",
+          "symbol": "__nv_drm_get_semsurf_ctx_seqno(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-fence.c",
+          "lines": [
+            720,
+            828
+          ]
+        },
+        {
+          "source": "nvkapi",
+          "symbol": "static void SemaphoreSurfaceKapiCallback(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia-modeset_kapi_src_nvkms-kapi-sync.c",
+          "lines": [
+            374
+          ]
+        }
+      ],
+      "update_rule": "GPU semaphore advances with submitted work; RM/KAPI notification invokes registered callback; DRM then reads sequence.",
+      "clock_or_units": "Timeline sequence, not calibrated CPU timestamp.",
+      "accuracy_and_staleness": "Source code does not bound GPU completion-to-RM callback latency. Context/timeline scope matters; one device-wide bit loses attribution.",
+      "access_and_cost": "Driver-owned mapping and callbacks; not an arbitrary BPF-loadable GPU pointer.",
+      "cake_use": "Publish known dependency progress on existing callback; avoid MMIO/RM polling in Cake.",
+      "invalidation": "Sequence/context lifetime, 32/64-bit expansion, reset/error, submission generation.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "fence_signal",
+      "signal": "Generic fence signaled and timestamp",
+      "locations": [
+        {
+          "source": "fence",
+          "symbol": "void dma_fence_signal_timestamp_locked(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/dma-fence.c",
+          "lines": [
+            353
+          ]
+        },
+        {
+          "source": "fence",
+          "symbol": "void dma_fence_signal(struct",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/dma-fence.c",
+          "lines": [
+            488
+          ]
+        }
+      ],
+      "update_rule": "One successful signal per fence; flag, tracepoint, timestamp publication, then callbacks in source order.",
+      "clock_or_units": "Supplied timestamp must be CLOCK_MONOTONIC; ordinary signal samples ktime_get.",
+      "accuracy_and_staleness": "Signaled tracepoint precedes timestamp-union publication. Ordinary NVIDIA signal timestamp is software delivery time, not exact hardware finish.",
+      "access_and_cost": "Existing trace/function argument; add typed metadata only under correct lifetime/atomic-context rules.",
+      "cake_use": "Carry completion/error cause to actual waiter before CPU placement.",
+      "invalidation": "Fence context+seqno+generation; errors, chains/arrays, timeout/reuse.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "fence_cpu_wait",
+      "signal": "Direct fence CPU waiter",
+      "locations": [
+        {
+          "source": "fence",
+          "symbol": "dma_fence_default_wait_cb(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/dma-fence.c",
+          "lines": [
+            791
+          ]
+        },
+        {
+          "source": "syncobj",
+          "symbol": "static void syncobj_wait_fence_func(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/gpu/drm/drm_syncobj.c",
+          "lines": [
+            1004
+          ]
+        }
+      ],
+      "update_rule": "Registered callback runs when dependency signals, then calls existing task wake.",
+      "clock_or_units": "Timestamp at satisfied wait; common MONOTONIC observation recommended.",
+      "accuracy_and_staleness": "Actual waiter known, but only these wait implementations are covered. Wake acceptance and first service are later distinct events.",
+      "access_and_cost": "Direct kernel path; proposed cause handoff need not add userspace or a workqueue.",
+      "cake_use": "High-priority candidate for precise ready-to-CPU attribution.",
+      "invalidation": "Timeout/cancel, callback removal, task lifetime, merged waits.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "syncobj_available",
+      "signal": "Syncobj point materialized versus complete",
+      "locations": [
+        {
+          "source": "syncobj",
+          "symbol": "static void syncobj_wait_syncobj_func(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/gpu/drm/drm_syncobj.c",
+          "lines": [
+            223,
+            1013
+          ]
+        },
+        {
+          "source": "syncobj",
+          "symbol": "DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/gpu/drm/drm_syncobj.c",
+          "lines": [
+            140,
+            1049,
+            1087,
+            1100,
+            1121,
+            1144,
+            1380,
+            1448,
+            1474
+          ]
+        },
+        {
+          "source": "kwinsync",
+          "symbol": "bool SyncTimeline::isMaterialized(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_core_syncobjtimeline.cpp",
+          "lines": [
+            194
+          ]
+        }
+      ],
+      "update_rule": "Availability updates when fence for a point is installed; completion updates only when it signals.",
+      "clock_or_units": "Sequence/flags; these are different logical events.",
+      "accuracy_and_staleness": "WAIT_AVAILABLE can wake while GPU work is unfinished. One generic GPU-ready label is incorrect.",
+      "access_and_cost": "Existing wait flag/point registration; timestamp and type must travel together.",
+      "cake_use": "Learn future dependency early, but mark runnable-for-dependent-work only at the required stage.",
+      "invalidation": "Timeline point and flags, replacement, context reset, chained fences.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "syncobj_eventfd",
+      "signal": "Fence completion through eventfd/epoll",
+      "locations": [
+        {
+          "source": "syncobj",
+          "symbol": "static void syncobj_eventfd_entry_fence_func(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/gpu/drm/drm_syncobj.c",
+          "lines": [
+            1409
+          ]
+        },
+        {
+          "source": "syncobj",
+          "symbol": "if (entry->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/gpu/drm/drm_syncobj.c",
+          "lines": [
+            1448
+          ]
+        },
+        {
+          "source": "epoll",
+          "symbol": "static int ep_poll_callback(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/fs/eventpoll.c",
+          "lines": [
+            1491
+          ]
+        }
+      ],
+      "update_rule": "Completion callback signals eventfd; availability-only mode can signal earlier; epoll queues readiness and wakes waiters.",
+      "clock_or_units": "Observer timestamps; object has no universal frame clock.",
+      "accuracy_and_staleness": "Fan-in/coalescing/already-readable eventfd break one-event/one-wake assumptions; mode must be preserved.",
+      "access_and_cost": "Existing kernel notification, then consumer service. Metadata propagation needs a valid identity across aggregation.",
+      "cake_use": "Measure queue boundary and preserve cause into actual consumer.",
+      "invalidation": "FD/object lifetime, point/mode, readiness consumption, epoll fan-out.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "syncfile",
+      "signal": "Fence poll via sync_file",
+      "locations": [
+        {
+          "source": "syncfile",
+          "symbol": "static __poll_t sync_file_poll(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/sync_file.c",
+          "lines": [
+            197
+          ]
+        },
+        {
+          "source": "syncfile",
+          "symbol": "static void fence_check_cb_func(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/sync_file.c",
+          "lines": [
+            47
+          ]
+        }
+      ],
+      "update_rule": "Poll installs callback if needed; signaled fence wakes waitqueue and yields EPOLLIN.",
+      "clock_or_units": "Fence state plus observation clock.",
+      "accuracy_and_staleness": "Observer registration may enable software signaling. Actual consumer can be epoll, not direct CPU fence waiter.",
+      "access_and_cost": "Callback+waitqueue; avoid assuming poll wake implies a new task transition.",
+      "cake_use": "Cover alternative GPU-to-compositor route without misattributing by submitting PID.",
+      "invalidation": "File/fence lifetime, callback registration, shared waiters.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "nvidia_worker",
+      "signal": "NVIDIA deferred dependency worker",
+      "locations": [
+        {
+          "source": "nvidia",
+          "symbol": "__nv_drm_semsurf_wait_fence_cb",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-fence.c",
+          "lines": [
+            1608,
+            1719
+          ]
+        },
+        {
+          "source": "nvidia",
+          "symbol": "__nv_drm_semsurf_wait_fence_work_cb",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-fence.c",
+          "lines": [
+            1575,
+            1710,
+            1732
+          ]
+        }
+      ],
+      "update_rule": "Fence callback queues worker when RM operation cannot run in interrupt context; already-signaled ioctl has immediate path.",
+      "clock_or_units": "Record enqueue/start/end in one CPU clock domain.",
+      "accuracy_and_staleness": "Queue latency is workload-dependent; source gives no maximum. Must identify actual required worker and class.",
+      "access_and_cost": "Existing workqueue boundary; no gain from boosting an unrelated game thread.",
+      "cake_use": "Measure and prioritize real runnable dependency, or redesign safe deferral if justified.",
+      "invalidation": "Worker/context teardown, retry/error, dependency generation.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "futex_wait",
+      "signal": "Futex release-to-task wake",
+      "locations": [
+        {
+          "source": "futex",
+          "symbol": "void futex_wake_mark(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/futex/waitwake.c",
+          "lines": [
+            134
+          ]
+        },
+        {
+          "source": "futex",
+          "symbol": "wake_up_q(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/futex/waitwake.c",
+          "lines": [
+            131,
+            225,
+            359
+          ]
+        }
+      ],
+      "update_rule": "Successful wake-mark adds actual task to wake_q; wake follows lock release.",
+      "clock_or_units": "Logical wake plus chosen clock; ordinary futex has no general owner contract.",
+      "accuracy_and_staleness": "Timeout/racing wakes and PI semantics matter; user word is not a trusted task pointer.",
+      "access_and_cost": "Existing wake path; cause must survive wake_q and deduplication.",
+      "cake_use": "Shorten proven dependency handoffs, not all short-sleeping threads.",
+      "invalidation": "Wait-key reuse, requeue, cancel, duplicate wake and task lifetime.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "ntsync_wait",
+      "signal": "NTSYNC ANY/ALL readiness",
+      "locations": [
+        {
+          "source": "ntsync",
+          "symbol": "static void try_wake_all(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/misc/ntsync.c",
+          "lines": [
+            255
+          ]
+        },
+        {
+          "source": "ntsync",
+          "symbol": "static void try_wake_any_event(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/misc/ntsync.c",
+          "lines": [
+            368
+          ]
+        }
+      ],
+      "update_rule": "Object updates evaluate wait conditions and atomically satisfy a wait before waking q->task.",
+      "clock_or_units": "Logical readiness; annotate monotonic time if needed.",
+      "accuracy_and_staleness": "Owner field is opaque userspace ID; all-wait readiness is not each individual object being signaled at some earlier time.",
+      "access_and_cost": "Driver knows waiter; typed wake must preserve its existing lock/context ordering.",
+      "cake_use": "Potential Proton path after verifying title usage; precise readiness beats ioctl-name heuristics.",
+      "invalidation": "Object/instance/task lifetime, owner mismatch, alert/timeout/cancel.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "input_origin",
+      "signal": "Kernel input timestamp",
+      "locations": [
+        {
+          "source": "input",
+          "symbol": "void input_set_timestamp(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/input.c",
+          "lines": [
+            2053
+          ]
+        },
+        {
+          "source": "input",
+          "symbol": "ktime_t *input_get_timestamp(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/input.c",
+          "lines": [
+            2068
+          ]
+        }
+      ],
+      "update_rule": "Driver supplies event time, or input core samples ktime_get when no valid timestamp exists; reset on flush.",
+      "clock_or_units": "MONOTONIC internally; REALTIME/BOOTTIME conversions also stored.",
+      "accuracy_and_staleness": "May be receipt timestamp; no guaranteed physical sensor timestamp. Delayed conversion across suspend can be inaccurate.",
+      "access_and_cost": "Existing event time; observe producer field, not a later clock read mislabeled as hardware time.",
+      "cake_use": "Input age with source-quality flag and consumer identity.",
+      "invalidation": "Device/report generation, suspend, synthetic events and clock choice.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "hid_ready",
+      "signal": "USB HID report arrival",
+      "locations": [
+        {
+          "source": "hid",
+          "symbol": "static void hid_irq_in(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/hid/usbhid/hid-core.c",
+          "lines": [
+            274
+          ]
+        }
+      ],
+      "update_rule": "Successful USB URB completion processes report; cadence depends on device/USB configuration and generated reports.",
+      "clock_or_units": "Receipt observation time, not physical scan time.",
+      "accuracy_and_staleness": "1/8 kHz imply 1 ms/125 us nominal intervals only as examples; this device cadence is not measured.",
+      "access_and_cost": "Existing driver function; tracing every event has cost. BPF cannot eliminate pre-arrival firmware/USB time.",
+      "cake_use": "Locate upstream delay; do not wake an unrouted consumer before packet readiness.",
+      "invalidation": "Disconnect/reset, report parsing errors, HID quirks, transport.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "evdev_ready",
+      "signal": "Mouse/key packet ready for client",
+      "locations": [
+        {
+          "source": "evdev",
+          "symbol": "static void evdev_pass_values(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/evdev.c",
+          "lines": [
+            248
+          ]
+        },
+        {
+          "source": "evdev",
+          "symbol": "static int evdev_set_clk_type(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/evdev.c",
+          "lines": [
+            178
+          ]
+        }
+      ],
+      "update_rule": "Nonempty SYN_REPORT packet publication, then poll wake after client buffer lock is released.",
+      "clock_or_units": "Selected evdev clock; serialized timeval truncates ns to microseconds.",
+      "accuracy_and_staleness": "Up to <1 us serialization truncation, plus earlier timestamp uncertainty and later queue delay. Clock changes can flush pending data/SYN_DROPPED.",
+      "access_and_cost": "Actual evdev client context known; trace or typed notification at readiness, no raw key/coordinate payload needed.",
+      "cake_use": "Good generic input cause origin before downstream epoll/task selection.",
+      "invalidation": "Client grab/revoke, SYN_DROPPED, clock switch, device/task lifetimes.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "libinput",
+      "signal": "Libinput delivery to KWin",
+      "locations": [
+        {
+          "source": "kwinevents",
+          "symbol": "libinput_event_pointer_get_time_usec",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_events.cpp",
+          "lines": [
+            169
+          ]
+        },
+        {
+          "source": "kwinevents",
+          "symbol": "libinput_event_keyboard_get_time_usec",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_events.cpp",
+          "lines": [
+            130
+          ]
+        },
+        {
+          "source": "kwininput",
+          "symbol": "void Connection::handleEvent(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_connection.cpp",
+          "lines": [
+            171
+          ]
+        }
+      ],
+      "update_rule": "KWin dispatches and queues libinput events when its event-loop service runs; empty-to-nonempty emits notification.",
+      "clock_or_units": "libinput MONOTONIC microseconds; arrival order need not match event timestamp order.",
+      "accuracy_and_staleness": "Timestamp can retain event age despite delayed delivery; synthesized events can have older timestamps.",
+      "access_and_cost": "Userspace event queue; kernel cannot infer route through Qt without cooperation or measured association.",
+      "cake_use": "Separate event age, queue age and freshest sample age.",
+      "invalidation": "Seat/device/focus and process generation; synthesized-event semantics.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "kwin_input_queue",
+      "signal": "KWin input thread-to-main handoff",
+      "locations": [
+        {
+          "source": "kwinbackend",
+          "symbol": "Qt::QueuedConnection",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_libinputbackend.cpp",
+          "lines": [
+            25
+          ]
+        },
+        {
+          "source": "kwininput",
+          "symbol": "void Connection::processEvents(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_connection.cpp",
+          "lines": [
+            261
+          ]
+        },
+        {
+          "source": "kwininput",
+          "symbol": "latestTime = p->time()",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_connection.cpp",
+          "lines": [
+            378
+          ]
+        }
+      ],
+      "update_rule": "Queued Qt notification, processed on main-thread service; consecutive motion events coalesced with latest event time.",
+      "clock_or_units": "Event time in MONOTONIC us; add enqueue/dequeue stamps separately.",
+      "accuracy_and_staleness": "Unbounded under stalls; latest-only timestamp hides oldest backlog. Both involved host threads are RR priority 1.",
+      "access_and_cost": "Existing userspace handoff; preserve dependency metadata rather than add another polling broker.",
+      "cake_use": "Measure this queue separately from Cake-owned game CPU queue.",
+      "invalidation": "Consumer acknowledgment, focus, suspend and process lifetime.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "keyboard_edges",
+      "signal": "Keyboard press/release/repeat delivery",
+      "locations": [
+        {
+          "source": "kwininput",
+          "symbol": "case LIBINPUT_EVENT_KEYBOARD_KEY:",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_connection.cpp",
+          "lines": [
+            301
+          ]
+        },
+        {
+          "source": "input",
+          "symbol": "static void input_repeat_key(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/input.c",
+          "lines": [
+            2236
+          ]
+        }
+      ],
+      "update_rule": "Per accepted input edge/report; kernel or higher layers may generate repeat.",
+      "clock_or_units": "Event MONOTONIC us in KWin; event class determines meaning.",
+      "accuracy_and_staleness": "Press/release ordering and seat counts matter. Repeat is not a new hardware scan; release lag needs its own measurement.",
+      "access_and_cost": "Reuse packet readiness with discrete-input class; no keycode required for scheduler.",
+      "cake_use": "Bound urgency until real consumer handles edge; do not renew forever on repeat.",
+      "invalidation": "Focus loss, dropped synchronization, held-key state, disconnect, acknowledgment.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "kwin_fence_queue",
+      "signal": "KWin acquire fence to transaction readiness",
+      "locations": [
+        {
+          "source": "kwintransaction",
+          "symbol": "void Transaction::watchSyncObj(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_wayland_transaction.cpp",
+          "lines": [
+            238
+          ]
+        },
+        {
+          "source": "kwinsync",
+          "symbol": "FileDescriptor SyncTimeline::eventFd(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_core_syncobjtimeline.cpp",
+          "lines": [
+            157
+          ]
+        }
+      ],
+      "update_rule": "KWin requests eventfd with flags=0 for acquire point; unreadable fd becomes a transaction fence and event-loop dependency.",
+      "clock_or_units": "Timeline point is completion state; event-loop notification time is later.",
+      "accuracy_and_staleness": "Source path waits for completion, distinct from isMaterialized WAIT_AVAILABLE. Whether game uses this path is not traced yet.",
+      "access_and_cost": "GPU fence -> kernel eventfd -> KWin event loop; per-point setup exists already.",
+      "cake_use": "Concrete compositor consumer route worth measuring; main thread remains RT.",
+      "invalidation": "Surface/transaction/point generation, fence error/discard, client exit.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "frame_target",
+      "signal": "KWin planned frame and render start",
+      "locations": [
+        {
+          "source": "kwinrender",
+          "symbol": "void RenderLoopPrivate::scheduleRepaint(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-renderloop.cpp",
+          "lines": [
+            44
+          ]
+        },
+        {
+          "source": "kwinrender",
+          "symbol": "void RenderLoopPrivate::notifyFrameCompleted(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-renderloop.cpp",
+          "lines": [
+            130
+          ]
+        }
+      ],
+      "update_rule": "Recomputed when scheduling/revising repaint; render estimate updated after frame feedback.",
+      "clock_or_units": "steady_clock ns; current Linux presentation clock verified MONOTONIC; timer duration is cast to ms.",
+      "accuracy_and_staleness": "Prediction, not measured future time. 1 ms extra safety allowance and sub-ms timer conversion affect planning; VRR/queue state change it.",
+      "access_and_cost": "Userspace already owns frame target; proposed bounded phase/target publication.",
+      "cake_use": "Advisory latest-start/slack for actual dependency; no permanent process priority.",
+      "invalidation": "Frame/output generation, refresh/VRR/mode change, estimate age, suspend.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "vblank",
+      "signal": "NVIDIA last-vblank timestamp",
+      "locations": [
+        {
+          "source": "nvcrtc",
+          "symbol": "static bool nv_drm_crtc_get_vblank_timestamp(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-crtc.c",
+          "lines": [
+            2559
+          ]
+        },
+        {
+          "source": "nvcrtc",
+          "symbol": "static void nv_drm_crtc_vblank_callback(",
+          "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-crtc.c",
+          "lines": [
+            3152
+          ]
+        }
+      ],
+      "update_rule": "Optional callback stores supplied timestamp per vblank; read uses cache to avoid sleeping KAPI call under DRM locks.",
+      "clock_or_units": "Driver-supplied ns timestamp; end-to-end hardware origin not established here.",
+      "accuracy_and_staleness": "Host nvidia_drm.vblank=N: this optional path is disabled. Available symbols alone do not make it live; separate pageflip feedback can still work.",
+      "access_and_cost": "Existing kernel cache if enabled; do not enable as part of observation or infer absent feedback from this flag alone.",
+      "cake_use": "Output phase evidence only after coverage/clock validation; vblank is not per-game completion.",
+      "invalidation": "Enablement, output/mode lifecycle, last-event age, fallback quality.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "presentation",
+      "signal": "Actual presentation/discard feedback",
+      "locations": [
+        {
+          "source": "presentation",
+          "symbol": "<event name=\"clock_id\">",
+          "path": "/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml",
+          "lines": [
+            90
+          ]
+        },
+        {
+          "source": "presentation",
+          "symbol": "<event name=\"presented\"",
+          "path": "/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml",
+          "lines": [
+            200
+          ]
+        },
+        {
+          "source": "protocolsync",
+          "symbol": "<request name=\"set_release_point\">",
+          "path": "/usr/share/wayland-protocols/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml",
+          "lines": [
+            210
+          ]
+        }
+      ],
+      "update_rule": "Feedback per requested surface content update after presentation or discard; delivery may lag embedded event timestamp.",
+      "clock_or_units": "Advertised presentation clock: host CLOCK_MONOTONIC; seconds+ns plus quality flags.",
+      "accuracy_and_staleness": "HW_CLOCK/HW_COMPLETION/ZERO_COPY flags have distinct meanings. Buffer release can occur without display; protocol availability does not prove a game's coverage.",
+      "access_and_cost": "Existing Wayland protocol; CPU scheduler needs cooperative frame association, not direct protocol parsing in BPF.",
+      "cake_use": "Outcome validation and prediction calibration, not a future-ready fact.",
+      "invalidation": "Connection clock, output, frame ID, discard, mode/VRR and buffer generation.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    },
+    {
+      "id": "input_protocol",
+      "signal": "High-resolution input timestamp protocol",
+      "locations": [
+        {
+          "source": "inputstamp",
+          "symbol": "<event name=\"timestamp\">",
+          "path": "/usr/share/wayland-protocols/unstable/input-timestamps/input-timestamps-unstable-v1.xml",
+          "lines": [
+            119
+          ]
+        }
+      ],
+      "update_rule": "If supported and subscribed, accompanies next matching timestamped input event.",
+      "clock_or_units": "seconds+ns in same domain as corresponding input timestamp.",
+      "accuracy_and_staleness": "Higher representation precision does not recover precision already lost upstream. Not advertised in this host registry snapshot.",
+      "access_and_cost": "Userspace protocol; availability must be negotiated, not inferred from installed XML.",
+      "cake_use": "Optional measurement/phase publisher input, not a required Cake dependency.",
+      "invalidation": "Seat subscription, device/client lifetime, clock mapping and event matching.",
+      "hardware_update_latency_ns": null,
+      "hotpath_read_cost_ns": null
+    }
+  ]
+}

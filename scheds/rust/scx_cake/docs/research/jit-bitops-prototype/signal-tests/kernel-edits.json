@@ -1,0 +1,254 @@
+[
+  [
+    "include/linux/sched/wake_signal.h",
+    null,
+    "/* SPDX-License-Identifier: GPL-2.0 */\n#ifndef _LINUX_SCHED_WAKE_SIGNAL_H\n#define _LINUX_SCHED_WAKE_SIGNAL_H\n\n#include <linux/wait.h>\n\n/* Internal wake flags, never poll bits or userspace supplied priority. */\n#define WF_SYNC\t\t\t0x10\n#define WF_SCX_INPUT\t\t0x100\n#define WF_SCX_FENCE\t\t0x200\n#define WF_SCX_SIGNAL_MASK\t(WF_SCX_INPUT | WF_SCX_FENCE)\n#define WF_SCX_SIGNAL_SHIFT\t8\n\nint wake_up_state_signal(struct task_struct *p, unsigned int state,\n\t\t\t unsigned int signal);\nint __wake_up_flags(struct wait_queue_head *head, unsigned int mode,\n\t\t    int nr_exclusive, int wake_flags, void *key);\nvoid __wake_up_locked_key_flags(struct wait_queue_head *head, unsigned int mode,\n\t\t\t\tint wake_flags, void *key);\n\n#endif\n"
+  ],
+  [
+    "kernel/sched/core.c",
+    "#include <linux/sched/rt.h>",
+    "#include <linux/sched/rt.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "kernel/sched/core.c",
+    "\t\tWRITE_ONCE(p->__state, TASK_WAKING);",
+    "\t\tWRITE_ONCE(p->__state, TASK_WAKING);\n\t\tscx_record_wake_signal(p, wake_flags);"
+  ],
+  [
+    "kernel/sched/core.c",
+    "EXPORT_SYMBOL(wake_up_process);",
+    "EXPORT_SYMBOL(wake_up_process);\n\n/* Tag only accepted wakeups of a blocked task; preserve normal wake semantics. */\nint wake_up_state_signal(struct task_struct *p, unsigned int state,\n\t\t\t unsigned int signal)\n{\n\treturn try_to_wake_up(p, state, signal & WF_SCX_SIGNAL_MASK);\n}\nEXPORT_SYMBOL_GPL(wake_up_state_signal);"
+  ],
+  [
+    "kernel/sched/wait.c",
+    "#include <linux/wait_bit.h>",
+    "#include <linux/wait_bit.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "kernel/sched/wait.c",
+    "EXPORT_SYMBOL(__wake_up);",
+    "EXPORT_SYMBOL(__wake_up);\n\nint __wake_up_flags(struct wait_queue_head *head, unsigned int mode,\n\t\t    int nr_exclusive, int wake_flags, void *key)\n{\n\treturn __wake_up_common_lock(head, mode, nr_exclusive, wake_flags, key);\n}\nEXPORT_SYMBOL_GPL(__wake_up_flags);"
+  ],
+  [
+    "kernel/sched/wait.c",
+    "EXPORT_SYMBOL_GPL(__wake_up_locked_key);",
+    "EXPORT_SYMBOL_GPL(__wake_up_locked_key);\n\nvoid __wake_up_locked_key_flags(struct wait_queue_head *head, unsigned int mode,\n\t\t\t\tint wake_flags, void *key)\n{\n\t__wake_up_common(head, mode, 1, wake_flags, key);\n}\nEXPORT_SYMBOL_GPL(__wake_up_locked_key_flags);"
+  ],
+  [
+    "include/linux/sched/ext.h",
+    "#include <linux/llist.h>",
+    "#include <linux/atomic.h>\n#include <linux/llist.h>"
+  ],
+  [
+    "include/linux/sched/ext.h",
+    "\tatomic_long_t\t\tops_state;",
+    "\tatomic_long_t\t\tops_state;\n\tatomic64_t\t\twake_signal;"
+  ],
+  [
+    "kernel/sched/ext/ext.h",
+    "#ifdef CONFIG_SCHED_CLASS_EXT\n\nvoid scx_tick",
+    "#ifdef CONFIG_SCHED_CLASS_EXT\n\nDECLARE_STATIC_KEY_FALSE(scx_wake_signal_enabled);\nvoid __scx_record_wake_signal(struct task_struct *p, int wake_flags);\n\nstatic inline void scx_record_wake_signal(struct task_struct *p, int wake_flags)\n{\n\tif (static_branch_unlikely(&scx_wake_signal_enabled))\n\t\t__scx_record_wake_signal(p, wake_flags);\n}\n\nvoid scx_tick"
+  ],
+  [
+    "kernel/sched/ext/ext.h",
+    "#else\t/* CONFIG_SCHED_CLASS_EXT */",
+    "#else\t/* CONFIG_SCHED_CLASS_EXT */\n\nstatic inline void scx_record_wake_signal(struct task_struct *p, int wake_flags) {}"
+  ],
+  [
+    "kernel/sched/ext/internal.h",
+    "\tSCX_OPS_TID_TO_TASK\t\t= 1LLU << 8,",
+    "\tSCX_OPS_TID_TO_TASK\t\t= 1LLU << 8,\n\n\t/* Root opts in to typed blocked-task wake metadata. */\n\tSCX_OPS_WAKE_SIGNAL\t\t= 1LLU << 9,"
+  ],
+  [
+    "kernel/sched/ext/internal.h",
+    "\t\t\t\t\t  SCX_OPS_TID_TO_TASK,",
+    "\t\t\t\t\t  SCX_OPS_TID_TO_TASK |\n\t\t\t\t\t  SCX_OPS_WAKE_SIGNAL,"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "#include <linux/sched/isolation.h>",
+    "#include <linux/sched/isolation.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "DEFINE_STATIC_KEY_FALSE(__scx_enabled);",
+    "DEFINE_STATIC_KEY_FALSE(__scx_enabled);\nDEFINE_STATIC_KEY_FALSE(scx_wake_signal_enabled);\n\nvoid __scx_record_wake_signal(struct task_struct *p, int wake_flags)\n{\n\tu64 cause = (wake_flags & WF_SCX_SIGNAL_MASK) >> WF_SCX_SIGNAL_SHIFT;\n\n\tif (p->sched_class != &ext_sched_class)\n\t\treturn;\n\tatomic64_set(&p->scx.wake_signal, cause ? (ktime_get_ns() & ~3ULL) | cause : 0);\n}"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "\t\tSCX_CALL_OP_TASK(sch, running, rq, p);",
+    "\t\tSCX_CALL_OP_TASK(sch, running, rq, p);\n\tif (static_branch_unlikely(&scx_wake_signal_enabled))\n\t\tatomic64_set(&p->scx.wake_signal, 0);"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "\tstatic_branch_disable(&__scx_enabled);",
+    "\tstatic_branch_disable(&__scx_enabled);\n\tstatic_branch_disable(&scx_wake_signal_enabled);"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "\tstatic_branch_enable(&__scx_enabled);",
+    "\tstatic_branch_enable(&__scx_enabled);\n\tif (ops->flags & SCX_OPS_WAKE_SIGNAL)\n\t\tstatic_branch_enable(&scx_wake_signal_enabled);"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "\tp->scx.disallow = false;",
+    "\tp->scx.disallow = false;\n\tatomic64_set(&p->scx.wake_signal, 0);"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "\tif ((ops->flags & SCX_OPS_TID_TO_TASK) && scx_parent(sch) &&",
+    "\tif ((ops->flags & SCX_OPS_WAKE_SIGNAL) && scx_parent(sch) &&\n\t    !(scx_root->ops.flags & SCX_OPS_WAKE_SIGNAL)) {\n\t\tscx_error(sch, \"SCX_OPS_WAKE_SIGNAL requires root scheduler opt-in\");\n\t\treturn -EINVAL;\n\t}\n\n\tif ((ops->flags & SCX_OPS_TID_TO_TASK) && scx_parent(sch) &&"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "BTF_KFUNCS_START(scx_kfunc_ids_any)",
+    "BTF_KFUNCS_START(scx_kfunc_ids_any)\nBTF_ID_FLAGS(func, scx_bpf_task_wake_signal_v1, KF_RCU)\nBTF_ID_FLAGS(func, scx_bpf_cpu_irq_ns_v1, KF_IMPLICIT_ARGS)"
+  ],
+  [
+    "kernel/sched/ext/ext.c",
+    "/**\n * scx_bpf_cpu_rq - Fetch the rq of a CPU",
+    "/**\n * scx_bpf_task_wake_signal_v1 - Read the current blocked-task wake token\n * @p: trusted task pointer\n *\n * Bits 0/1 mean input packet/fence completion. Other bits are the accepted\n * wake's CLOCK_MONOTONIC timestamp rounded down to four nanoseconds. Zero is\n * unknown. The token is cleared after ops.running(), not on a failed wake.\n */\n__bpf_kfunc u64 scx_bpf_task_wake_signal_v1(struct task_struct *p)\n{\n\tif (!static_branch_unlikely(&scx_wake_signal_enabled))\n\t\treturn 0;\n\treturn atomic64_read(&p->scx.wake_signal);\n}\n\n/**\n * scx_bpf_cpu_irq_ns_v1 - Read completed IRQ accounting without rq locking\n * @cpu: CPU to query\n * @aux: implicit BPF program context\n *\n * Returns U64_MAX for unknown/offline/unsupported data. This is a cumulative\n * duration, not an active-handler indication; ksoftirqd task time is excluded.\n * The 32-bit case is unsupported to avoid unbounded remote seqcount retries.\n */\n__bpf_kfunc u64 scx_bpf_cpu_irq_ns_v1(s32 cpu, const struct bpf_prog_aux *aux)\n{\n#if defined(CONFIG_IRQ_TIME_ACCOUNTING) && defined(CONFIG_64BIT)\n\tstruct scx_sched *sch;\n\tu64 total;\n\n\tguard(rcu)();\n\tif (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu) || !irqtime_enabled())\n\t\treturn U64_MAX;\n\tsch = scx_prog_sched(aux);\n\tif (!sch || !scx_cpu_valid(sch, cpu, NULL))\n\t\treturn U64_MAX;\n\ttotal = READ_ONCE(per_cpu(cpu_irqtime, cpu).total);\n\treturn cpu_online(cpu) && irqtime_enabled() ? total : U64_MAX;\n#else\n\treturn U64_MAX;\n#endif\n}\n\n/**\n * scx_bpf_cpu_rq - Fetch the rq of a CPU"
+  ],
+  [
+    "kernel/sched/sched.h",
+    "#include <linux/sched/topology.h>",
+    "#include <linux/sched/topology.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "kernel/sched/sched.h",
+    "#define WF_SYNC\t\t\t0x10 /* Waker goes to sleep after wakeup */\n",
+    ""
+  ],
+  [
+    "drivers/dma-buf/dma-fence.c",
+    "#include <linux/sched/signal.h>",
+    "#include <linux/sched/signal.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "drivers/dma-buf/dma-fence.c",
+    "\twake_up_state(wait->task, TASK_NORMAL);",
+    "\twake_up_state_signal(wait->task, TASK_NORMAL, WF_SCX_FENCE);"
+  ],
+  [
+    "drivers/dma-buf/sync_file.c",
+    "#include <linux/sched.h>",
+    "#include <linux/sched.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "drivers/dma-buf/sync_file.c",
+    "\twake_up_all(&sync_file->wq);",
+    "\t__wake_up_flags(&sync_file->wq, TASK_NORMAL, 0, WF_SCX_FENCE, NULL);",
+    2
+  ],
+  [
+    "drivers/input/evdev.c",
+    "#include <linux/sched.h>",
+    "#include <linux/sched.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "drivers/input/evdev.c",
+    "\t\twake_up_interruptible_poll(&client->wait,\n\t\t\tEPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);",
+    "\t\t__wake_up_flags(&client->wait, TASK_INTERRUPTIBLE, 1, WF_SCX_INPUT,\n\t\t\t\tpoll_to_key(EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM));"
+  ],
+  [
+    "fs/eventpoll.c",
+    "#include <linux/sched/signal.h>",
+    "#include <linux/sched/signal.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "fs/eventpoll.c",
+    "\t\t\t     unsigned pollflags)",
+    "\t\t\t     unsigned int pollflags, int wake_flags)"
+  ],
+  [
+    "fs/eventpoll.c",
+    "\t\t\t     __poll_t pollflags)",
+    "\t\t\t     __poll_t pollflags, int wake_flags)"
+  ],
+  [
+    "fs/eventpoll.c",
+    "\twake_up_locked_poll(&ep->poll_wait, EPOLLIN | pollflags);",
+    "\t__wake_up_locked_key_flags(&ep->poll_wait, TASK_NORMAL, wake_flags,\n\t\t\t\t   poll_to_key(EPOLLIN | pollflags));"
+  ],
+  [
+    "fs/eventpoll.c",
+    "\twake_up_poll(&ep->poll_wait, EPOLLIN | pollflags);",
+    "\t__wake_up_flags(&ep->poll_wait, TASK_NORMAL, 1, wake_flags,\n\t\t\tpoll_to_key(EPOLLIN | pollflags));"
+  ],
+  [
+    "fs/eventpoll.c",
+    "ep_poll_safewake(ep, NULL, 0);",
+    "ep_poll_safewake(ep, NULL, 0, 0);",
+    3
+  ],
+  [
+    "fs/eventpoll.c",
+    "\t\tif (sync)\n\t\t\twake_up_sync(&ep->wq);\n\t\telse\n\t\t\twake_up(&ep->wq);",
+    "\t\t__wake_up_flags(&ep->wq, TASK_NORMAL, 1,\n\t\t\t\t(sync & WF_SCX_SIGNAL_MASK) |\n\t\t\t\t((sync & ~WF_SCX_SIGNAL_MASK) ? WF_SYNC : 0), NULL);"
+  ],
+  [
+    "fs/eventpoll.c",
+    "\t\tep_poll_safewake(ep, epi, pollflags & EPOLL_URING_WAKE);",
+    "\t\tep_poll_safewake(ep, epi, pollflags & EPOLL_URING_WAKE,\n\t\t\t\t sync & WF_SCX_SIGNAL_MASK);"
+  ],
+  [
+    "include/linux/eventfd.h",
+    "void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask);",
+    "void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask);\nvoid eventfd_signal_mask_flags(struct eventfd_ctx *ctx, __poll_t mask,\n\t\t\t       int wake_flags);"
+  ],
+  [
+    "include/linux/eventfd.h",
+    "static inline void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)\n{\n}",
+    "static inline void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)\n{\n}\n\nstatic inline void eventfd_signal_mask_flags(struct eventfd_ctx *ctx,\n\t\t\t\t\t    __poll_t mask, int wake_flags)\n{\n}"
+  ],
+  [
+    "fs/eventfd.c",
+    "#include <linux/sched/signal.h>",
+    "#include <linux/sched/signal.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "fs/eventfd.c",
+    " * eventfd_signal_mask - Increment the event counter",
+    " * eventfd_signal_mask_flags - Increment the event counter with a wake cause"
+  ],
+  [
+    "fs/eventfd.c",
+    " * @mask: [in] poll mask",
+    " * @mask: [in] poll mask\n * @wake_flags: [in] internal typed readiness flags"
+  ],
+  [
+    "fs/eventfd.c",
+    "void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)\n{",
+    "void eventfd_signal_mask_flags(struct eventfd_ctx *ctx, __poll_t mask,\n\t\t\t       int wake_flags)\n{"
+  ],
+  [
+    "fs/eventfd.c",
+    "\t\twake_up_locked_poll(&ctx->wqh, EPOLLIN | mask);",
+    "\t\t__wake_up_locked_key_flags(&ctx->wqh, TASK_NORMAL,\n\t\t\t\t\t   wake_flags & WF_SCX_SIGNAL_MASK,\n\t\t\t\t\t   poll_to_key(EPOLLIN | mask));"
+  ],
+  [
+    "fs/eventfd.c",
+    "EXPORT_SYMBOL_GPL(eventfd_signal_mask);",
+    "EXPORT_SYMBOL_GPL(eventfd_signal_mask_flags);\n\nvoid eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)\n{\n\teventfd_signal_mask_flags(ctx, mask, 0);\n}\nEXPORT_SYMBOL_GPL(eventfd_signal_mask);"
+  ],
+  [
+    "drivers/gpu/drm/drm_syncobj.c",
+    "#include <linux/sched/signal.h>",
+    "#include <linux/sched/signal.h>\n#include <linux/sched/wake_signal.h>"
+  ],
+  [
+    "drivers/gpu/drm/drm_syncobj.c",
+    "\t\tcontainer_of(cb, struct syncobj_wait_entry, fence_cb);\n\n\twake_up_process(wait->task);",
+    "\t\tcontainer_of(cb, struct syncobj_wait_entry, fence_cb);\n\n\twake_up_state_signal(wait->task, TASK_NORMAL, WF_SCX_FENCE);"
+  ],
+  [
+    "drivers/gpu/drm/drm_syncobj.c",
+    "\t\tcontainer_of(cb, struct syncobj_eventfd_entry, fence_cb);\n\n\teventfd_signal(entry->ev_fd_ctx);",
+    "\t\tcontainer_of(cb, struct syncobj_eventfd_entry, fence_cb);\n\n\teventfd_signal_mask_flags(entry->ev_fd_ctx, 0, WF_SCX_FENCE);"
+  ],
+  [
+    "drivers/gpu/drm/drm_syncobj.c",
+    "\t\tif (ret == -ENOENT) {\n\t\t\teventfd_signal(entry->ev_fd_ctx);",
+    "\t\tif (ret == -ENOENT) {\n\t\t\teventfd_signal_mask_flags(entry->ev_fd_ctx, 0, WF_SCX_FENCE);"
+  ]
+]

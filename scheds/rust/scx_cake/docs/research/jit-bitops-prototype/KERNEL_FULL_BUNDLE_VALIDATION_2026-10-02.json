@@ -1,0 +1,97 @@
+{
+  "status": "combined patch reconstructs all 8 affected files of retained built candidate",
+  "patch": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-cake-kernel-full-experimental-cachyos-7.2.8.patch",
+  "patch_sha256": "c62c0f3faf99a9920aa116188d2aa0902935360955f231de7ac06bd099ff14f6",
+  "source_archive": "/home/ritz/.cache/cachyos-km/pkgbuilds/linux-cachyos/cachyos-7.2.8-1.tar.gz",
+  "source_archive_sha256": "f848df42bd4ac31a4918188c6723660d3c6dd7591b63a6419123dcbc23ecf328",
+  "inputs": {
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-bpf-x86-scalar-fastcall-bounds-cachyos-7.2.8.patch": "2cf0a07f5cbe90acccd484500e2396604f4040cf1e9fa5620c79342818e5d4e1",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0005-sched-ext-direct-dsq-index-with-typed-fallback-cachyos-7.2.8.patch": "90bb9172da4876589383a3fc6396f868880e9b3d13463dad0dee08e141ff0ea5"
+  },
+  "before_sha256": {
+    "arch/x86/net/bpf_jit_comp.c": "16c89fcd141c3386a0967d2caf63601092a0f4b7f3d2d9f4048f1490d2a26c75",
+    "include/linux/filter.h": "4b0ba3487c632e62661a053ddc648e4f3cf32d028ee27fced6306aa745f400ad",
+    "kernel/bpf/helpers.c": "ccdef35d186b6ca93abf4032b2f776930635ebf89deff7139f55ae897dabe115",
+    "tools/testing/selftests/bpf/progs/scalar_bitops.c": null,
+    "tools/testing/selftests/bpf/prog_tests/scalar_bitops.c": null,
+    "kernel/bpf/verifier.c": "2ac66e116d13ffb5689de71bd8c7a338a8a9aa7ce3a35b4197f731accd9e286f",
+    "kernel/sched/ext/ext.c": "6f2513a6820d6c37eb05efab17791413ab417ac06114ba583bfcf561c072f5d6",
+    "kernel/sched/ext/internal.h": "286e71c1355d3a71fdd19844674d3c0ee8bbb6f57592f4da062e5bb27bd732b7"
+  },
+  "after_sha256": {
+    "arch/x86/net/bpf_jit_comp.c": "20f81c95173015321af6197ac922448a21ecb0718f42df23f760af84ee815882",
+    "include/linux/filter.h": "16fbd3c11ab8b25f371f65e2f04c4587bf5e66e5cf8923ae0b18db9dd1875ebe",
+    "kernel/bpf/helpers.c": "86e746e97a25a750a466951a1f88b1bab8b3d4c20f657af7932d5a7c63260bcb",
+    "tools/testing/selftests/bpf/progs/scalar_bitops.c": "0df5a5d0458877dff10f77745a75fb68c52333d4ab45129d39da21fbc2f8282c",
+    "tools/testing/selftests/bpf/prog_tests/scalar_bitops.c": "47ceeb69e5bbd5eda645446aa57d8bc8db351ec6c108da21b8aa8c907b47f32f",
+    "kernel/bpf/verifier.c": "7b3b476399fd7b04f0a02322f446b7c995b27e7902d2996ec045aa605ee8577e",
+    "kernel/sched/ext/ext.c": "2de633c51bc1c8b0217358ddd462f784015f9aad0bac8127fc9286ac2ff4b1aa",
+    "kernel/sched/ext/internal.h": "005c8251c88503d80c05ee71fb88d74e921044171a20f3af22384fd7f8fa311b"
+  },
+  "candidate": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux",
+  "candidate_kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+  "commands": [
+    {
+      "argv": [
+        "git",
+        "apply",
+        "--check",
+        "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-cake-kernel-full-experimental-cachyos-7.2.8.patch"
+      ],
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "argv": [
+        "patch",
+        "--batch",
+        "--fuzz=0",
+        "--forward",
+        "-p1",
+        "-i",
+        "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-cake-kernel-full-experimental-cachyos-7.2.8.patch"
+      ],
+      "returncode": 0,
+      "output": "patching file arch/x86/net/bpf_jit_comp.c\npatching file include/linux/filter.h\npatching file kernel/bpf/helpers.c\npatching file tools/testing/selftests/bpf/progs/scalar_bitops.c\npatching file tools/testing/selftests/bpf/prog_tests/scalar_bitops.c\npatching file kernel/bpf/verifier.c\npatching file kernel/sched/ext/ext.c\npatching file kernel/sched/ext/internal.h\n"
+    },
+    {
+      "argv": [
+        "git",
+        "apply",
+        "--reverse",
+        "--check",
+        "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-cake-kernel-full-experimental-cachyos-7.2.8.patch"
+      ],
+      "returncode": 0,
+      "output": ""
+    }
+  ],
+  "checkpatch": {
+    "argv": [
+      "perl",
+      "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/scripts/checkpatch.pl",
+      "--no-tree",
+      "--strict",
+      "--no-signoff",
+      "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-cake-kernel-full-experimental-cachyos-7.2.8.patch"
+    ],
+    "returncode": 1,
+    "log": "/home/ritz/Documents/Repo/scx/target/cake_kernel_bundle_20261002T212506Z/checkpatch.log",
+    "errors": 0,
+    "warnings": 2,
+    "checks": 2,
+    "reviewed_notices": [
+      "existing new scalar selftest files: MAINTAINERS coverage notice",
+      "intentional volatile mutable selftest values retain register checks",
+      "two multiline BPF asm statements retain tested formatting"
+    ]
+  },
+  "new_build": false,
+  "new_runtime_test": false,
+  "host_installed": false,
+  "outstanding": [
+    "baseline KASAN/POC lockdep findings",
+    "hardware timing",
+    "compatible Cake specialization integration"
+  ]
+}

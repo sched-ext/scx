@@ -1,0 +1,57 @@
+clang version 22.1.8
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+LLVM (http://llvm.org/):
+  LLVM version 22.1.8
+  Optimized build.
+
+
+  Registered Targets:
+    aarch64     - AArch64 (little endian)
+    aarch64_32  - AArch64 (little endian ILP32)
+    aarch64_be  - AArch64 (big endian)
+    amdgcn      - AMD GCN GPUs
+    arm         - ARM
+    arm64       - ARM64 (little endian)
+    arm64_32    - ARM64 (little endian ILP32)
+    armeb       - ARM (big endian)
+    avr         - Atmel AVR Microcontroller
+    bpf         - BPF (host endian)
+    bpfeb       - BPF (big endian)
+    bpfel       - BPF (little endian)
+    hexagon     - Hexagon
+    lanai       - Lanai
+    loongarch32 - 32-bit LoongArch
+    loongarch64 - 64-bit LoongArch
+    mips        - MIPS (32-bit big endian)
+    mips64      - MIPS (64-bit big endian)
+    mips64el    - MIPS (64-bit little endian)
+    mipsel      - MIPS (32-bit little endian)
+    msp430      - MSP430 [experimental]
+    nvptx       - NVIDIA PTX 32-bit
+    nvptx64     - NVIDIA PTX 64-bit
+    ppc32       - PowerPC 32
+    ppc32le     - PowerPC 32 LE
+    ppc64       - PowerPC 64
+    ppc64le     - PowerPC 64 LE
+    r600        - AMD GPUs HD2XXX-HD6XXX
+    riscv32     - 32-bit RISC-V
+    riscv32be   - 32-bit big endian RISC-V
+    riscv64     - 64-bit RISC-V
+    riscv64be   - 64-bit big endian RISC-V
+    sparc       - Sparc
+    sparcel     - Sparc LE
+    sparcv9     - Sparc V9
+    spirv       - SPIR-V Logical
+    spirv32     - SPIR-V 32-bit
+    spirv64     - SPIR-V 64-bit
+    systemz     - SystemZ
+    thumb       - Thumb
+    thumbeb     - Thumb (big endian)
+    ve          - VE
+    wasm32      - WebAssembly 32-bit
+    wasm64      - WebAssembly 64-bit
+    x86         - 32-bit X86: Pentium-Pro and above
+    x86-64      - 64-bit X86: EM64T and AMD64
+    xcore       - XCore

@@ -1,0 +1,89 @@
+{
+  "date": "2026-09-29",
+  "hardware_performance_measured": false,
+  "cake_native_mode_loaded": false,
+  "host_scheduler_activated": false,
+  "kernel_base": "2709dd5ae32f0828f386327c76bba9f39f63a1c6",
+  "cake_base": "8fc5ec9b105198286f7c9f7c53e2bf40308c3a4a",
+  "runs": {
+    "vm-native-final": {
+      "environment": "tcg",
+      "correctness": {
+        "type": "correctness",
+        "vectors": 1156,
+        "program_runs": 5780,
+        "mismatches": 0
+      },
+      "kernel_selftests_passed": 3,
+      "timing_groups": 12,
+      "jit_expected_path_verified": "native",
+      "log": "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final.log"
+    },
+    "vm-fallback-final": {
+      "environment": "tcg",
+      "correctness": {
+        "type": "correctness",
+        "vectors": 1156,
+        "program_runs": 5780,
+        "mismatches": 0
+      },
+      "kernel_selftests_passed": 3,
+      "timing_groups": 12,
+      "jit_expected_path_verified": "fallback",
+      "log": "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final.log"
+    }
+  },
+  "sha256": {
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final.log": "9c5451d5246f108c21c7704b15b2bd75886a2308facf811599217d3f164f4160",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/raw.jsonl": "6d5f8b539a3596a2f13d99f128b5d7eb508e2c164df34ae2b5cf8ff7934efea9",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/control.bpf.bin": "61f5eb0ff2d614fa8d07ef5c8513e14918325319d3de7f87b0c50c0da99317f3",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/control.jit.bin": "68a4ca972a363dd7e602078d6f36b2519af519c5e0e3ddc79a8433d925315793",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/hw_ctz.bpf.bin": "07fe33d6e764ecd2b1275b128b1762607b273a6aa203c6ef9a90f8d0b09ef05c",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/hw_ctz.jit.bin": "2b83a940cea5db4580797f293d0d1486d09d955d11529e9495762a0756df6949",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/hw_pop.bpf.bin": "670895b20eff73bde6051577490bdb04ce086a61e0794a01616caea19d8d0852",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/hw_pop.jit.bin": "b65ae6dc728b5f8edf0ef9aae8ccfb6131ace5a97369d3e31ca927b710f7ca17",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/sw_ctz.bpf.bin": "feaa5cca099772408c8aafe779ca31c252fb161a968d199c63dc8ab245c89617",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/sw_ctz.jit.bin": "0fa45667d5c392bb3dae3237f07c5504af61059b69ffe19693385639076b3d45",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/sw_pop.bpf.bin": "3cdc280b59030f0cbf6cbc808f83d02ca7a583af1c279664b26c6898814d4a69",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-native-final/sw_pop.jit.bin": "4a00fbe5cdd047d9e246183296e2a99e3c64a24a605b82c052f7ee3771d20bec",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final.log": "de23d1175094299abdc2cd91c4e761d5c2250a428d2cfb968e022229b3fd4937",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/raw.jsonl": "da4875a6e3bd51559d941c72bd5428befcb78bbb51086445b996e29180a171f9",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/control.bpf.bin": "61f5eb0ff2d614fa8d07ef5c8513e14918325319d3de7f87b0c50c0da99317f3",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/control.jit.bin": "0eab7953f4c2efea74aa80756947fe37fc830c2d7ec7fbec26da41f70e6aaf2c",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/hw_ctz.bpf.bin": "07fe33d6e764ecd2b1275b128b1762607b273a6aa203c6ef9a90f8d0b09ef05c",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/hw_ctz.jit.bin": "01fc977dbc285a09528a94a8c3f0b37ba1b45d6cca3d669e8f2e14b4de7216bf",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/hw_pop.bpf.bin": "670895b20eff73bde6051577490bdb04ce086a61e0794a01616caea19d8d0852",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/hw_pop.jit.bin": "96b270cc3a28e331ecbe021afa1d28c37341a2385786c6766f6fd34119c11c19",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/sw_ctz.bpf.bin": "feaa5cca099772408c8aafe779ca31c252fb161a968d199c63dc8ab245c89617",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/sw_ctz.jit.bin": "a0af21383b92ea068542185f43c89e52f90a9daf0176efd0a56d3aee524ccad2",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/sw_pop.bpf.bin": "3cdc280b59030f0cbf6cbc808f83d02ca7a583af1c279664b26c6898814d4a69",
+    "/home/ritz/Documents/Repo/scx_cake_bench/runs/jit_bitops_20260929/vm-fallback-final/sw_pop.jit.bin": "0821c3a81544a52cc7b5d2b7b5e453cf9c0426cfb94f61a2b4d062ebac6eb2b1",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-bpf-x86-inline-scalar-bitops.patch": "893f357bc654d5a9bbf382d66377acad0b50a77049d3f78985b9a8a6454dde17",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0002-scx-cake-opt-in-native-bitops.patch": "6855ce38b24ca21a6f3551bc7f009cb827134e45875115310ecdbb67e47552d2",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/bitops.bpf.c": "d46b533891316cb271f903c1ee157122380f348be2434e922053e9da77d44dcb",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/bitops-run.c": "ebc00c1063f5b404055164448491d910f798a35b6acb8e08dcfe85f5a5bc40b9",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/selftest-run.c": "db4f1f5289dc84f1660332d87b76c88187732204fcf632cdac6ba32ece0c75e9",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/build/.config": "cd860f3a100b75630aaf38830c64e453d81ea6955cfb26d9e2d97226dcedb702",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/build/arch/x86/boot/bzImage": "cacef126c5562b2c6b7b5cc95631036f928bb621e4b92ea4493d1f83f0d7fdde",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/build/vmlinux": "16ba6b56ddf215f8f58542ace6f383ae054e438a203650db6fb4b82bf4e722c2",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/harness/bitops-run": "c80d34834968eb5ee51cfb63a1a43ae72170b9f71f6ff9feaa8ab2a59cee784f",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/harness/bitops.bpf.o": "9e41f251e7ab7ad4eb77bced7c4406b0cc41ef1f793bf4257c6baab1f0e8d83c",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/harness/scalar_bitops.bpf.o": "80fc5d13e194905c0bbc2272eaebcc30bb0a521a856650fd95eb9a4fb5a20c31",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/rootfs/work/bitops-run": "908ed9819e7ea4d2f4f956c421236abfaace96a07d1e9f0440bbbbb5c0333311",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/rootfs/work/selftest-run": "761fdf081f2ce93c9d0744e47342ed78fca211c1b22d7d34be822730d309f785",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/cake-build/release/scx_cake": "7f4c6768558349180715f10d70f1eb660d4361ccbcf688b2cdd297ae680cca40"
+  },
+  "checks": {
+    "kernel_bzImage_build": "passed",
+    "BPF_SYSCALL_n_JIT_object_build": "passed",
+    "patch_clean_base_apply": "both passed",
+    "cake_release_build": "passed",
+    "cake_format": "passed",
+    "cake_tests": "32 unit and 3 integration passed; one ignored outer test",
+    "cake_clippy_no_deps": "passed",
+    "analyzer_tests": 7,
+    "C_harness_Werror": "passed",
+    "BPF_selftest_Werror": "passed",
+    "checkpatch": "0 errors, 1 MAINTAINERS reminder"
+  }
+}
