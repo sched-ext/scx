@@ -1033,7 +1033,7 @@ static __always_inline u64 cake_pool_dsq(u32 llc)
 	return (u64)LLC_WAKE_DSQ_BASE + (llc & (MAX_LLCS - 1));
 }
 
-/* Physical locality, independent of the pool layout and g89 toggle. */
+/* Physical locality, independent of the pool layout. */
 static __always_inline bool cake_cross_llc(s32 from, s32 to)
 {
 	u32 a = (u32)from, b = (u32)to;
@@ -3448,7 +3448,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 		if (ret)
 			return ret;
 	}
-	/* One wake pool per LLC; a one-LLC host, or g89=0, uses pool 0. */
+	/* One wake pool per LLC; a one-LLC host uses pool 0. */
 	bpf_for(i, 0, MAX_LLCS) {
 		if ((u32)i >= nr_llcs)
 			break;

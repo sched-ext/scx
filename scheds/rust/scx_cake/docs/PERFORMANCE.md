@@ -4,17 +4,14 @@ This file explains how cake is measured and where results stand.
 
 ## Status
 
-The September 28 nightly policy has a [dated KovaaK's A/B
-report](KOVAAKS_KICK_ABBA_2026-09-28.md): a small average-frame improvement,
-mixed tails and increased mean adjacent-frame jitter. Its comparison was
-between two Cake revisions, not against EEVDF. It does not establish a universal
-win, repeatability, or input-to-display latency improvement.
-
-[STATE.md](../STATE.md) owns current status and outstanding validation. The
-[JIT prototype](research/jit-bitops-prototype/README.md) has VM correctness and
-instruction-emission evidence only; hardware performance is still unmeasured.
-Older campaign records, including the [EEVDF gate](archive/EEVDF_GATE_2026-07-04.md),
-retain their original build identities and are historical.
+[STATE.md](../STATE.md) owns current results: its pattern ledger lists every
+tested pattern with evidence, verdict and kernel requirement (stock or custom
+patch). As of 2026-10-04 the one established win is E1 (cached rq clock in
+ops.running, stock kernel ≥ 6.14) at the ns/run level; game frames are owed for
+every pattern. The September 28 nightly has a dated
+[KovaaK's A/B](KOVAAKS_KICK_ABBA_2026-09-28.md) against the previous Cake, not
+EEVDF. Older campaigns, such as the [EEVDF gate](archive/EEVDF_GATE_2026-07-04.md),
+are historical.
 
 ## Method
 

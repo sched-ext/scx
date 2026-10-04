@@ -1,17 +1,19 @@
-# scx_cake troubleshooting tooling
+# scx_cake tooling
 
-This is a **2026-09-02 inventory**, not a current installation or command
-availability guarantee. Start with the [bench index](../bench/README.md) for
-in-tree tool status and the [documentation map](README.md) for current research.
-Paths in the tables mix in-tree `bench/` tools with companion-repository
-`bench/` and `runs/` paths; resolve them in the owning repository before use.
-Use the maintained `cakebench` interface for measurements and permission handling.
+Inventory of measurement tools on the dev box (9800X3D), taken 2026-09-02 with
+additions dated inline. Paths mix in-tree `bench/` and the companion
+`scx_cake_bench` repo (`bench/`, `runs/`). Tiers: **validity** (is the arm what
+it claims), **diagnostic** (why), **score** (a number to keep). Never sudo; use
+the scoped helpers. Start with `cakebench` for measurements.
 
-Every tool installed on the dev box (2026-09-02, 9800X3D, kernel 7.2.2-cachyos)
-that can measure scheduling, CPU, IO, networking, GPU, or a game, with what it
-detects and how it is run here. Tiers: **validity** (is the arm what it claims),
-**diagnostic** (why), **score** (a number that can be kept). Never sudo; the
-scoped helpers are listed where root is needed.
+## Added 2026-10-04
+
+| tool | what it measures | usage | tier |
+|---|---|---|---|
+| `cakebench cost <A> <B> [<C> <D>]` | per-callback ns/run and appsim frames, mirrored slots, identity per slot; `--arm-args K='[...]'` per-arm flags, `--work profile` for cycles/instructions, `--spec` for a shorter appsim | `bash cakebench cost <sha> <sha> --slots 2 --spec <20s.conf>` (~2 min) | score (level 2–3) |
+| `runs/perfmap_20260927/perfmap.sh` + `perfmap.py` | perf `cycles:k` attributed to cake function → kfunc → leaf | `perfmap.sh <receipt> 0 10 <out> <spec>`, then `perf script -F period,ip > script.txt`, `perfmap.py <out>` | diagnostic |
+| `scx_cake --inspect-bpf NEW_DIR` | verifier load and per-program BPF/JIT sizes, no attach | after setcap on a receipt copy | validity |
+| `perf c2c record -a` | cache-line contention (AMD IBS); default rate is too sparse for cake lines | needs a higher sample rate | diagnostic |
 
 ## Scheduler and wake path
 
@@ -24,7 +26,7 @@ scoped helpers are listed where root is needed.
 | `runs/overnight_game_20260901/thread_cores.py` | per game thread: run time, migrations, top CPUs; per-CPU share of game time | core concentration, home stability (1.1.3 GameThread 650 migrations vs 12,629) | `python3 thread_cores.py <perf.data>` | diagnostic |
 | `bench/wake_migsplit.py`, `bench/wake_occupant.py` | wake latency split by migrated/not; who occupied the target CPU | cold-vs-warm placement cost, occupant class | `python3 bench/wake_migsplit.py <perf.data>` | diagnostic |
 | `bench/migrate_cause.py`, `bench/percpu_wake.py` | migration causes; per-CPU wake counts | routing skew | see file docstrings | diagnostic |
-| placement census (`cake_stats` PERCPU_ARRAY, probe commits) | which select_cpu arm placed each wake; holds >300 µs / >1 ms by queue kind | the arm behind a hold; local-DSQ (unstealable) share | build a PROBE commit, attach, read the `arms` lines at detach | diagnostic |
+| placement census (`cake_stats` PERCPU_ARRAY, probe commits) | which select_cpu arm placed each wake; holds >300 µs / >1 ms by queue kind | the arm behind a hold; local-DSQ (unstealable) share | `--toggle probe=1`, read the `arms` lines at detach | diagnostic |
 | `cake-bpfstats` (helper) | kernel `bpf_stats_enabled` + `bpftool prog show`: run count and ns/run per struct_ops callback | scheduler self-cost on the game's cores (1.1.3 0.8% of a CPU, nightly 2.2-2.8%) | through the maintained capture harness; it owns stats enable/read/restore | diagnostic |
 | `bench/rt_displace_capture.sh` | 30 s system-wide sched trace + samplers on one clock for §G93 (RT displacements of the game's threads) | the hold length per displacer, hop vs stay, the burst after | `bench/rt_displace_capture.sh 30` (user; tracefs events readable, schedstats on) | measurement |
 | `bench/rt_displace.py` | joins the trace into T1–T5: holds, outcomes, burst-after-hop vs after-stay, wake-side occupant split | the §G93 gate inequality | `rt_displace.py -i perf.data --tids sched_a.txt --main TID` | measurement |
@@ -84,7 +86,6 @@ scoped helpers are listed where root is needed.
 | `runs/xsched_20260904/chaincap.py` + `gpuchain.py` | `perf record` of sched_switch/waking + nvidia irq entry/exit + submit ioctls per arm; the analyzer follows every nvidia ISR's wakes hop by hop (fence, swapchain, display kthreads, game threads) to the next submit, classes each hop IDLE / PREEMPT / WAITED with holder, IRQ inter-arrival gaps | wallclock per hop of the GPU wait chain per scheduler | `DUR=20 python3 chaincap.py <pid> native cake-g86 cosmos`; `perf script -F comm,tid,cpu,time,event,trace > <arm>.txt`; `python3 gpuchain.py <dir> <arm>` | diagnostic |
 | `runs/xsched_20260904/kthreadhop.py`, `idleatwake.py` | ISR-woken kernel threads by comm with holders and run CPUs; for each queued wake of the frame roles, how many CPUs were idle and whether select_cpu's target was busy | a placement fault (idle CPU existed) vs real saturation | `python3 idleatwake.py <dir> <arm>` | diagnostic |
 | `runs/xsched_20260904/framecap.py` + `frameautopsy.py` | MangoHud logging and the sched/irq trace over the same window (t0 = CLOCK_MONOTONIC at `:logging=1;`, frames = t0 + `elapsed`); per slow frame: waits inside the frame window, worst wait role/class/holder, IRQ gaps, against normal frames | is a slow frame scheduler-caused | `LOG_S=20 python3 framecap.py cake-g86 cosmos`; `python3 frameautopsy.py <dir> cake-g86.json 11.0` | diagnostic |
-| `--toggle llcsplit=1` (loader) + `runs/llc_20260904/run.sh` | presents the 9800X3D to the BPF side as two dies (cores 0-3 + 8-11, 4-7 + 12-15); with `--toggle probe=1` the census prints per-site cross-die counters (`x_hint`, `x_pool_served`, `x_steal_moved`, ...) | does every routing system respect the die; the fabric penalty is NOT emulated | `EXTRA="--toggle llcsplit=1" bash run.sh probe-split` (appsim HD2 mission, 65 s), compare with `probe-flat` | diagnostic |
 | `runs/mini_20260904/mini.py`, `cycload.py` + `bursty` | the scx_flow mini benchmarker's three probes (cyclictest 4 threads pinned to CPU 0, schbench 1 msg thread + nproc workers, hackbench -l 1000 -g 10) per arm; `cycload.py` adds a fresh-occupant load on CPU 0 so cyclictest's wait behind cake's preempt gates is deterministic | timer-wake latency under a fresh occupant (§G87's rig) | `CYC_S=15 python3 cycload.py native cake-ship cosmos` | diagnostic |
 | `runs/xsched_20260904/placeaudit.py` | from a sched trace, rebuilds the idle set at every wake, names the best CPU by cache rank (warm prev + sibling idle, whole free core, warm prev with sibling busy, idle thread beside a busy one, busy CPU while something idle), scores the chosen CPU, separates 'contended' (best CPU taken within 30 us) from a miss; per role, with the top best->chosen pairs and their p99 wait | is the best available CPU picked, and which decision misses cost latency vs cache; works on any scheduler's trace | `python3 placeaudit.py <dir> <arm> [sib_xor=8] [sinks=9,13]` | diagnostic |
 | `cakebench game ab --game <id>` | receipted ABBA/ABCCBA cycle with focus check, harness validity, matrix and report | the scored frame route | `bash cakebench game ab --game kovaaks --duration 60 --settle 15` | score |
@@ -102,7 +103,7 @@ scoped helpers are listed where root is needed.
 | tool | what it measures | detects | usage | tier |
 |---|---|---|---|---|
 | `cakebench artifact ensure`, `native-pair --readiness/--execute` | receipted exact pairs against native on named workloads | throughput or latency regressions of a construct (`--blocks 2` screen, 8 confirm) | see `cakebench --help` | score |
-| `runs/toggle_wallclock_20260901/fast_ab.sh` | pipe 3M + messaging g20 ABBA in ~3 min | a quick wallclock guard on a toggle | `bash fast_ab.sh name "--toggle gNN=1" ""` | screen |
+| `runs/toggle_wallclock_20260901/fast_ab.sh` | pipe 3M + messaging g20 ABBA in ~3 min | a quick wallclock guard on a toggle | `bash fast_ab.sh name "<args>" ""` | screen |
 | `bench/cakeload` | a named CPU load generator (comm `cakeload`) | saturation regime for a wake test | `bench/cakeload N` | diagnostic |
 
 ## Rules that keep a number true
