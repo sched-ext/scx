@@ -1,9 +1,324 @@
 # scx_cake — CURRENT STATE
 
 > [!IMPORTANT]
-> **Read this first, every session.** It holds only what is current: what is owed,
-> then the latest rounds, newest first. Rules live in `CLAUDE.md`; behaviour in
-> `DESIGN.md`.
+> **Read this first, every session.** Current status comes first, followed by
+> carried obligations and dated rounds. Rules live in repository-root
+> `CLAUDE.md`; behaviour in `DESIGN.md`.
+
+## Pattern ledger with kernel requirement (2026-10-04)
+
+"Stock" means any upstream/CachyOS kernel with sched_ext at the stated version;
+"custom" means `0001-cake-kernel-full-signals-experimental-cachyos-7.2.8.patch`.
+Levels follow CLAUDE.md's metric order; game frames (level 1) are owed for all.
+
+| Pattern | Kernel needed | Without it | Best evidence | Verdict |
+|---|---|---|---|---|
+| E1: ops.running reads cached `rq->scx.clock` | Stock ≥ 6.14 | CO-RE falls back to `scx_bpf_now()` | 24-slot appsim: running −3.10 ns [−4.32, −1.91], BPF −1.9 %; frames neutral | **Default in working tree (uncommitted)**; game A/B owed |
+| Native CTZ/POPCNT (auto default) | Custom (`bpf_ctz64`, `bpf_popcnt64`) | Portable builtins, auto-selected | running −2.31 ns, select −4.11 / −0.2 (two screens) | Default (auto-detected); game A/B owed |
+| `bpf_fastcall` on scalar kfuncs | Custom (`KF_FASTCALL`) | Spills kept; still loads | select −1.08 then +1.82 | No effect |
+| Mask removal via verifier return bounds | Custom (bounds) | Stock: native path pruned, portable used; an older custom kernel without bounds fails verification | enqueue −8.2 did not repeat | No effect |
+| DSQ direct index (kernel side) | Custom (`sched_ext.dsq_direct`) | Hash lookup | Untested on hardware | Owed (reboot A/B) |
+| Input/fence wake signals, IRQ ns | Custom | `--kernel-signals` reports unavailable | VM contract only | Owed (game observe) |
+| 7.2.9 `SCX_RQ_IN_WAKEUP` fix | Stock 7.2.9 | Deferred work waits after remote wakeups | Source review | Baseline change |
+| Division-free quotients | Portable, or custom MULHI/CLZ | Portable arithmetic | BPF +5.8 %, select +11 ns | Removed |
+| Per-CPU claim line | Stock | — | select +3.23, enqueue +71.31 ns | Rejected |
+| E2: whole-core word from idle word | Stock | — | select −0.01 ns | No effect |
+| K1–K3: inline/aligned/no-SMT idle claim | Custom (not written) | Current kfunc | Perf: claim ≈ 60 % of select | Proposed |
+
+## Current navigation (reviewed 2026-10-02)
+
+- **2026-10-04 — host kernel 7.2.9-1-cachyos-custom with the full signals patch.**
+  Patch `0001-cake-kernel-full-signals-experimental-cachyos-7.2.8.patch` applies to
+  7.2.9 with offsets only. `sched_ext.dsq_direct=Y`: every cake DSQ ID is below 2048,
+  so the direct table serves all lookups and older-kernel numbers are not comparable.
+  Quick appsim screens (`cakebench cost`, 20 s spec, 2 slots/arm ABBA, all valid,
+  busy 30.0–30.7 %; diagnostic, level 3 only):
+
+  | Run (`scx_cake_bench/runs/cost/`) | Arms | Result ns/run (B − A) |
+  |---|---|---|
+  | `20261004T101532_appsim` | base vs `bpf_fastcall` attribute | select −1.08, enqueue +2.42, dispatch −0.94, running −0.47; all inside slot spread |
+  | `20261004T101959_appsim` | fastcall vs fastcall + mask removal (verifier bounds) | enqueue −8.2 (slots apart), but the same fastcall binary read 160.21 two minutes earlier; not established |
+  | `20261004T102143_appsim` | native vs `--portable-bitops` | native running −2.31 (slots apart), dispatch +0.39 (slots apart), select/enqueue inside spread |
+
+  Static: fastcall shrinks select_cpu by 8 BPF insns; mask removal grows it by 13.
+  Arms are dangling commits `e98aa3cce` (base = working tree), `150591415`
+  (fastcall), `96052c562` (fastcall + bounds). Owed: game frames for all three;
+  DSQ direct A/B (reboot with `sched_ext.dsq_direct=0`); signals observe in a game.
+
+  7.2.8 → 7.2.9 review for cake: `enqueue_task_scx()` now sets `SCX_RQ_IN_WAKEUP`
+  only on the core wakeup path, so deferred actions after a remote (wakelist)
+  activation are scheduled instead of waiting for a `task_woken_scx()` that never
+  came. That can move cake's remote-wake latency; another reason not to compare
+  across kernels. BPF: killable/preemptible verifier rewrites and JIT, gotox
+  fixes, memalloc refill lock, hashtab batch resched; no cake-facing change.
+  `psi_account_irqtime()` uses `curr`; LLC-bytes topology fix. Nothing to adopt.
+
+  Flags removed (uncommitted): `--division-free` (measured loss: BPF CPU +5.8 %,
+  select_cpu +11 ns), `--native-ctz`, `--native-popcnt`. Quotient sources moved to
+  `docs/research/jit-bitops-prototype/quotient/`; slice/burst use plain division.
+  Verifier load on 7.2.9 passed (18 programs); 38 unit + 3 CLI tests pass.
+
+  Appsim fast set `scx_cake_bench/runs/appsim_fast_20261004T111326` (20 s slots, ABCDDCBA, all 9
+  valid, busy 30.1–30.5 %, appsim p99 0.618–0.624 ms in every arm): select ns/run
+  base 84.67, fastcall 86.49, fastcall+bounds 85.93, portable 88.78. Fastcall's sign
+  flipped versus the first screen and the bounds enqueue −8.2 did not repeat: no
+  effect established for either. Native vs portable select −4.11 here, −0.2 in the
+  first screen. Probe census (3.07 M selects/20 s): warm claim wins 71.8 %, home
+  26.5 %, seat retake 1.5 %, serial 0 %; about one idle claim per select (98.5 %
+  won); every select reads the task-age clock and runs the admit division.
+
+  Where select time goes (perf cycles:k, appsim, `runs/perfmap_20261004_base/report.txt`;
+  `runs/cost/20261004T121113_profile`): select is 59.3 % of cake time, ~825 cycles
+  and ~1,440 instructions per call (IPC ~1.75, kfuncs included). The idle claim
+  (`scx_bpf_test_and_clear_cpu_idle`) is ~35.8 % of cake time, about 60 % of select;
+  its leaf `scx_idle_test_and_clear_cpu` alone is 26.7 % (locked bit-clear plus SMT
+  mask store on lines every CPU's idle transition writes). BPF self time is ~22 %
+  (claim_warm 11.1, select 8.9, admit 1.8), insert ~2.2 %. Elsewhere: running's
+  `scx_bpf_now` → `native_sched_clock` ~10 % of cake time. `bpf_jiffies64` is
+  verifier-inlined, so the task-age read is already a load.
+
+  Rejected 2026-10-04: per-CPU claim line (cake-owned 128 B slot per CPU replacing
+  `scx_bpf_test_and_clear_cpu_idle` on one-word hosts; claim = kernel idle bit +
+  read-then-xchg on the slot; reset in update_idle(idle) and on an empty dispatch).
+  Arm `5f2923496` vs base2 `c1c1e5aad`, `runs/cost/20261004T125140_appsim`, 2 slots/arm,
+  all valid, busy 30.4/31.0 %: select +3.23 ns, enqueue +71.31, dispatch +5.89,
+  BPF total +6.5 %, appsim p99 unchanged. Likely cause: kernel idle and SMT bits stay
+  set until the claimed CPU leaves idle, so other wakers retry claimed CPUs and the
+  whole-core preference picks claimed cores. The claim cost is the kernel's; a
+  lighter claim kfunc (kernel patch) is the remaining route.
+
+  E1/E2 screens 2026-10-04 (base2 `c1c1e5aad`; appsim 20 s, all slots valid):
+  - E1 `400e7a766` — ops.running reads `rq->scx.clock` of the task's CPU through
+    `runqueues` instead of `scx_bpf_now()` (the kfunc reads the TSC whenever
+    `SCX_RQ_CLK_VALID` is clear: skipped clock update after wake-preempt, or a
+    balance unpin). running ns/run −3.55 (`runs/cost/20261004T131835_appsim`,
+    slots 19.5–20.4 vs 23.3–23.7) and −3.26 reversed (`…T132239_appsim`, 20.9–21.5
+    vs 23.6–25.2). Other callbacks mixed across the two runs; appsim p99 unchanged.
+    Candidate default; game frames owed. Stamp can be one rq-clock update old.
+    24-slot A/B (`runs/cost/20261004T133141_appsim`, 12 slots/arm, interleaved
+    ABBA, all valid, busy 30.30 vs 30.30 %): running −3.10 ns, 95 % bootstrap CI
+    [−4.32, −1.91]; cake BPF total −0.48 ms/s [−0.90, −0.07] (−1.9 %); select,
+    enqueue, dispatch, stopping CIs include zero. Frames: p99, p999, sigma and
+    chain p50/p99 identical; frames over 2× median 6 in base (2 slots) vs 0 in E1,
+    too few to call. E1 per-slot running is bimodal (18.6–24.3): the gain depends
+    on how often the kernel clock is invalid in that slot.
+  - E2 `9c460cbe3` — whole-core word derived from the idle word with the uniform
+    SMT shift instead of reading the kernel SMT mask: no effect (select −0.01).
+  - E1+E2 `4333675d0`: running −2.40, select −1.13; one of its two slots showed no
+    running gain.
+  Kernel facts: with NR_CPUS=8192 and CPUMASK_OFFSTACK the scx idle cpu/smt masks
+  are kmalloc(8) objects (cpumask_size() = nr_cpu_ids bits), so they can share a
+  line with each other and unrelated objects; addresses unverified (kptrs read
+  as 0 from userspace; default-rate perf c2c too sparse).
+
+- [GPU/input/IRQ signaling implementation](docs/research/jit-bitops-prototype/GPU_INPUT_IRQ_SIGNALING_2026-10-02.md):
+  inclusive kernel patch plus Cake off/observe/on integration. Default remains
+  off; native CTZ/POPCNT still auto-detect. Ordinary VM production/fallback
+  checks and the 20-case signal contract passed; no hardware performance result.
+  Debug and additional CPU/configuration coverage remain pending. Cargo clean
+  removed build images/logs; persistent VM receipts and test sources survived,
+  and the kernel source/patch were recovered outside Cargo's target directory.
+  No host kernel installation. Builds and benchmarks deferred during game testing.
+
+- [Signal locations, freshness and clock accuracy](docs/research/jit-bitops-prototype/SIGNAL_FRESHNESS_CLOCKS_2026-10-02.md):
+  33 signals mapped to 35 hashed source files, with update triggers, clock
+  domains, staleness, access paths and invalidation rules. Live Vulkan/Wayland
+  queries verify timing support and presentation clock; 16 calibration queries
+  report 1,376–1,472 ns deviation and a GPU/MONOTONIC offset change of −30,594 ns
+  over 3.751 seconds. CSV/JSON, source links, reproducible observer and PNG retained.
+  Clock characterization only, not a scheduler/game win. Important distinctions:
+  cached rq time versus MONOTONIC, syncobj availability versus completion,
+  disabled optional NVIDIA vblank callback, and low-latency2 revision 2.
+  No scheduler/kernel/trace-clock or release binary change.
+
+- [GPU/input handoffs and low-latency scheduling signals](docs/research/jit-bitops-prototype/GAMING_SIGNAL_PIPELINE_2026-10-02.md):
+  source-backed investigation of IRQs, GPU status, fences, waits, frame timing,
+  compositor, mouse and keyboard. Traces a direct NVIDIA completion-to-waiter
+  path and KWin's queued input handoff; specifies metadata carried through the
+  existing wakeup before CPU selection. Live KWin main/input/display threads
+  are RR priority 1, outside Cake's scheduling class. Includes exact state
+  boundaries, patch options, costs, freshness and an experiment sequence.
+  Research only: no probes attached, signal patches implemented or new latency
+  result. Host kernel, scheduler state and repo release unchanged.
+
+- [Single complete kernel research patch](docs/research/jit-bitops-prototype/KERNEL_FULL_BUNDLE_2026-10-02.md):
+  scalar instructions, unary fastcall, verifier bounds, typed DSQ comparison
+  and direct DSQ index combined for fresh CachyOS 7.2.8-1 sources. Clean apply,
+  zero-fuzz/offset patching and reverse checks pass; all eight affected files
+  match the prior built/VM-tested candidate. Packaging only: no new build,
+  installation or performance claim. Debug gate remains open. Full native
+  specialization additionally needs the separate Cake build.
+
+- [Direct DSQ index implementation and simulation](docs/research/jit-bitops-prototype/DSQ_DIRECT_INDEX_2026-10-02.md):
+  optional kernel-owned RCU index replaces hashing for low queue IDs, with a
+  hash fallback and unchanged release Cake. Six VM configurations passed
+  393,216 concurrent lifecycle iterations; all 20 slots in five simulation
+  blocks passed checksums and restoration. Emulated wall time changed −0.023%,
+  with uncertainty spanning improvement and regression; no hardware speedup
+  established. Debug boots expose a POC-selector lock cycle and an early KASAN
+  report also observed on the baseline; a clean debug gate remains open.
+  Patches, test sources and receipts retained. Host kernel/package unchanged.
+
+- [Caching and hot-path lookup review](docs/research/jit-bitops-prototype/CACHE_HOTPATH_REVIEW_2026-10-02.md):
+  inventories current Cake/kernel caches and ranks a kernel-owned direct DSQ
+  index first, followed by lookup reuse and shared-line traffic investigation.
+  Follow-up distinguishes 100% potential Cake custom-ID coverage from unknown
+  hardware hit rates; this host's index working set is three cache lines.
+  Freshness, update frequency, historical load costs and coherence limits are explicit.
+  This review is source research; the subsequent implementation and simulation
+  are linked above.
+
+- [Automatic native bitops for game testing](docs/research/jit-bitops-prototype/AUTO_NATIVE_BITOPS_2026-10-02.md):
+  user-requested default now detects CTZ/POPCNT support at startup and falls
+  back per operation on unsupported CPUs/kernels. `--portable-bitops` forces
+  the old path for comparison; explicit native research flags remain strict.
+  Division-free, queue scanning and histograms remain off. Release build,
+  40 tests, debug/release Clippy, three host inspection loads, and six VM
+  activation/restoration checks passed across patched, unpatched and
+  instruction-disabled configurations. Embedded BPF is identical to the
+  measured wrapper-cleanup candidate. This is game-test preparation, not
+  a new performance result. Use the repo release; the user keeps the system
+  CachyOS package unchanged. Older dated opt-in descriptions are historical.
+
+- [Performance findings with charts and data](docs/research/jit-bitops-prototype/PERFORMANCE_SUMMARY_2026-10-02.md):
+  five-page chart pack, standalone HTML, CSV and source-hashed JSON consolidate
+  the retained scalar experiments. Five-repeat results recomputed from all 40
+  receipts: bitops enqueue −5.87 ns/call, running −0.83 ns/call; total BPF CPU
+  −0.47% remains uncertain. Division-free averages +5.81%, with higher cost
+  in all five blocks.
+  Wrapper cleanup p99 −21,850 ns and p99.9 −53,975 ns remain promising two-block
+  screen results. Hardware, VM, and static code-generation evidence are separate;
+  no new benchmark, kernel change, or broader performance verdict.
+
+- [Deep instruction/kernel research](docs/research/jit-bitops-prototype/DEEP_RESEARCH_2026-10-02.md):
+  backported the upstream-accepted typed DSQ comparator into an isolated kernel.
+  Actual lookup assembly replaces bcmp with a u64 comparison, inlines hashing,
+  and reduces its own stack use from 96 to 32 bytes. 26,248 differential
+  executions, 42 Cake inspection loads and 9 activation/restoration checks
+  passed. A separate deliberately weakened verifier incorrectly accepts two
+  unsafe pruning tests, confirming the bounds patch needs precision tracking;
+  accepted negative programs were never executed. Corrected historical perf
+  attribution that had included unrelated BPF programs in the Cake denominator.
+  No new hardware latency result, default change, or kernel installation.
+
+- [Scalar bounds and native release refactor](docs/research/jit-bitops-prototype/SCALAR_BOUNDS_REFACTOR_2026-10-02.md):
+  kernel return bounds and two release refactors built and VM-tested. Simply
+  deleting masks grows code; preserving LLVM range knowledge and specializing
+  native bitops removes 26 static select_cpu instructions / 126 bytes and 13
+  BPF stack accesses on a 16-thread guest. 20,844 differential executions,
+  56 Cake inspection loads, 8 activation/restoration checks; unsafe accesses
+  still rejected, including forced state-pruning tests. CPU-disabled fallback
+  passes. New mask-free native modes deliberately fail on the old kernel.
+  Combined/incremental patches and exact release artifacts retained; ordinary
+  release/source restored. Host kernel unchanged, hardware latency unmeasured.
+
+- [Further instruction passes and hardware costs](docs/research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md):
+  selective CTZ/POPCNT fastcall avoids the CLZ histogram growth; portable
+  fallback outlining increases native counts. Generic wide-ring CTZ prototype
+  passed 2,487,612 order/read checks. Native PMU probes measure ~1 cycle for
+  dependent CTZ/CLZ/POPCNT and ~2 with result masks; cost ladder §10 updated.
+  36 VM loads, 10 VM activation checks and 48/48 host slots passed; 1,496,976
+  simulated host frames retained. Quiet-start select_cpu -0.337 ns/call,
+  interval [-4.136,+3.461]; separate Blender activity contaminated a block.
+  No performance verdict/default change. Ordinary release/source restored;
+  host has the original scalar patch, not the later unary KF_FASTCALL patch.
+
+- [Five-block fastcall simulation](docs/research/jit-bitops-prototype/FASTCALL_SIMULATION_2026-10-01.md):
+  actual patched kernel in QEMU TCG, 20/20 valid release A/B slots, 60,000
+  simulated frames and 320 million fixed-work steps with identical checksums.
+  Guest p99 -1,221 ns, jitter +2,481 ns, fixed-work completion +28,321 ns;
+  all three paired intervals include zero. No speedup established. LLVM 22.1.8
+  `znver5` uses the Zen 4 timing model, so instruction-model output is only a
+  coarse proxy. Hardware performance remains unmeasured; host state unchanged.
+
+- [Unary fastcall kernel patch and release audit](docs/research/jit-bitops-prototype/FASTCALL_KERNEL_REVIEW_2026-10-01.md):
+  new combined/incremental CachyOS patches and isolated annotated release build.
+  Full kernel build, native/fallback/old-kernel VM tests, 18 positive scalar
+  executions, 3 expected rejections, 18 Cake inspection loads and 5 activation
+  checks passed. Native-bitops select_cpu: -8 static instructions, -9 BPF stack
+  accesses; histogram stopping grows by 6 instructions. No hardware performance
+  result or default promotion. Ordinary release restored byte-for-byte; host
+  kernel untouched. Further DSQ, kick, cpumask and compiler-pattern work is scoped
+  in the report, not implemented as new scheduling policy.
+
+- [Actual release assembly and kernel-signal roadmap](docs/research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md):
+  independent CTZ/POPCNT flags and load-only instruction inspection added.
+  Actual current-boot JIT confirms all four scalar operations. Removed repeated
+  wrapper symbol checks: select_cpu with bitops is 28 bytes / 4 instructions
+  smaller. 24/24 normal release slots, 748,484 simulated frames, probes/timing
+  off. Wrapper A/B p99 -21,850 ns (both blocks improve), jitter -6,431 ns;
+  promising screen at about 49% background busy, not game/default acceptance.
+  All flags remain opt-in. IRQ/capacity, GPU-fence and input-wakeup interfaces
+  are proposals; no new kernel patch installed. Native scheduling restored.
+
+- [Release CTZ/CLZ rebuild and normal-mode screen](docs/research/jit-bitops-prototype/RELEASE_CTZ_CLZ_2026-10-01.md):
+  CTZ queue scanning and CLZ histograms are now available as opt-in flags in
+  `target/release/scx_cake`; source and binary retained. 28/28 valid slots,
+  873,159 simulated frames. Twelve slots had probe and BPF timing disabled:
+  bitops vs default p99 +15,375 ns; adding queue scanning p99 -16,650 ns,
+  but mean slot maximum +1,449,200 ns and less background CPU. No fastest-mode
+  or default-promotion verdict. Separate instrumented scan dispatch -0.11
+  ns/call; CLZ diagnostic stopping -8.87 ns/call. Division-free stays off.
+  Native scheduling restored, BPF stats off; new flags remain experimental.
+
+- [Scalar instruction usage audit and expansion experiments](docs/research/jit-bitops-prototype/INSTRUCTION_USAGE_REVIEW_2026-10-01.md):
+  three prototypes, 6,922,350 offline checks and 32/32 valid live slots;
+  996,188 simulated frames retained. CTZ queue scanning: dispatch -18.05
+  ns/call in the non-probe screen, but worse p99.9/0.1% lows and reversal
+  with probe enabled. CLZ histograms: stopping -8.21 ns/call, with mixed
+  aggregate results and worse frame tails. MULHI vtime is confounded by
+  much lighter background load. Unreal/compiler activity prevents acceptance.
+  Experiments archived as patches; original scheduler source, release binary
+  and embedded BPF restored byte-for-byte. Native scheduling restored.
+  Quotient review: per-call reciprocal setup explains the earlier loss;
+  select_cpu accounts for about 91% of its extra measured BPF CPU time.
+
+- [October 1 five-repeat scalar comparison](docs/research/jit-bitops-prototype/REPEAT_5X_2026-10-01.md):
+  40/40 slots passed, 1,247,480 simulated frames, ten observations per mode.
+  Total CPU busy 36.61–38.31%; estimated non-appsim busy 5.21–6.86%.
+  Bitops-only: BPF CPU -0.47%, frame p99 -400 ns; enqueue -5.87 and running
+  -0.83 ns/call. Aggregate CPU/frame intervals include zero. Division-free
+  increased BPF CPU in all five blocks: +5.81% alone, +6.01% with bitops;
+  frame p99 +920 / -830 ns, neither established as a frame effect. Flags
+  remain off by default. Native scheduling and BPF statistics restored.
+
+- [October 1 quick scalar comparison](docs/research/jit-bitops-prototype/QUICK_TEST_2026-10-01.md):
+  eight 15-second appsim slots, 249,495 frames, all modes loaded and exited
+  cleanly. Bitops-only BPF CPU time -1.95%, frame p99 -49,250 ns; division-free
+  +12.51%, +29,700 ns; both +5.65%, -25,000 ns. Unreal/Discord noise and a
+  133,300 ns baseline p99 shift prevent performance acceptance. Flags remain
+  off; native scheduling and BPF statistics were restored.
+
+- [October 1 combined-patch live smoke](docs/research/jit-bitops-prototype/HARDWARE_SMOKE_2026-10-01.md):
+  booted kernel exposes all four scalar kfuncs. The unchanged September 30
+  release build passed verifier loading and ran for 15 seconds with
+  `--division-free --native-bitops`, reporting native CLZ/MULHI selection.
+  Versioned Cake ops identity and clean native restoration were observed.
+  This closes the host-topology native-mode load/activation gate below;
+  fresh CLZ/MULHI primitive selftests, JIT dumps and performance remain pending.
+
+- [README.md](README.md): supported use and CLI; [DESIGN.md](DESIGN.md): current policy.
+- [Documentation map](docs/README.md): folders, evidence levels and historical records.
+- [JIT experiment](docs/research/jit-bitops-prototype/README.md): kernel patches
+  and opt-in Cake flags; September 30 patched-hardware primitive smoke passed
+  17,340 differential executions and actual TZCNT/POPCNT JIT emission. Noisy
+  timings are diagnostic only. Native-mode Cake loading passed on October 1;
+  performance acceptance remains pending. This is not part of the default policy.
+- [Exact quotient implementation](docs/research/jit-bitops-prototype/QUOTIENT_IMPLEMENTATION.md):
+  September 30 normal-build `--division-free` integration replaces four dynamic
+  division expressions. Portable/native arithmetic each passed 7,907,120 cases;
+  Cake tests, Clippy and release build passed. Additional CLZ/MULHI kernel
+  extension passed patch and object compile checks. October 1 native boot and
+  Cake verifier/activation passed; fresh primitive JIT verification and
+  performance acceptance remain pending.
+- Kernel Manager packaging: [one combined CachyOS 7.2.8 patch](docs/research/jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch)
+  includes CTZ/POPCNT/CLZ/MULHI. Clean-source application and byte equivalence
+  to the separate patches passed; affected objects recompiled successfully.
+  Replace the older local kernel patch entries with this file for a fresh build.
+- The September 28 entry below describes the current default. Older entries
+  retain their original dates, hashes and claims of uncommitted state; they are
+  not instructions to restore an old checkout. The `Owed` section explicitly
+  contains carried items that require revalidation.
 
 **2026-09-28 — TESTED POOL-SERVING C POLICY FOR NIGHTLY USER TESTING.** The
 pool-tag fix below plus historical C `f3ae91cf2` (claim before move, early
@@ -203,6 +518,9 @@ Items below were owed by the reverted 2026-09-23..26 work; re-check each against
 ---
 
 ## RESUME HERE
+
+Historical resume marker from September 26. Start with the current navigation
+and newest entry above; the following record is retained for its evidence.
 
 **2026-09-26 — §G97 REMOVED (ISR-WAKE PLACEMENT).** Uncommitted, on top of §G98 and the
 startup rows (release binary `dde4a804`). §G97 (`3c56bafb2`; its entry is now in the

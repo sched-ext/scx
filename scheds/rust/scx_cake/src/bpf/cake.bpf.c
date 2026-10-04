@@ -9,6 +9,40 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
+extern u64 bpf_ctz64(u64 x) __weak __ksym;
+extern u64 bpf_popcnt64(u64 x) __weak __ksym;
+extern u64 bpf_clz64(u64 x) __weak __ksym;
+const volatile bool cake_native_ctz;
+const volatile bool cake_native_popcnt;
+const volatile bool cake_native_clz;
+const volatile bool cake_native_ring;
+const volatile bool cake_native_hist;
+
+static __always_inline u32 cake_ctz64(u64 word)
+{
+	if (cake_native_ctz)
+		/* Nonzero CPU masks retain the verifier's 0..63 bound. */
+		return (u32)bpf_ctz64(word) & 63;
+	return (u32)__builtin_ctzll(word);
+}
+
+static __always_inline u32 cake_popcnt64(u64 word)
+{
+	if (cake_native_popcnt)
+		return (u32)bpf_popcnt64(word);
+	return (u32)__builtin_popcountll(word);
+}
+
+static __always_inline u32 cake_clz64(u64 word)
+{
+	if (cake_native_clz)
+		return (u32)bpf_clz64(word) & 63;
+	return (u32)__builtin_clzll(word);
+}
+
+#include "scalar-experiments.bpf.h"
+#include "wake-signals.bpf.h"
+
 /* on_cpu changed from int to u8. An unsigned local int lets CO-RE narrow
  * the load to u8 without poisoning an unused signed read. On old kernels
  * the width stays unchanged; signedness does not affect our zero test. */
@@ -872,7 +906,8 @@ static __always_inline bool cake_cpu_irq_bad(s32 cpu)
 {
 	u32 c = (u32)cpu & (MAX_CPUS - 1);
 
-	return cpu >= 0 && (cake_cpu_irq_hot(c) || cake_irq_live[c].depth);
+	return cpu >= 0 && (cake_cpu_irq_hot(c) || cake_irq_live[c].depth ||
+			   cake_signal_irq_hot(c));
 }
 
 /* The timer is the one interrupt scheduled ahead: a CPU whose next tick fires
@@ -1377,7 +1412,7 @@ static __always_inline u64 cake_smt_expand(u64 seats)
 		       ((seats & cake_smt_right) >> shift);
 
 	for (i = 0; i < 64 && seats; i++) {
-		u32 c = (u32)__builtin_ctzll(seats);
+		u32 c = cake_ctz64(seats);
 		s32 sib = cpu_sibling[c & (MAX_CPUS - 1)];
 
 		if (sib >= 0 && sib < 64)
@@ -1410,7 +1445,7 @@ static __always_inline s32 cake_pick_cold(u64 w, u64 cores, u64 seats, u64 noisy
 		best = w;
 	if (best & ~seats)
 		best &= ~seats;
-	return (s32)__builtin_ctzll(cake_rank_tier(cake_prefer_irq_clean(best, noisy)));
+	return (s32)cake_ctz64(cake_rank_tier(cake_prefer_irq_clean(best, noisy)));
 }
 
 /* PROBE hold attribution -- not for scoring. */
@@ -1765,7 +1800,7 @@ static __noinline bool cake_system_serial(u32 wc)
 	u32 c = wc & (MAX_CPUS - 1);
 
 	if (cake_one_word)
-		return (u32)__builtin_popcountll(cake_idle_word() & cpu_llc_word[c]) * 4 >=
+		return cake_popcnt64(cake_idle_word() & cpu_llc_word[c]) * 4 >=
 		       cpu_llc_online3[c];
 	return (u32)cake_idle_nr * 4 >= nr_cpu_online3;
 }
@@ -1942,6 +1977,7 @@ static __noinline s32 cake_select_undecided(struct task_struct *p __arg_trusted,
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	bool device_wake = cake_signal_wake(p);
 	bool stage;
 	/* A busy/ineligible home is not a warm-half candidate. */
 	bool home_askable = false, seat_blocked;
@@ -1961,12 +1997,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		bool serial = ((wr->hint >> CAKE_HINT_CONF_SHIFT) &
 			       CAKE_HINT_CONF_MAX) >= CAKE_HINT_CONF_MAX;
 
-		if (!(wr->hint & CAKE_HINT_WOKE))
+		if (!device_wake && !(wr->hint & CAKE_HINT_WOKE))
 			wr->hint |= CAKE_HINT_WOKE;
 
 		/* No core-contended veto here: a handoff sibling is usually another transient
 		 * pair, and the veto exiled mutex pairs from co-location. */
-		if (serial && !(wake_flags & CAKE_WAKE_SYNC) &&
+		if (!device_wake && serial && !(wake_flags & CAKE_WAKE_SYNC) &&
 		    !cake_cpu_irq_bad((s32)wc) &&
 		    cake_allowed(p, (s32)wc) &&
 		    cake_system_serial_tried(wc) &&
@@ -2560,6 +2596,32 @@ static __noinline bool cake_ring_walk(u32 ucpu)
 	u64 m = 0;
 	u32 i;
 
+	if (cake_native_ring && cake_one_word) {
+		u64 pending = cake.qmask[0] & cpu_llc_word[ucpu & (MAX_CPUS - 1)];
+		s32 sibling = cpu_sibling[ucpu & (MAX_CPUS - 1)];
+
+		pending &= ~(1ULL << (ucpu & 63));
+		if (sibling >= 0 && sibling < 64) {
+			u64 bit = 1ULL << ((u32)sibling & 63);
+
+			if (pending & bit) {
+				pending &= ~bit;
+				if (cake_probe_steal(ucpu, (u32)sibling) &&
+				    cake_move_to_local((u64)sibling))
+					return true;
+			}
+		}
+		pending = cake_ring_rotate(pending, ucpu);
+		for (i = 0; i < 64 && pending; i++) {
+			u32 idx = cake_ring_next(pending, ucpu);
+
+			pending &= pending - 1;
+			if (cake_probe_steal(ucpu, idx) && cake_move_to_local((u64)idx))
+				return true;
+		}
+		return false;
+	}
+
 	if (CCD_STEAL_POLICY > 0 && steal_order_live && ucpu < STEAL_SPAN) {
 		/* One precomputed locality order avoids verifier-multiplying
 		 * scan loops. */
@@ -2959,6 +3021,9 @@ static __always_inline u32 cake_release_band(u64 ns)
 	u64 v = ns >> CAKE_RELEASE_BAND_SHIFT;
 	u32 b = 0;
 
+	if (cake_native_hist)
+		return cake_band_native(ns, CAKE_RELEASE_BAND_SHIFT, CAKE_RELEASE_BANDS);
+
 	while (b < CAKE_RELEASE_BANDS - 1 && (v >> (b + 1)))
 		b++;
 	return b;
@@ -2976,6 +3041,9 @@ static __always_inline u32 cake_hist_band(u64 ns)
 {
 	u64 v = ns >> CAKE_HIST_SHIFT;
 	u32 b = 0;
+
+	if (cake_native_hist)
+		return cake_band_native(ns, CAKE_HIST_SHIFT, CAKE_HIST_BANDS);
 
 	while (b < CAKE_HIST_BANDS - 1 && (v >> (b + 1)))
 		b++;
@@ -3141,13 +3209,32 @@ static __always_inline u64 cake_frontier_advance(u64 vtime, u32 cpu, u64 now)
 }
 
 /* ops.running: stamp the per-CPU run start and advance the vtime frontier within its wall-rate band. */
+/* The rq clock of @cpu as its last update left it, the value scx_bpf_now()
+ * returns while it is valid. ops.running sees it invalid after a skipped
+ * update or a balance unpin, where the kfunc reads the TSC; the cached value
+ * is then at most that update old. */
+static __always_inline u64 cake_running_clock(u32 cpu)
+{
+	struct rq *rq;
+	u64 clock;
+
+	if (!bpf_core_field_exists(struct rq, scx.clock))
+		return cake_now_rq(CAKE_SITE_KT_RUNNING);
+	cake_stat_inc2(CAKE_SITE_KT, CAKE_SITE_KT_RUNNING);
+	rq = bpf_per_cpu_ptr(&runqueues, cpu);
+	clock = rq ? rq->scx.clock : 0;
+	return clock ? clock : scx_bpf_now();
+}
+
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
 	/* The task's CPU: a remote property change fires this op from the caller's
 	 * CPU, whose smp id charged a foreign slot. */
 	u32 cpu = p->thread_info.cpu;
 	struct cake_run_slot *run = &cake.run[cpu & (MAX_CPUS - 1)];
-	u64 now = cake_now_rq(CAKE_SITE_KT_RUNNING);
+	u64 now = cake_running_clock(cpu);
+
+	cake_signal_running(p, cpu);
 
 	/* First: the grant below and every later reader want the untagged slice. */
 	cake_pool_seen(p);

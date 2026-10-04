@@ -1,0 +1,106 @@
+{
+  "slots": 20,
+  "blocks": 5,
+  "workers_per_slot": 4,
+  "total_frames": 12800,
+  "total_steps": 256000000,
+  "checksums_match": true,
+  "paired": [
+    {
+      "block": 1,
+      "elapsed_ns": {
+        "hash": 182420546.5,
+        "direct": 182295580.5,
+        "delta": -124966.0,
+        "percent": -0.06850434471207256
+      },
+      "wake_late_max_ns": {
+        "hash": 1836769.5,
+        "direct": 1143666,
+        "delta": -693103.5,
+        "percent": -37.734919923267455
+      }
+    },
+    {
+      "block": 2,
+      "elapsed_ns": {
+        "hash": 181905816.5,
+        "direct": 179528749,
+        "delta": -2377067.5,
+        "percent": -1.3067572800785077
+      },
+      "wake_late_max_ns": {
+        "hash": 1929649,
+        "direct": 1033347,
+        "delta": -896302,
+        "percent": -46.44896558907864
+      }
+    },
+    {
+      "block": 3,
+      "elapsed_ns": {
+        "hash": 182391890.5,
+        "direct": 181358923,
+        "delta": -1032967.5,
+        "percent": -0.5663450810056703
+      },
+      "wake_late_max_ns": {
+        "hash": 1778581.5,
+        "direct": 946396.5,
+        "delta": -832185.0,
+        "percent": -46.789253121096785
+      }
+    },
+    {
+      "block": 4,
+      "elapsed_ns": {
+        "hash": 182842593,
+        "direct": 182665727,
+        "delta": -176866,
+        "percent": -0.09673129061344987
+      },
+      "wake_late_max_ns": {
+        "hash": 2380523.5,
+        "direct": 1297984.5,
+        "delta": -1082539.0,
+        "percent": -45.4748293810164
+      }
+    },
+    {
+      "block": 5,
+      "elapsed_ns": {
+        "hash": 179205891.5,
+        "direct": 182704679,
+        "delta": 3498787.5,
+        "percent": 1.9523841937975517
+      },
+      "wake_late_max_ns": {
+        "hash": 1166413.5,
+        "direct": 1709497.5,
+        "delta": 543084.0,
+        "percent": 46.56016069772855
+      }
+    }
+  ],
+  "summary": {
+    "elapsed_ns": {
+      "mean_delta_ns": -42615.9,
+      "paired_bootstrap_95": [
+        -1486606.9,
+        1867685.8
+      ],
+      "mean_hash_ns": 181753347.6,
+      "mean_direct_ns": 181710731.7
+    },
+    "wake_late_max_ns": {
+      "mean_delta_ns": -592209.1,
+      "paired_bootstrap_95": [
+        -967404.5,
+        -7023.6
+      ],
+      "mean_hash_ns": 1818387.4,
+      "mean_direct_ns": 1226178.3
+    }
+  },
+  "limitation": "TCG has no faithful 9800X3D cache/coherence timing. wake_late_max_ns is completion lateness against a per-iteration deadline, not measured scheduler wake-to-run latency. Five blocks are a small diagnostic sample."
+}

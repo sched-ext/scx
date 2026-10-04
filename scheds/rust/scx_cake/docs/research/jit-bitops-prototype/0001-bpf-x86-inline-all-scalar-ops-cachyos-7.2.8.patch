@@ -1,0 +1,234 @@
+diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
+--- a/arch/x86/net/bpf_jit_comp.c
++++ b/arch/x86/net/bpf_jit_comp.c
+@@ -1628,6 +1628,40 @@
+ 	*pprog = prog;
+ }
+ 
++static bool emit_scalar_bitop(u8 **pprog, const u8 *func)
++{
++#ifdef CONFIG_BPF_SYSCALL
++	u8 *prog = *pprog;
++	u8 opcode;
++
++	if (func == (const u8 *)bpf_mulhi64) {
++		/* r0 = mulhi(r1, r2), clobbering only call-scratch RAX/RDX. */
++		EMIT3(0x48, 0x89, 0xf8); /* mov RAX, RDI */
++		EMIT3(0x48, 0xf7, 0xe6); /* mul RSI */
++		EMIT3(0x48, 0x89, 0xd0); /* mov RAX, RDX */
++		*pprog = prog;
++		return true;
++	}
++
++	if (func == (const u8 *)bpf_ctz64 && boot_cpu_has(X86_FEATURE_BMI1))
++		opcode = 0xbc;
++	else if (func == (const u8 *)bpf_popcnt64 && boot_cpu_has(X86_FEATURE_POPCNT))
++		opcode = 0xb8;
++	else if (func == (const u8 *)bpf_clz64 && boot_cpu_has(X86_FEATURE_ABM))
++		opcode = 0xbd;
++	else
++		return false;
++
++	/* r0 = bitop(r1): RAX = bitop(RDI), normal BPF call ABI. */
++	EMIT4(0xf3, 0x48, 0x0f, opcode);
++	EMIT1(0xc7);
++	*pprog = prog;
++	return true;
++#else
++	return false;
++#endif
++}
++
+ #define INSN_SZ_DIFF (((addrs[i] - addrs[i - 1]) - (prog - temp)))
+ 
+ #define __LOAD_TCC_PTR(off)			\
+@@ -2607,6 +2641,9 @@
+ 			}
+ 			if (!imm32)
+ 				return -EINVAL;
++			if (src_reg == BPF_PSEUDO_KFUNC_CALL &&
++			    emit_scalar_bitop(&prog, func))
++				break;
+ 			if (priv_frame_ptr) {
+ 				push_r9(&prog);
+ 				ip += 2;
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -1264,6 +1264,11 @@
+ 				       const struct bpf_insn *patch, u32 len);
+ 
+ #ifdef CONFIG_BPF_SYSCALL
++u64 bpf_ctz64(u64 x);
++u64 bpf_popcnt64(u64 x);
++u64 bpf_clz64(u64 x);
++u64 bpf_mulhi64(u64 x, u64 y);
++
+ struct bpf_prog *bpf_patch_insn_data(struct bpf_verifier_env *env, u32 off,
+ 				     const struct bpf_insn *patch, u32 len);
+ struct bpf_insn_aux_data *bpf_dup_insn_aux_data(struct bpf_verifier_env *env);
+diff --git a/kernel/bpf/helpers.c b/kernel/bpf/helpers.c
+--- a/kernel/bpf/helpers.c
++++ b/kernel/bpf/helpers.c
+@@ -4769,6 +4769,32 @@
+ 		ret = bpf_async_schedule_op(cb, BPF_ASYNC_CANCEL, 0, 0);
+ 		return ret ? ret : -ECANCELED;
+ 	}
++}
++
++/* Scalar bitops keep identical semantics on inline and fallback call paths. */
++__bpf_kfunc u64 bpf_ctz64(u64 x)
++{
++	return x ? __ffs64(x) : 64;
++}
++
++__bpf_kfunc u64 bpf_popcnt64(u64 x)
++{
++	return hweight64(x);
++}
++
++__bpf_kfunc u64 bpf_clz64(u64 x)
++{
++	return 64 - fls64(x);
++}
++
++__bpf_kfunc u64 bpf_mulhi64(u64 x, u64 y)
++{
++	u64 x0 = (u32)x, x1 = x >> 32, y0 = (u32)y, y1 = y >> 32;
++	u64 mid = x1 * y0 + ((x0 * y0) >> 32);
++	u64 carry = mid >> 32;
++
++	mid = (u32)mid + x0 * y1;
++	return x1 * y1 + carry + (mid >> 32);
+ }
+ 
+ __bpf_kfunc_end_defs();
+@@ -4971,6 +4997,10 @@
+ BTF_ID_FLAGS(func, bpf_dynptr_from_file)
+ BTF_ID_FLAGS(func, bpf_dynptr_file_discard, KF_RELEASE)
+ BTF_ID_FLAGS(func, bpf_timer_cancel_async)
++BTF_ID_FLAGS(func, bpf_ctz64)
++BTF_ID_FLAGS(func, bpf_popcnt64)
++BTF_ID_FLAGS(func, bpf_clz64)
++BTF_ID_FLAGS(func, bpf_mulhi64)
+ BTF_KFUNCS_END(common_btf_ids)
+ 
+ static const struct btf_kfunc_id_set common_kfunc_set = {
+diff --git a/tools/testing/selftests/bpf/prog_tests/scalar_bitops.c b/tools/testing/selftests/bpf/prog_tests/scalar_bitops.c
+new file mode 100644
+--- /dev/null
++++ b/tools/testing/selftests/bpf/prog_tests/scalar_bitops.c
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <test_progs.h>
++#include "scalar_bitops.skel.h"
++
++void test_scalar_bitops(void)
++{
++	RUN_TESTS(scalar_bitops);
++}
+diff --git a/tools/testing/selftests/bpf/progs/scalar_bitops.c b/tools/testing/selftests/bpf/progs/scalar_bitops.c
+new file mode 100644
+--- /dev/null
++++ b/tools/testing/selftests/bpf/progs/scalar_bitops.c
+@@ -0,0 +1,100 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/bpf.h>
++#include <bpf/bpf_helpers.h>
++#include "bpf_misc.h"
++
++extern __u64 bpf_ctz64(__u64 x) __ksym;
++extern __u64 bpf_popcnt64(__u64 x) __ksym;
++extern __u64 bpf_clz64(__u64 x) __ksym;
++extern __u64 bpf_mulhi64(__u64 x, __u64 y) __ksym;
++
++static __always_inline __u64 mulhi_ref(__u64 x, __u64 y)
++{
++	__u64 x0 = (__u32)x, x1 = x >> 32, y0 = (__u32)y, y1 = y >> 32;
++	__u64 mid = x1 * y0 + ((x0 * y0) >> 32);
++	__u64 carry = mid >> 32;
++
++	asm volatile("" : "+r" (carry));
++	mid = (__u32)mid + x0 * y1;
++	return x1 * y1 + carry + (mid >> 32);
++}
++
++SEC("syscall")
++__success __retval(0)
++int scalar_bitops_boundaries(void *ctx)
++{
++	int i;
++
++	if (bpf_ctz64(0) != 64 || bpf_popcnt64(0) != 0 ||
++	    bpf_ctz64(~0ULL) != 0 || bpf_popcnt64(~0ULL) != 64 ||
++	    bpf_clz64(0) != 64 || bpf_clz64(~0ULL) != 0 ||
++	    bpf_mulhi64(0, ~0ULL) != 0 ||
++	    bpf_mulhi64(~0ULL, ~0ULL) != ~0ULL - 1)
++		return 1;
++	for (i = 0; i < 64; i++) {
++		__u64 bit = 1ULL << i;
++
++		if (bpf_ctz64(bit) != i || bpf_popcnt64(bit) != 1 ||
++		    bpf_popcnt64(~bit) != 63 || bpf_clz64(bit) != 63 - i ||
++		    bpf_mulhi64(bit, ~0ULL) != bit - 1)
++			return 2;
++	}
++	return 0;
++}
++
++SEC("syscall")
++__success __retval(0)
++int scalar_bitops_random(void *ctx)
++{
++	__u64 x = 0xd1b54a32d192ed03ULL;
++	int i;
++
++	for (i = 0; i < 1024; i++) {
++		x ^= x << 13;
++		x ^= x >> 7;
++		x ^= x << 17;
++		if (bpf_ctz64(x) != (x ? __builtin_ctzll(x) : 64) ||
++		    bpf_popcnt64(x) != __builtin_popcountll(x) ||
++		    bpf_clz64(x) != (x ? __builtin_clzll(x) : 64) ||
++		    bpf_mulhi64(x, ~x) != mulhi_ref(x, ~x))
++			return 1;
++	}
++	return 0;
++}
++
++SEC("syscall")
++__success __retval(0)
++__naked int scalar_bitops_preserve(void)
++{
++	asm volatile (
++		"r6 = 17; r7 = 29; r8 = 43; r9 = 61;"
++		"r1 = 256; call bpf_ctz64;"
++		"if r0 != 8 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r1 = -1; call bpf_popcnt64;"
++		"if r0 != 64 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r1 = 256; call bpf_clz64;"
++		"if r0 != 55 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r1 = -1; r2 = -1; call bpf_mulhi64;"
++		"if r0 != -2 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r0 = 0; exit;"
++		"fail_%=: r0 = 1; exit;"
++		::: __clobber_all);
++}
++
++char LICENSE[] SEC("license") = "GPL";

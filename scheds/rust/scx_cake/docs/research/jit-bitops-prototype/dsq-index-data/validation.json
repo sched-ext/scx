@@ -1,0 +1,1886 @@
+{
+  "status": "prototype implemented and simulation complete; debug gate open; hardware performance unmeasured",
+  "host_kernel": "7.2.8-1-cachyos-custom",
+  "host_scx_state": "disabled",
+  "cake_release_sha256": "059f78b352ef5c796754691ecd38dbbf0c896b10c2d0a85a383f1609fed94fef",
+  "cake_bpf_sha256": "9c12e59b99c96071b14f4c5f987932382cc4e8815bd84743d38f03c0cc148f60",
+  "release_matrix": [
+    "candidate-2cpu-final",
+    "candidate-smt16-final",
+    "hash-only-2cpu-final",
+    "no-bitops-2cpu-final",
+    "two-socket-4cpu-final",
+    "baseline-2cpu-final"
+  ],
+  "release_matrix_passed": 6,
+  "concurrent_lifecycle_iterations": 393216,
+  "debug_runs": [
+    "baseline-kasan-poc-on",
+    "baseline-kasan-poc-on-retry",
+    "candidate-kasan-poc-off",
+    "candidate-kasan-poc-off-retry",
+    "kasan-lockdep-4cpu-final"
+  ],
+  "simulation": {
+    "slots": 20,
+    "blocks": 5,
+    "workers_per_slot": 4,
+    "total_frames": 12800,
+    "total_steps": 256000000,
+    "checksums_match": true,
+    "paired": [
+      {
+        "block": 1,
+        "elapsed_ns": {
+          "hash": 182420546.5,
+          "direct": 182295580.5,
+          "delta": -124966.0,
+          "percent": -0.06850434471207256
+        },
+        "wake_late_max_ns": {
+          "hash": 1836769.5,
+          "direct": 1143666,
+          "delta": -693103.5,
+          "percent": -37.734919923267455
+        }
+      },
+      {
+        "block": 2,
+        "elapsed_ns": {
+          "hash": 181905816.5,
+          "direct": 179528749,
+          "delta": -2377067.5,
+          "percent": -1.3067572800785077
+        },
+        "wake_late_max_ns": {
+          "hash": 1929649,
+          "direct": 1033347,
+          "delta": -896302,
+          "percent": -46.44896558907864
+        }
+      },
+      {
+        "block": 3,
+        "elapsed_ns": {
+          "hash": 182391890.5,
+          "direct": 181358923,
+          "delta": -1032967.5,
+          "percent": -0.5663450810056703
+        },
+        "wake_late_max_ns": {
+          "hash": 1778581.5,
+          "direct": 946396.5,
+          "delta": -832185.0,
+          "percent": -46.789253121096785
+        }
+      },
+      {
+        "block": 4,
+        "elapsed_ns": {
+          "hash": 182842593,
+          "direct": 182665727,
+          "delta": -176866,
+          "percent": -0.09673129061344987
+        },
+        "wake_late_max_ns": {
+          "hash": 2380523.5,
+          "direct": 1297984.5,
+          "delta": -1082539.0,
+          "percent": -45.4748293810164
+        }
+      },
+      {
+        "block": 5,
+        "elapsed_ns": {
+          "hash": 179205891.5,
+          "direct": 182704679,
+          "delta": 3498787.5,
+          "percent": 1.9523841937975517
+        },
+        "wake_late_max_ns": {
+          "hash": 1166413.5,
+          "direct": 1709497.5,
+          "delta": 543084.0,
+          "percent": 46.56016069772855
+        }
+      }
+    ],
+    "summary": {
+      "elapsed_ns": {
+        "mean_delta_ns": -42615.9,
+        "paired_bootstrap_95": [
+          -1486606.9,
+          1867685.8
+        ],
+        "mean_hash_ns": 181753347.6,
+        "mean_direct_ns": 181710731.7
+      },
+      "wake_late_max_ns": {
+        "mean_delta_ns": -592209.1,
+        "paired_bootstrap_95": [
+          -967404.5,
+          -7023.6
+        ],
+        "mean_hash_ns": 1818387.4,
+        "mean_direct_ns": 1226178.3
+      }
+    },
+    "limitation": "TCG has no faithful 9800X3D cache/coherence timing. wake_late_max_ns is completion lateness against a per-iteration deadline, not measured scheduler wake-to-run latency. Five blocks are a small diagnostic sample."
+  },
+  "receipts": {
+    "baseline-2cpu-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/baseline-2cpu-final/result.json",
+      "sha256": "589b5654e40ad98561ca1aadfb6a1d7fd10279a40a6ef7ee38158e5de7f0dd53",
+      "name": "baseline-2cpu-final",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 14.217597007751465,
+      "kernel_sha256": "156b4e1b5dac3bfc31988cba8a1be6cc6b3f0e5d3fa476521b79e12b52c30387",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "baseline-2cpu-final",
+        "hash_only": false,
+        "baseline": true,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false
+      },
+      "tests": [
+        {
+          "checks": 69255,
+          "errors": 0,
+          "creates": 32702,
+          "duplicates": 66,
+          "misses": 43,
+          "race_ops": 32768,
+          "small_inserts": 580,
+          "large_inserts": 690,
+          "small_moves": 580,
+          "large_moves": 690,
+          "peeks": 1212,
+          "failed": 0
+        },
+        {
+          "checks": 69309,
+          "errors": 0,
+          "creates": 32706,
+          "duplicates": 62,
+          "misses": 36,
+          "race_ops": 32768,
+          "small_inserts": 575,
+          "large_inserts": 690,
+          "small_moves": 575,
+          "large_moves": 690,
+          "peeks": 1213,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 94583996,
+          "wake_late_max_ns": 3142573,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 85155264,
+          "wake_late_max_ns": 1812934,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "5663865e3e2df507bc3481d15c20a5680f1e0e2f3085130719e564de14123170",
+      "command.json_sha256": "4bd7dbcfc30169ce52d5ec4cc9c3b968a2b814096dd5175019ccfcf5722449b7"
+    },
+    "baseline-2cpu-v2": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/baseline-2cpu-v2/result.json",
+      "sha256": "a175e226daf6188e625f391c72422ed916419bb2df899249561f245a68e105a7",
+      "name": "baseline-2cpu-v2",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 11.302120447158813,
+      "kernel_sha256": "156b4e1b5dac3bfc31988cba8a1be6cc6b3f0e5d3fa476521b79e12b52c30387",
+      "initramfs_sha256": "1627e75d03f96238dc56619e69527246a4bebf59b07cc61030214a6a496667e8",
+      "config": {
+        "name": "baseline-2cpu-v2",
+        "hash_only": false,
+        "baseline": true,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": false
+      },
+      "tests": [
+        {
+          "checks": 69319,
+          "errors": 0,
+          "creates": 32684,
+          "duplicates": 84,
+          "misses": 59,
+          "race_ops": 32768,
+          "small_inserts": 589,
+          "large_inserts": 693,
+          "small_moves": 589,
+          "large_moves": 693,
+          "peeks": 1188,
+          "failed": 0
+        },
+        {
+          "checks": 69179,
+          "errors": 0,
+          "creates": 32550,
+          "duplicates": 218,
+          "misses": 185,
+          "race_ops": 32768,
+          "small_inserts": 568,
+          "large_inserts": 633,
+          "small_moves": 568,
+          "large_moves": 633,
+          "peeks": 1194,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 107221131,
+          "wake_late_max_ns": 3918230,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 122301424,
+          "wake_late_max_ns": 4975901,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "4a557de0f43c98679b947370955c671d6b6a1b5c1fb859cb61f50521c7127672",
+      "command.json_sha256": "2138f1acb47116bf113e5a5c478a1d13829f9a6b54ad8d9a83f661acd0a8a91a"
+    },
+    "baseline-kasan-poc-on": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/baseline-kasan-poc-on/result.json",
+      "sha256": "630270f92dbbd90e64b3ed79f6eecc202fe51cfe82e77e974849329351705478",
+      "name": "baseline-kasan-poc-on",
+      "returncode": 0,
+      "passed": false,
+      "elapsed_seconds": 23.664133310317993,
+      "kernel_sha256": "40c334297e8e5717d7cbed47f6eb06f3b93d38517c5fd4509cbffe687557e81e",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "baseline-kasan-poc-on",
+        "hash_only": false,
+        "baseline": true,
+        "cpus": 4,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": true,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "checks": 70033,
+          "errors": 0,
+          "creates": 31475,
+          "duplicates": 1293,
+          "misses": 1207,
+          "race_ops": 32768,
+          "small_inserts": 698,
+          "large_inserts": 804,
+          "small_moves": 698,
+          "large_moves": 804,
+          "peeks": 1369,
+          "failed": 0
+        },
+        {
+          "checks": 69627,
+          "errors": 0,
+          "creates": 31265,
+          "duplicates": 1503,
+          "misses": 1393,
+          "race_ops": 32768,
+          "small_inserts": 609,
+          "large_inserts": 727,
+          "small_moves": 609,
+          "large_moves": 727,
+          "peeks": 1452,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 80738422,
+          "wake_late_max_ns": 317713,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 83268202,
+          "wake_late_max_ns": 1860384,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "161944e754bd99eec8c55b89cc28c9a78481339318cebb3de3aa94a5b43ed0c0",
+      "command.json_sha256": "76f546f3fd40efddc2eef4c2a27cc578203219eeb697663a03c962bd1f93708a"
+    },
+    "baseline-kasan-poc-on-retry": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/baseline-kasan-poc-on-retry/result.json",
+      "sha256": "19308c7fd2e420ab5688d3b43fc49f10352adab2a19a71cc9ace7ac2756b2986",
+      "name": "baseline-kasan-poc-on-retry",
+      "returncode": 0,
+      "passed": false,
+      "elapsed_seconds": 28.575888872146606,
+      "kernel_sha256": "40c334297e8e5717d7cbed47f6eb06f3b93d38517c5fd4509cbffe687557e81e",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "baseline-kasan-poc-on-retry",
+        "hash_only": false,
+        "baseline": true,
+        "cpus": 4,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": true,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "checks": 69671,
+          "errors": 0,
+          "creates": 27401,
+          "duplicates": 5367,
+          "misses": 4581,
+          "race_ops": 32768,
+          "small_inserts": 636,
+          "large_inserts": 789,
+          "small_moves": 636,
+          "large_moves": 789,
+          "peeks": 1498,
+          "failed": 0
+        },
+        {
+          "checks": 69715,
+          "errors": 0,
+          "creates": 31380,
+          "duplicates": 1388,
+          "misses": 1284,
+          "race_ops": 32768,
+          "small_inserts": 636,
+          "large_inserts": 748,
+          "small_moves": 636,
+          "large_moves": 748,
+          "peeks": 1494,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 87415021,
+          "wake_late_max_ns": 1087668,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 86532672,
+          "wake_late_max_ns": 789460,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "2a0c3902b1952a514db0f3746af0e2f6b8fddc0ea76b37400aece0aeaa68f727",
+      "command.json_sha256": "76f546f3fd40efddc2eef4c2a27cc578203219eeb697663a03c962bd1f93708a"
+    },
+    "candidate-2cpu-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/candidate-2cpu-final/result.json",
+      "sha256": "5426023fb8b43c20ae90d4cf2a37b1434abe0ece88e68704b19a860b9d3f3aa3",
+      "name": "candidate-2cpu-final",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 11.908116102218628,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "candidate-2cpu-final",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false
+      },
+      "tests": [
+        {
+          "checks": 69217,
+          "errors": 0,
+          "creates": 32613,
+          "duplicates": 155,
+          "misses": 136,
+          "race_ops": 32768,
+          "small_inserts": 567,
+          "large_inserts": 642,
+          "small_moves": 567,
+          "large_moves": 642,
+          "peeks": 1198,
+          "failed": 0
+        },
+        {
+          "checks": 69399,
+          "errors": 0,
+          "creates": 32634,
+          "duplicates": 134,
+          "misses": 111,
+          "race_ops": 32768,
+          "small_inserts": 599,
+          "large_inserts": 676,
+          "small_moves": 599,
+          "large_moves": 675,
+          "peeks": 1128,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 98929815,
+          "wake_late_max_ns": 2022304,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 97149791,
+          "wake_late_max_ns": 3060829,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "5e0eda82cb43ba8a97bbb7ac0398e130e883f3ea5d56a0ccb0915d0f3b9c63fe",
+      "command.json_sha256": "b301cc9db2c8bc5dd26d34a207edbbabf3cf627c1f2e5ed7382b8daa745da901"
+    },
+    "candidate-2cpu-v1": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/candidate-2cpu-v1/result.json",
+      "sha256": "225ed694def35432a076cddc256f61745d90ff45d33aea242ca5553d45d9e52f",
+      "name": "candidate-2cpu-v1",
+      "returncode": 0,
+      "passed": false,
+      "elapsed_seconds": 2.942349433898926,
+      "kernel_sha256": "0673f90331580ac682a5502712f1710b0db26e400510365c19f77734b3d8bc2d",
+      "initramfs_sha256": "9c84dde391ee4bf5359692084c44fa79f9cb2f483aea16d8e8a30e6a90eb25db",
+      "config": {
+        "name": "candidate-2cpu-v1",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": false
+      },
+      "tests": [],
+      "serial.log_sha256": "9c84814f03f27ad66679c6e87e398cc5a72b3bd3becc6768340b82768cf48c11",
+      "command.json_sha256": "b301cc9db2c8bc5dd26d34a207edbbabf3cf627c1f2e5ed7382b8daa745da901"
+    },
+    "candidate-2cpu-v3": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/candidate-2cpu-v3/result.json",
+      "sha256": "1b7cb62a9551039fe89dd68ab0f37488b9ed7bb1d346ab0619d51783f29e3bcc",
+      "name": "candidate-2cpu-v3",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 10.619723558425903,
+      "kernel_sha256": "21e5119ad2e561c8c8cec431b943880f6fe8b226b774a78f333896e0d4b955b3",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "candidate-2cpu-v3",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": false
+      },
+      "tests": [
+        {
+          "checks": 69167,
+          "errors": 0,
+          "creates": 32520,
+          "duplicates": 248,
+          "misses": 211,
+          "race_ops": 32768,
+          "small_inserts": 572,
+          "large_inserts": 646,
+          "small_moves": 572,
+          "large_moves": 646,
+          "peeks": 1200,
+          "failed": 0
+        },
+        {
+          "checks": 69125,
+          "errors": 0,
+          "creates": 32575,
+          "duplicates": 193,
+          "misses": 159,
+          "race_ops": 32768,
+          "small_inserts": 570,
+          "large_inserts": 624,
+          "small_moves": 570,
+          "large_moves": 624,
+          "peeks": 1181,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 88578079,
+          "wake_late_max_ns": 1717067,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 94556957,
+          "wake_late_max_ns": 2570973,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "7fa358297727456820f98c1da91b2b7279090203e424699feb5d770124be50ea",
+      "command.json_sha256": "b301cc9db2c8bc5dd26d34a207edbbabf3cf627c1f2e5ed7382b8daa745da901"
+    },
+    "candidate-kasan-poc-off": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/candidate-kasan-poc-off/result.json",
+      "sha256": "aa9f0851a242490104c766f401f157d74546fb0639a5d6e7e4c44c9da24b2ad8",
+      "name": "candidate-kasan-poc-off",
+      "returncode": 0,
+      "passed": false,
+      "elapsed_seconds": 23.559528350830078,
+      "kernel_sha256": "b5e2675a737d7bc6448d2baab018c04c6e477a86c8936d3b3b6e2471212e737c",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "candidate-kasan-poc-off",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 4,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": true,
+        "poc_off": true
+      },
+      "tests": [
+        {
+          "checks": 69951,
+          "errors": 0,
+          "creates": 30922,
+          "duplicates": 1846,
+          "misses": 1693,
+          "race_ops": 32768,
+          "small_inserts": 678,
+          "large_inserts": 803,
+          "small_moves": 678,
+          "large_moves": 803,
+          "peeks": 1411,
+          "failed": 0
+        },
+        {
+          "checks": 69699,
+          "errors": 0,
+          "creates": 31291,
+          "duplicates": 1477,
+          "misses": 1366,
+          "race_ops": 32768,
+          "small_inserts": 621,
+          "large_inserts": 730,
+          "small_moves": 621,
+          "large_moves": 730,
+          "peeks": 1484,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 81950998,
+          "wake_late_max_ns": 1856549,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 79716089,
+          "wake_late_max_ns": 358080,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "a92210c24f540e1658c9490b479721e467d02ebe80eeeb9e48177723b8c35394",
+      "command.json_sha256": "09bfa71e998e9028d28fe258e73a72dbd3c471066edd254e48bf0f350810833b"
+    },
+    "candidate-kasan-poc-off-retry": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/candidate-kasan-poc-off-retry/result.json",
+      "sha256": "bcb202c65cc9fc6a89e4d01b7871c14d640e47b0e270b783f6285a4456445f2b",
+      "name": "candidate-kasan-poc-off-retry",
+      "returncode": 0,
+      "passed": false,
+      "elapsed_seconds": 23.91254425048828,
+      "kernel_sha256": "b5e2675a737d7bc6448d2baab018c04c6e477a86c8936d3b3b6e2471212e737c",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "candidate-kasan-poc-off-retry",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 4,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": true,
+        "poc_off": true
+      },
+      "tests": [
+        {
+          "checks": 69971,
+          "errors": 0,
+          "creates": 31912,
+          "duplicates": 856,
+          "misses": 778,
+          "race_ops": 32768,
+          "small_inserts": 682,
+          "large_inserts": 807,
+          "small_moves": 682,
+          "large_moves": 807,
+          "peeks": 1445,
+          "failed": 0
+        },
+        {
+          "checks": 70013,
+          "errors": 0,
+          "creates": 31329,
+          "duplicates": 1439,
+          "misses": 1320,
+          "race_ops": 32768,
+          "small_inserts": 693,
+          "large_inserts": 825,
+          "small_moves": 693,
+          "large_moves": 825,
+          "peeks": 1416,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 84317717,
+          "wake_late_max_ns": 1248660,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 81446621,
+          "wake_late_max_ns": 557662,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "8f000928a1f22910481b1c06bcdf06db8e4805989fba08c4929b219ab11a047c",
+      "command.json_sha256": "09bfa71e998e9028d28fe258e73a72dbd3c471066edd254e48bf0f350810833b"
+    },
+    "candidate-smt16-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/candidate-smt16-final/result.json",
+      "sha256": "13e70c9e04779e9905e4f45f0732ec4184c69a1d55007a470e3b01e1cea7b91c",
+      "name": "candidate-smt16-final",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 23.728755712509155,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "candidate-smt16-final",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 16,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false
+      },
+      "tests": [
+        {
+          "checks": 72367,
+          "errors": 0,
+          "creates": 31355,
+          "duplicates": 1413,
+          "misses": 1265,
+          "race_ops": 32768,
+          "small_inserts": 646,
+          "large_inserts": 655,
+          "small_moves": 646,
+          "large_moves": 654,
+          "peeks": 802,
+          "failed": 0
+        },
+        {
+          "checks": 72093,
+          "errors": 0,
+          "creates": 30314,
+          "duplicates": 2454,
+          "misses": 1990,
+          "race_ops": 32768,
+          "small_inserts": 634,
+          "large_inserts": 647,
+          "small_moves": 634,
+          "large_moves": 647,
+          "peeks": 697,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 16,
+          "workers": 32,
+          "frames": 2048,
+          "steps": 40960000,
+          "checksum": 11868266055441002336,
+          "elapsed_ns": 119885333,
+          "wake_late_max_ns": 5870392,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 16,
+          "workers": 32,
+          "frames": 2048,
+          "steps": 40960000,
+          "checksum": 11868266055441002336,
+          "elapsed_ns": 125955925,
+          "wake_late_max_ns": 6985831,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "88abbf6b25ae5a6aadefedecb780eac5771cce16fe0cd3d1bb12207d80f5d006",
+      "command.json_sha256": "5f858edf1270a3b0598125e09f6adf912184dd54ea789e1486764e4e7101188c"
+    },
+    "hash-only-2cpu-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/hash-only-2cpu-final/result.json",
+      "sha256": "0a326bffb67e32771f07cfa55301f1e6cf56ce2ce6a5683277876c059a72cb4c",
+      "name": "hash-only-2cpu-final",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 13.668612480163574,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "hash-only-2cpu-final",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false
+      },
+      "tests": [
+        {
+          "checks": 69117,
+          "errors": 0,
+          "creates": 32731,
+          "duplicates": 37,
+          "misses": 23,
+          "race_ops": 32768,
+          "small_inserts": 547,
+          "large_inserts": 651,
+          "small_moves": 547,
+          "large_moves": 651,
+          "peeks": 1178,
+          "failed": 0
+        },
+        {
+          "checks": 69293,
+          "errors": 0,
+          "creates": 32658,
+          "duplicates": 110,
+          "misses": 93,
+          "race_ops": 32768,
+          "small_inserts": 576,
+          "large_inserts": 689,
+          "small_moves": 576,
+          "large_moves": 688,
+          "peeks": 1164,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 97423217,
+          "wake_late_max_ns": 4384320,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 81463270,
+          "wake_late_max_ns": 1568538,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "511d0a9ae6fda6d78abd61db7ecb39313e9b9717f654b033d3bf9057f3288163",
+      "command.json_sha256": "2c905a2d00223466fafee433833fd4b363f282fd3d736360308108dfa928db57"
+    },
+    "kasan-lockdep-4cpu-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/kasan-lockdep-4cpu-final/result.json",
+      "sha256": "e03e5e0a83394f5266c125acee0c683b0fe9fe78d05605090671b221d9cf8b51",
+      "name": "kasan-lockdep-4cpu-final",
+      "returncode": 0,
+      "passed": false,
+      "elapsed_seconds": 45.06418251991272,
+      "kernel_sha256": "b5e2675a737d7bc6448d2baab018c04c6e477a86c8936d3b3b6e2471212e737c",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "kasan-lockdep-4cpu-final",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 4,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": true
+      },
+      "tests": [
+        {
+          "checks": 69853,
+          "errors": 0,
+          "creates": 27458,
+          "duplicates": 5310,
+          "misses": 4530,
+          "race_ops": 32768,
+          "small_inserts": 651,
+          "large_inserts": 805,
+          "small_moves": 651,
+          "large_moves": 805,
+          "peeks": 1572,
+          "failed": 0
+        },
+        {
+          "checks": 69867,
+          "errors": 0,
+          "creates": 28314,
+          "duplicates": 4454,
+          "misses": 3773,
+          "race_ops": 32768,
+          "small_inserts": 643,
+          "large_inserts": 858,
+          "small_moves": 643,
+          "large_moves": 858,
+          "peeks": 1600,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 167373824,
+          "wake_late_max_ns": 9228848,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 165042110,
+          "wake_late_max_ns": 12291462,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "9ec32bad524ed83fcb6f483ea51800e791872bec32e6645d81a1c8dc200e32b4",
+      "command.json_sha256": "4ea03eedbc9af39317f2f976b6459a723beccf520a4ce540f9f53a9a788c01b7"
+    },
+    "no-bitops-2cpu-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/no-bitops-2cpu-final/result.json",
+      "sha256": "86f4d73727223b3ed611a634a9d43f36dd35a56d94ec3a1b835db90960fc0689",
+      "name": "no-bitops-2cpu-final",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 10.002762794494629,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "no-bitops-2cpu-final",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": false,
+        "no_bitops": true,
+        "sockets": 1,
+        "debug_kernel": false
+      },
+      "tests": [
+        {
+          "checks": 69139,
+          "errors": 0,
+          "creates": 32546,
+          "duplicates": 222,
+          "misses": 186,
+          "race_ops": 32768,
+          "small_inserts": 574,
+          "large_inserts": 628,
+          "small_moves": 574,
+          "large_moves": 628,
+          "peeks": 1192,
+          "failed": 0
+        },
+        {
+          "checks": 69193,
+          "errors": 0,
+          "creates": 32530,
+          "duplicates": 238,
+          "misses": 191,
+          "race_ops": 32768,
+          "small_inserts": 585,
+          "large_inserts": 653,
+          "small_moves": 585,
+          "large_moves": 653,
+          "peeks": 1144,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 84314485,
+          "wake_late_max_ns": 3586838,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 256,
+          "steps": 5120000,
+          "checksum": 17560202623930206538,
+          "elapsed_ns": 82779835,
+          "wake_late_max_ns": 1728477,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "b76816f96df7ddfdbfcf5e49201c0e335272ece421931bc790cc89623545ddba",
+      "command.json_sha256": "5879ef8bbbcfba81cc6ff807ce01cf656f3f8b09cc5a81172fce6ed49b33ea26"
+    },
+    "sim-b1-s1-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b1-s1-hash/result.json",
+      "sha256": "62175969a53a86a8bfb6d9967f6b415ca8713e0a08bcc2a125b917af89899de5",
+      "name": "sim-b1-s1-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.982362747192383,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b1-s1-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182090650,
+          "wake_late_max_ns": 2090508,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "73b63340950f06dfbe0d3f83f1f98ad0e085d80d960152a08947f05eb1ced2cc",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b1-s2-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b1-s2-direct/result.json",
+      "sha256": "4bae1a7b75448ee54e44783c23c579f69dd0ab2d464b6cad71698320ff26e888",
+      "name": "sim-b1-s2-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.882246971130371,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b1-s2-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182560282,
+          "wake_late_max_ns": 730351,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "261e9b47f19795e6781fd2f71b97b8e68cd4c376a712a86f64bc70927929489c",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b1-s3-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b1-s3-direct/result.json",
+      "sha256": "d897729cc6d7439b8a8b4df8747f8cf3ac07260d0ac4fdc9fcd9cc8e8e5cb760",
+      "name": "sim-b1-s3-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.8324265480041504,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b1-s3-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182030879,
+          "wake_late_max_ns": 1556981,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "f67703b202f552ee6510adf49e208238ac703aae1a71b66cae4d3d50f88b11eb",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b1-s4-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b1-s4-hash/result.json",
+      "sha256": "67cf200586f16ad2f3462e8f57c4abb5d9377cbe84e9c652665f8f855b4764ba",
+      "name": "sim-b1-s4-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.8823630809783936,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b1-s4-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182750443,
+          "wake_late_max_ns": 1583031,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "d207345e9d8019df2228444bb698e9a0950d7609d73f51ffc904e364db0980a9",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b2-s1-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b2-s1-direct/result.json",
+      "sha256": "f820077f0f85ffc6f9a1d850ebed068996a9bacdb65b5ed319ee67f7a9cef498",
+      "name": "sim-b2-s1-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.8322372436523438,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b2-s1-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 179841483,
+          "wake_late_max_ns": 1515307,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "590417f17d773bbad094ce72045ed698bfc8f056751208cfe489d12fbc52d4c1",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b2-s2-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b2-s2-hash/result.json",
+      "sha256": "9ee36d38862f6e1a3844a8e35705293a92acfb43cca98820b0723d472ccb7d73",
+      "name": "sim-b2-s2-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.832209587097168,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b2-s2-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182429635,
+          "wake_late_max_ns": 2932852,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "bd36fcd7870160cfc2b37fee22e0d931a2dbad9dc34c36c038542d5985bd9b08",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b2-s3-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b2-s3-hash/result.json",
+      "sha256": "db03cc46c9452f0a288461f3eb9d4a757c8ca00b786e81b35ae21e496c28b9e7",
+      "name": "sim-b2-s3-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.882373094558716,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b2-s3-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 181381998,
+          "wake_late_max_ns": 926446,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "45d8b0fe5876a94d1aa31b528796d2706b75654100cf14a561a531ae6c6e2c6a",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b2-s4-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b2-s4-direct/result.json",
+      "sha256": "fd595731f50ab4910a650465b1aa5956d8de5e07032c3a3415aa125aa81d51de",
+      "name": "sim-b2-s4-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.831916570663452,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b2-s4-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 179216015,
+          "wake_late_max_ns": 551387,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "d83aa98f13d96756b57b1cdd7f95b431270761c61fa982e80014cd824c656c1b",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b3-s1-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b3-s1-hash/result.json",
+      "sha256": "4efa194b41dcb69542371b5775bf3bbafbd1869cc7ebd6d071083557130bd6ce",
+      "name": "sim-b3-s1-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.882256031036377,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b3-s1-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182324353,
+          "wake_late_max_ns": 2482737,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "a24626e56bb83eefc4a23c5f5c27bef9435d78ed47d0159bd1c76207b2d824c0",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b3-s2-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b3-s2-direct/result.json",
+      "sha256": "b4f316e8d0c05cc598e5660f4a56a708b55d7b6dd91f496862d48687b005b6f2",
+      "name": "sim-b3-s2-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.882697343826294,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b3-s2-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182498981,
+          "wake_late_max_ns": 1102000,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "c48ea64700cd2f8bba68d8bef6d671d675f21d8748bd52f39d6166a702b71f7b",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b3-s3-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b3-s3-direct/result.json",
+      "sha256": "89fb1e1bb4e32541c67e997b1cdca100705c1fbfb55716bd3c88675b2193a0c9",
+      "name": "sim-b3-s3-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.8321855068206787,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b3-s3-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 180218865,
+          "wake_late_max_ns": 790793,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "1515910fb251556b098258e56d0c571908304bf1fb5ef05e41cfd011ff1b24a3",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b3-s4-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b3-s4-hash/result.json",
+      "sha256": "4e441d276d19b406a7d30c407f076f79ec8dbabedcc0a3f77a25901ab0a23167",
+      "name": "sim-b3-s4-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.983393907546997,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b3-s4-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182459428,
+          "wake_late_max_ns": 1074426,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "4bec12fa3a38fb485f702066e34f3a44ba0aeea4164b4483447522dda7d29eaa",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b4-s1-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b4-s1-direct/result.json",
+      "sha256": "2c7460022195200f259c1d5ff59ed1e650f234341e0d8233d5ce5115277e8593",
+      "name": "sim-b4-s1-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.933126211166382,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b4-s1-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 186086898,
+          "wake_late_max_ns": 2275889,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "8f3333130d10dcbe5233c40d38c5433eb01af417b0d58f91e85d0de944bef3de",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b4-s2-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b4-s2-hash/result.json",
+      "sha256": "8f7765ad216cd126c2e252570dda414ad4f96192559ede500469ac4539c54dd7",
+      "name": "sim-b4-s2-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 4.033626079559326,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b4-s2-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 183089207,
+          "wake_late_max_ns": 2293734,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "42b1b7833403b7c3aacbc5fa5ca4927c671e693de1ca6735403ce39e42269d6c",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b4-s3-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b4-s3-hash/result.json",
+      "sha256": "7d3a514ee429a66772a551b5f67be5b17bbbf805f5aee7dd7b328154bf9e2855",
+      "name": "sim-b4-s3-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.932793617248535,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b4-s3-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182595979,
+          "wake_late_max_ns": 2467313,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "c0044a1d52f67a3b372d043d6d99f3771d29e48a9de8d1fc10d0122f8cc8ba06",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b4-s4-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b4-s4-direct/result.json",
+      "sha256": "f7b06e14bc84238837db96bd0dfc645489490e8db083e0e3abee29b0f8160faf",
+      "name": "sim-b4-s4-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.9339356422424316,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b4-s4-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 179244556,
+          "wake_late_max_ns": 320080,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "0b721185b676be9538c41408c9301227a7c3cb98c909be1af03b5fc1671685d3",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b5-s1-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b5-s1-hash/result.json",
+      "sha256": "63872b699cf8549b32ebefa1cd7656abf591109872394a8439d104a90533368a",
+      "name": "sim-b5-s1-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.88234543800354,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b5-s1-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 181206570,
+          "wake_late_max_ns": 555865,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "2c69749089f866a2308f32d9a05f91c16b51c35dce14bbdd1200d766ce6a2f25",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "sim-b5-s2-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b5-s2-direct/result.json",
+      "sha256": "b0b57d4d8f24a0ffd6cd3ade819e50e21a501fe838e43b67a1727cbb92075164",
+      "name": "sim-b5-s2-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.882723808288574,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b5-s2-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 182266178,
+          "wake_late_max_ns": 2416361,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "92b76487b64a87092031edfc90b6289c08ef43a5dd2934e454ab1241aec3eb93",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b5-s3-direct": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b5-s3-direct/result.json",
+      "sha256": "819902ef34ef7625f4a2d668b8817fb1ecef95f029986ae186ad464f6b868ec4",
+      "name": "sim-b5-s3-direct",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.982933282852173,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b5-s3-direct",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 183143180,
+          "wake_late_max_ns": 1002634,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "ef6e163f1067bb6f69a08aa61d842653b4d86106e4efd333669acfc365105ae8",
+      "command.json_sha256": "10297f9f383400733b3ae6ec72832dce72ed24dab0534728e0f0101af8b03d2a"
+    },
+    "sim-b5-s4-hash": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/sim-b5-s4-hash/result.json",
+      "sha256": "62107023c46134492df44ae5d34bab50cfbc05c68675aeb276ba352ad5968c06",
+      "name": "sim-b5-s4-hash",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 3.982314348220825,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+      "config": {
+        "name": "sim-b5-s4-hash",
+        "hash_only": true,
+        "baseline": false,
+        "cpus": 2,
+        "sim": true,
+        "no_bitops": false,
+        "sockets": 1,
+        "debug_kernel": false,
+        "poc_off": false
+      },
+      "tests": [
+        {
+          "sim": 1,
+          "cpus": 2,
+          "workers": 4,
+          "frames": 640,
+          "steps": 12800000,
+          "checksum": 2379318453712269499,
+          "elapsed_ns": 177205213,
+          "wake_late_max_ns": 1776962,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "bb70cf602929187505b448c2da7f94900ced2ce0959df17d93caa057fa7180c9",
+      "command.json_sha256": "8b9b880cd1eabed7d531821a56980f335245a9e94c7da58748db3d4d31b68099"
+    },
+    "two-socket-4cpu-final": {
+      "path": "/home/ritz/Documents/Repo/scx_cake_bench/runs/cake_dsq_index_20261002T201929Z/two-socket-4cpu-final/result.json",
+      "sha256": "abf0fa5cd400561e72e2ebe62e176e5805aa142ca22ceee69e8beabd9d84bb6c",
+      "name": "two-socket-4cpu-final",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_seconds": 16.477483987808228,
+      "kernel_sha256": "2c785c1a6fc0c30197ff6410a3ff414c9a941011a588eab7837439621d73aacf",
+      "initramfs_sha256": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+      "config": {
+        "name": "two-socket-4cpu-final",
+        "hash_only": false,
+        "baseline": false,
+        "cpus": 4,
+        "sim": false,
+        "no_bitops": false,
+        "sockets": 2,
+        "debug_kernel": false
+      },
+      "tests": [
+        {
+          "checks": 70029,
+          "errors": 0,
+          "creates": 32462,
+          "duplicates": 306,
+          "misses": 268,
+          "race_ops": 32768,
+          "small_inserts": 618,
+          "large_inserts": 634,
+          "small_moves": 618,
+          "large_moves": 634,
+          "peeks": 1176,
+          "failed": 0
+        },
+        {
+          "checks": 69831,
+          "errors": 0,
+          "creates": 32546,
+          "duplicates": 222,
+          "misses": 196,
+          "race_ops": 32768,
+          "small_inserts": 577,
+          "large_inserts": 621,
+          "small_moves": 577,
+          "large_moves": 621,
+          "peeks": 1394,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 136788450,
+          "wake_late_max_ns": 12669370,
+          "failed": 0
+        },
+        {
+          "sim": 0,
+          "cpus": 4,
+          "workers": 8,
+          "frames": 512,
+          "steps": 10240000,
+          "checksum": 3901796226009129547,
+          "elapsed_ns": 103372680,
+          "wake_late_max_ns": 3808630,
+          "failed": 0
+        }
+      ],
+      "serial.log_sha256": "e387e454a5d08f3d95a6091091ad4ef9082866a35be2b59b6f2485ab4a02e2e7",
+      "command.json_sha256": "4d7501318e72e4d310fd8d7dca4bab870817f2a9eaf3ce229673de754b7842f6"
+    }
+  },
+  "artifacts": {
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/dsq-direct-index.patch": "5acba73b33e9827a0199f7e080780566f1be2fa6b9d78a3f1c1a5f2bbf3d7a7c",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/dsq-direct-index-with-typed-fallback.patch": "90bb9172da4876589383a3fc6396f868880e9b3d13463dad0dee08e141ff0ea5",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/plan.json": "0ad59bf4b4af484134270f2b1f40cb489e8244b88b403bf03ad0b0544655e82c",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/patch-validation.json": "e6719e73d94e66abf9b611cc8a3cef30093ffa97f623a8dc3c8148d5af56d273",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/source-state.json": "8d6c16a74c91d3e3d51ea8e5a31bdcf6f4ca5fbb88ac9c1822b2376f151efa2e",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/candidate-assembly.json": "ac92fdce9ac87f8be205a9087107949dea762edf2c8678d141f689ea6455efcf",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/baseline-assembly.json": "c031eb9e8b047bcf25098e090f28bf183a9d850c73b723fbfca6c12de1dbedeb",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/final-lookup.asm": "40e310b7225fd7d8a69626c7e2063a939f01cef66f3166a26d917862b9fdbafb",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/baseline-lookup.asm": "b9f0794c715a58edde32b9bea8b8c3c7a91d86ba17d47027db299250f64cea59",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/kernel-build-final.log": "5fe6bd0b44962f9f89ec3dcf30c01271b713ff5f6ec3241a6250460d67218fa9",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/debug-build.log": "8de2cdc4515c3278992cde00456a88db448d556eadc3715b2ffa9d1c7a36ac0d",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/debug-baseline-build.log": "6045aec5b8a2fb09c625622a4047ab71eeff5cec82589cde6299f5d414d1502a",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/vm-files.json": "4bff60762265f13eafbb3890d672c14f55b021ee6305aa3869f5807bb5172904",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/vm-files-v3.json": "81972512249c6ba0a87ed367b317eed3d68519f37e99d5bc31608f3b9e62c2b1",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/validation.cpio": "1b98e751cc66e42e612f6990bcb742354b3a7701df8bd91bb674356d2133e42c",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/validation-correctness-v3.cpio": "df9ee80cb2fb55ad2987271ed3ea542b884523d965d02c0eab280f1aebfba47d",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c": "2de633c51bc1c8b0217358ddd462f784015f9aad0bac8127fc9286ac2ff4b1aa",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/internal.h": "005c8251c88503d80c05ee71fb88d74e921044171a20f3af22384fd7f8fa311b",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/dsq-test.c": "ad9f900692b3d7c87e92adaadda050215c3a3aaa49d1bfa465e03164329af35d",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/dsq-test.bpf.c": "4426e795a1fd35ddef9316274fc001347c5690e1c321d50ad7ff7ed63c48cc61",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/vm-init.c": "9d0c979ecdb3643c9381e4ac88f2c7edd27ff21b00579bddb5d6800f97d9f12b",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/run-vm.py": "f2deaa08966a6efdfb77257c1a4d940c9d68b63775f2a5a523854b0b9717b62c",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/simulate.py": "55bfc5fdda953299aa13a96f86f290575cee15635f0fbb309dc6d52020eca18d",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/build-vm.py": "6b95483de187f650492d1e579d32cc0ba06f6f6a663f132e8bf45f4855c8a3dd",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/dsq-test.bpf.c": "4426e795a1fd35ddef9316274fc001347c5690e1c321d50ad7ff7ed63c48cc61",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/dsq-test.c": "ad9f900692b3d7c87e92adaadda050215c3a3aaa49d1bfa465e03164329af35d",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/vm-init.c": "9d0c979ecdb3643c9381e4ac88f2c7edd27ff21b00579bddb5d6800f97d9f12b",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/build-vm.py": "6b95483de187f650492d1e579d32cc0ba06f6f6a663f132e8bf45f4855c8a3dd",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/run-vm.py": "f2deaa08966a6efdfb77257c1a4d940c9d68b63775f2a5a523854b0b9717b62c",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/simulate.py": "55bfc5fdda953299aa13a96f86f290575cee15635f0fbb309dc6d52020eca18d",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-tests/README.md": "8dcb8d3302ad93f79ae62e40b71865510fb1be05564a02c172f150b75c15db85",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-data/simulation.csv": "09754da8e2af2bf5351a4e2a1f763d03587721cc8373608de0d957705bc86ff0",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-data/simulation.json": "4d8a0bc0d3e71392303f8ce08fa1d8645b0752f60fed05382d9c5aced9b19750",
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/dsq-index-data/simulation-plan.json": "23481bb53d706cf2ebdd0e5336992198d0f4e99ac807206fc6bdeccc924ce652",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/checkpatch.log": "b02e7abe112c429c39bccef2518744bf8994c2f6c14603820bde3345b58e4914",
+    "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/checkpatch-with-typed-fallback.log": "49373d25f6a8f3be0e9aeaebdb70bb012cb2efe8ebd76528033a4c3e50d9bbdc"
+  },
+  "omissions": [
+    "actual allocation fault injection",
+    "simultaneous nested schedulers",
+    "nonempty destruction rejection",
+    "long duration stress",
+    "CPU hotplug",
+    "physical hardware timing"
+  ],
+  "debug_findings": [
+    "POC-selector pi_lock/pool-lock cycle reproduced by baseline",
+    "early boot IRQ KASAN report reproduced by baseline; root cause unresolved"
+  ],
+  "checkpatch": "--no-tree --strict --no-signoff; 0 errors/warnings/checks for both patch alternatives; submission sign-off intentionally absent"
+}

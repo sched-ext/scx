@@ -1,0 +1,33 @@
+--- a/scheds/rust/scx_cake/src/bpf/cake.bpf.c
++++ b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+@@ -23,9 +23,12 @@
+ 
+ static __always_inline u32 cake_ctz64(u64 word)
+ {
+-	if (cake_native_ctz)
+-		/* Nonzero CPU masks retain the verifier's 0..63 bound. */
+-		return (u32)bpf_ctz64(word) & 63;
++	if (cake_native_ctz) {
++		u64 count = bpf_ctz64(word);
++
++		__builtin_assume(count < 64);
++		return (u32)count;
++	}
+ 	return (u32)__builtin_ctzll(word);
+ }
+ 
+@@ -38,8 +41,12 @@
+ 
+ static __always_inline u32 cake_clz64(u64 word)
+ {
+-	if (cake_native_clz)
+-		return (u32)bpf_clz64(word) & 63;
++	if (cake_native_clz) {
++		u64 count = bpf_clz64(word);
++
++		__builtin_assume(count < 64);
++		return (u32)count;
++	}
+ 	return (u32)__builtin_clzll(word);
+ }
+ 

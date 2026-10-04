@@ -45,6 +45,56 @@ cargo build --locked --release -p scx_cake
 You can also select Cake through your distribution's scheduler service.
 The default policy needs no profile or toggle options.
 
+The local `cake build` helper produces the ordinary optimized executable in
+`target/release`. At startup, Cake automatically uses native CTZ/POPCNT when
+the running kernel exports the corresponding scalar kfuncs and the x86 CPU
+supports BMI1/POPCNT. Each unavailable operation uses its portable fallback.
+Detection happens on the machine running Cake, never on the build host:
+
+```sh
+cake build
+# Once permissions are provisioned, native bitops are selected automatically.
+./target/release/scx_cake
+# Compare the same release using the portable operations.
+./target/release/scx_cake --portable-bitops
+```
+
+The startup log reports the effective `Native CTZ` and `Native POPCNT` choices.
+`--native-bitops` explicitly requires both operations and fails if either is
+unavailable. `--portable-bitops` forces both off and conflicts with explicit
+native bitops/queue-scan flags. No kernel patch is needed to build or run the
+portable path. Automatic selection is enabled for user game testing; the
+[performance summary](docs/research/jit-bitops-prototype/PERFORMANCE_SUMMARY_2026-10-02.md)
+separates measured callback savings from promising screens and unconfirmed
+real-game gains. Add `--native-ring` only to experiment with CTZ queue scanning
+on compatible single-LLC hosts; it is still off by default.
+
+The new [GPU/input/IRQ signaling experiment](docs/research/jit-bitops-prototype/GPU_INPUT_IRQ_SIGNALING_2026-10-02.md)
+is separate and defaults off. Startup detects its kernel interface even when
+disabled: `available=false` means the complete interface was not detected.
+On a supporting kernel, `--kernel-signals observe` collects signals with the
+existing placement policy; `--kernel-signals on` enables experimental placement.
+Missing support warns and falls back. Neither changes native-bitops detection.
+Add `--signal-report NEW.csv` to save counters at exit; reporting adds overhead.
+VM correctness checks passed; a hardware/game speedup has not been measured.
+
+The [fastcall kernel experiment](docs/research/jit-bitops-prototype/FASTCALL_KERNEL_REVIEW_2026-10-01.md)
+adds VM-verified kernel patches and an isolated release annotation build. It is
+not enabled by these runtime flags or integrated into the ordinary build.
+The [current assembly review](docs/research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md)
+captures the running kernel's actual native instructions and the release
+comparison after removing repeated wrapper checks. `--inspect-bpf NEW_DIRECTORY`
+loads the configured BPF object and dumps visible instructions without attaching
+the scheduler or IRQ programs. It needs BPF load permissions; JIT visibility
+also depends on kernel pointer policy. It refuses an existing output directory.
+
+`--native-hist` only optimizes diagnostics when
+`--toggle probe=1`; its savings do not apply to normal probe-off operation.
+Normal release builds use thin LTO; the separately named `release-fast`
+profile disables LTO and is not a demonstrated faster scheduler mode.
+On another checkout, run `./scheds/rust/scx_cake/cake build` from its root;
+the short `cake` command is a local symlink in `~/.local/bin`.
+
 The September 28 nightly pool-serving and queue-mark changes are part of that
 default policy, including in release builds. See the [KovaaK's testing
 findings](docs/KOVAAKS_KICK_ABBA_2026-09-28.md) for the measured gains, jitter
@@ -68,6 +118,13 @@ mechanism, not a latency guarantee.
 | `-v`, `--verbose` | Off | Enable verbose libbpf output, startup details, IRQ diagnostics and exit event counts |
 | `--toggle NAME=0\|1` | No overrides | Override a setting from the table below; repeat the option for multiple settings |
 | `--handoff-ns NS` | No override | Override the handoff threshold in nanoseconds for experiments; leave unset for the default policy |
+| `--kernel-signals off\|observe\|on` | Off | Detect optional wake/IRQ interface; observe collects without changing placement, on enables experimental policy; missing support falls back |
+| `--signal-report NEW.csv` | Off | Save signal counters/histograms at exit; requires observe/on and a new output file |
+| `--native-bitops` | Automatic detection without flag | Explicitly require both CTZ/POPCNT symbols and x86 BMI1/POPCNT |
+| `--portable-bitops` | Off | Force portable CTZ/POPCNT for comparison |
+| `--inspect-bpf NEW_DIRECTORY` | Off | Load configured BPF and dump visible instructions, then exit before attaching |
+| `--native-ring` | Off | Research: enumerate marked queues with native CTZ; require compatible single-word, single-LLC topology and verified queue order |
+| `--native-hist` | Off | Research: use native CLZ for diagnostic histogram buckets; useful only with `--toggle probe=1` |
 
 `--version` takes precedence over `--print-topology`. These inspection modes
 do not apply or validate toggle specifications. Use the ordinary scheduler
@@ -210,7 +267,9 @@ exact launch arguments, and relevant scheduler and kernel logs.
 | [src/core_performance.rs](./src/core_performance.rs) | Capacity and preferred-core discovery |
 | [tests/cli.rs](./tests/cli.rs) | CLI regression tests without attachment |
 | [DESIGN.md](./DESIGN.md) | Current policy and known limits |
-| [STATE.md](./STATE.md), [docs/](./docs/README.md) | Historical research and experiment records; may describe older or rejected behavior |
+| [STATE.md](./STATE.md) | Current status and open validation, followed by dated history |
+| [Documentation index](./docs/README.md) | Folder map, references, research, meeting page and archives |
+| [Bench tool index](./bench/README.md) | Offline checks, diagnostic scripts and retired entry points |
 | [docs/PERFORMANCE.md](./docs/PERFORMANCE.md) | Measurement background and historical results |
 
 License: GPL-2.0-only.

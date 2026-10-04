@@ -1,0 +1,12 @@
+{
+  "README.md": "fc7a636e6ad53a818667c16c93993db0f5154d2df1b01643db3e4dbe51fd5932",
+  "bitops.bpf.asm": "51423a3c439d0b9264e37fe5b3ccc6ce31563c907f54c48e49bd56f1b6e489e7",
+  "bitops.bpf.o": "249a7b578fb2d1aa15caf0679286b5b54715d079739b91f826547d8a2da81ee3",
+  "bitops.c": "fab2fcd0d8ebbb170fd94df821c411517e307092cb23d57080aaab91e209a1aa",
+  "bitops.x86.asm": "fc46807734706d3cfdc5767c1da526888830e1c71f1044a91e6c29a27deee71a",
+  "bitops.x86.o": "a2701b73789b1b15de79f040017874ff4de0f55b4628d8ee239f7fbf768b0e72",
+  "counts.json": "d2ac27de89335304c44fea5012eb6c2c33d61226c9a6618b79a83c6c72e69ff1",
+  "installed-jit.asm": "ac6cc935180f5602f7bfea09defee9965c83992eed28fba07c1bc5c0f826ee06",
+  "provenance.json": "3e3a8006a2abeafdc593105cc3085b8b7ae6613eda069c7f8da6242bfe8897ce",
+  "toolchain.txt": "b5d78ae0f19e265984487814ddf83e2fa2e6ce761bb537cb4268eba353da8e74"
+}

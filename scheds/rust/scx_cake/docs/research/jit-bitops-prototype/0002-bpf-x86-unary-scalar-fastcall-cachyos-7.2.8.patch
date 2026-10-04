@@ -1,0 +1,143 @@
+diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
+--- a/arch/x86/net/bpf_jit_comp.c
++++ b/arch/x86/net/bpf_jit_comp.c
+@@ -2634,6 +2634,8 @@
+ 
+ 			/* call */
+ 		case BPF_JMP | BPF_CALL: {
++			bool scalar_fastcall = false;
++
+ 			func = (u8 *) __bpf_call_base + imm32;
+ 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
+ 				LOAD_TAIL_CALL_CNT_PTR(stack_depth);
+@@ -2644,6 +2646,20 @@
+ 			if (src_reg == BPF_PSEUDO_KFUNC_CALL &&
+ 			    emit_scalar_bitop(&prog, func))
+ 				break;
++#ifdef CONFIG_BPF_SYSCALL
++			if (src_reg == BPF_PSEUDO_KFUNC_CALL &&
++			    (func == (const u8 *)bpf_ctz64 ||
++			     func == (const u8 *)bpf_popcnt64 ||
++			     func == (const u8 *)bpf_clz64)) {
++				/* The C fallback must honor unary KF_FASTCALL too. */
++				EMIT1(0x56); /* push rsi (BPF R2) */
++				EMIT1(0x52); /* push rdx (BPF R3) */
++				EMIT1(0x51); /* push rcx (BPF R4) */
++				EMIT2(0x41, 0x50); /* push r8 (BPF R5) */
++				ip += 5;
++				scalar_fastcall = true;
++			}
++#endif
+ 			if (priv_frame_ptr) {
+ 				push_r9(&prog);
+ 				ip += 2;
+@@ -2653,6 +2669,12 @@
+ 				return -EINVAL;
+ 			if (priv_frame_ptr)
+ 				pop_r9(&prog);
++			if (scalar_fastcall) {
++				EMIT2(0x41, 0x58); /* pop r8 */
++				EMIT1(0x59); /* pop rcx */
++				EMIT1(0x5a); /* pop rdx */
++				EMIT1(0x5e); /* pop rsi */
++			}
+ 			break;
+ 		}
+ 
+diff --git a/kernel/bpf/helpers.c b/kernel/bpf/helpers.c
+--- a/kernel/bpf/helpers.c
++++ b/kernel/bpf/helpers.c
+@@ -4997,9 +4997,15 @@
+ BTF_ID_FLAGS(func, bpf_dynptr_from_file)
+ BTF_ID_FLAGS(func, bpf_dynptr_file_discard, KF_RELEASE)
+ BTF_ID_FLAGS(func, bpf_timer_cancel_async)
++#if defined(CONFIG_X86_64) && defined(CONFIG_BPF_JIT)
++BTF_ID_FLAGS(func, bpf_ctz64, KF_FASTCALL)
++BTF_ID_FLAGS(func, bpf_popcnt64, KF_FASTCALL)
++BTF_ID_FLAGS(func, bpf_clz64, KF_FASTCALL)
++#else
+ BTF_ID_FLAGS(func, bpf_ctz64)
+ BTF_ID_FLAGS(func, bpf_popcnt64)
+ BTF_ID_FLAGS(func, bpf_clz64)
++#endif
+ BTF_ID_FLAGS(func, bpf_mulhi64)
+ BTF_KFUNCS_END(common_btf_ids)
+ 
+diff --git a/tools/testing/selftests/bpf/progs/scalar_bitops.c b/tools/testing/selftests/bpf/progs/scalar_bitops.c
+--- a/tools/testing/selftests/bpf/progs/scalar_bitops.c
++++ b/tools/testing/selftests/bpf/progs/scalar_bitops.c
+@@ -3,9 +3,9 @@
+ #include <bpf/bpf_helpers.h>
+ #include "bpf_misc.h"
+ 
+-extern __u64 bpf_ctz64(__u64 x) __ksym;
+-extern __u64 bpf_popcnt64(__u64 x) __ksym;
+-extern __u64 bpf_clz64(__u64 x) __ksym;
++extern __u64 bpf_ctz64(__u64 x) __ksym __attribute__((bpf_fastcall));
++extern __u64 bpf_popcnt64(__u64 x) __ksym __attribute__((bpf_fastcall));
++extern __u64 bpf_clz64(__u64 x) __ksym __attribute__((bpf_fastcall));
+ extern __u64 bpf_mulhi64(__u64 x, __u64 y) __ksym;
+ 
+ static __always_inline __u64 mulhi_ref(__u64 x, __u64 y)
+@@ -62,12 +62,17 @@
+ 	return 0;
+ }
+ 
++/* Mutable map data prevents verifier folding of preservation checks. */
++volatile __u64 fastcall_values[] = { 17, 29, 43, 61 };
++
+ SEC("syscall")
+ __success __retval(0)
+ __naked int scalar_bitops_preserve(void)
+ {
+ 	asm volatile (
+-		"r6 = 17; r7 = 29; r8 = 43; r9 = 61;"
++		"r1 = %[fastcall_values] ll;"
++		"r6 = *(u64 *)(r1 + 0); r7 = *(u64 *)(r1 + 8);"
++		"r8 = *(u64 *)(r1 + 16); r9 = *(u64 *)(r1 + 24);"
+ 		"r1 = 256; call bpf_ctz64;"
+ 		"if r0 != 8 goto fail_%=;"
+ 		"if r6 != 17 goto fail_%=;"
+@@ -94,6 +99,42 @@
+ 		"if r9 != 61 goto fail_%=;"
+ 		"r0 = 0; exit;"
+ 		"fail_%=: r0 = 1; exit;"
++		: : __imm_addr(fastcall_values) : __clobber_all);
++}
++
++#define FASTCALL_TEST(name, function, argument, expected) \
++SEC("syscall") \
++__success __retval(0) \
++__naked int name(void) \
++{ \
++	asm volatile ( \
++		"r1 = %[fastcall_values] ll;" \
++		"r2 = *(u64 *)(r1 + 0); r3 = *(u64 *)(r1 + 8);" \
++		"r4 = *(u64 *)(r1 + 16); r5 = *(u64 *)(r1 + 24);" \
++		"r1 = " #argument ";" \
++		"*(u64 *)(r10 - 8) = r2; *(u64 *)(r10 - 16) = r3;" \
++		"*(u64 *)(r10 - 24) = r4; *(u64 *)(r10 - 32) = r5;" \
++		"call " #function ";" \
++		"r5 = *(u64 *)(r10 - 32); r4 = *(u64 *)(r10 - 24);" \
++		"r3 = *(u64 *)(r10 - 16); r2 = *(u64 *)(r10 - 8);" \
++		"if r0 != " #expected " goto fail_%=;" \
++		"if r2 != 17 goto fail_%=; if r3 != 29 goto fail_%=;" \
++		"if r4 != 43 goto fail_%=; if r5 != 61 goto fail_%=;" \
++		"r0 = 0; exit; fail_%=: r0 = 1; exit;" \
++		: : __imm_addr(fastcall_values) : __clobber_all); \
++}
++
++FASTCALL_TEST(scalar_fastcall_ctz, bpf_ctz64, 256, 8)
++FASTCALL_TEST(scalar_fastcall_popcnt, bpf_popcnt64, -1, 64)
++FASTCALL_TEST(scalar_fastcall_clz, bpf_clz64, 256, 55)
++
++SEC("syscall")
++__failure __msg("R3 !read_ok")
++__naked int scalar_mulhi_is_not_fastcall(void)
++{
++	asm volatile (
++		"r1 = -1; r2 = -1; r3 = 17; call bpf_mulhi64;"
++		"r0 = r3; exit;"
+ 		::: __clobber_all);
+ }
+ 

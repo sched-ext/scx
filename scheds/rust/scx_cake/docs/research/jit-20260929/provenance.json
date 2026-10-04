@@ -1,0 +1,15 @@
+{
+  "kernel": "7.2.8-1-cachyos",
+  "boot_id": "d693683e-1a44-4944-936b-7915c0a314d2",
+  "vmlinux": "/usr/lib/modules/7.2.8-1-cachyos/build/vmlinux",
+  "vmlinux_sha256": "c31c961ce0c4721cf54fd7af4c212ed57dae08a12fece1968d0fb7fef504d731",
+  "live_build_id": "424ea18dbf0262d3f9c8a2205b292c577c338802",
+  "packaged_build_id": "424ea18dbf0262d3f9c8a2205b292c577c338802",
+  "live_btf_sha256": "6708fcf99f8c775f1c6830c2a54c41f7ac6b094b442c010cc51dfec602f32a5d",
+  "packaged_btf_sha256": "6708fcf99f8c775f1c6830c2a54c41f7ac6b094b442c010cc51dfec602f32a5d",
+  "config_sha256": "21d1a226c873fb4c5890fdc9a6a881135e116876ee7e55020fbd8e851b9b2901",
+  "source_reference_commit": "2709dd5ae32f0828f386327c76bba9f39f63a1c6",
+  "source_matches_running_kernel": false,
+  "build_id_matches": true,
+  "btf_matches": true
+}

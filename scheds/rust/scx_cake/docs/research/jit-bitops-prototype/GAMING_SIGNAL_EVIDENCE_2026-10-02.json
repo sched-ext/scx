@@ -1,0 +1,479 @@
+{
+  "schema": 1,
+  "created_utc": "2026-10-02T21:56:19.685060+00:00",
+  "scope": "Read-only source and host capability investigation; no live latency capture or policy implementation",
+  "repo_head": "8fc5ec9b105198286f7c9f7c53e2bf40308c3a4a",
+  "dirty_worktree": true,
+  "artifact_root": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z",
+  "kernel_source_boundary": "Retained CachyOS 7.2.8 candidate; not proof of complete identity with running kernel",
+  "sources": {
+    "C1": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/bpf/cake.bpf.c",
+        "sha256": "9c12e59b99c96071b14f4c5f987932382cc4e8815bd84743d38f03c0cc148f60",
+        "bytes": 122642
+      }
+    ],
+    "C2": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/src/main.rs",
+        "sha256": "e27322e5c3528f4fab22cde90b86e96e0cac785d6c8576385a2646beb49b37bf",
+        "bytes": 96731
+      }
+    ],
+    "K1": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/cputime.c",
+        "sha256": "5c9a5f92d5b359c6051ea93860a2bbb286a6feea84568c2b6351fb826b022aaa",
+        "bytes": 33065
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/sched.h",
+        "sha256": "59faad6dae04953390cc85635a36370b61513f13847326e8406134c825beb245",
+        "bytes": 121391
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+        "sha256": "8de9cba3dffab247241e767f86028e49e2445f54ad5623329484d8708ee8a526",
+        "bytes": 303770
+      }
+    ],
+    "K2": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/irq/handle.c",
+        "sha256": "beeec315712e7971083ce7cb4b1c9038519b2ddafbd43f598e9612946d0a1078",
+        "bytes": 7929
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/softirq.c",
+        "sha256": "47499de6cbf75e470dcfa195d4d5500d3157e2735570b30319d484c0928ec8af",
+        "bytes": 29112
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/arch/x86/include/asm/idtentry.h",
+        "sha256": "0eeb262a12fea1100ef3b81880cb926fb17cbfd0efb339aa052341d0f94d64e6",
+        "bytes": 24357
+      }
+    ],
+    "K3": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/internal.h",
+        "sha256": "005c8251c88503d80c05ee71fb88d74e921044171a20f3af22384fd7f8fa311b",
+        "bytes": 58813
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/ext/ext.c",
+        "sha256": "2de633c51bc1c8b0217358ddd462f784015f9aad0bac8127fc9286ac2ff4b1aa",
+        "bytes": 330626
+      }
+    ],
+    "K4": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/dma-buf/dma-fence.c",
+        "sha256": "dd990e0c96a12c0a5794efb3e07230abcd1d7fb94b71f40ec7d5b94c7c586b0b",
+        "bytes": 40203
+      }
+    ],
+    "K5": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/sched/core.c",
+        "sha256": "8de9cba3dffab247241e767f86028e49e2445f54ad5623329484d8708ee8a526",
+        "bytes": 303770
+      }
+    ],
+    "K6": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/kernel/futex/waitwake.c",
+        "sha256": "81f34cfefa5259b18d4c07dc049ea67ac3a32f7b2194cf1f9a84893cfca80acf",
+        "bytes": 21399
+      }
+    ],
+    "K7": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/misc/ntsync.c",
+        "sha256": "32002e6c0467cdb385cef514f5fa8afff7d2632a35c0c98e2436bff834ca0675",
+        "bytes": 27201
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/Documentation/userspace-api/ntsync.rst",
+        "sha256": "9800abd461ecbc6af8c045941631238e0a86e992d94af85ed27f7f70076ebc9f",
+        "bytes": 14938
+      }
+    ],
+    "K8": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/fs/eventpoll.c",
+        "sha256": "97a193bd04baa7c502de3ac039ac52cd271d9268fe50978f093c286bfefffdfe",
+        "bytes": 84672
+      }
+    ],
+    "K9": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/input.c",
+        "sha256": "b3ecf6d187bfa59ac0d0c534c49b7d92d9c56aff5a8bea0668d337b9d03f27a5",
+        "bytes": 72114
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/input/evdev.c",
+        "sha256": "8405e9aa72effd33bb69213d0bca8335a9586746c88a3c58ac4b57247f497d5f",
+        "bytes": 33581
+      }
+    ],
+    "K10": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/hid/usbhid/hid-core.c",
+        "sha256": "80125a41841e2899b86c05c7548559543f881c3821fe8ec29ef0f5c918342b0e",
+        "bytes": 47358
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/hid/hid-core.c",
+        "sha256": "94034dc9e89e46e32c302a1c72ef6570ff1a4a56a7556e47917d58b4053bedb8",
+        "bytes": 82832
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_dsq_index_20261002T201929Z/linux/drivers/hid/hid-input.c",
+        "sha256": "e0308ec517a36838e3ed8e94fa7e9f7ca5d06536e228cfbfeb34692392c46497",
+        "bytes": 71340
+      }
+    ],
+    "H1": [
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/host.json",
+        "sha256": "cd8a199521181869157e399be23043a724c48e206e868534545f737dafed9ade",
+        "bytes": 136762
+      },
+      {
+        "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/thread-policy.json",
+        "sha256": "ac8636694146dbae0a657768f07b4a9201eebc828e948cac29cf67487a8ca187",
+        "bytes": 675
+      }
+    ],
+    "protocols": [
+      {
+        "path": "/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml",
+        "sha256": "dffac93bcb2bb1d8c385e72b8a8c2c0d4d79a336866322f3ba886dce2b27b1e2",
+        "bytes": 12890
+      },
+      {
+        "path": "/usr/share/wayland-protocols/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml",
+        "sha256": "5ede41a56eced6aa635caa7ab2996066bff9fd211620dbf9f73aafab740bec71",
+        "bytes": 12655
+      },
+      {
+        "path": "/usr/share/wayland-protocols/staging/fifo/fifo-v1.xml",
+        "sha256": "0b6c31dfe6bca19b712745c9de7a4a398558cfa1087b1938e96fd3b10ffc1069",
+        "bytes": 6268
+      },
+      {
+        "path": "/usr/share/wayland-protocols/staging/commit-timing/commit-timing-v1.xml",
+        "sha256": "ff3fcf31d13d44bad756a50fda663a43008bacbbd2bf8cba3a1bf5ffe7f54172",
+        "bytes": 5528
+      },
+      {
+        "path": "/usr/share/wayland-protocols/unstable/input-timestamps/input-timestamps-unstable-v1.xml",
+        "sha256": "92d9911f070407d470458f59ffdee5406ce3b6368270a93e6ecd9f4f71368bb0",
+        "bytes": 7129
+      }
+    ]
+  },
+  "downloads": {
+    "nvidia-files.json": {
+      "url": "https://api.github.com/repos/NVIDIA/open-gpu-kernel-modules/contents/kernel-open/nvidia-drm?ref=615.71.09",
+      "bytes": 47631,
+      "sha256": "460bc239bf101596708780e2bc272a80e5a733f7473a710201be7a8ddf9d572b",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-files.json"
+    },
+    "nvidia-README.md": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/README.md",
+      "bytes": 71208,
+      "sha256": "c2ce63aedef8c6779e59fdc46596eaa4c4b97767dce888d85d99ce2790bfbb77",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-README.md"
+    },
+    "nvidia-drm-fence.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/kernel-open/nvidia-drm/nvidia-drm-fence.c",
+      "bytes": 63213,
+      "sha256": "e8ad3de2e7aacbce943bfacbaa91a3520811cceb024a418631de023ba3da795d",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-fence.c"
+    },
+    "nvidia-drm-crtc.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/kernel-open/nvidia-drm/nvidia-drm-crtc.c",
+      "bytes": 131595,
+      "sha256": "e786f78bd2dd17e219a4320df990706c140b1b3dcc82e73f7b5eb39539b9d6f7",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-drm-crtc.c"
+    },
+    "kwin-renderloop.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/core/renderloop.cpp",
+      "bytes": 11733,
+      "sha256": "ac95f7a27f0c687c58e0fa4c676607bc629eb50d94217f98b5ac9d4a8a136bad",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-renderloop.cpp"
+    },
+    "kwin-outputframe.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/core/outputframe.cpp",
+      "error": "HTTP Error 404: Not Found"
+    },
+    "kwin-input.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/input.cpp",
+      "bytes": 123969,
+      "sha256": "812618da0d6c9f6a032dcce8c094162b57a721a80617537a0cc8b8cd5f755f69",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-input.cpp"
+    },
+    "kwin-waylandcompositor.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/compositor_wayland.cpp",
+      "error": "HTTP Error 404: Not Found"
+    },
+    "kwin-tree.json": {
+      "url": "https://api.github.com/repos/KDE/kwin/git/trees/v6.7.5?recursive=1",
+      "bytes": 868866,
+      "sha256": "36240331649ba18c4a80595695a3b1bd2920bfd18a9e99b71f6c35aacfac4f1c",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-tree.json"
+    },
+    "kwin-src_compositor.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/compositor.cpp",
+      "bytes": 42855,
+      "sha256": "e9101fd4eab68e1d7cb1feb896219c077a0e3852311cd3e6e6b3c750875ea094",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_compositor.cpp"
+    },
+    "kwin-src_core_renderloop_p.h": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/core/renderloop_p.h",
+      "bytes": 1703,
+      "sha256": "b0c5163e24e80064a37c2ac91cb7b2c7ccc514ec2ff331d5f93e865496073575",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_core_renderloop_p.h"
+    },
+    "kwin-src_core_output.h": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/core/output.h",
+      "bytes": 12533,
+      "sha256": "c540dce4e4d9e000742f68f3678a25532015e59d984de151b56a862ce9acd33e",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_core_output.h"
+    },
+    "kwin-src_core_output.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/core/output.cpp",
+      "bytes": 16662,
+      "sha256": "e959c7d872ac6f0ba898b451bb7b1daa8bd1902f07d4eac0054cc50063bf19c7",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_core_output.cpp"
+    },
+    "kwin-src_backends_libinput_connection.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/backends/libinput/connection.cpp",
+      "bytes": 32358,
+      "sha256": "d791ea424db3e4a3fef9f0ee38f697ec1710aa583b62a435a4f668d827f1318d",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_connection.cpp"
+    },
+    "kwin-src_backends_libinput_events.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/backends/libinput/events.cpp",
+      "bytes": 11755,
+      "sha256": "e1dcce8fe27e00d1b9d8a3b8108fa25cb986337a16b1ce618b0f5fa7fcf71dee",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_events.cpp"
+    },
+    "kwin-src_wayland_linux_drm_syncobj_v1.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/wayland/linux_drm_syncobj_v1.cpp",
+      "bytes": 6944,
+      "sha256": "d0d95e6b6622297bcd5bae9ac2651aa487b3db949e2a10789fcee8adf18353bd",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_wayland_linux_drm_syncobj_v1.cpp"
+    },
+    "kwin-src_wayland_surface.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/wayland/surface.cpp",
+      "bytes": 44563,
+      "sha256": "d66a5b40eb6bd54b7b7074224a041731ea73f1691dbea66f9a208e789c54bdb3",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_wayland_surface.cpp"
+    },
+    "kwin-src_pointer_input.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/pointer_input.cpp",
+      "bytes": 43928,
+      "sha256": "5760ed44fe45eb4aebb5e59fa07e1ecc11a953e0547e872d92864e35e0140eb1",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_pointer_input.cpp"
+    },
+    "kwin-src_keyboard_input.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/keyboard_input.cpp",
+      "bytes": 10124,
+      "sha256": "904b9df46245916ac98b5d0ee5f1179b66f9a7cf103eda02d54fcc9a65d892c0",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_keyboard_input.cpp"
+    },
+    "kwin-src_backends_libinput_backend.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/backends/libinput/backend.cpp",
+      "error": "HTTP Error 404: Not Found"
+    },
+    "kwin-src_utils_realtime.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/utils/realtime.cpp",
+      "bytes": 675,
+      "sha256": "93666eb7f41482da748bfe2d77271d70efeee6712f11c7e325c6af76f6feddf3",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_utils_realtime.cpp"
+    },
+    "kwin-src_backends_libinput_libinputbackend.cpp": {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/backends/libinput/libinputbackend.cpp",
+      "bytes": 1567,
+      "sha256": "c05479cd19969a14f0551bf3d820ae4410894404dfdbe95ce0af915fde8c8586",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/kwin-src_backends_libinput_libinputbackend.cpp"
+    },
+    "nvidia-tree.json": {
+      "url": "https://api.github.com/repos/NVIDIA/open-gpu-kernel-modules/git/trees/615.71.09?recursive=1",
+      "bytes": 1238960,
+      "sha256": "4c9109b3e5a026ef7dfe57c3b659641f129407a56399109e40333bee020cafea",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-tree.json"
+    },
+    "nvidia-src_nvidia-modeset_kapi_src_nvkms-kapi-sync.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c",
+      "bytes": 17757,
+      "sha256": "09fa351c8202e78e790d8d903ac48caaa3360d20210a5151f9ddf97cbdb1b499",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia-modeset_kapi_src_nvkms-kapi-sync.c"
+    },
+    "nvidia-src_nvidia-modeset_kapi_src_nvkms-kapi.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/src/nvidia-modeset/kapi/src/nvkms-kapi.c",
+      "bytes": 139566,
+      "sha256": "35752cff2c5da390893166ddf9a501f3b035ec350ebdaf7614801f52d6e9afcb",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia-modeset_kapi_src_nvkms-kapi.c"
+    },
+    "nvidia-src_nvidia-modeset_src_nvkms-event.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/src/nvidia-modeset/src/nvkms-event.c",
+      "bytes": 14130,
+      "sha256": "c3cae6c2c677d038a2e15276b7a5de01d4bc0e9328b46124fbd156f938e17507",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia-modeset_src_nvkms-event.c"
+    },
+    "nvidia-src_nvidia-modeset_kapi_interface_nvkms-kapi.h": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/src/nvidia-modeset/kapi/interface/nvkms-kapi.h",
+      "bytes": 55106,
+      "sha256": "959b299b5f57f89494bf6f2ddd5e84da0cdb40d277f3321aed2876b77d84d272",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia-modeset_kapi_interface_nvkms-kapi.h"
+    },
+    "nvidia-src_nvidia_src_kernel_rmapi_event_notification.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/src/nvidia/src/kernel/rmapi/event_notification.c",
+      "bytes": 39497,
+      "sha256": "14e732f7131a31ee95685e882d995a795bedf582fa7fddc0ccc5bd7a55894233",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia_src_kernel_rmapi_event_notification.c"
+    },
+    "nvidia-src_nvidia_src_kernel_rmapi_event_api.c": {
+      "url": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/src/nvidia/src/kernel/rmapi/event_api.c",
+      "bytes": 26056,
+      "sha256": "64cd2778d83dd6a1e8e8318310409d6f1f5a56f12624d437d5ac8e483d895204",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_research_20261002T213213Z/sources/nvidia-src_nvidia_src_kernel_rmapi_event_api.c"
+    }
+  },
+  "host": {
+    "available_events": [
+      "nvidia:nvidia_dev_xid",
+      "irq_vectors:local_timer_entry",
+      "irq_vectors:local_timer_exit",
+      "irq_vectors:spurious_apic_entry",
+      "irq_vectors:spurious_apic_exit",
+      "irq_vectors:error_apic_entry",
+      "irq_vectors:error_apic_exit",
+      "irq_vectors:x86_platform_ipi_entry",
+      "irq_vectors:x86_platform_ipi_exit",
+      "irq_vectors:irq_work_entry",
+      "irq_vectors:irq_work_exit",
+      "irq_vectors:reschedule_entry",
+      "irq_vectors:reschedule_exit",
+      "irq_vectors:call_function_entry",
+      "irq_vectors:call_function_exit",
+      "irq_vectors:call_function_single_entry",
+      "irq_vectors:call_function_single_exit",
+      "irq_vectors:threshold_apic_entry",
+      "irq_vectors:threshold_apic_exit",
+      "irq_vectors:deferred_error_apic_entry",
+      "irq_vectors:deferred_error_apic_exit",
+      "irq_vectors:thermal_apic_entry",
+      "irq_vectors:thermal_apic_exit",
+      "irq_vectors:vector_config",
+      "irq_vectors:vector_update",
+      "irq_vectors:vector_clear",
+      "irq_vectors:vector_reserve_managed",
+      "irq_vectors:vector_reserve",
+      "irq_vectors:vector_alloc",
+      "irq_vectors:vector_alloc_managed",
+      "irq_vectors:vector_activate",
+      "irq_vectors:vector_deactivate",
+      "irq_vectors:vector_teardown",
+      "irq_vectors:vector_setup",
+      "irq_vectors:vector_free_moved",
+      "irq:irq_handler_entry",
+      "irq:irq_handler_exit",
+      "irq:softirq_entry",
+      "irq:softirq_exit",
+      "irq:softirq_raise",
+      "irq:tasklet_entry",
+      "irq:tasklet_exit",
+      "sched:sched_waking",
+      "sched:sched_wakeup",
+      "sched:sched_wakeup_new",
+      "sched:sched_switch",
+      "sched:sched_wake_idle_without_ipi",
+      "drm:drm_vblank_event",
+      "drm:drm_vblank_event_queued",
+      "drm:drm_vblank_event_delivered",
+      "dma_fence:dma_fence_emit",
+      "dma_fence:dma_fence_init",
+      "dma_fence:dma_fence_destroy",
+      "dma_fence:dma_fence_enable_signal",
+      "dma_fence:dma_fence_signaled",
+      "dma_fence:dma_fence_wait_start",
+      "dma_fence:dma_fence_wait_end"
+    ],
+    "module_btf": [
+      "snd_usb_audio",
+      "nvidia_uvm",
+      "snd_usbmidi_lib",
+      "mac_hid",
+      "prom21_xhci",
+      "drm_display_helper",
+      "nvidia",
+      "drm_ttm_helper",
+      "nvidia_drm",
+      "hid_logitech_dj",
+      "hid_logitech_hidpp",
+      "nvidia_modeset"
+    ],
+    "gpu": [
+      "Model: \t\t NVIDIA GeForce RTX 4090",
+      "IRQ:   \t\t 97",
+      "GPU Excluded:\t No"
+    ],
+    "nvidia_version": "615.71.09",
+    "source_dirs": [
+      "/usr/src/debug",
+      "/usr/src/v4l2loopback-0.15.4",
+      "/usr/src/linux-cachyos-lts",
+      "/usr/src/linux-cachyos-rc",
+      "/usr/src/linux-cachyos",
+      "/usr/src/linux-cachyos-custom"
+    ],
+    "kernel": "7.2.8-1-cachyos-custom",
+    "boot_id": "e4d51516-9170-4a66-b0bd-1e47327fab05",
+    "sched_ext": "disabled",
+    "compositor": "kwin 6.7.5-1.1\nwayland-protocols 1.49-1\nlibinput 1.32.0-1.1\nnvidia-utils 615.71.09-1\n",
+    "nvidia_license": "Dual MIT/GPL",
+    "clock_tick": "100",
+    "config": [
+      "CONFIG_IRQ_WORK=y",
+      "CONFIG_BPF_JIT=y",
+      "CONFIG_SCHED_CLASS_EXT=y",
+      "CONFIG_IRQ_TIME_ACCOUNTING=y",
+      "CONFIG_DEBUG_INFO_BTF=y",
+      "CONFIG_SCHEDSTATS=y"
+    ],
+    "release_sha256": "059f78b352ef5c796754691ecd38dbbf0c896b10c2d0a85a383f1609fed94fef"
+  },
+  "thread_policies": {
+    "1869": "    PID     TID CLS RTPRIO  NI PSR COMMAND\n   1869    1869  RR      1   -  15 kwin_wayland\n   1869    1877  TS      -   0   2 QDBusConnection\n   1869    1880  TS      -   0   0 kwin_wayland\n   1869    1881  TS      -   0  12 [vkcf] Analysis\n   1869    1883  TS      -   0  14 [vkrt] Analysis\n   1869    1884  TS      -   0   3 [vkps] Update\n   1869    1891  TS      -   0   1 kwin_wayland\n   1869    1892  RR      1   -   7 DP-2\n   1869    1893  RR      1   -  14 DP-3\n   1869    1894  RR      1   -  13 libinput-connec\n   1869    1906  TS      -   0   4 QQmlThread\n   1869   91270  TS      -   0   5 threaded-ml\n",
+    "ntsync_device_exists": true
+  },
+  "final_unchanged_state_check": {
+    "kernel": "7.2.8-1-cachyos-custom",
+    "sched_ext": "disabled",
+    "boot_id": "e4d51516-9170-4a66-b0bd-1e47327fab05",
+    "release_sha256": "059f78b352ef5c796754691ecd38dbbf0c896b10c2d0a85a383f1609fed94fef"
+  },
+  "report": {
+    "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/GAMING_SIGNAL_PIPELINE_2026-10-02.md",
+    "sha256": "0614dcf36d00c98fe9e321d8c7f4b78bc0c83cc75f59757d5258d98dabdd0d08",
+    "bytes": 50551
+  },
+  "evidence_level": {
+    "source_review": true,
+    "host_capability_inventory": true,
+    "probes_attached": false,
+    "raw_input_recorded": false,
+    "new_signal_patch_implemented": false,
+    "new_performance_measurement": false,
+    "kernel_installed": false,
+    "scheduler_activated": false
+  },
+  "report_link_update_note": "Added link to separately evidenced freshness/clock follow-up; original measurements unchanged."
+}
