@@ -1,0 +1,17 @@
+{
+  "target": "CachyOS 7.2.8-1",
+  "source_archive": "/home/ritz/.cache/cachyos-km/pkgbuilds/linux-cachyos/cachyos-7.2.8-1.tar.gz",
+  "git_apply_check": "passed",
+  "gnu_patch_fuzz_0_dry_run": "passed",
+  "LLVM_object_build": "passed: arch/x86/net/bpf_jit_comp.o and kernel/bpf/helpers.o",
+  "full_kernel_build": false,
+  "runtime_tested": false,
+  "hashes": {
+    "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-bpf-x86-inline-scalar-bitops-cachyos-7.2.8.patch": "b0a71e0e24d9b1392340b4c88fbc5f09303473c39273d2314d99224d80d1b2f6",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/cachyos-7.2.8-port/apply-check.txt": "e713c56815f7e255db34d91dd92a532d6bacfbe997dac489ed55f395fe22b352",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/cachyos-7.2.8-port/build.log": "ce39762febb34ee521b7d5e679a8264ecfe57988170f7ebd70324f9fc918f28e",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/cachyos-7.2.8-port/build/.config": "ec5f88f95988c3ff6d978dca99fb36d96bec3085e223f60f0c00bf32ef1c40a5",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/cachyos-7.2.8-port/build/arch/x86/net/bpf_jit_comp.o": "372938d9d5d9fa7babfdcfadb981097b6be527b6b1440aa0e29e5f6f0c815e4a",
+    "/home/ritz/Documents/Repo/scx/target/cake_jit_bitops_20260929/cachyos-7.2.8-port/build/kernel/bpf/helpers.o": "c31fb248e6d23398617394e0ca766f49ecf2bb74c38c65f797009b49e8aec11a"
+  }
+}

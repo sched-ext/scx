@@ -1,0 +1,33 @@
+{
+  "samples": 16,
+  "duration_raw_ns": 3750923362,
+  "timestamp_period_ns": 1,
+  "queue_timestamp_valid_bits": 64,
+  "adjtimex": {
+    "state": 0,
+    "status": 24577,
+    "freq_scaled_ppm": -654614,
+    "maxerror_us": 705000,
+    "esterror_us": 0
+  },
+  "adjtimex_freq_ppm": -9.988616943359375,
+  "coarse_resolution_ns": 1000000,
+  "query_wall_ns": {
+    "min": 3423,
+    "median": 4057.5,
+    "max": 4202
+  },
+  "reported_max_deviation_ns": {
+    "min": 1376,
+    "median": 1408.0,
+    "max": 1472
+  },
+  "mono_raw_change_ns": -36960,
+  "mono_relative_to_raw_ppm": -9.853573755847906,
+  "gpu_mono_change_ns": -30594,
+  "gpu_relative_to_mono_ppm": -8.156472023169524,
+  "gpu_raw_change_ns": -67554,
+  "gpu_relative_to_raw_ppm": -18.00996540861876,
+  "endpoint_reported_uncertainty_ppm": 0.7592797093250768,
+  "interpretation": "Short observed clock-mapping change; not a stable oscillator drift bound, source-to-consumer latency or scheduler speedup. pMaxDeviation is implementation-reported, not an independently measured confidence interval."
+}

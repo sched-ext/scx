@@ -1,0 +1,13 @@
+WARNING: added, moved or deleted file(s), does MAINTAINERS need updating?
+#90: 
+new file mode 100644
+
+total: 0 errors, 1 warnings, 148 lines checked
+
+NOTE: For some of the reported defects, checkpatch may be able to
+      mechanically convert to the typical style using --fix or --fix-inplace.
+
+/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-bpf-x86-inline-scalar-bitops.patch has style problems, please review.
+
+NOTE: If any of the errors are false positives, please report
+      them to the maintainer, see CHECKPATCH in MAINTAINERS.

@@ -8,6 +8,7 @@
 mod bpf_skel;
 mod build_identity;
 mod core_performance;
+mod inspect_bpf;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
@@ -57,6 +58,34 @@ fn configure_acquire_census(skel: &mut OpenBpfSkel<'_>, probe_on: bool) {
 #[derive(Debug, PartialEq, Eq, Parser)]
 #[command(after_help = toggle_help())]
 struct Opts {
+    /// Experimental device wake/IRQ signals: off, observe, or on. Missing support falls back.
+    #[clap(long, value_enum, default_value_t = KernelSignals::Off)]
+    kernel_signals: KernelSignals,
+
+    /// Save device wake-to-running histograms and IRQ sample counters as CSV at exit.
+    #[clap(long, value_name = "NEW_CSV")]
+    signal_report: Option<std::path::PathBuf>,
+
+    /// Require native CTZ/POPCNT. By default, detect support at startup and fall back.
+    #[clap(long)]
+    native_bitops: bool,
+
+    /// Use portable CTZ/POPCNT even when the CPU and kernel support native operations.
+    #[clap(long, conflicts_with_all = ["native_bitops", "native_ring"])]
+    portable_bitops: bool,
+
+    /// Load and export BPF instructions to a new directory, then exit without attaching.
+    #[clap(long, value_name = "NEW_DIRECTORY")]
+    inspect_bpf: Option<std::path::PathBuf>,
+
+    /// Research: enumerate marked queues with native CTZ on compatible one-LLC hosts.
+    #[clap(long)]
+    native_ring: bool,
+
+    /// Research: use native CLZ for probe histogram buckets.
+    #[clap(long)]
+    native_hist: bool,
+
     /// Print startup core topology and platform performance preferences without attaching.
     #[clap(long)]
     print_topology: bool,
@@ -88,12 +117,160 @@ struct Opts {
 /// --help prints this table.
 const TOGGLES: [(&str, &str, u8); 1] = [("probe", "diagnostics", 0)];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+enum KernelSignals {
+    #[default]
+    Off,
+    Observe,
+    On,
+}
+
+fn signal_mode(requested: KernelSignals, supported: bool) -> (bool, bool) {
+    (
+        supported && requested != KernelSignals::Off,
+        supported && requested == KernelSignals::On,
+    )
+}
+
+fn signal_counter_names() -> Vec<String> {
+    let mut names: Vec<String> = [
+        "select_input",
+        "select_fence",
+        "select_unknown",
+        "running_input",
+        "running_fence",
+        "running_unknown",
+        "expired_select",
+        "clock_error",
+        "irq_samples",
+        "irq_unknown",
+        "irq_hot_samples",
+        "input_wake_ns_sum",
+        "fence_wake_ns_sum",
+        "input_wake_ns_max",
+        "fence_wake_ns_max",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    for cause in ["input", "fence"] {
+        for bucket in 0..32 {
+            names.push(format!("{cause}_wake_ns_log2_{bucket}"));
+        }
+    }
+    names
+}
+
+fn aggregate_signal_counters(per_cpu: &[Vec<u8>]) -> Result<Vec<u64>> {
+    let mut result = vec![0u64; signal_counter_names().len()];
+    for values in per_cpu {
+        anyhow::ensure!(
+            values.len() == result.len() * 8,
+            "invalid signal counter layout"
+        );
+        for (i, bytes) in values.chunks_exact(8).enumerate() {
+            let value = u64::from_ne_bytes(bytes.try_into()?);
+            if i == 13 || i == 14 {
+                result[i] = result[i].max(value);
+            } else {
+                result[i] = result[i].saturating_add(value);
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn modes_preserve_fallback_and_observation_does_not_enable_policy() {
+        for mode in [
+            KernelSignals::Off,
+            KernelSignals::Observe,
+            KernelSignals::On,
+        ] {
+            assert_eq!(signal_mode(mode, false), (false, false));
+        }
+        assert_eq!(signal_mode(KernelSignals::Off, true), (false, false));
+        assert_eq!(signal_mode(KernelSignals::Observe, true), (true, false));
+        assert_eq!(signal_mode(KernelSignals::On, true), (true, true));
+        assert!(parse_opts_lenient(["cake", "--kernel-signals", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn counters_sum_counts_but_merge_latency_maxima_by_maximum() {
+        let mut a = vec![1u64; 79];
+        let mut b = vec![2u64; 79];
+        a[13] = 900;
+        b[13] = 200;
+        a[14] = 100;
+        b[14] = 800;
+        let encode = |values: Vec<u64>| values.into_iter().flat_map(u64::to_ne_bytes).collect();
+        let got = aggregate_signal_counters(&[encode(a), encode(b)]).unwrap();
+        assert_eq!(got[0], 3);
+        assert_eq!((got[13], got[14]), (900, 800));
+        assert_eq!(got[78], 3);
+        assert!(aggregate_signal_counters(&[vec![0; 8]]).is_err());
+    }
+}
+
 fn toggle_help() -> String {
     let mut s = String::from("Toggles (--toggle NAME=0|1, repeatable):\n");
     for (name, what, dfl) in TOGGLES {
         s.push_str(&format!("  {name:<9} {what:<20} default {dfl}\n"));
     }
     s
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NativeBitops {
+    ctz: bool,
+    popcnt: bool,
+}
+
+impl NativeBitops {
+    fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let kernel_supports = |name| match compat::ksym_exists(name) {
+                Ok(found) => found,
+                Err(err) => {
+                    warn!("Cannot detect {name}; using portable operation: {err:#}");
+                    false
+                }
+            };
+            Self {
+                ctz: std::is_x86_feature_detected!("bmi1") && kernel_supports("bpf_ctz64"),
+                popcnt: std::is_x86_feature_detected!("popcnt") && kernel_supports("bpf_popcnt64"),
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        Self::default()
+    }
+
+    fn select(self, opts: &Opts) -> Result<Self> {
+        if opts.portable_bitops {
+            return Ok(Self::default());
+        }
+        let requested = Self {
+            ctz: opts.native_bitops || opts.native_ring,
+            popcnt: opts.native_bitops,
+        };
+        if !requested.ctz && !requested.popcnt {
+            return Ok(self);
+        }
+        anyhow::ensure!(
+            !requested.ctz || self.ctz,
+            "native CTZ requires x86_64 BMI1 and bpf_ctz64 in the running kernel"
+        );
+        anyhow::ensure!(
+            !requested.popcnt || self.popcnt,
+            "native POPCNT requires x86_64 POPCNT and bpf_popcnt64 in the running kernel"
+        );
+        Ok(requested)
+    }
 }
 
 /// Retain complete pairs only, ordered for entry-first teardown.
@@ -121,11 +298,43 @@ struct Scheduler<'a> {
     /// Multi-LLC hosts: the die each V-cache mode prefers, and the mode last seen.
     pref_die: Option<PreferredDie>,
     x3d_mode: Option<String>,
+    signal_report: Option<std::fs::File>,
+    signals_enabled: bool,
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Option<Self>> {
         try_set_rlimit_infinity();
+
+        anyhow::ensure!(
+            opts.signal_report.is_none() || opts.kernel_signals != KernelSignals::Off,
+            "--signal-report requires --kernel-signals observe or on"
+        );
+        let signal_report = opts
+            .signal_report
+            .as_ref()
+            .map(|path| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .with_context(|| format!("create signal report {}", path.display()))
+            })
+            .transpose()?;
+        let signal_flag = compat::read_enum("scx_ops_flags", "SCX_OPS_WAKE_SIGNAL").unwrap_or(0);
+        let signal_support = signal_flag != 0
+            && compat::ksym_exists("scx_bpf_task_wake_signal_v1").unwrap_or(false)
+            && compat::ksym_exists("scx_bpf_cpu_irq_ns_v1").unwrap_or(false);
+        let (signals_enabled, signals_policy) = signal_mode(opts.kernel_signals, signal_support);
+        let signals_observe = signals_enabled
+            && (opts.kernel_signals == KernelSignals::Observe || opts.signal_report.is_some());
+        info!(
+            "Kernel signals requested={:?} available={signal_support} enabled={signals_enabled} policy={signals_policy} counters={signals_observe}",
+            opts.kernel_signals
+        );
+        if opts.kernel_signals != KernelSignals::Off && !signal_support {
+            warn!("Kernel signal v1 support absent; using existing Cake policy");
+        }
 
         // The startup banner is cake's only telemetry, one-shot: version, machine
         // shape, compiled constants, and the fast paths the running kernel provides.
@@ -136,6 +345,28 @@ impl<'a> Scheduler<'a> {
         let slice_us = bpf_intf::consts_SLICE_NS as u64 / bpf_intf::consts_NSEC_PER_USEC as u64;
         let queued_wakeup = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP != 0;
         let dsq_peek = compat::ksym_exists("scx_bpf_dsq_peek").unwrap_or(false);
+
+        let NativeBitops {
+            ctz: native_ctz,
+            popcnt: native_popcnt,
+        } = NativeBitops::detect().select(opts)?;
+        if opts.native_hist {
+            #[cfg(not(target_arch = "x86_64"))]
+            anyhow::bail!("--native-hist currently requires x86_64");
+            #[cfg(target_arch = "x86_64")]
+            anyhow::ensure!(
+                std::is_x86_feature_detected!("lzcnt"),
+                "--native-hist requires LZCNT"
+            );
+            anyhow::ensure!(
+                compat::ksym_exists("bpf_clz64")?,
+                "--native-hist requires bpf_clz64"
+            );
+        }
+        info!("Native hist {}", opts.native_hist);
+        info!("Native bitops {}", native_ctz && native_popcnt);
+        info!("Native CTZ {native_ctz}");
+        info!("Native POPCNT {native_popcnt}");
 
         info!(
             "{} {}",
@@ -192,6 +423,15 @@ impl<'a> Scheduler<'a> {
             .rodata_data
             .as_mut()
             .context("BPF rodata unavailable for CPU topology")?;
+
+        rodata.cake_native_ctz = native_ctz;
+        rodata.cake_native_popcnt = native_popcnt;
+        rodata.cake_native_clz = opts.native_hist;
+        rodata.cake_native_ring = opts.native_ring;
+        rodata.cake_native_hist = opts.native_hist;
+        rodata.cake_signals_enabled = signals_enabled;
+        rodata.cake_signals_policy = signals_policy;
+        rodata.cake_signals_observe = signals_observe;
 
         // The CPU id span the steal ring and neighbour probe scan: rodata, so the
         // verifier folds it. It must cover the kernel's nr_cpu_ids, which counts
@@ -552,13 +792,61 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        if opts.native_ring {
+            let ro = skel
+                .maps
+                .rodata_data
+                .as_ref()
+                .context("BPF rodata unavailable")?;
+            anyhow::ensure!(
+                ro.cake_one_word != 0 && ro.nr_llcs == 1 && ro.steal_order_live != 0,
+                "--native-ring requires one word, one LLC and a verified steal order"
+            );
+            let span = bpf_intf::consts_STEAL_SPAN as usize;
+            for src in topo.all_cpus.keys().copied() {
+                let sibling = ro.cpu_sibling[src];
+                let mut expected: Vec<_> = topo
+                    .all_cpus
+                    .keys()
+                    .copied()
+                    .filter(|dst| *dst != src)
+                    .collect();
+                expected.sort_by_key(|dst| {
+                    (
+                        i32::try_from(*dst).ok() != Some(sibling),
+                        (dst + 64 - src) & 63,
+                    )
+                });
+                anyhow::ensure!(
+                    expected
+                        .iter()
+                        .enumerate()
+                        .all(|(i, dst)| ro.cpu_steal_order[src * span + i] as usize == *dst),
+                    "--native-ring cannot preserve the steal order for CPU {src}"
+                );
+            }
+        }
+        info!("Native ring {}", opts.native_ring);
+
         configure_acquire_census(&mut skel, probe_on);
+        if signals_enabled {
+            skel.struct_ops.cake_ops_mut().flags |= signal_flag;
+        }
         if idle_exit_max_ns == 0 {
             skel.progs.cake_cpu_idle.set_autoload(false);
         }
 
         // Load and attach.
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
+
+        if let Some(path) = &opts.inspect_bpf {
+            inspect_bpf::dump(libbpf_rs::skel::Skel::object(&skel), path)?;
+            info!(
+                "BPF inspection saved to {}; nothing attached",
+                path.display()
+            );
+            return Ok(None);
+        }
 
         // Handler-edge tracepoints feed the in-handler depth. The exit hook of each
         // pair attaches FIRST (an entry counted before its exit hook exists leaves
@@ -634,7 +922,7 @@ impl<'a> Scheduler<'a> {
             warn!("post-attach capability drop failed: {err}");
         }
 
-        Ok(Self {
+        Ok(Some(Self {
             skel,
             struct_ops,
             _irq_links: irq_links,
@@ -643,7 +931,9 @@ impl<'a> Scheduler<'a> {
             sinks: SinkMonitor::new(*NR_CPU_IDS),
             pref_die,
             x3d_mode,
-        })
+            signal_report,
+            signals_enabled,
+        }))
     }
 
     fn exited(&mut self) -> bool {
@@ -994,6 +1284,26 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
+        if let Some(mut report) = self.signal_report.take() {
+            use std::io::Write;
+            let values = self
+                .skel
+                .maps
+                .cake_signal_stats
+                .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)?
+                .context("signal counter map missing")?;
+            let counters = aggregate_signal_counters(&values)?;
+            writeln!(report, "# enabled={}", self.signals_enabled)?;
+            writeln!(
+                report,
+                "# clock=CLOCK_MONOTONIC; origin=accepted_blocked_wake; end=ops.running"
+            )?;
+            writeln!(report, "metric,value")?;
+            for (name, value) in signal_counter_names().iter().zip(counters) {
+                writeln!(report, "{name},{value}")?;
+            }
+            report.flush()?;
+        }
         info!("Stopped");
         uei_report!(&self.skel, uei)
     }
@@ -1680,7 +1990,9 @@ fn main() -> Result<()> {
     .context("Error setting Ctrl-C handler")?;
 
     let mut open_object = MaybeUninit::uninit();
-    let mut sched = Scheduler::init(&opts, &mut open_object)?;
+    let Some(mut sched) = Scheduler::init(&opts, &mut open_object)? else {
+        return Ok(());
+    };
 
     if sched.run(shutdown.clone())?.should_restart() {
         info!("Restart requested by the kernel — re-executing");
@@ -1772,6 +2084,90 @@ impl LlcLayout {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bitops_and_inspection_flags_are_recognized() {
+        let (defaults, dropped) = super::parse_opts_lenient(["scx_cake"]).unwrap();
+        assert!(dropped.is_empty());
+        assert!(!defaults.native_bitops && defaults.inspect_bpf.is_none());
+        let (opts, dropped) = super::parse_opts_lenient([
+            "scx_cake",
+            "--native-bitops",
+            "--inspect-bpf",
+            "inspection-output",
+        ])
+        .unwrap();
+        assert!(dropped.is_empty());
+        assert!(opts.native_bitops);
+        assert_eq!(
+            opts.inspect_bpf.unwrap(),
+            std::path::PathBuf::from("inspection-output")
+        );
+    }
+
+    #[test]
+    fn automatic_bitops_follow_available_cpu_and_kernel_support() {
+        let (opts, _) = super::parse_opts_lenient(["scx_cake"]).unwrap();
+        assert!(!opts.native_ring && !opts.native_hist);
+        for ctz in [false, true] {
+            for popcnt in [false, true] {
+                let available = super::NativeBitops { ctz, popcnt };
+                assert_eq!(available.select(&opts).unwrap(), available);
+            }
+        }
+    }
+
+    #[test]
+    fn portable_override_disables_supported_bitops_and_rejects_native_flags() {
+        let (opts, dropped) = super::parse_opts_lenient(["scx_cake", "--portable-bitops"]).unwrap();
+        assert!(dropped.is_empty());
+        let available = super::NativeBitops {
+            ctz: true,
+            popcnt: true,
+        };
+        assert_eq!(
+            available.select(&opts).unwrap(),
+            super::NativeBitops::default()
+        );
+        for flag in ["--native-bitops", "--native-ring"] {
+            let err =
+                super::parse_opts_lenient(["scx_cake", "--portable-bitops", flag]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn explicit_bitops_preserve_ablation_and_fail_when_unavailable() {
+        for (flag, requested) in [
+            (
+                "--native-bitops",
+                super::NativeBitops {
+                    ctz: true,
+                    popcnt: true,
+                },
+            ),
+            (
+                "--native-ring",
+                super::NativeBitops {
+                    ctz: true,
+                    popcnt: false,
+                },
+            ),
+        ] {
+            let (opts, _) = super::parse_opts_lenient(["scx_cake", flag]).unwrap();
+            for ctz in [false, true] {
+                for popcnt in [false, true] {
+                    let available = super::NativeBitops { ctz, popcnt };
+                    let result = available.select(&opts);
+                    if (!requested.ctz || ctz) && (!requested.popcnt || popcnt) {
+                        assert_eq!(result.unwrap(), requested);
+                    } else {
+                        assert!(result.is_err(), "{flag}: {available:?}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn legacy_profiles_use_default_options() {
         let (defaults, _) = super::parse_opts_lenient(["scx_cake"]).unwrap();

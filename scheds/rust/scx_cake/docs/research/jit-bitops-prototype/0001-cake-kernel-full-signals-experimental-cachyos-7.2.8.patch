@@ -1,0 +1,1174 @@
+diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
+--- a/arch/x86/net/bpf_jit_comp.c
++++ b/arch/x86/net/bpf_jit_comp.c
+@@ -1628,6 +1628,40 @@
+ 	*pprog = prog;
+ }
+ 
++static bool emit_scalar_bitop(u8 **pprog, const u8 *func)
++{
++#ifdef CONFIG_BPF_SYSCALL
++	u8 *prog = *pprog;
++	u8 opcode;
++
++	if (func == (const u8 *)bpf_mulhi64) {
++		/* r0 = mulhi(r1, r2), clobbering only call-scratch RAX/RDX. */
++		EMIT3(0x48, 0x89, 0xf8); /* mov RAX, RDI */
++		EMIT3(0x48, 0xf7, 0xe6); /* mul RSI */
++		EMIT3(0x48, 0x89, 0xd0); /* mov RAX, RDX */
++		*pprog = prog;
++		return true;
++	}
++
++	if (func == (const u8 *)bpf_ctz64 && boot_cpu_has(X86_FEATURE_BMI1))
++		opcode = 0xbc;
++	else if (func == (const u8 *)bpf_popcnt64 && boot_cpu_has(X86_FEATURE_POPCNT))
++		opcode = 0xb8;
++	else if (func == (const u8 *)bpf_clz64 && boot_cpu_has(X86_FEATURE_ABM))
++		opcode = 0xbd;
++	else
++		return false;
++
++	/* r0 = bitop(r1): RAX = bitop(RDI), normal BPF call ABI. */
++	EMIT4(0xf3, 0x48, 0x0f, opcode);
++	EMIT1(0xc7);
++	*pprog = prog;
++	return true;
++#else
++	return false;
++#endif
++}
++
+ #define INSN_SZ_DIFF (((addrs[i] - addrs[i - 1]) - (prog - temp)))
+ 
+ #define __LOAD_TCC_PTR(off)			\
+@@ -2600,6 +2634,8 @@
+ 
+ 			/* call */
+ 		case BPF_JMP | BPF_CALL: {
++			bool scalar_fastcall = false;
++
+ 			func = (u8 *) __bpf_call_base + imm32;
+ 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
+ 				LOAD_TAIL_CALL_CNT_PTR(stack_depth);
+@@ -2607,6 +2643,23 @@
+ 			}
+ 			if (!imm32)
+ 				return -EINVAL;
++			if (src_reg == BPF_PSEUDO_KFUNC_CALL &&
++			    emit_scalar_bitop(&prog, func))
++				break;
++#ifdef CONFIG_BPF_SYSCALL
++			if (src_reg == BPF_PSEUDO_KFUNC_CALL &&
++			    (func == (const u8 *)bpf_ctz64 ||
++			     func == (const u8 *)bpf_popcnt64 ||
++			     func == (const u8 *)bpf_clz64)) {
++				/* The C fallback must honor unary KF_FASTCALL too. */
++				EMIT1(0x56); /* push rsi (BPF R2) */
++				EMIT1(0x52); /* push rdx (BPF R3) */
++				EMIT1(0x51); /* push rcx (BPF R4) */
++				EMIT2(0x41, 0x50); /* push r8 (BPF R5) */
++				ip += 5;
++				scalar_fastcall = true;
++			}
++#endif
+ 			if (priv_frame_ptr) {
+ 				push_r9(&prog);
+ 				ip += 2;
+@@ -2616,6 +2669,12 @@
+ 				return -EINVAL;
+ 			if (priv_frame_ptr)
+ 				pop_r9(&prog);
++			if (scalar_fastcall) {
++				EMIT2(0x41, 0x58); /* pop r8 */
++				EMIT1(0x59); /* pop rcx */
++				EMIT1(0x5a); /* pop rdx */
++				EMIT1(0x5e); /* pop rsi */
++			}
+ 			break;
+ 		}
+ 
+diff --git a/drivers/dma-buf/dma-fence.c b/drivers/dma-buf/dma-fence.c
+--- a/drivers/dma-buf/dma-fence.c
++++ b/drivers/dma-buf/dma-fence.c
+@@ -15,6 +15,7 @@
+ #include <linux/atomic.h>
+ #include <linux/dma-fence.h>
+ #include <linux/sched/signal.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/seq_file.h>
+ 
+ #define CREATE_TRACE_POINTS
+@@ -793,7 +794,7 @@
+ 	struct default_wait_cb *wait =
+ 		container_of(cb, struct default_wait_cb, base);
+ 
+-	wake_up_state(wait->task, TASK_NORMAL);
++	wake_up_state_signal(wait->task, TASK_NORMAL, WF_SCX_FENCE);
+ }
+ 
+ /**
+diff --git a/drivers/dma-buf/sync_file.c b/drivers/dma-buf/sync_file.c
+--- a/drivers/dma-buf/sync_file.c
++++ b/drivers/dma-buf/sync_file.c
+@@ -12,6 +12,7 @@
+ #include <linux/kernel.h>
+ #include <linux/poll.h>
+ #include <linux/sched.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/slab.h>
+ #include <linux/uaccess.h>
+ #include <linux/anon_inodes.h>
+@@ -50,7 +51,7 @@
+ 
+ 	sync_file = container_of(cb, struct sync_file, cb);
+ 
+-	wake_up_all(&sync_file->wq);
++	__wake_up_flags(&sync_file->wq, TASK_NORMAL, 0, WF_SCX_FENCE, NULL);
+ }
+ 
+ /**
+@@ -204,7 +205,7 @@
+ 	    !test_and_set_bit(POLL_ENABLED, &sync_file->flags)) {
+ 		if (dma_fence_add_callback(sync_file->fence, &sync_file->cb,
+ 					   fence_check_cb_func) < 0)
+-			wake_up_all(&sync_file->wq);
++			__wake_up_flags(&sync_file->wq, TASK_NORMAL, 0, WF_SCX_FENCE, NULL);
+ 	}
+ 
+ 	return dma_fence_is_signaled(sync_file->fence) ? EPOLLIN : 0;
+diff --git a/drivers/gpu/drm/drm_syncobj.c b/drivers/gpu/drm/drm_syncobj.c
+--- a/drivers/gpu/drm/drm_syncobj.c
++++ b/drivers/gpu/drm/drm_syncobj.c
+@@ -199,6 +199,7 @@
+ #include <linux/file.h>
+ #include <linux/fs.h>
+ #include <linux/sched/signal.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/sync_file.h>
+ #include <linux/uaccess.h>
+ 
+@@ -1007,7 +1008,7 @@
+ 	struct syncobj_wait_entry *wait =
+ 		container_of(cb, struct syncobj_wait_entry, fence_cb);
+ 
+-	wake_up_process(wait->task);
++	wake_up_state_signal(wait->task, TASK_NORMAL, WF_SCX_FENCE);
+ }
+ 
+ static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
+@@ -1412,7 +1413,7 @@
+ 	struct syncobj_eventfd_entry *entry =
+ 		container_of(cb, struct syncobj_eventfd_entry, fence_cb);
+ 
+-	eventfd_signal(entry->ev_fd_ctx);
++	eventfd_signal_mask_flags(entry->ev_fd_ctx, 0, WF_SCX_FENCE);
+ 	syncobj_eventfd_entry_free(entry);
+ }
+ 
+@@ -1452,7 +1453,7 @@
+ 		ret = dma_fence_add_callback(fence, &entry->fence_cb,
+ 					     syncobj_eventfd_entry_fence_func);
+ 		if (ret == -ENOENT) {
+-			eventfd_signal(entry->ev_fd_ctx);
++			eventfd_signal_mask_flags(entry->ev_fd_ctx, 0, WF_SCX_FENCE);
+ 			syncobj_eventfd_entry_free(entry);
+ 		}
+ 	}
+diff --git a/drivers/input/evdev.c b/drivers/input/evdev.c
+--- a/drivers/input/evdev.c
++++ b/drivers/input/evdev.c
+@@ -14,6 +14,7 @@
+ 
+ #include <linux/poll.h>
+ #include <linux/sched.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ #include <linux/mm.h>
+@@ -287,8 +288,8 @@
+ 	spin_unlock(&client->buffer_lock);
+ 
+ 	if (wakeup)
+-		wake_up_interruptible_poll(&client->wait,
+-			EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);
++		__wake_up_flags(&client->wait, TASK_INTERRUPTIBLE, 1, WF_SCX_INPUT,
++				poll_to_key(EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM));
+ }
+ 
+ /*
+diff --git a/fs/eventfd.c b/fs/eventfd.c
+--- a/fs/eventfd.c
++++ b/fs/eventfd.c
+@@ -11,6 +11,7 @@
+ #include <linux/init.h>
+ #include <linux/fs.h>
+ #include <linux/sched/signal.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/kernel.h>
+ #include <linux/slab.h>
+ #include <linux/list.h>
+@@ -44,16 +45,18 @@
+ };
+ 
+ /**
+- * eventfd_signal_mask - Increment the event counter
++ * eventfd_signal_mask_flags - Increment the event counter with a wake cause
+  * @ctx: [in] Pointer to the eventfd context.
+  * @mask: [in] poll mask
++ * @wake_flags: [in] internal typed readiness flags
+  *
+  * This function is supposed to be called by the kernel in paths that do not
+  * allow sleeping. In this function we allow the counter to reach the ULLONG_MAX
+  * value, and we signal this as overflow condition by returning a EPOLLERR
+  * to poll(2).
+  */
+-void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)
++void eventfd_signal_mask_flags(struct eventfd_ctx *ctx, __poll_t mask,
++			       int wake_flags)
+ {
+ 	unsigned long flags;
+ 
+@@ -73,9 +76,17 @@
+ 	if (ctx->count < ULLONG_MAX)
+ 		ctx->count++;
+ 	if (waitqueue_active(&ctx->wqh))
+-		wake_up_locked_poll(&ctx->wqh, EPOLLIN | mask);
++		__wake_up_locked_key_flags(&ctx->wqh, TASK_NORMAL,
++					   wake_flags & WF_SCX_SIGNAL_MASK,
++					   poll_to_key(EPOLLIN | mask));
+ 	current->in_eventfd = 0;
+ 	spin_unlock_irqrestore(&ctx->wqh.lock, flags);
++}
++EXPORT_SYMBOL_GPL(eventfd_signal_mask_flags);
++
++void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)
++{
++	eventfd_signal_mask_flags(ctx, mask, 0);
+ }
+ EXPORT_SYMBOL_GPL(eventfd_signal_mask);
+ 
+@@ -420,4 +431,3 @@
+ {
+ 	return do_eventfd(count, 0);
+ }
+-
+diff --git a/fs/eventpoll.c b/fs/eventpoll.c
+--- a/fs/eventpoll.c
++++ b/fs/eventpoll.c
+@@ -9,6 +9,7 @@
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/sched/signal.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/fs.h>
+ #include <linux/file.h>
+ #include <linux/signal.h>
+@@ -841,7 +842,7 @@
+ #ifdef CONFIG_DEBUG_LOCK_ALLOC
+ 
+ static void ep_poll_safewake(struct eventpoll *ep, struct epitem *epi,
+-			     unsigned pollflags)
++			     unsigned int pollflags, int wake_flags)
+ {
+ 	struct eventpoll *ep_src;
+ 	unsigned long flags;
+@@ -872,7 +873,8 @@
+ 	}
+ 	spin_lock_irqsave_nested(&ep->poll_wait.lock, flags, nests);
+ 	ep->nests = nests + 1;
+-	wake_up_locked_poll(&ep->poll_wait, EPOLLIN | pollflags);
++	__wake_up_locked_key_flags(&ep->poll_wait, TASK_NORMAL, wake_flags,
++				   poll_to_key(EPOLLIN | pollflags));
+ 	ep->nests = 0;
+ 	spin_unlock_irqrestore(&ep->poll_wait.lock, flags);
+ }
+@@ -880,9 +882,10 @@
+ #else
+ 
+ static void ep_poll_safewake(struct eventpoll *ep, struct epitem *epi,
+-			     __poll_t pollflags)
+-{
+-	wake_up_poll(&ep->poll_wait, EPOLLIN | pollflags);
++			     __poll_t pollflags, int wake_flags)
++{
++	__wake_up_flags(&ep->poll_wait, TASK_NORMAL, 1, wake_flags,
++			poll_to_key(EPOLLIN | pollflags));
+ }
+ 
+ #endif
+@@ -1239,7 +1242,7 @@
+ {
+ 	/* Release any threads blocked in poll-on-ep. */
+ 	if (waitqueue_active(&ep->poll_wait))
+-		ep_poll_safewake(ep, NULL, 0);
++		ep_poll_safewake(ep, NULL, 0, 0);
+ 
+ 	mutex_lock(&ep->mtx);
+ 	ep_drain_pollwaits(ep);
+@@ -1558,10 +1561,9 @@
+ 				break;
+ 			}
+ 		}
+-		if (sync)
+-			wake_up_sync(&ep->wq);
+-		else
+-			wake_up(&ep->wq);
++		__wake_up_flags(&ep->wq, TASK_NORMAL, 1,
++				(sync & WF_SCX_SIGNAL_MASK) |
++				((sync & ~WF_SCX_SIGNAL_MASK) ? WF_SYNC : 0), NULL);
+ 	}
+ 	if (waitqueue_active(&ep->poll_wait))
+ 		pwake++;
+@@ -1571,7 +1573,8 @@
+ 
+ 	/* We have to call this outside the lock */
+ 	if (pwake)
+-		ep_poll_safewake(ep, epi, pollflags & EPOLL_URING_WAKE);
++		ep_poll_safewake(ep, epi, pollflags & EPOLL_URING_WAKE,
++				 sync & WF_SCX_SIGNAL_MASK);
+ 
+ 	if (!(epi->event.events & EPOLLEXCLUSIVE))
+ 		ewake = 1;
+@@ -1968,7 +1971,7 @@
+ 
+ 	/* We have to call this outside the lock */
+ 	if (pwake)
+-		ep_poll_safewake(ep, NULL, 0);
++		ep_poll_safewake(ep, NULL, 0, 0);
+ 
+ 	return 0;
+ }
+@@ -2044,7 +2047,7 @@
+ 
+ 	/* We have to call this outside the lock */
+ 	if (pwake)
+-		ep_poll_safewake(ep, NULL, 0);
++		ep_poll_safewake(ep, NULL, 0, 0);
+ 
+ 	return 0;
+ }
+diff --git a/include/linux/eventfd.h b/include/linux/eventfd.h
+--- a/include/linux/eventfd.h
++++ b/include/linux/eventfd.h
+@@ -36,6 +36,8 @@
+ struct eventfd_ctx *eventfd_ctx_fdget(int fd);
+ struct eventfd_ctx *eventfd_ctx_fileget(struct file *file);
+ void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask);
++void eventfd_signal_mask_flags(struct eventfd_ctx *ctx, __poll_t mask,
++			       int wake_flags);
+ int eventfd_ctx_remove_wait_queue(struct eventfd_ctx *ctx, wait_queue_entry_t *wait,
+ 				  __u64 *cnt);
+ void eventfd_ctx_do_read(struct eventfd_ctx *ctx, __u64 *cnt);
+@@ -58,6 +60,11 @@
+ }
+ 
+ static inline void eventfd_signal_mask(struct eventfd_ctx *ctx, __poll_t mask)
++{
++}
++
++static inline void eventfd_signal_mask_flags(struct eventfd_ctx *ctx,
++					    __poll_t mask, int wake_flags)
+ {
+ }
+ 
+@@ -90,4 +97,3 @@
+ }
+ 
+ #endif /* _LINUX_EVENTFD_H */
+-
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -1264,6 +1264,11 @@
+ 				       const struct bpf_insn *patch, u32 len);
+ 
+ #ifdef CONFIG_BPF_SYSCALL
++u64 bpf_ctz64(u64 x);
++u64 bpf_popcnt64(u64 x);
++u64 bpf_clz64(u64 x);
++u64 bpf_mulhi64(u64 x, u64 y);
++
+ struct bpf_prog *bpf_patch_insn_data(struct bpf_verifier_env *env, u32 off,
+ 				     const struct bpf_insn *patch, u32 len);
+ struct bpf_insn_aux_data *bpf_dup_insn_aux_data(struct bpf_verifier_env *env);
+diff --git a/include/linux/sched/ext.h b/include/linux/sched/ext.h
+--- a/include/linux/sched/ext.h
++++ b/include/linux/sched/ext.h
+@@ -11,6 +11,7 @@
+ 
+ #ifdef CONFIG_SCHED_CLASS_EXT
+ 
++#include <linux/atomic.h>
+ #include <linux/llist.h>
+ #include <linux/rhashtable-types.h>
+ 
+@@ -187,6 +188,7 @@
+ #endif
+ 	struct scx_dispatch_q	*dsq;
+ 	atomic_long_t		ops_state;
++	atomic64_t		wake_signal;
+ 	u64			ddsp_dsq_id;
+ 	u64			ddsp_enq_flags;
+ 	struct scx_dsq_list_node dsq_list;	/* dispatch order */
+diff --git a/include/linux/sched/wake_signal.h b/include/linux/sched/wake_signal.h
+--- /dev/null
++++ b/include/linux/sched/wake_signal.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_SCHED_WAKE_SIGNAL_H
++#define _LINUX_SCHED_WAKE_SIGNAL_H
++
++#include <linux/wait.h>
++
++/* Internal wake flags, never poll bits or userspace supplied priority. */
++#define WF_SYNC			0x10
++#define WF_SCX_INPUT		0x100
++#define WF_SCX_FENCE		0x200
++#define WF_SCX_SIGNAL_MASK	(WF_SCX_INPUT | WF_SCX_FENCE)
++#define WF_SCX_SIGNAL_SHIFT	8
++
++int wake_up_state_signal(struct task_struct *p, unsigned int state,
++			 unsigned int signal);
++int __wake_up_flags(struct wait_queue_head *head, unsigned int mode,
++		    int nr_exclusive, int wake_flags, void *key);
++void __wake_up_locked_key_flags(struct wait_queue_head *head, unsigned int mode,
++				int wake_flags, void *key);
++
++#endif
+diff --git a/kernel/bpf/helpers.c b/kernel/bpf/helpers.c
+--- a/kernel/bpf/helpers.c
++++ b/kernel/bpf/helpers.c
+@@ -4769,6 +4769,32 @@
+ 		ret = bpf_async_schedule_op(cb, BPF_ASYNC_CANCEL, 0, 0);
+ 		return ret ? ret : -ECANCELED;
+ 	}
++}
++
++/* Scalar bitops keep identical semantics on inline and fallback call paths. */
++__bpf_kfunc u64 bpf_ctz64(u64 x)
++{
++	return x ? __ffs64(x) : 64;
++}
++
++__bpf_kfunc u64 bpf_popcnt64(u64 x)
++{
++	return hweight64(x);
++}
++
++__bpf_kfunc u64 bpf_clz64(u64 x)
++{
++	return 64 - fls64(x);
++}
++
++__bpf_kfunc u64 bpf_mulhi64(u64 x, u64 y)
++{
++	u64 x0 = (u32)x, x1 = x >> 32, y0 = (u32)y, y1 = y >> 32;
++	u64 mid = x1 * y0 + ((x0 * y0) >> 32);
++	u64 carry = mid >> 32;
++
++	mid = (u32)mid + x0 * y1;
++	return x1 * y1 + carry + (mid >> 32);
+ }
+ 
+ __bpf_kfunc_end_defs();
+@@ -4971,6 +4997,16 @@
+ BTF_ID_FLAGS(func, bpf_dynptr_from_file)
+ BTF_ID_FLAGS(func, bpf_dynptr_file_discard, KF_RELEASE)
+ BTF_ID_FLAGS(func, bpf_timer_cancel_async)
++#if defined(CONFIG_X86_64) && defined(CONFIG_BPF_JIT)
++BTF_ID_FLAGS(func, bpf_ctz64, KF_FASTCALL)
++BTF_ID_FLAGS(func, bpf_popcnt64, KF_FASTCALL)
++BTF_ID_FLAGS(func, bpf_clz64, KF_FASTCALL)
++#else
++BTF_ID_FLAGS(func, bpf_ctz64)
++BTF_ID_FLAGS(func, bpf_popcnt64)
++BTF_ID_FLAGS(func, bpf_clz64)
++#endif
++BTF_ID_FLAGS(func, bpf_mulhi64)
+ BTF_KFUNCS_END(common_btf_ids)
+ 
+ static const struct btf_kfunc_id_set common_kfunc_set = {
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -11222,6 +11222,9 @@
+ 	KF_bpf_session_is_return,
+ 	KF_bpf_stream_vprintk,
+ 	KF_bpf_stream_print_stack,
++	KF_bpf_ctz64,
++	KF_bpf_popcnt64,
++	KF_bpf_clz64,
+ };
+ 
+ BTF_ID_LIST(special_kfunc_list)
+@@ -11319,6 +11322,9 @@
+ #endif
+ BTF_ID(func, bpf_stream_vprintk)
+ BTF_ID(func, bpf_stream_print_stack)
++BTF_ID(func, bpf_ctz64)
++BTF_ID(func, bpf_popcnt64)
++BTF_ID(func, bpf_clz64)
+ 
+ static bool is_bpf_obj_new_kfunc(u32 func_id)
+ {
+@@ -13072,6 +13078,31 @@
+ 
+ static int check_return_code(struct bpf_verifier_env *env, int regno, const char *reg_name);
+ 
++static int scalar_bitop_return_max(struct bpf_verifier_env *env,
++				   const struct bpf_kfunc_call_arg_meta *meta,
++				   int *max)
++{
++	struct bpf_reg_state *arg = &cur_regs(env)[BPF_REG_1];
++	bool scan;
++	int err;
++
++	if (meta->btf != btf_vmlinux)
++		return 0;
++	scan = meta->func_id == special_kfunc_list[KF_bpf_ctz64] ||
++	       meta->func_id == special_kfunc_list[KF_bpf_clz64];
++	if (!scan && meta->func_id != special_kfunc_list[KF_bpf_popcnt64])
++		return 0;
++	*max = 64;
++	if (scan && (reg_umin(arg) > 0 || arg->var_off.value)) {
++		/* The derived bound must retain its input dependency during pruning. */
++		err = mark_chain_precision(env, BPF_REG_1);
++		if (err)
++			return err;
++		*max = 63;
++	}
++	return 0;
++}
++
+ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
+ 			    int *insn_idx_p)
+ {
+@@ -13086,6 +13117,7 @@
+ 	const struct btf_param *args;
+ 	u32 i, nargs, ptr_type_id;
+ 	struct btf *desc_btf;
++	int scalar_max = -1;
+ 	int id;
+ 
+ 	/* skip for now, but return error when we find this in fixup_kfunc_call */
+@@ -13152,6 +13184,9 @@
+ 	err = check_kfunc_args(env, &meta, insn_idx);
+ 	if (err < 0)
+ 		return err;
++	err = scalar_bitop_return_max(env, &meta, &scalar_max);
++	if (err)
++		return err;
+ 
+ 	if ((is_bpf_obj_drop_kfunc(meta.func_id) ||
+ 	     is_bpf_percpu_obj_drop_kfunc(meta.func_id)) && (is_tracing_prog_type(prog_type) ||
+@@ -13301,6 +13336,11 @@
+ 
+ 	if (btf_type_is_scalar(t)) {
+ 		mark_reg_unknown(env, regs, BPF_REG_0);
++		if (scalar_max >= 0) {
++			regs[BPF_REG_0].var_off = tnum_range(0, scalar_max);
++			reg_set_urange64(&regs[BPF_REG_0], 0, scalar_max);
++			reg_bounds_sync(&regs[BPF_REG_0]);
++		}
+ 		if (meta.btf == btf_vmlinux && (meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock] ||
+ 		    meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock_irqsave]))
+ 			__mark_reg_const_zero(env, &regs[BPF_REG_0]);
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -39,6 +39,7 @@
+ #include <linux/sched/nohz.h>
+ #include <linux/sched/rseq_api.h>
+ #include <linux/sched/rt.h>
++#include <linux/sched/wake_signal.h>
+ 
+ #include <linux/blkdev.h>
+ #include <linux/context_tracking.h>
+@@ -4379,6 +4380,7 @@
+ 		 * enqueue, such as ttwu_queue_wakelist().
+ 		 */
+ 		WRITE_ONCE(p->__state, TASK_WAKING);
++		scx_record_wake_signal(p, wake_flags);
+ 
+ 		/*
+ 		 * If the owning (remote) CPU is still in the middle of schedule() with
+@@ -4571,6 +4573,14 @@
+ 	return try_to_wake_up(p, TASK_NORMAL, 0);
+ }
+ EXPORT_SYMBOL(wake_up_process);
++
++/* Tag only accepted wakeups of a blocked task; preserve normal wake semantics. */
++int wake_up_state_signal(struct task_struct *p, unsigned int state,
++			 unsigned int signal)
++{
++	return try_to_wake_up(p, state, signal & WF_SCX_SIGNAL_MASK);
++}
++EXPORT_SYMBOL_GPL(wake_up_state_signal);
+ 
+ int wake_up_state(struct task_struct *p, unsigned int state)
+ {
+diff --git a/kernel/sched/ext/ext.c b/kernel/sched/ext/ext.c
+--- a/kernel/sched/ext/ext.c
++++ b/kernel/sched/ext/ext.c
+@@ -8,9 +8,11 @@
+  */
+ #include <linux/bitmap.h>
+ #include <linux/btf_ids.h>
++#include <linux/nospec.h>
+ #include <linux/rhashtable.h>
+ #include <linux/sched/clock.h>
+ #include <linux/sched/isolation.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/suspend.h>
+ #include <linux/sysrq.h>
+ 
+@@ -70,6 +72,16 @@
+ /* ops enable/disable */
+ static DEFINE_MUTEX(scx_enable_mutex);
+ DEFINE_STATIC_KEY_FALSE(__scx_enabled);
++DEFINE_STATIC_KEY_FALSE(scx_wake_signal_enabled);
++
++void __scx_record_wake_signal(struct task_struct *p, int wake_flags)
++{
++	u64 cause = (wake_flags & WF_SCX_SIGNAL_MASK) >> WF_SCX_SIGNAL_SHIFT;
++
++	if (p->sched_class != &ext_sched_class)
++		return;
++	atomic64_set(&p->scx.wake_signal, cause ? (ktime_get_ns() & ~3ULL) | cause : 0);
++}
+ DEFINE_STATIC_PERCPU_RWSEM(scx_fork_rwsem);
+ static atomic_t scx_enable_state_var = ATOMIC_INIT(SCX_DISABLED);
+ static DEFINE_RAW_SPINLOCK(scx_bypass_lock);
+@@ -163,11 +175,23 @@
+  */
+ static DEFINE_PER_CPU(struct task_struct *, direct_dispatch_task);
+ 
++static __always_inline int dsq_cmpfn(struct rhashtable_compare_arg *arg, const void *ptr)
++{
++	const struct scx_dispatch_q *dsq = ptr;
++
++	BUILD_BUG_ON(sizeof_field(struct scx_dispatch_q, id) != sizeof(u64));
++
++	return dsq->id != *(const u64 *)arg->key;
++}
++
+ static const struct rhashtable_params dsq_hash_params = {
+ 	.key_len		= sizeof_field(struct scx_dispatch_q, id),
+ 	.key_offset		= offsetof(struct scx_dispatch_q, id),
+ 	.head_offset		= offsetof(struct scx_dispatch_q, hash_node),
++	.obj_cmpfn		= dsq_cmpfn,
+ };
++
++#define SCX_DSQ_DIRECT_NR	2048
+ 
+ static LLIST_HEAD(dsqs_to_free);
+ 
+@@ -206,6 +230,7 @@
+  */
+ static unsigned int scx_slice_bypass_us = SCX_SLICE_BYPASS / NSEC_PER_USEC;
+ static unsigned int scx_bypass_lb_intv_us = SCX_BYPASS_LB_DFL_INTV_US;
++static bool scx_dsq_direct_enabled = true;
+ 
+ static int set_slice_us(const char *val, const struct kernel_param *kp)
+ {
+@@ -234,6 +259,8 @@
+ MODULE_PARM_DESC(slice_bypass_us, "bypass slice in microseconds, applied on [un]load (100us to 100ms)");
+ module_param_cb(bypass_lb_intv_us, &bypass_lb_intv_us_param_ops, &scx_bypass_lb_intv_us, 0600);
+ MODULE_PARM_DESC(bypass_lb_intv_us, "bypass load balance interval in microseconds (0 (disable) to 10s)");
++module_param_named(dsq_direct, scx_dsq_direct_enabled, bool, 0444);
++MODULE_PARM_DESC(dsq_direct, "index low DSQ IDs directly (disable for hash-only comparison)");
+ 
+ #undef MODULE_PARAM_PREFIX
+ 
+@@ -356,9 +383,23 @@
+ 	return &sch->pnode[cpu_to_node(cpu)]->global_dsq;
+ }
+ 
+-static struct scx_dispatch_q *find_user_dsq(struct scx_sched *sch, u64 dsq_id)
++static noinline struct scx_dispatch_q *find_user_dsq_hash(struct scx_sched *sch,
++							  u64 dsq_id)
+ {
+ 	return rhashtable_lookup(&sch->dsq_hash, &dsq_id, dsq_hash_params);
++}
++
++static __always_inline struct scx_dispatch_q *find_user_dsq(struct scx_sched *sch,
++							    u64 dsq_id)
++{
++	struct scx_dispatch_q __rcu **direct = sch->dsq_direct;
++
++	if (dsq_id < SCX_DSQ_DIRECT_NR && direct) {
++		unsigned long idx = array_index_nospec(dsq_id, SCX_DSQ_DIRECT_NR);
++
++		return rcu_dereference(direct[idx]);
++	}
++	return find_user_dsq_hash(sch, dsq_id);
+ }
+ 
+ static const struct sched_class *scx_setscheduler_class(struct task_struct *p)
+@@ -3011,6 +3052,8 @@
+ 	/* see dequeue_task_scx() on why we skip when !QUEUED */
+ 	if (SCX_HAS_OP(sch, running) && (p->scx.flags & SCX_TASK_QUEUED))
+ 		SCX_CALL_OP_TASK(sch, running, rq, p);
++	if (static_branch_unlikely(&scx_wake_signal_enabled))
++		atomic64_set(&p->scx.wake_signal, 0);
+ 
+ 	clr_task_runnable(p, true);
+ 
+@@ -3717,6 +3760,7 @@
+ 	int ret;
+ 
+ 	p->scx.disallow = false;
++	atomic64_set(&p->scx.wake_signal, 0);
+ 
+ 	if (SCX_HAS_OP(sch, init_task)) {
+ 		struct scx_init_task_args args = {
+@@ -4897,9 +4941,14 @@
+ 		goto out_unlock_dsq;
+ 	}
+ 
+-	if (rhashtable_remove_fast(&sch->dsq_hash, &dsq->hash_node,
+-				   dsq_hash_params))
+-		goto out_unlock_dsq;
++	/* Serialize both indexes against creation of the same ID. */
++	scoped_guard(raw_spinlock, &sch->dsq_index_lock) {
++		if (rhashtable_remove_fast(&sch->dsq_hash, &dsq->hash_node,
++					   dsq_hash_params))
++			goto out_unlock_dsq;
++		if (sch->dsq_direct && dsq_id < SCX_DSQ_DIRECT_NR)
++			RCU_INIT_POINTER(sch->dsq_direct[dsq_id], NULL);
++	}
+ 
+ 	/*
+ 	 * Mark dead by invalidating ->id to prevent dispatch_enqueue() from
+@@ -5148,6 +5197,7 @@
+ 	rhashtable_walk_exit(&rht_iter);
+ 
+ 	rhashtable_free_and_destroy(&sch->dsq_hash, NULL, NULL);
++	kfree(sch->dsq_direct);
+ 	free_exit_info(sch->exit_info);
+ 	scx_set_cmask_scratch_free(sch);
+ 	scx_arena_pool_destroy(sch);
+@@ -5172,6 +5222,15 @@
+ 	return sysfs_emit(buf, "%s\n", sch->ops.name);
+ }
+ SCX_ATTR(ops);
++
++static ssize_t scx_attr_dsq_direct_entries_show(struct kobject *kobj,
++						struct kobj_attribute *ka, char *buf)
++{
++	struct scx_sched *sch = container_of(kobj, struct scx_sched, kobj);
++
++	return sysfs_emit(buf, "%u\n", sch->dsq_direct ? SCX_DSQ_DIRECT_NR : 0);
++}
++SCX_ATTR(dsq_direct_entries);
+ 
+ #define scx_attr_event_show(buf, at, events, kind) ({				\
+ 	sysfs_emit_at(buf, at, "%s %llu\n", #kind, (events)->kind);		\
+@@ -5204,6 +5263,7 @@
+ 
+ static struct attribute *scx_sched_attrs[] = {
+ 	&scx_attr_ops.attr,
++	&scx_attr_dsq_direct_entries.attr,
+ 	&scx_attr_events.attr,
+ 	NULL,
+ };
+@@ -6323,6 +6383,7 @@
+ 
+ 	/* no task is on scx, turn off all the switches and flush in-progress calls */
+ 	static_branch_disable(&__scx_enabled);
++	static_branch_disable(&scx_wake_signal_enabled);
+ 	static_branch_disable(&__scx_is_cid_type);
+ 	if (sch->ops.flags & SCX_OPS_TID_TO_TASK)
+ 		static_branch_disable(&__scx_tid_to_task_enabled);
+@@ -6961,6 +7022,11 @@
+ 	if (ret < 0)
+ 		goto err_free_ei;
+ 
++	raw_spin_lock_init(&sch->dsq_index_lock);
++	if (scx_dsq_direct_enabled)
++		sch->dsq_direct = kcalloc(SCX_DSQ_DIRECT_NR, sizeof(*sch->dsq_direct),
++					  GFP_KERNEL | __GFP_NOWARN);
++
+ 	sch->pnode = kzalloc_objs(sch->pnode[0], nr_node_ids);
+ 	if (!sch->pnode) {
+ 		ret = -ENOMEM;
+@@ -7147,6 +7213,7 @@
+ 	kfree(sch->pnode);
+ err_free_hash:
+ 	rhashtable_free_and_destroy(&sch->dsq_hash, NULL, NULL);
++	kfree(sch->dsq_direct);
+ err_free_ei:
+ 	free_exit_info(sch->exit_info);
+ err_free_sch:
+@@ -7198,6 +7265,12 @@
+ 	 * may set it to declare a dependency; reject if the root hasn't
+ 	 * enabled it.
+ 	 */
++	if ((ops->flags & SCX_OPS_WAKE_SIGNAL) && scx_parent(sch) &&
++	    !(scx_root->ops.flags & SCX_OPS_WAKE_SIGNAL)) {
++		scx_error(sch, "SCX_OPS_WAKE_SIGNAL requires root scheduler opt-in");
++		return -EINVAL;
++	}
++
+ 	if ((ops->flags & SCX_OPS_TID_TO_TASK) && scx_parent(sch) &&
+ 	    !(scx_root->ops.flags & SCX_OPS_TID_TO_TASK)) {
+ 		scx_error(sch, "SCX_OPS_TID_TO_TASK requires root scheduler to enable it");
+@@ -7526,6 +7599,8 @@
+ 	 */
+ 	WRITE_ONCE(scx_switching_all, !(ops->flags & SCX_OPS_SWITCH_PARTIAL));
+ 	static_branch_enable(&__scx_enabled);
++	if (ops->flags & SCX_OPS_WAKE_SIGNAL)
++		static_branch_enable(&scx_wake_signal_enabled);
+ 
+ 	/*
+ 	 * We're fully committed and can't fail. The task READY -> ENABLED
+@@ -9465,8 +9540,12 @@
+ 	sch = scx_prog_sched(aux);
+ 	if (sch) {
+ 		dsq->sched = sch;
+-		ret = rhashtable_lookup_insert_fast(&sch->dsq_hash, &dsq->hash_node,
+-						    dsq_hash_params);
++		scoped_guard(raw_spinlock_irqsave, &sch->dsq_index_lock) {
++			ret = rhashtable_lookup_insert_fast(&sch->dsq_hash, &dsq->hash_node,
++							    dsq_hash_params);
++			if (!ret && sch->dsq_direct && dsq_id < SCX_DSQ_DIRECT_NR)
++				rcu_assign_pointer(sch->dsq_direct[dsq_id], dsq);
++		}
+ 	} else {
+ 		ret = -ENODEV;
+ 	}
+@@ -10366,6 +10445,49 @@
+ 	if (!tbl)
+ 		return -EINVAL;
+ 	return tbl[task_cpu(p)];
++}
++
++/**
++ * scx_bpf_task_wake_signal_v1 - Read the current blocked-task wake token
++ * @p: trusted task pointer
++ *
++ * Bits 0/1 mean input packet/fence completion. Other bits are the accepted
++ * wake's CLOCK_MONOTONIC timestamp rounded down to four nanoseconds. Zero is
++ * unknown. The token is cleared after ops.running(), not on a failed wake.
++ */
++__bpf_kfunc u64 scx_bpf_task_wake_signal_v1(struct task_struct *p)
++{
++	if (!static_branch_unlikely(&scx_wake_signal_enabled))
++		return 0;
++	return atomic64_read(&p->scx.wake_signal);
++}
++
++/**
++ * scx_bpf_cpu_irq_ns_v1 - Read completed IRQ accounting without rq locking
++ * @cpu: CPU to query
++ * @aux: implicit BPF program context
++ *
++ * Returns U64_MAX for unknown/offline/unsupported data. This is a cumulative
++ * duration, not an active-handler indication; ksoftirqd task time is excluded.
++ * The 32-bit case is unsupported to avoid unbounded remote seqcount retries.
++ */
++__bpf_kfunc u64 scx_bpf_cpu_irq_ns_v1(s32 cpu, const struct bpf_prog_aux *aux)
++{
++#if defined(CONFIG_IRQ_TIME_ACCOUNTING) && defined(CONFIG_64BIT)
++	struct scx_sched *sch;
++	u64 total;
++
++	guard(rcu)();
++	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu) || !irqtime_enabled())
++		return U64_MAX;
++	sch = scx_prog_sched(aux);
++	if (!sch || !scx_cpu_valid(sch, cpu, NULL))
++		return U64_MAX;
++	total = READ_ONCE(per_cpu(cpu_irqtime, cpu).total);
++	return cpu_online(cpu) && irqtime_enabled() ? total : U64_MAX;
++#else
++	return U64_MAX;
++#endif
+ }
+ 
+ /**
+@@ -10654,6 +10776,8 @@
+ __bpf_kfunc_end_defs();
+ 
+ BTF_KFUNCS_START(scx_kfunc_ids_any)
++BTF_ID_FLAGS(func, scx_bpf_task_wake_signal_v1, KF_RCU)
++BTF_ID_FLAGS(func, scx_bpf_cpu_irq_ns_v1, KF_IMPLICIT_ARGS)
+ BTF_ID_FLAGS(func, scx_bpf_task_set_slice, KF_IMPLICIT_ARGS | KF_RCU);
+ BTF_ID_FLAGS(func, scx_bpf_task_set_dsq_vtime, KF_IMPLICIT_ARGS | KF_RCU);
+ BTF_ID_FLAGS(func, scx_bpf_kick_cpu, KF_IMPLICIT_ARGS)
+diff --git a/kernel/sched/ext/ext.h b/kernel/sched/ext/ext.h
+--- a/kernel/sched/ext/ext.h
++++ b/kernel/sched/ext/ext.h
+@@ -7,6 +7,15 @@
+  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
+  */
+ #ifdef CONFIG_SCHED_CLASS_EXT
++
++DECLARE_STATIC_KEY_FALSE(scx_wake_signal_enabled);
++void __scx_record_wake_signal(struct task_struct *p, int wake_flags);
++
++static inline void scx_record_wake_signal(struct task_struct *p, int wake_flags)
++{
++	if (static_branch_unlikely(&scx_wake_signal_enabled))
++		__scx_record_wake_signal(p, wake_flags);
++}
+ 
+ void scx_tick(struct rq *rq);
+ void init_scx_entity(struct sched_ext_entity *scx);
+@@ -41,6 +50,8 @@
+ #endif
+ 
+ #else	/* CONFIG_SCHED_CLASS_EXT */
++
++static inline void scx_record_wake_signal(struct task_struct *p, int wake_flags) {}
+ 
+ static inline void scx_tick(struct rq *rq) {}
+ static inline void scx_pre_fork(struct task_struct *p) {}
+diff --git a/kernel/sched/ext/internal.h b/kernel/sched/ext/internal.h
+--- a/kernel/sched/ext/internal.h
++++ b/kernel/sched/ext/internal.h
+@@ -183,6 +183,9 @@
+ 	 * enabled it, attaching the sub-sched is rejected.
+ 	 */
+ 	SCX_OPS_TID_TO_TASK		= 1LLU << 8,
++
++	/* Root opts in to typed blocked-task wake metadata. */
++	SCX_OPS_WAKE_SIGNAL		= 1LLU << 9,
+ 
+ 	SCX_OPS_ALL_FLAGS		= SCX_OPS_KEEP_BUILTIN_IDLE |
+ 					  SCX_OPS_ENQ_LAST |
+@@ -192,7 +195,8 @@
+ 					  SCX_OPS_SWITCH_PARTIAL |
+ 					  SCX_OPS_BUILTIN_IDLE_PER_NODE |
+ 					  SCX_OPS_ALWAYS_ENQ_IMMED |
+-					  SCX_OPS_TID_TO_TASK,
++					  SCX_OPS_TID_TO_TASK |
++					  SCX_OPS_WAKE_SIGNAL,
+ 
+ 	/* high 8 bits are internal, don't include in SCX_OPS_ALL_FLAGS */
+ 	__SCX_OPS_INTERNAL_MASK		= 0xffLLU << 56,
+@@ -1150,6 +1154,8 @@
+ 	 * per-node split isn't sufficient, it can be further split.
+ 	 */
+ 	struct rhashtable	dsq_hash;
++	raw_spinlock_t		dsq_index_lock;
++	struct scx_dispatch_q __rcu **dsq_direct;
+ 	struct scx_sched_pnode	**pnode;
+ 	struct scx_sched_pcpu __percpu *pcpu;
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -21,6 +21,7 @@
+ #include <linux/sched/task_flags.h>
+ #include <linux/sched/task.h>
+ #include <linux/sched/topology.h>
++#include <linux/sched/wake_signal.h>
+ #include <linux/atomic.h>
+ #include <linux/bitmap.h>
+ #include <linux/bug.h>
+@@ -2613,7 +2614,6 @@
+ #define WF_FORK			0x04 /* Wakeup after fork; maps to SD_BALANCE_FORK */
+ #define WF_TTWU			0x08 /* Wakeup;            maps to SD_BALANCE_WAKE */
+ 
+-#define WF_SYNC			0x10 /* Waker goes to sleep after wakeup */
+ #define WF_MIGRATED		0x20 /* Internal use, task got migrated */
+ #define WF_CURRENT_CPU		0x40 /* Prefer to move the wakee to the current CPU. */
+ #define WF_RQ_SELECTED		0x80 /* ->select_task_rq() was called */
+diff --git a/kernel/sched/wait.c b/kernel/sched/wait.c
+--- a/kernel/sched/wait.c
++++ b/kernel/sched/wait.c
+@@ -6,6 +6,7 @@
+  */
+ #include "sched.h"
+ #include <linux/wait_bit.h>
++#include <linux/sched/wake_signal.h>
+ 
+ void __init_waitqueue_head(struct wait_queue_head *wq_head, const char *name, struct lock_class_key *key)
+ {
+@@ -148,6 +149,13 @@
+ }
+ EXPORT_SYMBOL(__wake_up);
+ 
++int __wake_up_flags(struct wait_queue_head *head, unsigned int mode,
++		    int nr_exclusive, int wake_flags, void *key)
++{
++	return __wake_up_common_lock(head, mode, nr_exclusive, wake_flags, key);
++}
++EXPORT_SYMBOL_GPL(__wake_up_flags);
++
+ void __wake_up_on_current_cpu(struct wait_queue_head *wq_head, unsigned int mode, void *key)
+ {
+ 	__wake_up_common_lock(wq_head, mode, 1, WF_CURRENT_CPU, key);
+@@ -167,6 +175,13 @@
+ 	__wake_up_common(wq_head, mode, 1, 0, key);
+ }
+ EXPORT_SYMBOL_GPL(__wake_up_locked_key);
++
++void __wake_up_locked_key_flags(struct wait_queue_head *head, unsigned int mode,
++				int wake_flags, void *key)
++{
++	__wake_up_common(head, mode, 1, wake_flags, key);
++}
++EXPORT_SYMBOL_GPL(__wake_up_locked_key_flags);
+ 
+ /**
+  * __wake_up_sync_key - wake up threads blocked on a waitqueue.
+diff --git a/tools/testing/selftests/bpf/prog_tests/scalar_bitops.c b/tools/testing/selftests/bpf/prog_tests/scalar_bitops.c
+--- /dev/null
++++ b/tools/testing/selftests/bpf/prog_tests/scalar_bitops.c
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <test_progs.h>
++#include "scalar_bitops.skel.h"
++
++void test_scalar_bitops(void)
++{
++	RUN_TESTS(scalar_bitops);
++}
+diff --git a/tools/testing/selftests/bpf/progs/scalar_bitops.c b/tools/testing/selftests/bpf/progs/scalar_bitops.c
+--- /dev/null
++++ b/tools/testing/selftests/bpf/progs/scalar_bitops.c
+@@ -0,0 +1,141 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/bpf.h>
++#include <bpf/bpf_helpers.h>
++#include "bpf_misc.h"
++
++extern __u64 bpf_ctz64(__u64 x) __ksym __attribute__((bpf_fastcall));
++extern __u64 bpf_popcnt64(__u64 x) __ksym __attribute__((bpf_fastcall));
++extern __u64 bpf_clz64(__u64 x) __ksym __attribute__((bpf_fastcall));
++extern __u64 bpf_mulhi64(__u64 x, __u64 y) __ksym;
++
++static __always_inline __u64 mulhi_ref(__u64 x, __u64 y)
++{
++	__u64 x0 = (__u32)x, x1 = x >> 32, y0 = (__u32)y, y1 = y >> 32;
++	__u64 mid = x1 * y0 + ((x0 * y0) >> 32);
++	__u64 carry = mid >> 32;
++
++	asm volatile("" : "+r" (carry));
++	mid = (__u32)mid + x0 * y1;
++	return x1 * y1 + carry + (mid >> 32);
++}
++
++SEC("syscall")
++__success __retval(0)
++int scalar_bitops_boundaries(void *ctx)
++{
++	int i;
++
++	if (bpf_ctz64(0) != 64 || bpf_popcnt64(0) != 0 ||
++	    bpf_ctz64(~0ULL) != 0 || bpf_popcnt64(~0ULL) != 64 ||
++	    bpf_clz64(0) != 64 || bpf_clz64(~0ULL) != 0 ||
++	    bpf_mulhi64(0, ~0ULL) != 0 ||
++	    bpf_mulhi64(~0ULL, ~0ULL) != ~0ULL - 1)
++		return 1;
++	for (i = 0; i < 64; i++) {
++		__u64 bit = 1ULL << i;
++
++		if (bpf_ctz64(bit) != i || bpf_popcnt64(bit) != 1 ||
++		    bpf_popcnt64(~bit) != 63 || bpf_clz64(bit) != 63 - i ||
++		    bpf_mulhi64(bit, ~0ULL) != bit - 1)
++			return 2;
++	}
++	return 0;
++}
++
++SEC("syscall")
++__success __retval(0)
++int scalar_bitops_random(void *ctx)
++{
++	__u64 x = 0xd1b54a32d192ed03ULL;
++	int i;
++
++	for (i = 0; i < 1024; i++) {
++		x ^= x << 13;
++		x ^= x >> 7;
++		x ^= x << 17;
++		if (bpf_ctz64(x) != (x ? __builtin_ctzll(x) : 64) ||
++		    bpf_popcnt64(x) != __builtin_popcountll(x) ||
++		    bpf_clz64(x) != (x ? __builtin_clzll(x) : 64) ||
++		    bpf_mulhi64(x, ~x) != mulhi_ref(x, ~x))
++			return 1;
++	}
++	return 0;
++}
++
++/* Mutable map data prevents verifier folding of preservation checks. */
++volatile __u64 fastcall_values[] = { 17, 29, 43, 61 };
++
++SEC("syscall")
++__success __retval(0)
++__naked int scalar_bitops_preserve(void)
++{
++	asm volatile (
++		"r1 = %[fastcall_values] ll;"
++		"r6 = *(u64 *)(r1 + 0); r7 = *(u64 *)(r1 + 8);"
++		"r8 = *(u64 *)(r1 + 16); r9 = *(u64 *)(r1 + 24);"
++		"r1 = 256; call bpf_ctz64;"
++		"if r0 != 8 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r1 = -1; call bpf_popcnt64;"
++		"if r0 != 64 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r1 = 256; call bpf_clz64;"
++		"if r0 != 55 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r1 = -1; r2 = -1; call bpf_mulhi64;"
++		"if r0 != -2 goto fail_%=;"
++		"if r6 != 17 goto fail_%=;"
++		"if r7 != 29 goto fail_%=;"
++		"if r8 != 43 goto fail_%=;"
++		"if r9 != 61 goto fail_%=;"
++		"r0 = 0; exit;"
++		"fail_%=: r0 = 1; exit;"
++		: : __imm_addr(fastcall_values) : __clobber_all);
++}
++
++#define FASTCALL_TEST(name, function, argument, expected) \
++SEC("syscall") \
++__success __retval(0) \
++__naked int name(void) \
++{ \
++	asm volatile ( \
++		"r1 = %[fastcall_values] ll;" \
++		"r2 = *(u64 *)(r1 + 0); r3 = *(u64 *)(r1 + 8);" \
++		"r4 = *(u64 *)(r1 + 16); r5 = *(u64 *)(r1 + 24);" \
++		"r1 = " #argument ";" \
++		"*(u64 *)(r10 - 8) = r2; *(u64 *)(r10 - 16) = r3;" \
++		"*(u64 *)(r10 - 24) = r4; *(u64 *)(r10 - 32) = r5;" \
++		"call " #function ";" \
++		"r5 = *(u64 *)(r10 - 32); r4 = *(u64 *)(r10 - 24);" \
++		"r3 = *(u64 *)(r10 - 16); r2 = *(u64 *)(r10 - 8);" \
++		"if r0 != " #expected " goto fail_%=;" \
++		"if r2 != 17 goto fail_%=; if r3 != 29 goto fail_%=;" \
++		"if r4 != 43 goto fail_%=; if r5 != 61 goto fail_%=;" \
++		"r0 = 0; exit; fail_%=: r0 = 1; exit;" \
++		: : __imm_addr(fastcall_values) : __clobber_all); \
++}
++
++FASTCALL_TEST(scalar_fastcall_ctz, bpf_ctz64, 256, 8)
++FASTCALL_TEST(scalar_fastcall_popcnt, bpf_popcnt64, -1, 64)
++FASTCALL_TEST(scalar_fastcall_clz, bpf_clz64, 256, 55)
++
++SEC("syscall")
++__failure __msg("R3 !read_ok")
++__naked int scalar_mulhi_is_not_fastcall(void)
++{
++	asm volatile (
++		"r1 = -1; r2 = -1; r3 = 17; call bpf_mulhi64;"
++		"r0 = r3; exit;"
++		::: __clobber_all);
++}
++
++char LICENSE[] SEC("license") = "GPL";

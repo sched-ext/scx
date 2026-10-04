@@ -4,18 +4,23 @@ This file explains how cake is measured and where results stand.
 
 ## Status
 
-**No published results exist for the current build.** Recent code changes
-(the G27–G36 placement work) invalidate the prior campaign numbers, so this
-file carries no result tables until the current build passes the A/B gates
-again. Dated internal records of past campaigns live in
-[`../STATE.md`](../STATE.md) and
-[`archive/EEVDF_GATE_2026-07-04.md`](./archive/EEVDF_GATE_2026-07-04.md);
-read them as history, not as claims about the current code.
+The September 28 nightly policy has a [dated KovaaK's A/B
+report](KOVAAKS_KICK_ABBA_2026-09-28.md): a small average-frame improvement,
+mixed tails and increased mean adjacent-frame jitter. Its comparison was
+between two Cake revisions, not against EEVDF. It does not establish a universal
+win, repeatability, or input-to-display latency improvement.
+
+[STATE.md](../STATE.md) owns current status and outstanding validation. The
+[JIT prototype](research/jit-bitops-prototype/README.md) has VM correctness and
+instruction-emission evidence only; hardware performance is still unmeasured.
+Older campaign records, including the [EEVDF gate](archive/EEVDF_GATE_2026-07-04.md),
+retain their original build identities and are historical.
 
 ## Method
 
 - Hardware: AMD Ryzen 7 9800X3D (8c/16t, single CCD, 96 MB X3D cache),
-  CachyOS kernel 7.1.x, performance governor.
+  the kernel, governor and boot identity must come from each run's metadata.
+  The older campaigns used 7.1.x; the September 28 game report records 7.2.7.
 - Interleaved A/B pairs: cake and EEVDF run back-to-back in the same noise
   window, ≥2 repetitions per scheduler.
 - Background noise is recorded per run as a covariate, not filtered out.

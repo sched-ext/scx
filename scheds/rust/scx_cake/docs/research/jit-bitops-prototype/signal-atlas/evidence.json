@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "date": "2026-10-02",
+  "evidence_levels": {
+    "source_catalog": true,
+    "live_read_only_capability_queries": true,
+    "small_clock_calibration_observation": true,
+    "scheduler_performance_measurement": false,
+    "source_to_consumer_delay_measured": false,
+    "new_bpf_attachment": false,
+    "raw_input_capture": false,
+    "kernel_or_scheduler_policy_modified": false
+  },
+  "unchanged_host_check": {
+    "/sys/kernel/tracing/trace_clock": "[local] global counter uptime perf mono mono_raw boot tai x86-tsc",
+    "/sys/kernel/tracing/current_tracer": "nop",
+    "/sys/kernel/sched_ext/state": "disabled",
+    "/proc/sys/kernel/random/boot_id": "e4d51516-9170-4a66-b0bd-1e47327fab05",
+    "/sys/module/nvidia_drm/parameters/vblank": "N",
+    "kernel": "7.2.8-1-cachyos-custom",
+    "release_sha256": "059f78b352ef5c796754691ecd38dbbf0c896b10c2d0a85a383f1609fed94fef"
+  },
+  "signal_count": 33,
+  "source_count": 35,
+  "files": [
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/host-clock-inventory.json",
+      "sha256": "3abcc028ac1ae584e9021cf63c4f8c13b65b904e584896dec706daccdb609d01",
+      "bytes": 1776
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/kwin-threads.json",
+      "sha256": "51b0d2983b16ed6bb144f8bd007d2cb1d8d6c44a60a702c5fbe03150f6e40b50",
+      "bytes": 591
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/vulkaninfo.txt",
+      "sha256": "ccb003cf7d5ca2eb436d3d5ce42cbe1e387339fff218ccec063d922a963d0ec7",
+      "bytes": 316934
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/vulkaninfo.stderr.txt",
+      "sha256": "412fcc2dbe72d0900dc6f91a57d45cfd8ce8540a615f4b83b1705fcfadd0ae46",
+      "bytes": 660
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/wayland-info.txt",
+      "sha256": "9f2c8f9ca5f7d12309fd9d23fdacffd85c33bef02757ca010226cb2e210707e9",
+      "bytes": 68885
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/wayland-info.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/calibrated-clocks.json",
+      "sha256": "fb860b533c42728346b5d48a22f1bd1d8b708e0a60db54d7560bc3b1683c3671",
+      "bytes": 3881
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/calibrated-clocks.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/downloads.json",
+      "sha256": "d81a29f858fb2e2fdfe0728cf380c41317de852af618ad3c52f9671324ef25a2",
+      "bytes": 625
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/clock_inventory",
+      "sha256": "b20057708e55e3b2591edb8117c6181bcd04f0cc5b1cdae2274ddc75aa01d2b8",
+      "bytes": 17472
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/calibration-backtrace.txt",
+      "sha256": "c1ce4744fb5dbbd222ce5028a4ba388a8dc6d4de3c1b3ec73c7ed52a929c7295",
+      "bytes": 1285
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/calibration-arguments.txt",
+      "sha256": "089bd00d8e6fc93a9043312b4211c257e58546c4fe81592441b8197921a93640",
+      "bytes": 1491
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/clock_inventory_initial_invalid.c",
+      "sha256": "faa1145c2d01822abdb453b50833ebb6c00e5fc3f57d1086cbff5512abefe852",
+      "bytes": 6234
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/clock_inventory.c",
+      "sha256": "b56c26d0cef76ed5143205f356a1dbee04c7bc45398a4ded24de638207978ab3",
+      "bytes": 6547
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/build_catalog.py",
+      "sha256": "af96b1a2ad0becd5c74ae7793dade310e88e953cab34c37d6e5447526c94fa6d",
+      "bytes": 28364
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/catalog.json",
+      "sha256": "ec35f04ccd694e70bee21e922f43eca10c9c3f363f5f64ac2e2ea643ada176f8",
+      "bytes": 56725
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/catalog.csv",
+      "sha256": "eeaec887ace9d2f5b88e48ffdc819848459eb3e99315fe548ec5de09094f2363",
+      "bytes": 28433
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/CATALOG.md",
+      "sha256": "afdd60e50e0236e19b28c6a38fa89314461c3772fcd13bc40b8723ae4d1869a3",
+      "bytes": 33646
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/analyze_clocks.py",
+      "sha256": "2a9e7ecb4b3cbcee044c7c7f7d4bd65e7b2709db16982b30e2bc5914b0051885",
+      "bytes": 3833
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/clock-analysis.json",
+      "sha256": "abf817a76133ac35fc9a6822af0537a0d11ab651442beebc8d266d110398c9b6",
+      "bytes": 1049
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/clock-offset-drift.png",
+      "sha256": "e0e7a55fe1ae4b1a2d68e28b426439a8e5de4c963688ee0ed108f0001450205a",
+      "bytes": 132484
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/signal-atlas/calibrated-clocks.json",
+      "sha256": "fb860b533c42728346b5d48a22f1bd1d8b708e0a60db54d7560bc3b1683c3671",
+      "bytes": 3881
+    },
+    {
+      "path": "/home/ritz/Documents/Repo/scx/scheds/rust/scx_cake/docs/research/jit-bitops-prototype/SIGNAL_FRESHNESS_CLOCKS_2026-10-02.md",
+      "sha256": "5b455d47278865cdc933fb0dd4ec3af06c5b1c507de4d53a5f0956b2693bdf94",
+      "bytes": 25614
+    }
+  ],
+  "downloads": [
+    {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/core/syncobjtimeline.cpp",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_core_syncobjtimeline.cpp",
+      "sha256": "541cef4a25a5607701f6c6d42aafc69bd2e092958ccba209117ea8b95dd0ac34"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/KDE/kwin/v6.7.5/src/wayland/transaction.cpp",
+      "path": "/home/ritz/Documents/Repo/scx/target/cake_signal_atlas_20261002T220459Z/sources/kwin-src_wayland_transaction.cpp",
+      "sha256": "3e7e2714c47fc0c4de7821a93ce09ee3ce0caacddcf24088fc6b08c96f04633e"
+    }
+  ],
+  "method_correction": "Initial helper queried swapchain domains without required context and crashed in userspace; final source filters to DEVICE/MONOTONIC/RAW and completed 16 queries. Retained failed source and backtrace identify this as invalid observer usage, not a Cake/kernel regression."
+}

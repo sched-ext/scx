@@ -1,0 +1,42 @@
+From: Usama Arif <usama.arif@linux.dev>
+Subject: [PATCH] sched_ext: Specialize the DSQ hashtable compare
+
+Local backport of the September 21, 2026 authored patch to CachyOS
+7.2.8.
+The signature is joined as in the maintainer acceptance reply.
+
+Link: https://lore.kernel.org/all/20260921171928.1639407-1-usama.arif@linux.dev/
+Link: https://lists.openwall.net/linux-kernel/2026/09/21/2444
+Accepted for sched_ext/for-7.4; see:
+Link: https://lists.openwall.net/linux-kernel/2026/09/21/2516
+
+Compare the known u64 DSQ key directly instead of using a generic
+runtime-length memcmp.
+This local backport has build and VM coverage; hardware latency is
+unmeasured.
+No new local Signed-off-by is asserted.
+---
+diff --git a/kernel/sched/ext/ext.c b/kernel/sched/ext/ext.c
+--- a/kernel/sched/ext/ext.c
++++ b/kernel/sched/ext/ext.c
+@@ -163,10 +163,20 @@
+  */
+ static DEFINE_PER_CPU(struct task_struct *, direct_dispatch_task);
+ 
++static __always_inline int dsq_cmpfn(struct rhashtable_compare_arg *arg, const void *ptr)
++{
++	const struct scx_dispatch_q *dsq = ptr;
++
++	BUILD_BUG_ON(sizeof_field(struct scx_dispatch_q, id) != sizeof(u64));
++
++	return dsq->id != *(const u64 *)arg->key;
++}
++
+ static const struct rhashtable_params dsq_hash_params = {
+ 	.key_len		= sizeof_field(struct scx_dispatch_q, id),
+ 	.key_offset		= offsetof(struct scx_dispatch_q, id),
+ 	.head_offset		= offsetof(struct scx_dispatch_q, hash_node),
++	.obj_cmpfn		= dsq_cmpfn,
+ };
+ 
+ static LLIST_HEAD(dsqs_to_free);

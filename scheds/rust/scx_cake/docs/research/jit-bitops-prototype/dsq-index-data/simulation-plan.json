@@ -1,0 +1,130 @@
+{
+  "blocks": 5,
+  "order": "alternating ABBA/BAAB",
+  "cpus": 2,
+  "host_performance_claim": false,
+  "primary": "all fixed-work checksums and completion; TCG timing diagnostic only",
+  "kernel": "same candidate image; hash arm sets sched_ext.dsq_direct=0",
+  "slots": [
+    {
+      "block": 1,
+      "slot": 1,
+      "arm": "hash",
+      "name": "sim-b1-s1-hash"
+    },
+    {
+      "block": 1,
+      "slot": 2,
+      "arm": "direct",
+      "name": "sim-b1-s2-direct"
+    },
+    {
+      "block": 1,
+      "slot": 3,
+      "arm": "direct",
+      "name": "sim-b1-s3-direct"
+    },
+    {
+      "block": 1,
+      "slot": 4,
+      "arm": "hash",
+      "name": "sim-b1-s4-hash"
+    },
+    {
+      "block": 2,
+      "slot": 1,
+      "arm": "direct",
+      "name": "sim-b2-s1-direct"
+    },
+    {
+      "block": 2,
+      "slot": 2,
+      "arm": "hash",
+      "name": "sim-b2-s2-hash"
+    },
+    {
+      "block": 2,
+      "slot": 3,
+      "arm": "hash",
+      "name": "sim-b2-s3-hash"
+    },
+    {
+      "block": 2,
+      "slot": 4,
+      "arm": "direct",
+      "name": "sim-b2-s4-direct"
+    },
+    {
+      "block": 3,
+      "slot": 1,
+      "arm": "hash",
+      "name": "sim-b3-s1-hash"
+    },
+    {
+      "block": 3,
+      "slot": 2,
+      "arm": "direct",
+      "name": "sim-b3-s2-direct"
+    },
+    {
+      "block": 3,
+      "slot": 3,
+      "arm": "direct",
+      "name": "sim-b3-s3-direct"
+    },
+    {
+      "block": 3,
+      "slot": 4,
+      "arm": "hash",
+      "name": "sim-b3-s4-hash"
+    },
+    {
+      "block": 4,
+      "slot": 1,
+      "arm": "direct",
+      "name": "sim-b4-s1-direct"
+    },
+    {
+      "block": 4,
+      "slot": 2,
+      "arm": "hash",
+      "name": "sim-b4-s2-hash"
+    },
+    {
+      "block": 4,
+      "slot": 3,
+      "arm": "hash",
+      "name": "sim-b4-s3-hash"
+    },
+    {
+      "block": 4,
+      "slot": 4,
+      "arm": "direct",
+      "name": "sim-b4-s4-direct"
+    },
+    {
+      "block": 5,
+      "slot": 1,
+      "arm": "hash",
+      "name": "sim-b5-s1-hash"
+    },
+    {
+      "block": 5,
+      "slot": 2,
+      "arm": "direct",
+      "name": "sim-b5-s2-direct"
+    },
+    {
+      "block": 5,
+      "slot": 3,
+      "arm": "direct",
+      "name": "sim-b5-s3-direct"
+    },
+    {
+      "block": 5,
+      "slot": 4,
+      "arm": "hash",
+      "name": "sim-b5-s4-hash"
+    }
+  ]
+}
