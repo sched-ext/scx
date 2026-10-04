@@ -5,7 +5,8 @@ For reviewers: [exact file changes, bundle inventory and validation handoff](HAN
 **Current startup default:** [automatic native bitops](AUTO_NATIVE_BITOPS_2026-10-02.md)
 selects CTZ/POPCNT when supported and otherwise falls back. `--portable-bitops`
 provides a comparison mode. Older reports below describe their original opt-in
-settings; division-free and other research modes are still off by default.
+settings. Division-free and the per-op native flags were removed 2026-10-04;
+verdicts and kernel requirements are in the STATE.md pattern ledger.
 
 Experimental patches and tests, prepared 2026-09-29. During preparation, the host
 kernel and running scheduler were not changed. This is a review/test bundle,

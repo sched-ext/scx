@@ -1,275 +1,141 @@
 # scx_cake
 
-A Linux `sched_ext` CPU scheduler focused on gaming responsiveness and general-purpose use.
+A Linux `sched_ext` CPU scheduler for gaming responsiveness and general use.
 
-Cake tries to keep runnable tasks from waiting unnecessarily while preserving
-cache locality and fair CPU service. Its name comes from the CAKE network queue
-manager. Scheduling decisions use task activity and hardware topology, not game
-names or application profiles.
+Cake keeps runnable tasks from waiting needlessly while preserving cache
+locality and fair CPU service. Decisions use task activity and hardware
+topology, never game names or profiles. The name comes from the CAKE network
+queue manager.
 
-This README describes the source in this checkout. An installed package may
-differ: check `scx_cake --version` and `scx_cake --help`.
-
-[Build and run](#build-and-run) · [Flags](#command-line-flags) ·
-[Toggles](#toggle-settings) · [Design](#how-scheduling-works) ·
-[Limits](#hardware-support-and-limits) · [Source](#source-and-further-reading)
+This README describes this checkout; an installed package may differ
+(`scx_cake --version`, `scx_cake --help`).
 
 ## Build and run
 
 Requirements:
 
-- A Linux kernel with `CONFIG_SCHED_CLASS_EXT=y`, BPF support and kernel BTF.
-  See the repository's [kernel configuration](../../../kernel.config).
-  Compatibility wrappers handle supported API differences; a kernel version
-  or distribution name alone does not establish that this build will load.
+- A kernel with `CONFIG_SCHED_CLASS_EXT=y`, BPF and BTF
+  ([kernel configuration](../../../kernel.config)).
 - The repository's [Rust toolchain](../../../rust-toolchain.toml), Clang with
-  BPF support, and the system libraries listed in the
-  [build instructions](../../../README.md#build--install).
-- Permission to load and attach the scheduler, provided by your scheduler
-  service or system administrator. The commands below do not grant permissions.
+  BPF support and the libraries in the [build instructions](../../../README.md#build--install).
+- Permission to load the scheduler (your scheduler service or administrator).
 
 From the scx repository root:
 
 ```sh
 cargo build --locked --release -p scx_cake
-
-# Inspect the binary and host without starting the scheduler.
-./target/release/scx_cake --version
-./target/release/scx_cake --help
-./target/release/scx_cake --print-topology
-
-# Start with the default policy, once permissions are provisioned.
-./target/release/scx_cake
+./target/release/scx_cake --version          # inspect, no attach
+./target/release/scx_cake --print-topology   # inspect, no attach
+./target/release/scx_cake                    # run the default policy
 ```
 
-You can also select Cake through your distribution's scheduler service.
-The default policy needs no profile or toggle options.
+`cake build` (`./scheds/rust/scx_cake/cake build`) produces the same release
+binary. `cat /sys/kernel/sched_ext/root/ops` shows the active scheduler; Cake's
+name starts with `cake`. Ctrl+C detaches and returns to the kernel default.
+Cake requests a five-second runnable-stall watchdog: a recovery mechanism, not a
+latency guarantee.
 
-The local `cake build` helper produces the ordinary optimized executable in
-`target/release`. At startup, Cake automatically uses native CTZ/POPCNT when
-the running kernel exports the corresponding scalar kfuncs and the x86 CPU
-supports BMI1/POPCNT. Each unavailable operation uses its portable fallback.
-Detection happens on the machine running Cake, never on the build host:
+## Stock kernel or custom patch
 
-```sh
-cake build
-# Once permissions are provisioned, native bitops are selected automatically.
-./target/release/scx_cake
-# Compare the same release using the portable operations.
-./target/release/scx_cake --portable-bitops
-```
+Cake runs on any supported kernel. Features from the experimental cake kernel
+patch ([full signals patch](docs/research/jit-bitops-prototype/0001-cake-kernel-full-signals-experimental-cachyos-7.2.8.patch))
+are detected at startup on the running machine, never at build time; without
+them Cake falls back automatically.
 
-The startup log reports the effective `Native CTZ` and `Native POPCNT` choices.
-`--native-bitops` explicitly requires both operations and fails if either is
-unavailable. `--portable-bitops` forces both off and conflicts with explicit
-native bitops/queue-scan flags. No kernel patch is needed to build or run the
-portable path. Automatic selection is enabled for user game testing; the
-[performance summary](docs/research/jit-bitops-prototype/PERFORMANCE_SUMMARY_2026-10-02.md)
-separates measured callback savings from promising screens and unconfirmed
-real-game gains. Add `--native-ring` only to experiment with CTZ queue scanning
-on compatible single-LLC hosts; it is still off by default.
+| Feature | Needs | Without it |
+|---|---|---|
+| Cached rq clock in `ops.running` | Stock ≥ 6.14 | `scx_bpf_now()` |
+| Native CTZ/POPCNT | Custom patch, x86 BMI1/POPCNT | Portable builtins |
+| `--kernel-signals` (input/fence wake, IRQ time) | Custom patch | Reports unavailable, runs normally |
+| Direct DSQ index | Custom patch (kernel side, no Cake change) | Hash lookup |
 
-The new [GPU/input/IRQ signaling experiment](docs/research/jit-bitops-prototype/GPU_INPUT_IRQ_SIGNALING_2026-10-02.md)
-is separate and defaults off. Startup detects its kernel interface even when
-disabled: `available=false` means the complete interface was not detected.
-On a supporting kernel, `--kernel-signals observe` collects signals with the
-existing placement policy; `--kernel-signals on` enables experimental placement.
-Missing support warns and falls back. Neither changes native-bitops detection.
-Add `--signal-report NEW.csv` to save counters at exit; reporting adds overhead.
-VM correctness checks passed; a hardware/game speedup has not been measured.
-
-The [fastcall kernel experiment](docs/research/jit-bitops-prototype/FASTCALL_KERNEL_REVIEW_2026-10-01.md)
-adds VM-verified kernel patches and an isolated release annotation build. It is
-not enabled by these runtime flags or integrated into the ordinary build.
-The [current assembly review](docs/research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md)
-captures the running kernel's actual native instructions and the release
-comparison after removing repeated wrapper checks. `--inspect-bpf NEW_DIRECTORY`
-loads the configured BPF object and dumps visible instructions without attaching
-the scheduler or IRQ programs. It needs BPF load permissions; JIT visibility
-also depends on kernel pointer policy. It refuses an existing output directory.
-
-`--native-hist` only optimizes diagnostics when
-`--toggle probe=1`; its savings do not apply to normal probe-off operation.
-Normal release builds use thin LTO; the separately named `release-fast`
-profile disables LTO and is not a demonstrated faster scheduler mode.
-On another checkout, run `./scheds/rust/scx_cake/cake build` from its root;
-the short `cake` command is a local symlink in `~/.local/bin`.
-
-The September 28 nightly pool-serving and queue-mark changes are part of that
-default policy, including in release builds. See the [KovaaK's testing
-findings](docs/KOVAAKS_KICK_ABBA_2026-09-28.md) for the measured gains, jitter
-tradeoff, and remaining input-latency questions. Rebuild or update from this
-nightly source to test them; an older installed release does not include them.
-
-While running, `cat /sys/kernel/sched_ext/root/ops` identifies the active
-scheduler; Cake's name starts with `cake`. Press Ctrl+C to stop a foreground
-instance. Detaching returns scheduling to the kernel's default scheduler.
-Check service logs, terminal output and the kernel log for startup or exit
-errors. Cake requests a five-second runnable-stall watchdog; it is a recovery
-mechanism, not a latency guarantee.
+Measured results and verdicts: [STATE.md](./STATE.md) pattern ledger.
 
 ## Command-line flags
 
-| Flag | Default | Behavior |
+Everything except the inspection flags is for testing; the default policy needs
+no flags.
+
+| Flag | Default | Behaviour |
 |---|---|---|
-| `-h`, `--help` | Off | Print supported flags and toggle defaults, then exit |
-| `-V`, `--version` | Off | Print the version, then exit |
-| `--print-topology` | Off | Print discovered core topology, capacity and preferred-core information, then exit without attaching |
-| `-v`, `--verbose` | Off | Enable verbose libbpf output, startup details, IRQ diagnostics and exit event counts |
-| `--toggle NAME=0\|1` | No overrides | Override a setting from the table below; repeat the option for multiple settings |
-| `--handoff-ns NS` | No override | Override the handoff threshold in nanoseconds for experiments; leave unset for the default policy |
-| `--kernel-signals off\|observe\|on` | Off | Detect optional wake/IRQ interface; observe collects without changing placement, on enables experimental policy; missing support falls back |
-| `--signal-report NEW.csv` | Off | Save signal counters/histograms at exit; requires observe/on and a new output file |
-| `--native-bitops` | Automatic detection without flag | Explicitly require both CTZ/POPCNT symbols and x86 BMI1/POPCNT |
-| `--portable-bitops` | Off | Force portable CTZ/POPCNT for comparison |
-| `--inspect-bpf NEW_DIRECTORY` | Off | Load configured BPF and dump visible instructions, then exit before attaching |
-| `--native-ring` | Off | Research: enumerate marked queues with native CTZ; require compatible single-word, single-LLC topology and verified queue order |
-| `--native-hist` | Off | Research: use native CLZ for diagnostic histogram buckets; useful only with `--toggle probe=1` |
+| `-h`, `--help` | — | Print flags and toggles, exit |
+| `-V`, `--version` | — | Print version and binary SHA-256, exit |
+| `--print-topology` | — | Print topology and core preferences, exit |
+| `-v`, `--verbose` | Off | libbpf output, startup detail, IRQ diagnostics, exit counts |
+| `--inspect-bpf NEW_DIR` | Off | Load the BPF, dump instructions, exit without attaching |
+| `--toggle NAME=0\|1` | — | Override a toggle (below); repeatable, last wins |
+| `--handoff-ns NS` | — | Override the handoff threshold |
+| `--native-bitops` | Auto | Require native CTZ/POPCNT; fail if unavailable |
+| `--portable-bitops` | Off | Force portable CTZ/POPCNT |
+| `--native-ring` | Off | CTZ queue scan on single-LLC hosts |
+| `--native-hist` | Off | Native CLZ for probe histograms; only with `probe=1` |
+| `--kernel-signals off\|observe\|on` | Off | `observe` counts signals; `on` uses them for placement |
+| `--signal-report NEW.csv` | Off | Save signal counters at exit; needs `observe` or `on` |
 
-`--version` takes precedence over `--print-topology`. These inspection modes
-do not apply or validate toggle specifications. Use the ordinary scheduler
-startup logs to check whether a requested diagnostic toggle was accepted.
+Unknown options, such as old `--profile gaming` or `-p powersave` arguments
+from `scx_loader`, are ignored with a warning and **Cake still starts** with the
+remaining options. Invalid toggle specifications are ignored the same way.
 
-### Obsolete and invalid options
+## Toggles
 
-Unknown options from an old `scx_loader` configuration or another launcher
-are ignored with a warning. Their associated values are discarded, and valid
-options still apply. If no valid override remains, Cake uses its defaults.
-
-Examples of ignored legacy arguments:
-
-- `--profile gaming`
-- `--profile=performance`
-- `-p powersave`
-- `-pperformance`
-
-In `-vpperformance`, `-v` still enables verbose output and the obsolete
-`-pperformance` suffix is ignored. None of these profile names selects a policy.
-
-Invalid toggle specifications are warned about and ignored during scheduler
-startup. They do not undo earlier valid overrides. Missing values for supported
-options, such as a bare `--toggle`, remain errors. `--help` exits before logging;
-version and topology output can be accompanied by unknown-option warnings.
-
-## Toggle settings
-
-Names are case-sensitive. Values must be exactly `0` (off) or `1` (on).
-Settings are read at startup; changing them requires restarting Cake.
-Repeated valid assignments are processed in order, so the last one wins.
-
-| Name | Default | What it controls |
+| Name | Default | Controls |
 |---|---|---|
-| `probe` | `0` | Collect additional BPF placement and delay diagnostics, reported at exit |
+| `probe` | `0` | Extra placement and delay diagnostics, reported at exit |
 
-`-v` and `probe` are independent: verbose logging does not enable probe
-instrumentation. Neither is needed for normal scheduling. The former `g85`,
-`g86`, `g87`, `g89`, and `llcsplit` toggle names are not accepted by this
-checkout; unknown names are warned about and ignored. Scheduling policy is
-enabled by default, with hardware fallbacks applied automatically.
-
-With launch permissions already provisioned:
-
-```sh
-# Log details with the default scheduling policy.
-./target/release/scx_cake -v
-
-# Collect additional diagnostics.
-./target/release/scx_cake --toggle probe=1
-```
+`-v` and `probe` are independent. Toggles are read at startup.
 
 ## How scheduling works
 
-An **LLC** is a last-level cache shared by a group of CPUs. A **DSQ** is a
-dispatch queue managed through `sched_ext`.
+An **LLC** is a last-level cache shared by a group of CPUs; a **DSQ** is a
+`sched_ext` dispatch queue. Cake has one owner queue per CPU and one wake pool
+per LLC.
 
-Cake uses CPU-owner queues and shared wake queues. With the default policy
-and supported topology, each LLC has a wake queue. Wider layouts can fall
-back to one shared wake queue.
-
-| Situation | Usual behavior |
+| Situation | Usual behaviour |
 |---|---|
-| A task wakes and Cake claims an eligible idle CPU | Admit the task directly to that CPU |
-| An eligible wake's estimated mean wait exceeds twice its mean CPU burst | Normally use its LLC's shared wake queue so nearby CPUs can serve it |
-| A task uses up its slice | Return it to its owner queue, preserving locality |
-| A CPU needs work | Check remote offers, its owner queue and its wake pool, then other eligible queues |
+| A wake claims an eligible idle CPU | Insert directly on that CPU |
+| A wake's mean wait exceeds twice its mean burst | Use its LLC wake pool |
+| A task uses up its slice | Return it to its owner queue |
+| A CPU needs work | Remote offers, own queue, wake pool, then other queues |
 
-Affinity restrictions, pinned tasks, serial handoffs and forced requeues add
-exceptions. These are common paths, not unconditional routing rules.
+Placement weighs cache warmth, whole idle cores, SMT interference, platform
+capacity hints and interrupt load (sampled IRQ share, active handlers, tick
+look-ahead). A **seat** links a CPU to a pipeline-stage task; it is a
+preference, not a reservation.
 
-Placement considers cache warmth, whole idle cores, SMT interference and
-platform capacity/preferred-core hints. A **seat** associates a CPU with a
-pipeline-stage task; it is not an exclusive reservation or a CPU-affinity change.
-Task storage retains placement history.
+Virtual runtime orders service by CPU time and nice weight. The adaptive slice
+uses lifetime runtime, age and voluntary switches, with a **1,464 ns floor** and
+**1.5 ms cap**; some paths use a fixed **3 ms** slice. Details:
+[DESIGN.md](./DESIGN.md).
 
-Cake also prefers CPUs with less interrupt work. It samples interrupt-time
-shares, tracks active interrupt handlers, and uses tick look-ahead when the
-required information is available. Noisy CPUs remain usable when suitable
-cleaner CPUs are unavailable.
+## Limits
 
-### CPU time and fairness
+- Narrow claim, seat and per-LLC pool paths need present CPU IDs in 0–63; wider
+  spans use the kernel idle picker and one pool.
+- At most 16 LLC pools; more LLCs collapse to one.
+- CPU-ID span limit 1,024 (possible CPUs included).
+- A fixed **24 ms** starvation fallback lets dispatch favour an unserved pool
+  ([DESIGN.md](./DESIGN.md#starvation-fallback-24-ms)).
 
-Virtual runtime orders service using consumed CPU time and nice-level weights.
-The adaptive task-slice calculation uses lifetime runtime, task age and voluntary
-switch count. It has a fixed **1,464 ns floor** and **1.5 ms cap**. Some paths,
-including local kernel-thread wake admission, use the fixed **3 ms** slice instead.
-
-The startup handoff probe does not set the adaptive slice floor. It supplies
-diagnostic data and, when usable, a timing horizon for tick look-ahead.
-Cake does not sample a display or game frame clock.
-
-See [DESIGN.md](./DESIGN.md) for the policy details and construct names.
-
-## Hardware support and limits
-
-Topology is discovered at startup; it is not baked in from the build machine.
-
-- Present CPU IDs must fit in 0–63 for the narrow claim, seat and per-LLC pool
-  paths. A wider present-ID span uses the kernel idle picker and one wake pool.
-- At most 16 LLC wake pools are represented. More LLCs collapse to one pool.
-- The compiled CPU-ID span limit is 1,024, including possible CPUs. This is
-  an ID-space limit, not just the number of online CPUs.
-- Missing or incomplete capacity/preference data retains fallback placement.
-  Advertised maximum frequency is reported, not treated as a speed measurement.
-
-Known limits include overflow in lifetime wait/run comparison products, delayed
-cross-LLC service when advisory queue information is stale, and serial-handoff
-eligibility based on CPU-ID span rather than online CPU count. A fixed **24 ms**
-starvation fallback lets dispatch favor an unserved pool. This is a policy
-constant, not a deliberate task delay or a guaranteed maximum wait; its current
-tuning is not established by these docs. See
-[DESIGN.md](./DESIGN.md#starvation-fallback-24-ms).
-
-Performance depends on the workload, topology and kernel. Historical benchmark
-or game results do not establish the performance of every later build.
-
-## Verification and bug reports
-
-Run the portable regression tests from the repository root:
+## Tests and bug reports
 
 ```sh
 cargo test --locked -p scx_cake
 ```
 
-The ordinary tests do not activate the scheduler. The optional verifier-load
-test is ignored by default and requires appropriate kernel support and BPF
-permissions. Passing these tests does not prove live scheduling performance.
+The tests do not attach the scheduler; the verifier-load test is ignored by
+default and needs BPF permissions. For a bug report include the version or
+commit, kernel version, CPU, launch arguments and scheduler and kernel logs.
 
-For a bug report, include the version or commit, kernel version, CPU/topology,
-exact launch arguments, and relevant scheduler and kernel logs.
-
-## Source and further reading
+## Source
 
 | File | Purpose |
 |---|---|
-| [src/main.rs](./src/main.rs) | Flags, toggle defaults, topology setup, attach/restart and IRQ monitoring |
-| [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | Scheduling policy, task state, queues and service accounting |
-| [src/bpf/intf.h](./src/bpf/intf.h) | Shared constants and topology limits |
-| [src/core_performance.rs](./src/core_performance.rs) | Capacity and preferred-core discovery |
-| [tests/cli.rs](./tests/cli.rs) | CLI regression tests without attachment |
-| [DESIGN.md](./DESIGN.md) | Current policy and known limits |
-| [STATE.md](./STATE.md) | Current status and open validation, followed by dated history |
-| [Documentation index](./docs/README.md) | Folder map, references, research, meeting page and archives |
-| [Bench tool index](./bench/README.md) | Offline checks, diagnostic scripts and retired entry points |
-| [docs/PERFORMANCE.md](./docs/PERFORMANCE.md) | Measurement background and historical results |
+| [src/main.rs](./src/main.rs) | Loader: flags, topology, attach, IRQ monitoring |
+| [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | Scheduling policy |
+| [src/bpf/intf.h](./src/bpf/intf.h) | Shared constants and limits |
+| [DESIGN.md](./DESIGN.md) | Policy and known limits |
+| [STATE.md](./STATE.md) | Current status, pattern ledger, owed work |
+| [docs/README.md](./docs/README.md) | Documentation map |
+| [bench/README.md](./bench/README.md) | Bench tools |
 
 License: GPL-2.0-only.
