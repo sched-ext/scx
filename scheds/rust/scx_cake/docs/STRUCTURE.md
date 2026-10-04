@@ -14,7 +14,7 @@ scx/                                  Workspace
 └── scheds/rust/scx_cake/              Cake package
     ├── README.md                     User-facing build, flags and limits
     ├── DESIGN.md                     Current scheduling policy
-    ├── STATE.md                      Current status plus dated rounds
+    ├── STATE.md                      Current status, pattern ledger, owed work
     ├── Cargo.toml, build.rs           Package and BPF build integration
     ├── .cargo/                       Package-local Cargo configuration
     ├── .codegraph/                   Local generated source index
