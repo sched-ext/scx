@@ -1012,30 +1012,28 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * The move_to_local can fail if we raced with another CPU in the subcell
-	 * and now the subcell queue is empty. Try the CPU DSQ as a fallback.
+	 * A head can leave between the peek and the move, consumed by another
+	 * CPU in the subcell or dequeued. Fall back to the other DSQ instead of
+	 * idling with its head queued.
 	 */
-
-	/* Try the winner first */
-	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
-		/*
-		 * Served the per-CPU DSQ: restart its wait clock. If it is now
-		 * empty the next dispatch's peek clears it.
-		 */
-		if (min_vtime_dsq.raw == cpu_dsq.raw)
-			WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
-		if (enable_llc_awareness && min_vtime_dsq.raw == subcell_dsq.raw) {
-			struct subcell *subcell = lookup_subcell(cell, subcell_id);
-
-			if (subcell)
-				subcell_llc_nr_queued_dec(subcell, llc);
-		}
-		return;
+	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		min_vtime_dsq = min_vtime_dsq.raw == subcell_dsq.raw ? cpu_dsq : subcell_dsq;
+		if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+			return;
 	}
 
-	/* The subcell DSQ won but raced empty; try the CPU DSQ. */
-	if (min_vtime_dsq.raw == subcell_dsq.raw)
-		scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0);
+	/*
+	 * Served the per-CPU DSQ: restart its wait clock. If it is now empty
+	 * the next dispatch's peek clears it.
+	 */
+	if (min_vtime_dsq.raw == cpu_dsq.raw) {
+		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
+	} else if (enable_llc_awareness) {
+		struct subcell *subcell = lookup_subcell(cell, subcell_id);
+
+		if (subcell)
+			subcell_llc_nr_queued_dec(subcell, llc);
+	}
 }
 
 /*
