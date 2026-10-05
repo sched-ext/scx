@@ -42,10 +42,19 @@ struct {
 
 struct scx_allocator scx_cgrp_allocator;
 
+static struct scx_urcu scx_cgrp_urcu;
+
+SCX_URCU_DEFINE(scx_cgrp, scx_cgrp_urcu, scx_cgrp_allocator);
+
 __hidden
 int scx_cgrp_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_cgrp_allocator, data_size, align);
+	int ret = scx_alloc_init(&scx_cgrp_allocator, data_size, align);
+
+	if (ret)
+		return ret;
+
+	return scx_cgrp_urcu_init();
 }
 
 __hidden
@@ -126,12 +135,10 @@ void scx_cgrp_free(struct cgroup *cgrp)
 	scx_free(&scx_cgrp_allocator, data);
 }
 
-static struct scx_urcu scx_cgrp_urcu;
-
 /*
  * The deferred counterpart of scx_cgrp_free(): queue @cgrp's allocation, if
- * any, for freeing after a grace period, currently provided by the scx_urcu
- * machinery in lib/sdt_alloc.bpf.c. Same repetition rules as scx_cgrp_free().
+ * any, for freeing after a grace period. Same repetition rules as
+ * scx_cgrp_free().
  */
 __hidden
 void scx_cgrp_free_rcu(struct cgroup *cgrp)
@@ -149,7 +156,8 @@ void scx_cgrp_free_rcu(struct cgroup *cgrp)
 	if (unlikely(!data))
 		return;
 
-	scx_urcu_free(&scx_cgrp_urcu, &scx_cgrp_allocator, data);
+	if (scx_urcu_free(&scx_cgrp_urcu, &scx_cgrp_allocator, data))
+		scx_cgrp_urcu_kick();
 }
 
 /* scx_urcu driver programs, discovered by name and run by the userspace side */
