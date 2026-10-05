@@ -62,13 +62,6 @@ struct Cli {
     /// Run BPF scheduler only, disable Rust adaptive control loop
     #[arg(long)]
     no_adaptive: bool,
-
-    /// Override the topology-derived Phi distance scale (phi_dist_scale_q16).
-    /// 0 disables the Phi steal-resist (flat CoDel target); omit for the
-    /// topology value. Test/bench use -- the override holds across both the
-    /// adaptive and --no-adaptive paths.
-    #[arg(long)]
-    phi_scale: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -96,7 +89,6 @@ fn main() -> Result<()> {
     let dump_log = cli.dump_log;
     let nr_cpus = cli.nr_cpus;
     let no_adaptive = cli.no_adaptive;
-    let phi_scale = cli.phi_scale;
 
     if cli.version {
         println!(
@@ -107,7 +99,7 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive, phi_scale),
+        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive),
         Some(SubCmd::Probe) => {
             cli::probe::run_probe();
             Ok(())
@@ -124,7 +116,6 @@ fn run_scheduler(
     dump_log: bool,
     nr_cpus: Option<u64>,
     no_adaptive: bool,
-    phi_scale: Option<u64>,
 ) -> Result<()> {
     ctrlc::set_handler(move || {
         SHUTDOWN.store(true, Ordering::Relaxed);
@@ -181,11 +172,9 @@ fn run_scheduler(
         // loops, so a CPU broken at boot self-corrects and the R_eff/phi/
         // domain tables track the live width.
         let mut last_online = topology::CpuTopology::online_cpu_count();
-        if let Err(e) = topology::CpuTopology::detect_and_populate(
-            &mut sched,
-            nr_cpus_display as usize,
-            phi_scale,
-        ) {
+        if let Err(e) =
+            topology::CpuTopology::detect_and_populate(&mut sched, nr_cpus_display as usize)
+        {
             log_warn!("CACHE TOPOLOGY DETECT FAILED: {}", e);
         }
 
@@ -203,7 +192,6 @@ fn run_scheduler(
                 topology::CpuTopology::poll_hotplug(
                     &mut sched,
                     nr_cpus_display as usize,
-                    phi_scale,
                     &mut last_online,
                 );
 
@@ -372,7 +360,7 @@ fn run_scheduler(
         } else {
             // ADAPTIVE MODE: BPF + SINGLE-THREAD MONITOR LOOP
             log_info!("PANDEMONIUM IS ACTIVE (CTRL+C TO EXIT)");
-            adaptive::monitor_loop(&mut sched, &SHUTDOWN, verbose, nr_cpus_display, phi_scale)?
+            adaptive::monitor_loop(&mut sched, &SHUTDOWN, verbose, nr_cpus_display)?
         };
 
         log_info!("PANDEMONIUM IS SHUTTING DOWN");

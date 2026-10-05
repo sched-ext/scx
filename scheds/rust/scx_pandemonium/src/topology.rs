@@ -332,22 +332,10 @@ impl CpuTopology {
     // cache_domain + l2_siblings (USED TOGETHER), THE AFFINITY-RANK FAMILY,
     // cpu_domain, AND THE TUNING KNOBS LAST -- THE "GO" SIGNAL THAT TRIGGERS
     // BPF'S OWN tau-SCALED RE-DERIVATION.
-    pub fn detect_and_populate(
-        sched: &mut Scheduler,
-        nr_cpus: usize,
-        phi_scale: Option<u64>,
-    ) -> Result<TopologySpectrum> {
+    pub fn detect_and_populate(sched: &mut Scheduler, nr_cpus: usize) -> Result<TopologySpectrum> {
         let topo = Self::detect(nr_cpus)?;
         topo.log_summary();
-        let (reff, rank, mut spectrum) = topo.compute_resistance_affinity();
-        if let Some(pv) = phi_scale {
-            log_info!(
-                "PHI OVERRIDE: phi_dist_scale_q16 {} -> {} (--phi-scale)",
-                spectrum.phi_dist_scale_q16,
-                pv
-            );
-            spectrum.phi_dist_scale_q16 = pv;
-        }
+        let (reff, rank, spectrum) = topo.compute_resistance_affinity();
         topo.log_resistance_affinity(&reff, &rank, spectrum);
         let domains = topo.compute_domain_tree();
         topo.log_domains(&domains);
@@ -400,12 +388,7 @@ impl CpuTopology {
     // self-corrects once real sysfs data exists, and every R_eff/phi/domain
     // table tracks the live width. Called each tick by BOTH control loops.
     // Returns true when it fired -- the adaptive loop keys its tau refresh on it.
-    pub fn poll_hotplug(
-        sched: &mut Scheduler,
-        nr_cpus: usize,
-        phi_scale: Option<u64>,
-        last_online: &mut usize,
-    ) -> bool {
+    pub fn poll_hotplug(sched: &mut Scheduler, nr_cpus: usize, last_online: &mut usize) -> bool {
         let now = Self::online_cpu_count();
         if now == 0 || now == *last_online {
             return false;
@@ -416,7 +399,7 @@ impl CpuTopology {
             now
         );
         *last_online = now;
-        if let Err(e) = Self::detect_and_populate(sched, nr_cpus, phi_scale) {
+        if let Err(e) = Self::detect_and_populate(sched, nr_cpus) {
             log_warn!("HOTPLUG TOPOLOGY RE-DETECT FAILED: {}", e);
         }
         true
@@ -1221,18 +1204,32 @@ impl CpuTopology {
     ) -> Result<()> {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES as usize;
         let valid = self.nr_cpus.saturating_sub(1).min(stride);
-        // R_eff's SPAN, FOR THE DIMENSIONLESS EMIT BELOW. Same quantity
-        // detect_and_populate calls reff_norm; recomputed here so this function
-        // stays self-contained rather than taking an eighth argument.
-        let reff_span =
-            ((reff.iter().cloned().fold(0.0f64, f64::max) * 1_000_000.0).round() as u64).max(1);
+        // R_eff's SPAN ACROSS DISTINCT PAIRS, FOR THE DIMENSIONLESS EMIT BELOW. A
+        // distance prices only its excess over the nearest pair on the machine:
+        // the nearest peer is free, the most distant pair is 65536, and a
+        // topology whose pairs are all equidistant (2C on one L3) prices nothing.
+        // The diagonal is excluded -- R_eff(i, i) is 0 and is no peer.
+        let n = self.nr_cpus;
+        let (mut rmin, mut rmax) = (f64::MAX, 0.0f64);
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    let r = reff[i * n + j];
+                    rmin = rmin.min(r);
+                    rmax = rmax.max(r);
+                }
+            }
+        }
+        let to_scaled = |r: f64| (r * 1_000_000.0).round().clamp(0.0, u32::MAX as f64) as u64;
+        let reff_floor = if rmin == f64::MAX { 0 } else { to_scaled(rmin) };
+        let reff_span = to_scaled(rmax).saturating_sub(reff_floor);
         for cpu in 0..self.nr_cpus {
             for slot in 0..valid {
                 let val = rank[cpu * self.nr_cpus + slot];
                 sched.write_affinity_rank(cpu as u32, slot as u32, val)?;
                 // T3b.1: the emergent-domain crossing price to this ranked peer,
                 // 1:1 with the rank slot (sentinel for an out-of-range peer id).
-                // UNDER --phi-scale 0 (phi_dist_scale_q16 == 0) THE STEAL
+                // IF phi_dist_scale_q16 IS 0 (tau UNSET; ITS FLOOR PREVENTS IT) THE STEAL
                 // DOES NO R_eff DISTANCE PRICING; MAKE THE CROSSING PRICE
                 // SENTINEL TOO SO THE STEAL-SIDE PAIR-SPLIT HOLD IS A NO-OP,
                 // MATCHING reff_value's FLAT codel_target BASELINE (THE STEAL
@@ -1250,7 +1247,7 @@ impl CpuTopology {
                 // final steal extra-wait in ns, (R_eff * phi_dist_scale_q16) >> 16,
                 // so the BPF steal does one indexed read and no multiply. The 1e6
                 // scale matches build_affinity_rank's sort key. phi_dist_scale_q16
-                // is 0 on monolithic / --phi-scale 0 -> every penalty 0 -> flat
+                // is computed on every part, a single-L3 one included; 0 only with tau unset -> flat
                 // codel_target (exact prior behavior).
                 // CEILING-ONLY CLAMP (shipped with SPILL-Phi; deliberately no
                 // floor): an unclamped toll scales toward tau itself (~40ms,
@@ -1274,18 +1271,19 @@ impl CpuTopology {
                 // THE SAME R_eff SHAPE, WITH NO TIME UNIT ON IT. reff_value folds
                 // the distance against TAU because that is the steal's question:
                 // only sustained backlog (~tau) justifies a far pull. The wake-path
-                // placement sites ask a different question against comparands two
-                // orders smaller -- one codel_target (233-667us) and a backlog
-                // quantised at one pcpu_demand_ns (12-50us) -- so the tau fold is
-                // 20-170x oversized there and settles those tests by itself.
+                // placement sites ask a different question against a comparand two
+                // orders smaller -- one codel_target (233-667us) -- so the tau fold
+                // is 20-170x oversized there and settles those tests by itself.
                 // Emit the fraction instead and let each consumer multiply by the
                 // yardstick its own comparison uses. Q16, so 65536 == the most
                 // distant pair on this machine; bounded at every topology, which is
-                // what stops slot 0 changing rung from moving a threshold 42x.
-                let frac_q16 = if phi_dist_scale_q16 == 0 {
+                // what stops slot 0 changing rung from moving a threshold 42x. The
+                // nearest pair is 0, so a distance only ever prices how much
+                // farther a peer is than the nearest one could have been.
+                let frac_q16 = if phi_dist_scale_q16 == 0 || reff_span == 0 {
                     0u32
                 } else {
-                    ((r_scaled << 16) / reff_span).min(65536) as u32
+                    ((r_scaled.saturating_sub(reff_floor) << 16) / reff_span).min(65536) as u32
                 };
                 sched.write_reff_frac(cpu as u32, slot as u32, frac_q16)?;
             }

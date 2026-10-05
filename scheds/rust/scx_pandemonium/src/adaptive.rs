@@ -297,7 +297,6 @@ pub fn monitor_loop(
     shutdown: &'static AtomicBool,
     verbose: bool,
     nr_cpus: u64,
-    phi_scale: Option<u64>,
 ) -> Result<bool> {
     // HOTPLUG POLL STATE: the online count as last observed. The poll below
     // re-derives topology on change AND refreshes the Rust-local tau_ns --
@@ -386,7 +385,7 @@ pub fn monitor_loop(
         crate::watchdog::LOOP_HEARTBEAT.fetch_add(1, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(1));
 
-        if CpuTopology::poll_hotplug(sched, nr_cpus as usize, phi_scale, &mut last_online) {
+        if CpuTopology::poll_hotplug(sched, nr_cpus as usize, &mut last_online) {
             tau_ns = sched.read_tuning_knobs().topology_tau_ns;
         }
 
