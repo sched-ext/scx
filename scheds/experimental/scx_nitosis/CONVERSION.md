@@ -12,8 +12,8 @@ fork, the features it removed, the representation choices, the verifier
 constraints that shaped the code, and the procedure for syncing with
 mitosis.
 
-The last sync, on 2026-09-29, covered main through c9b90b3ad3d0
-("scheds/include: Sync with kernel sched_ext/for-7.4 (c6fe97c34a1a)").
+The last sync, on 2026-10-05, covered main through 63f2014925f7
+("scx_mitosis: Retry the other DSQ when the chosen head got away").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
