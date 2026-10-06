@@ -645,6 +645,10 @@ static inline bool is_migration_disabled(const struct task_struct *p)
 void bpf_rcu_read_lock(void) __ksym;
 void bpf_rcu_read_unlock(void) __ksym;
 
+/* irq */
+void bpf_local_irq_save(unsigned long *flags) __ksym __weak;
+void bpf_local_irq_restore(unsigned long *flags) __ksym __weak;
+
 /* resilient qspinlock */
 int bpf_res_spin_lock(struct bpf_res_spin_lock *lock) __ksym __weak;
 void bpf_res_spin_unlock(struct bpf_res_spin_lock *lock) __ksym __weak;
