@@ -2514,8 +2514,12 @@ SCX_OPS_CID_DEFINE(mitosis,
 		* a configuration change. dispatch() extends the slice of a solo
 		* task whose placement remains valid, so the enqueue only fires
 		* when the task must leave the cpu.
+		*
+		* A sub may set SCX_OPS_TID_TO_TASK to declare that it needs the
+		* tid lookup, and the kernel rejects it unless the root has the
+		* flag too.
 		*/
-	       .flags			= SCX_OPS_ENQ_LAST,
+	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_TID_TO_TASK,
 	       .select_cid		= (void *)mitosis_select_cid,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
