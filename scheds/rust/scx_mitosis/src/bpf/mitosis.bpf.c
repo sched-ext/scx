@@ -766,6 +766,12 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
+	 * enqueue() starts a new placement. A borrowed one that never ran still
+	 * carries the flag, since only stopping() clears it.
+	 */
+	tctx->borrowed = false;
+
+	/*
 	 * CPU -> subcell mappings can change between enqueue() and stopping().
 	 * If that happens, the task's dsq_vtime may no longer belong to the
 	 * CPU-local or shared subcell vtime visible at stopping(), and
