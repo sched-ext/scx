@@ -1209,6 +1209,13 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
+        // close the open sub intervals so that the counters read below are
+        // current, see sub_charge_cids()
+        self.skel
+            .progs
+            .sub_charge_cids
+            .test_run(ProgramInput::default())
+            .context("running sub_charge_cids")?;
         // the demand deltas are measured up to here, see collect_demand_metrics()
         let sampled_at = Instant::now();
         let cpu_ctxs = read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for metrics")?;
@@ -1255,7 +1262,7 @@ impl<'a> Scheduler<'a> {
         // Deltas over the time that really passed: an iteration can take well
         // over the nominal interval and events wake the loop early. Let half
         // an interval build up before sampling again. sampled_at is taken right
-        // before the counters are read.
+        // after the sub intervals are closed, before the arena read.
         let half_interval = self.monitor_interval / 2;
         let interval_ns = match self.demand_sampled_at {
             Some(prev) if sampled_at.duration_since(prev) < half_interval => return Ok(()),
@@ -1272,10 +1279,14 @@ impl<'a> Scheduler<'a> {
         let mut on_own_ns = [0u64; MAX_CELLS];
         let mut lent_ns = [0u64; MAX_CELLS];
 
+        // the subs' time on a cid is charged apart from our own tasks' time,
+        // see sub_charge()
         for cpu_ctx in cpu_ctxs.iter() {
             let owner = cpu_ctx.cell as usize;
+            let running_ns: [u64; MAX_CELLS] =
+                std::array::from_fn(|cell| cpu_ctx.running_ns[cell] + cpu_ctx.sub_ns[cell]);
             for cell in 0..MAX_CELLS {
-                let ns = cpu_ctx.running_ns[cell];
+                let ns = running_ns[cell];
                 total_running_ns[cell] += ns;
                 if owner == cell {
                     on_own_ns[cell] += ns;
@@ -1289,8 +1300,8 @@ impl<'a> Scheduler<'a> {
                 );
             }
             // Lent time: non-owner cell tasks running on this CPU
-            let total_on_cpu: u64 = cpu_ctx.running_ns.iter().sum();
-            let owner_on_cpu = cpu_ctx.running_ns[owner];
+            let total_on_cpu: u64 = running_ns.iter().sum();
+            let owner_on_cpu = running_ns[owner];
             lent_ns[owner] += total_on_cpu.saturating_sub(owner_on_cpu);
         }
 

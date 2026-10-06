@@ -1574,6 +1574,65 @@ void BPF_STRUCT_OPS(mitosis_sub_detach, struct scx_sub_detach_args *args)
 	}
 }
 
+/* charge the open sub interval of cctx's cid up to now, cctx->sub_lock held */
+static void sub_charge(struct cpu_ctx __arena *cctx, u64 now)
+{
+	if (cctx->sub_cell < MAX_CELLS)
+		cctx->sub_ns[cctx->sub_cell] += time_delta(now, cctx->sub_since);
+	cctx->sub_since = now;
+}
+
+/*
+ * A sub's tasks never pass through stopping(), so this is where a delegated
+ * cell's cpu time is charged. The sub fields are written here and by
+ * sub_charge_cids() from the sampling cpu, under sub_lock.
+ */
+void BPF_STRUCT_OPS(mitosis_sub_cid_sched_updated, s32 cid, u64 sched)
+{
+	struct cpu_ctx __arena *cctx = &cpu_ctxs[cid];
+	u32 cell;
+
+	MITOSIS_TOUCH_ARENA();
+
+	if (sched == SCX_CID_SCHED_NONE || sched == SCX_CID_SCHED_SELF) {
+		cell = SUB_CELL_NONE;
+	} else if (READ_ONCE(cells[cctx->cell].sub_cgid) == sched) {
+		/* the usual holder is the sub of the cid's own cell */
+		cell = cctx->cell;
+	} else {
+		/* any other sub is resolved through its cgroup */
+		struct cgroup *cgrp __free(cgroup) = bpf_cgroup_from_id(sched);
+		struct cgrp_ctx __arena *cgc = cgrp ? lookup_cgrp_ctx_fallible(cgrp) : NULL;
+
+		cell = cgc ? READ_ONCE(cgc->cell) : SUB_CELL_NONE;
+	}
+
+	guard(scx_spin_lock)(&cctx->sub_lock);
+	sub_charge(cctx, scx_bpf_now());
+	cctx->sub_cell = cell;
+}
+
+/*
+ * Charge every open sub interval, so that the sampler reads cumulative counters
+ * only. Run by userspace before each sample, see collect_metrics().
+ */
+SEC("syscall")
+int sub_charge_cids(void *ctx)
+{
+	s32 cid;
+
+	MITOSIS_TOUCH_ARENA();
+
+	bpf_arena_for(cid, 0, topo->nr_cids) {
+		struct cpu_ctx __arena *cctx = &cpu_ctxs[cid];
+
+		/* sub_lock nests inside the rq lock, so irqs stay off */
+		guard(scx_spin_lock_irqsave)(&cctx->sub_lock);
+		sub_charge(cctx, scx_bpf_now());
+	}
+	return 0;
+}
+
 /* Tracepoints provide cgroup lifecycle tracking for cell management. */
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
@@ -1827,11 +1886,15 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		if (dsq_is_invalid(dsq_id))
 			return;
 		if (enable_llc_awareness) {
-			scx_bpf_dump("CID[%d] cell=%d llc=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell, cpu_ctx->llc,
-				     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
+			scx_bpf_dump("CID[%d] cell=%d sub_cell=%u llc=%d vtime=%llu nr_queued=%d\n",
+				     i, cpu_ctx->cell, cpu_ctx->sub_cell, cpu_ctx->llc,
+				     READ_ONCE(cpu_ctx->vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		} else {
-			scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
-				     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
+			scx_bpf_dump("CPU[%d] cell=%d sub_cell=%u vtime=%llu nr_queued=%d\n",
+				     i, cpu_ctx->cell, cpu_ctx->sub_cell,
+				     READ_ONCE(cpu_ctx->vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		}
 	}
 }
@@ -2049,6 +2112,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 		cpu_ctx = &cpu_ctxs[i];
 		cpu_ctx->cpu = scx_bpf_cid_to_cpu(i);
+		cpu_ctx->sub_cell = SUB_CELL_NONE;
 		if (enable_llc_awareness)
 			cpu_ctx->llc = t->cid[i].llc_idx >= 0 ? t->cid[i].llc_idx : LLC_INVALID;
 		else
@@ -2537,6 +2601,7 @@ SCX_OPS_CID_DEFINE(mitosis,
 	       .cpuctl_move		= (void *)mitosis_cpuctl_move,
 	       .sub_attach		= (void *)mitosis_sub_attach,
 	       .sub_detach		= (void *)mitosis_sub_detach,
+	       .sub_cid_sched_updated	= (void *)mitosis_sub_cid_sched_updated,
 	       .dump 			= (void *)mitosis_dump,
 	       .dump_task		= (void *)mitosis_dump_task,
 	       .init			= (void *)mitosis_init,

@@ -13,11 +13,26 @@ typedef unsigned long long u64;
 typedef unsigned int u32;
 #endif
 
+/*
+ * The sub fields of cpu_ctx are written under an arena spinlock. Userspace
+ * never takes it and only needs its word in the layout. The lock type exists
+ * only in a BPF compile with vmlinux.h: bindgen targets bpf without it and the
+ * editor view has it without the target.
+ */
+#if defined(__BPF__) && defined(__VMLINUX_H__)
+#include <lib/spinlock.h>
+#else
+typedef u32 arena_spinlock_t;
+#endif
+_Static_assert(sizeof(arena_spinlock_t) == sizeof(u32), "userspace reserves one u32");
+
 enum consts {
 	MAX_CPUS_SHIFT = 9,
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
+	/* cpu_ctx.sub_cell when no sub-scheduler holds the cid */
+	SUB_CELL_NONE = MAX_CELLS,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
 	MAX_CG_DEPTH = 256,
@@ -71,6 +86,14 @@ struct cpu_ctx {
 	u32 llc;
 	/* cpu this cid maps to, used by userspace to translate array indices */
 	u32 cpu;
+	/* guards the sub fields below, see sub_charge() */
+	arena_spinlock_t sub_lock;
+	/* the cell of the sub holding this cid, SUB_CELL_NONE when none */
+	u32 sub_cell;
+	/* when that sub took the cid or was last charged */
+	u64 sub_since;
+	/* time subs' tasks ran on this cid, per cell */
+	u64 sub_ns[MAX_CELLS];
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 struct cgrp_ctx {
