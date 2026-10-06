@@ -21,4 +21,10 @@ scx_mitosis --cell-parent-cgroup /workloads
 
 # With LLC-awareness
 scx_mitosis --cell-parent-cgroup /workloads --enable-llc-awareness
+
+# Run the scheduler and monitor its stats in the same process
+scx_mitosis --cell-parent-cgroup /workloads --monitor-sync 1
+
+# Monitor an already running scheduler from another terminal
+scx_mitosis --monitor 1
 ```
