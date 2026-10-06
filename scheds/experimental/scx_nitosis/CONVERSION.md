@@ -312,6 +312,8 @@ expensively and inlining them into tp_cgroup_mkdir()'s ancestor loop
 exceeded the instruction limit. The idle pick phases are __noinline subprogs
 because inlining them into every caller exceeded the combined stack limit
 once LLC awareness stacked a second pick level into ops.select_cid().
+sub_cap_sync_cell() is one too, so that the two halves of the cap pass share
+a single copy of its cmask bodies.
 
 The ops.init() topology walk fills each entry field by field, because clang
 20 derived the destination of the aggregate copy before the arena

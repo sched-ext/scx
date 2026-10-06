@@ -547,6 +547,8 @@ impl<'a> Scheduler<'a> {
             }
 
             // Periodic work on every iteration
+            self.release_detached_cells()
+                .context("releasing detached cells")?;
             self.refresh_bpf_cells()
                 .context("refreshing BPF cell state")?;
             self.check_cpuset_changes()
@@ -583,9 +585,11 @@ impl<'a> Scheduler<'a> {
     /// Process cell manager events (new/destroyed cgroups)
     fn process_cell_events(&mut self) -> Result<()> {
         let (num_new, num_destroyed, new_cell_ids, destroyed_cell_ids) = {
+            // the records decide whether a destroyed cell's ID is reused at
+            // once or waits for its sub-scheduler to detach
             let (new_cells, destroyed_cells) = self
                 .cell_manager
-                .process_events()
+                .process_events(|| read_cell_sub_cgids(&self.skel).context("reading cell records"))
                 .context("processing inotify events")?;
 
             if new_cells.is_empty() && destroyed_cells.is_empty() {
@@ -615,6 +619,29 @@ impl<'a> Scheduler<'a> {
             "Cell config updated ({} new, {} destroyed): {}",
             num_new,
             num_destroyed,
+            self.cell_manager.format_cell_config(&cpu_assignments)
+        );
+
+        Ok(())
+    }
+
+    /// Free the cells whose sub-scheduler detached since the last pass and
+    /// re-apply the configuration, which clears their owners. A detach is not
+    /// a cgroup event, so inotify does not report it.
+    fn release_detached_cells(&mut self) -> Result<()> {
+        let sub_cgids = read_cell_sub_cgids(&self.skel).context("reading cell records")?;
+        let released = self.cell_manager.release_detached_cells(&sub_cgids);
+        if released == 0 {
+            return Ok(());
+        }
+
+        let cpu_assignments = self
+            .compute_and_apply_cell_config(&[])
+            .context("recomputing cell configuration after a detach")?;
+
+        info!(
+            "Released {} detached cell(s): {}",
+            released,
             self.cell_manager.format_cell_config(&cpu_assignments)
         );
 
@@ -1495,6 +1522,24 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
             }
         }
     }
+}
+
+/// Every cell's attached sub-scheduler cgroup ID as the arena records it, 0 when none.
+fn read_cell_sub_cgids(skel: &BpfSkel) -> Result<Vec<u64>> {
+    let bss = skel
+        .maps
+        .bss_data
+        .as_ref()
+        .context("bss_data not available")?;
+    let ptr = bss.cells as *const bpf_intf::cell;
+    if ptr.is_null() {
+        bail!("cells arena array not initialized");
+    }
+    let mut cgids = Vec::with_capacity(MAX_CELLS);
+    for cell in 0..MAX_CELLS {
+        cgids.push(unsafe { std::ptr::addr_of!((*ptr.add(cell)).sub_cgid).read_volatile() });
+    }
+    Ok(cgids)
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {

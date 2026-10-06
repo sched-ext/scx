@@ -91,10 +91,13 @@ _Static_assert(sizeof(struct cell_llc) >= SCX_CACHELINE_SIZE,
 	       "cell_llc must be at least one cache line");
 
 struct cell {
-	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
+	// cgroup ID of the cell owner, kept while a detaching sub-scheduler
+	// still holds the cell (0 for cell 0 or none)
 	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
+	// cgroup ID of the attached sub-scheduler, 0 when none
+	u64 sub_cgid;
 	// Bitmap of LLC DSQs that have queued work but no CPUs in this cell
 	u64 llcs_to_drain;
 	// Bitmap of LLCs that contain CPUs assigned to this cell

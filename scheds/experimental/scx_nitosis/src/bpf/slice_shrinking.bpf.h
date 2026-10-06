@@ -106,12 +106,17 @@ static inline u64 slice_shrink_limit(u64 avg_runtime_ns, enum slice_shrink_resul
 	return limit;
 }
 
-/* Shrink p's slice to limit and bump the appropriate stat counter. */
-static inline void slice_shrink_apply(struct task_struct *p, u64 limit, enum slice_shrink_result result, u32 cell,
-				      struct cpu_ctx __arena *cctx)
+/*
+ * Shrink p's slice to limit and bump the stat counter. Return false when the
+ * kernel refuses the write, which it does for a task of another sched.
+ */
+static inline bool
+slice_shrink_apply(struct task_struct *p, u64 limit, enum slice_shrink_result result,
+		   u32 cell, struct cpu_ctx __arena *cctx)
 {
 	if (p->scx.slice > limit) {
-		scx_bpf_task_set_slice(p, limit);
+		if (!scx_bpf_task_set_slice(p, limit))
+			return false;
 		if (result == SHRINK_MAX)
 			cstat_inc(CSTAT_SLICE_SHRINK_MAX, cell, cctx);
 		else if (result == SHRINK_PROPORTIONAL)
@@ -119,6 +124,7 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit, enum sli
 		else if (result == SHRINK_MIN)
 			cstat_inc(CSTAT_SLICE_SHRINK_MIN, cell, cctx);
 	}
+	return true;
 }
 
 /*
@@ -126,12 +132,13 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit, enum sli
  * Shrinks the currently running task's slice based on the waiter's
  * EWMA runtime. Caller must check enable_slice_shrinking and curr.
  */
-static inline void slice_shrink_on_enqueue(struct task_struct *curr, struct task_ctx __arena *pinned_waiter_tctx,
-					   u32 cell, struct cpu_ctx __arena *cctx)
+static inline bool
+slice_shrink_on_enqueue(struct task_struct *curr, struct task_ctx __arena *pinned_waiter_tctx,
+			u32 cell, struct cpu_ctx __arena *cctx)
 {
 	enum slice_shrink_result result;
 	u64 limit = slice_shrink_limit(pinned_waiter_tctx->avg_runtime_ns, &result);
-	slice_shrink_apply(curr, limit, result, cell, cctx);
+	return slice_shrink_apply(curr, limit, result, cell, cctx);
 }
 
 /*

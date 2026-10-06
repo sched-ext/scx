@@ -755,6 +755,11 @@ pub struct CellManager {
     cell_id_to_cgid: HashMap<u32, u64>,
     /// Freed cell IDs available for reuse
     free_cell_ids: BTreeSet<u32>,
+    /// Cell IDs of destroyed cgroups whose sub-scheduler has not detached yet.
+    /// An ID stays out of reuse until then, so the cell's recorded owner never
+    /// changes while a sub-scheduler is attached to it. See
+    /// release_detached_cells().
+    detaching_cells: BTreeSet<u32>,
     next_cell_id: u32,
     max_cells: u32,
     /// Cpumask of all CPUs in the system (from topology)
@@ -831,6 +836,7 @@ impl CellManager {
             cells: HashMap::new(),
             cell_id_to_cgid: HashMap::new(),
             free_cell_ids: BTreeSet::new(),
+            detaching_cells: BTreeSet::new(),
             next_cell_id: 1, // Cell 0 is reserved for root
             max_cells,
             all_cpus,
@@ -909,8 +915,16 @@ impl CellManager {
     /// Rather than processing individual events, we simply check if any events occurred
     /// and then rescan the directory to reconcile state. This is simpler and handles
     /// edge cases like inotify queue overflow gracefully.
+    ///
+    /// `read_records` returns the cell records as read_cell_sub_cgids() does.
+    /// It runs after the directory listing, so that a sub-scheduler which
+    /// attached to a cgroup removed before the listing still counts as holding
+    /// its cell.
     #[allow(clippy::type_complexity)]
-    pub fn process_events(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
+    pub fn process_events(
+        &mut self,
+        read_records: impl FnOnce() -> Result<Vec<u64>>,
+    ) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
         let mut buffer = [0; 1024];
         let mut has_events = false;
 
@@ -936,15 +950,21 @@ impl CellManager {
         }
 
         // Rescan directory and reconcile with our tracked state
-        self.reconcile_cells()
+        let current_entries = self.scan_cells()?;
+        let sub_cgids = read_records()?;
+        self.reconcile_scanned(current_entries, &sub_cgids)
     }
 
     /// Reconcile our tracked cells with the actual cgroup directory contents.
     /// Returns (new_cells, destroyed_cells).
-    fn reconcile_cells(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
-        let mut new_cells = Vec::new();
+    #[cfg(test)]
+    fn reconcile_cells(&mut self, sub_cgids: &[u64]) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
+        let current_entries = self.scan_cells()?;
+        self.reconcile_scanned(current_entries, sub_cgids)
+    }
 
-        // Snapshot current child cgroups by path and inode.
+    /// Snapshot current child cgroups by path and inode.
+    fn scan_cells(&self) -> Result<BTreeMap<PathBuf, u64>> {
         // Reconcile by identity, not path alone, so path reuse doesn't keep
         // the old cell and create a second one for the new inode.
         let mut current_entries: BTreeMap<PathBuf, u64> = BTreeMap::new();
@@ -976,6 +996,19 @@ impl CellManager {
                 current_entries.insert(path, metadata.ino());
             }
         }
+        Ok(current_entries)
+    }
+
+    /// Reconcile the tracked cells with a directory snapshot. `sub_cgids` is
+    /// the cell records as read_cell_sub_cgids() returns them. Returns
+    /// (new_cells, destroyed_cells).
+    #[allow(clippy::type_complexity)]
+    fn reconcile_scanned(
+        &mut self,
+        current_entries: BTreeMap<PathBuf, u64>,
+        sub_cgids: &[u64],
+    ) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
+        let mut new_cells = Vec::new();
 
         // Remove cells for cgroups that no longer exist
         let mut destroyed_cells: BTreeSet<u32> = BTreeSet::new();
@@ -1004,10 +1037,17 @@ impl CellManager {
             }
         });
 
-        // Update tracking structures for destroyed cells
+        // A destroyed cell's ID is reused at once unless a sub-scheduler still
+        // holds the cell. Then it waits in detaching_cells for the detach.
         self.cell_id_to_cgid
             .retain(|cell_id, _| !destroyed_cells.contains(cell_id));
-        self.free_cell_ids.extend(destroyed_cells.iter().copied());
+        for &cell_id in &destroyed_cells {
+            if sub_cgids[cell_id as usize] == 0 {
+                self.free_cell_ids.insert(cell_id);
+            } else {
+                self.detaching_cells.insert(cell_id);
+            }
+        }
 
         // Find new cgroups that we don't have cells for
         for (path, cgid) in current_entries {
@@ -1081,6 +1121,23 @@ impl CellManager {
             // File doesn't exist - cpuset controller is not enabled for this cgroup
             Err(_) => Ok(None),
         }
+    }
+
+    /// Free the destroyed cells whose sub-scheduler has detached since.
+    /// `sub_cgids` is the cell records as read_cell_sub_cgids() returns them.
+    /// Returns how many cells were freed.
+    pub fn release_detached_cells(&mut self, sub_cgids: &[u64]) -> usize {
+        let released: Vec<u32> = self
+            .detaching_cells
+            .iter()
+            .copied()
+            .filter(|&id| sub_cgids[id as usize] == 0)
+            .collect();
+        for &id in &released {
+            self.detaching_cells.remove(&id);
+            self.free_cell_ids.insert(id);
+        }
+        released.len()
     }
 
     fn allocate_cell_id(&mut self) -> Result<u32> {
@@ -1330,6 +1387,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// The cell records as the BPF side reports them with no sub-scheduler
+    /// attached anywhere, sized for the test managers' max_cells.
+    const NO_SUBS: [u64; 256] = [0; 256];
+
     fn cpumask_for_range(nr_cpus: usize) -> Cpumask {
         scx_utils::set_cpumask_test_width(nr_cpus);
         let mut mask = Cpumask::new();
@@ -1441,7 +1502,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
 
         // Reconcile should detect it
-        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells(&NO_SUBS).unwrap();
         assert_eq!(new_cells.len(), 1);
         assert_eq!(destroyed_cells.len(), 0);
         assert_eq!(mgr.cell_count(), 2);
@@ -1467,7 +1528,7 @@ mod tests {
         std::fs::remove_dir(tmp.path().join("container-b")).unwrap();
 
         // Reconcile should detect it
-        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells(&NO_SUBS).unwrap();
         assert_eq!(new_cells.len(), 0);
         assert_eq!(destroyed_cells.len(), 1);
         assert_eq!(mgr.cell_count(), 1);
@@ -1499,12 +1560,13 @@ mod tests {
         std::fs::rename(&original_path, parked.path().join("container-a-old")).unwrap();
         std::fs::create_dir(&original_path).unwrap();
 
-        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells(&NO_SUBS).unwrap();
 
         assert_eq!(new_cells.len(), 1);
         assert_eq!(destroyed_cells, vec![old_cell_id]);
         assert_eq!(mgr.cell_count(), 1);
 
+        // with no sub-scheduler attached, the destroyed ID is reused at once
         let new_info = mgr.find_cell_by_name("container-a").unwrap();
         assert_eq!(new_info.cell_id, old_cell_id);
         assert_ne!(new_info.cgid.unwrap(), old_cgid);
@@ -1533,14 +1595,49 @@ mod tests {
 
         // Remove cell2
         std::fs::remove_dir(tmp.path().join("cell2")).unwrap();
-        mgr.reconcile_cells().unwrap();
+        mgr.reconcile_cells(&NO_SUBS).unwrap();
 
         // Add a new directory - should reuse cell2's ID
         std::fs::create_dir(tmp.path().join("cell4")).unwrap();
-        mgr.reconcile_cells().unwrap();
+        mgr.reconcile_cells(&NO_SUBS).unwrap();
 
         let cell4_info = mgr.find_cell_by_name("cell4").unwrap();
         assert_eq!(cell4_info.cell_id, cell2_id);
+    }
+
+    #[test]
+    fn test_held_cell_id_waits_for_detach() {
+        let tmp = TempDir::new().unwrap();
+
+        std::fs::create_dir(tmp.path().join("cell1")).unwrap();
+        std::fs::create_dir(tmp.path().join("cell2")).unwrap();
+
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let cell2_id = mgr.find_cell_by_name("cell2").unwrap().cell_id;
+
+        // cell2 goes away while a sub-scheduler holds its cell
+        let mut held = NO_SUBS;
+        held[cell2_id as usize] = 42;
+        std::fs::remove_dir(tmp.path().join("cell2")).unwrap();
+        mgr.reconcile_cells(&held).unwrap();
+
+        // the held ID is not reused
+        std::fs::create_dir(tmp.path().join("cell3")).unwrap();
+        mgr.reconcile_cells(&held).unwrap();
+        assert_ne!(mgr.find_cell_by_name("cell3").unwrap().cell_id, cell2_id);
+
+        // nothing is freed while the record stays, one cell is once it clears
+        assert_eq!(mgr.release_detached_cells(&held), 0);
+        assert_eq!(mgr.release_detached_cells(&NO_SUBS), 1);
+        std::fs::create_dir(tmp.path().join("cell4")).unwrap();
+        mgr.reconcile_cells(&NO_SUBS).unwrap();
+        assert_eq!(mgr.find_cell_by_name("cell4").unwrap().cell_id, cell2_id);
     }
 
     // ==================== compute_cpu_assignments tests ====================
@@ -2570,7 +2667,7 @@ mod tests {
 
         // Adding a third cell should fail due to exhaustion
         std::fs::create_dir(tmp.path().join("cell3")).unwrap();
-        let result = mgr.reconcile_cells();
+        let result = mgr.reconcile_cells(&NO_SUBS);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2601,12 +2698,12 @@ mod tests {
 
         // Remove cell1 to free up its ID
         std::fs::remove_dir(tmp.path().join("cell1")).unwrap();
-        mgr.reconcile_cells().unwrap();
+        mgr.reconcile_cells(&NO_SUBS).unwrap();
         assert_eq!(mgr.cell_count(), 1);
 
         // Now adding cell3 should succeed by reusing the freed ID
         std::fs::create_dir(tmp.path().join("cell3")).unwrap();
-        let result = mgr.reconcile_cells();
+        let result = mgr.reconcile_cells(&NO_SUBS);
         assert!(result.is_ok());
         assert_eq!(mgr.cell_count(), 2);
     }
@@ -2658,14 +2755,14 @@ mod tests {
 
         // Add an excluded cgroup — should not become a cell
         std::fs::create_dir(tmp.path().join("ignored-service")).unwrap();
-        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells(&NO_SUBS).unwrap();
         assert_eq!(new_cells.len(), 0);
         assert_eq!(destroyed_cells.len(), 0);
         assert_eq!(mgr.cell_count(), 1);
 
         // Add a non-excluded cgroup — should become a cell
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
-        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells(&NO_SUBS).unwrap();
         assert_eq!(new_cells.len(), 1);
         assert_eq!(destroyed_cells.len(), 0);
         assert_eq!(mgr.cell_count(), 2);
