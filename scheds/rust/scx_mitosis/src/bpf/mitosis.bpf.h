@@ -107,6 +107,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *llc_cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	/* running time is charged up to here, see charge_running() */
+	u64 charged_at;
 	/* Packed subcell whose vtime should be charged for this task. */
 	u32 vtime_charge_subcell;
 	u64 basis_vtime;
