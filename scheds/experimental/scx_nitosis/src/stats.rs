@@ -27,6 +27,8 @@ pub struct CellMetrics {
         _om_skip
     )]
     pub cgroup_path: String,
+    #[stat(desc = "Cgroup id of the attached sub-scheduler, 0 if none")]
+    pub sub_cgid: u64,
     #[stat(desc = "Local queue %")]
     pub local_q_pct: f64,
     #[stat(desc = "CPU queue %")]
@@ -35,6 +37,8 @@ pub struct CellMetrics {
     pub cell_q_pct: f64,
     #[stat(desc = "Borrowed CPU %")]
     pub borrowed_pct: f64,
+    #[stat(desc = "Sub-scheduler dispatch %")]
+    pub sub_q_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
@@ -75,6 +79,7 @@ impl CellMetrics {
         self.cpu_q_pct = ds.cpu_q_pct;
         self.cell_q_pct = ds.cell_q_pct;
         self.borrowed_pct = ds.borrowed_pct;
+        self.sub_q_pct = ds.sub_q_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
         self.borrow_bounce_pct = ds.borrow_bounce_pct;
@@ -104,6 +109,8 @@ pub struct Metrics {
     pub cell_q_pct: f64,
     #[stat(desc = "Borrowed CPU %")]
     pub borrowed_pct: f64,
+    #[stat(desc = "Sub-scheduler dispatch %")]
+    pub sub_q_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
@@ -150,6 +157,7 @@ impl Metrics {
         self.cpu_q_pct = ds.cpu_q_pct;
         self.cell_q_pct = ds.cell_q_pct;
         self.borrowed_pct = ds.borrowed_pct;
+        self.sub_q_pct = ds.sub_q_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
         self.borrow_bounce_pct = ds.borrow_bounce_pct;

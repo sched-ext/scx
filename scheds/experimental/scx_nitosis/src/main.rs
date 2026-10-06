@@ -221,14 +221,15 @@ struct Opts {
 }
 
 // The subset of cstats we care about.
-// Local + Default + Hi + Lo = Total Decisions
+// Local + CPU + Cell + Borrowed + Sub = Total Decisions
 // Affinity violations are not queue decisions, but
 // will be calculated separately and reported as a percent of the total
-const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
+const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 5] = [
     bpf_intf::cell_stat_idx_CSTAT_LOCAL,
     bpf_intf::cell_stat_idx_CSTAT_CPU_DSQ,
     bpf_intf::cell_stat_idx_CSTAT_CELL_DSQ,
     bpf_intf::cell_stat_idx_CSTAT_BORROWED,
+    bpf_intf::cell_stat_idx_CSTAT_SUB_DISPATCH,
 ];
 
 // Per cell book-keeping
@@ -287,6 +288,7 @@ struct DistributionStats {
     cpu_q_pct: f64,
     cell_q_pct: f64,
     borrowed_pct: f64,
+    sub_q_pct: f64,
     affn_viol_pct: f64,
     steal_pct: f64,
     pin_skip_pct: f64,
@@ -312,13 +314,14 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}% Bounce:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% Sub:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}% Bounce:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
             self.cpu_q_pct,
             self.cell_q_pct,
             self.borrowed_pct,
+            self.sub_q_pct,
             self.affn_viol_pct,
             self.steal_pct,
             self.pin_skip_pct,
@@ -940,7 +943,7 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_borrow_bounces as f64) / (scope_queue_decisions as f64)
         };
 
-        const EXPECTED_QUEUES: usize = 4;
+        const EXPECTED_QUEUES: usize = 5;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
                 "Expected {} queues, got {}",
@@ -956,6 +959,7 @@ impl<'a> Scheduler<'a> {
             cpu_q_pct: queue_pct[1],
             cell_q_pct: queue_pct[2],
             borrowed_pct: queue_pct[3],
+            sub_q_pct: queue_pct[4],
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
             pin_skip_pct,
@@ -1155,6 +1159,12 @@ impl<'a> Scheduler<'a> {
             .sum();
 
         self.update_drain_metrics(cell_stats_delta);
+
+        // a delegated cell reports its sub whether or not it had decisions
+        let sub_cgids = read_cell_sub_cgids(&self.skel).context("reading cell records")?;
+        for (cell, cell_metrics) in self.metrics.cells.iter_mut() {
+            cell_metrics.sub_cgid = sub_cgids[*cell as usize];
+        }
 
         if global_queue_decisions == 0 {
             if self.metrics.drain_cnt == 0 {

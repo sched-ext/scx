@@ -1193,8 +1193,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		 * else, and a task on its way into the sub stays ours until the
 		 * kernel re-homes it.
 		 */
-		if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid))
+		if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid)) {
+			cstat_inc(CSTAT_SUB_DISPATCH, cell, cctx);
 			return;
+		}
 
 		/*
 		 * Nothing to run. Extend the slice of a still-runnable prev
@@ -1232,8 +1234,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		min_vtime_dsq = min_vtime_dsq.raw == cell_dsq.raw ? cid_dsq : cell_dsq;
 		if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
 			/* our queues are empty, so offer the cid to the sub */
-			if (sub_cgid)
-				scx_bpf_sub_dispatch(sub_cgid);
+			if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid))
+				cstat_inc(CSTAT_SUB_DISPATCH, cell, cctx);
 			return;
 		}
 	}
