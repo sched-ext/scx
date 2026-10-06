@@ -669,7 +669,12 @@ static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
 			tctx->vtime_charge_cell = tctx->cell;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice_ns, 0);
+			/*
+			 * A borrowed cid is used only while idle. SCX_ENQ_IMMED
+			 * has the kernel enforce that.
+			 */
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice_ns,
+					   SCX_ENQ_IMMED);
 			if (kick)
 				scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 			return cid;
@@ -849,6 +854,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	 * enqueue() starts a new placement. A borrowed one that never ran still
 	 * carries the flag, since only stopping() clears it.
 	 */
+	if (tctx->borrowed)
+		cstat_inc(CSTAT_BORROW_BOUNCE, tctx->cell, cctx);
 	tctx->borrowed = false;
 
 	/*

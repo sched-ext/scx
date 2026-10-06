@@ -39,6 +39,8 @@ pub struct CellMetrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Borrow bounce %")]
+    pub borrow_bounce_pct: f64,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
     #[stat(desc = "Orphaned LLC DSQ affinity rescue events")]
@@ -75,6 +77,7 @@ impl CellMetrics {
         self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
+        self.borrow_bounce_pct = ds.borrow_bounce_pct;
         self.pin_skip_pct = ds.pin_skip_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
@@ -105,6 +108,8 @@ pub struct Metrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Borrow bounce %")]
+    pub borrow_bounce_pct: f64,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
     #[stat(desc = "Orphaned LLC DSQ affinity rescue events")]
@@ -147,6 +152,7 @@ impl Metrics {
         self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
+        self.borrow_bounce_pct = ds.borrow_bounce_pct;
         self.pin_skip_pct = ds.pin_skip_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;

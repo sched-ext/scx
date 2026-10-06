@@ -290,6 +290,7 @@ struct DistributionStats {
     affn_viol_pct: f64,
     steal_pct: f64,
     pin_skip_pct: f64,
+    borrow_bounce_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -311,7 +312,7 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}% Bounce:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -321,6 +322,7 @@ impl Display for DistributionStats {
             self.affn_viol_pct,
             self.steal_pct,
             self.pin_skip_pct,
+            self.borrow_bounce_pct,
             width = descisions_width,
         )
     }
@@ -868,6 +870,7 @@ impl<'a> Scheduler<'a> {
         scope_affn_viols: u64,
         scope_steals: u64,
         scope_pin_skips: u64,
+        scope_borrow_bounces: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -904,6 +907,12 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_pin_skips as f64) / (scope_queue_decisions as f64)
         };
 
+        let borrow_bounce_pct = if scope_queue_decisions == 0 {
+            0.0
+        } else {
+            100.0 * (scope_borrow_bounces as f64) / (scope_queue_decisions as f64)
+        };
+
         const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -923,6 +932,7 @@ impl<'a> Scheduler<'a> {
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
             pin_skip_pct,
+            borrow_bounce_pct,
             global_queue_decisions,
         })
     }
@@ -961,6 +971,12 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize])
             .sum::<u64>();
 
+        // Sum borrow bounces over all cells
+        let scope_borrow_bounces: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_BORROW_BOUNCE as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self
             .calculate_distribution_stats(
@@ -970,6 +986,7 @@ impl<'a> Scheduler<'a> {
                 scope_affn_viols,
                 scope_steals,
                 scope_pin_skips,
+                scope_borrow_bounces,
             )
             .context("calculating global queue distribution stats")?;
 
@@ -1033,6 +1050,10 @@ impl<'a> Scheduler<'a> {
             let scope_pin_skips: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
 
+            // Borrow bounces for this cell
+            let scope_borrow_bounces: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_BORROW_BOUNCE as usize];
+
             let stats = self
                 .calculate_distribution_stats(
                     &queue_counts,
@@ -1041,6 +1062,7 @@ impl<'a> Scheduler<'a> {
                     scope_affn_viols,
                     scope_steals,
                     scope_pin_skips,
+                    scope_borrow_bounces,
                 )
                 .with_context(|| {
                     format!("calculating queue distribution stats for cell {}", cell)
