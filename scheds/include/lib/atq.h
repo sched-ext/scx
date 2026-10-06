@@ -10,6 +10,7 @@
 
 #include <bpf_arena_spin_lock.h>
 #include <lib/rbtree.h>
+#include <lib/spinlock.h>
 
 enum scx_atq_consts {
 	SCX_ATQ_INF_CAPACITY  = ((u64)-1),
@@ -72,32 +73,5 @@ static __always_inline
 void scx_atq_task_drop(scx_task_common __arg_arena *taskc)
 {
 	__atomic_add_fetch(&taskc->holdcnt, -1, 0);
-}
-
-static __always_inline
-int scx_atq_lock(scx_atq_t __arg_arena *atq)
-{
-	int ret = arena_spin_lock(&atq->lock);
-
-	/*
-	 * arena_spin_lock() returns -ETIMEDOUT when one of the bounded spin
-	 * loops inside arena_spin_lock_slowpath() exhausts its iterations
-	 * (see scheds/include/bpf_arena_spin_lock.h).  The timed-out waiter
-	 * just bails, leaving the MCS chain with stale ->next links and any
-	 * waiters queued behind it stuck on their own bounded spins.
-	 * Subsequent acquires race against an inconsistent queue; retrying
-	 * is unsafe.  Treat the timeout as a fatal scheduler error so the
-	 * system tears down cleanly.
-	 */
-	if (ret == -ETIMEDOUT)
-		scx_bpf_error("scx_atq: arena_spin_lock timed out");
-
-	return ret;
-}
-
-static __always_inline
-void scx_atq_unlock(scx_atq_t __arg_arena *atq)
-{
-	arena_spin_unlock(&atq->lock);
 }
 #endif /* __BPF__ */

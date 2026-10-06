@@ -3,6 +3,7 @@
 #include <lib/atq.h>
 #include <lib/dhq.h>
 #include <lib/minheap.h>
+#include <lib/spinlock.h>
 
 /*
  * Architecture-specific cache line size for padding hot structures.
