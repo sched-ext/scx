@@ -304,9 +304,8 @@ remaining scans have not been converted, see "Open items".
 
 A program that only dereferences arena pointers handed to it never loads the
 arena map and is rejected at the first address-space cast.
-scx_arena_subprog_init() in ops.dispatch(), ops.dump(), tp_cgroup_mkdir()
-and apply_cell_config(), and MITOSIS_TOUCH_ARENA() in ops.update_idle(),
-give those programs the reference.
+MITOSIS_TOUCH_ARENA() at the top of every such program gives it the
+reference.
 
 init_cgrp_ctx() is a global function, because its arena accesses verify
 expensively and inlining them into tp_cgroup_mkdir()'s ancestor loop

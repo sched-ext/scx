@@ -980,7 +980,7 @@ static __always_inline bool pinned_dsq_overdue(struct cpu_ctx __arena *cctx)
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	struct cpu_ctx __arena *cctx;
 	u32 cell;
@@ -1366,7 +1366,7 @@ void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *f
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	int ret;
 
@@ -1544,7 +1544,7 @@ static void dump_cell_cmask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	dsq_id_t dsq_id;
 	int i;
@@ -2027,7 +2027,7 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 SEC("syscall")
 int apply_cell_config(void *ctx)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	struct cgrp_ctx __arena *cgc;
 	struct cell __arena *cell;
