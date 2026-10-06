@@ -65,8 +65,8 @@ UEI_DEFINE(uei);
 
 struct cell __arena *cells;
 struct mitosis_topo __arena *topo;
-union shard_cmask __arena *idle_masks;
-union shard_cmask __arena *idle_smt_masks;
+struct shard_cmask __arena *idle_masks;
+struct shard_cmask __arena *idle_smt_masks;
 struct scx_cmask __arena *topo_cids;
 /* Cell cmask generations, published in cell_masks and freed via scx_urcu */
 static struct scx_allocator cell_cmask_allocator;
@@ -1760,8 +1760,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Offline-possible cpus have no topology, collect the cids that do. */
-	topo_cids =
-		bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(union cell_cmask), PAGE_SIZE), NUMA_NO_NODE, 0);
+	topo_cids = bpf_arena_alloc_pages(&arena, NULL,
+					  div_round_up(sizeof(struct cell_cmask), PAGE_SIZE),
+					  NUMA_NO_NODE, 0);
 	if (!topo_cids)
 		return -ENOMEM;
 	cmask_init(topo_cids, 0, nr_cids);
@@ -1772,7 +1773,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Per-shard idle masks, windowed to each shard's cid range. */
-	u32 mask_pgs = div_round_up(nr_shards * sizeof(union shard_cmask), PAGE_SIZE);
+	u32 mask_pgs = div_round_up(nr_shards * sizeof(struct shard_cmask), PAGE_SIZE);
 
 	idle_masks = bpf_arena_alloc_pages(&arena, NULL, mask_pgs, NUMA_NO_NODE, 0);
 	if (!idle_masks)
