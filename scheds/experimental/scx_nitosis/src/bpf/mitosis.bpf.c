@@ -1127,6 +1127,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 
 	/* Record the running slice start time. */
 	tctx->started_running_at = scx_bpf_now();
+	tctx->charged_at = tctx->started_running_at;
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
 	if (enable_slice_shrinking) {
@@ -1148,6 +1149,27 @@ static inline void update_task_runtime_ewma(struct task_ctx __arena *tctx, u64 u
 		tctx->avg_runtime_ns = used;
 	else
 		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
+}
+
+/*
+ * Charge the task's time since the last charge to its cell. Called from the
+ * tick as well as stopping(), so a task kept running by the slice extension
+ * accrues as it runs.
+ */
+static void charge_running(struct task_ctx __arena *tctx, struct cpu_ctx __arena *cctx,
+			   u64 now)
+{
+	cctx->running_ns[tctx->cell] += time_delta(now, tctx->charged_at);
+	tctx->charged_at = now;
+}
+
+void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
+{
+	struct task_ctx __arena *tctx;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+	charge_running(tctx, cur_cpu_ctx(), scx_bpf_now());
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -1224,7 +1246,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	cctx->running_ns[tctx->cell] += used;
+	charge_running(tctx, cctx, now);
 }
 
 SEC("fentry/cpuset_write_resmask")
@@ -2249,6 +2271,7 @@ SCX_OPS_CID_DEFINE(mitosis,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
 	       .running			= (void *)mitosis_running,
+	       .tick			= (void *)mitosis_tick,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cmask		= (void *)mitosis_set_cmask,
 	       .update_idle		= (void *)mitosis_update_idle,

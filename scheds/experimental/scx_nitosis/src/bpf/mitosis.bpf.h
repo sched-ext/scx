@@ -152,6 +152,8 @@ static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand, 
 struct task_ctx {
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	/* running time is charged up to here, see charge_running() */
+	u64 charged_at;
 	/* Cell whose vtime domain should be charged for this task */
 	u32 vtime_charge_cell;
 	u64 basis_vtime;

@@ -12,8 +12,8 @@ fork, the features it removed, the representation choices, the verifier
 constraints that shaped the code, and the procedure for syncing with
 mitosis.
 
-The last sync, on 2026-10-06, covered main through 140ad0972582
-("scx_mitosis: Clear the borrowed flag on every enqueue").
+The last sync, on 2026-10-06, covered main through 42378f3ac13a
+("scx_mitosis: Sample the demand metrics over measured intervals").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
