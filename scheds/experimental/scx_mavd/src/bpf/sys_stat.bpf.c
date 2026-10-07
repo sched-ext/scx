@@ -81,7 +81,7 @@ static struct sys_stat_ctx __arena_global ctx;
 
 static void init_sys_stat_ctx(void)
 {
-	struct sys_stat_ctx __arena *c = &ctx;
+	struct sys_stat_ctx *c = &ctx;
 
 	__builtin_memset(c, 0, sizeof(*c));
 
@@ -93,7 +93,7 @@ static void init_sys_stat_ctx(void)
 
 static void collect_sys_stat(void)
 {
-	struct sys_stat_ctx __arena *c = &ctx;
+	struct sys_stat_ctx *c = &ctx;
 	u64 compute_wall = 1;
 	u32 cpdom_id;
 	int cpu;
@@ -102,7 +102,7 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each compute domain.
 	 */
 	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+		struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		cpdomc->cur_util_wall_sum = 0;
 		cpdomc->avg_util_wall_sum = 0;
@@ -153,8 +153,8 @@ static void collect_sys_stat(void)
 		u64 now_pelt, delta_task, delta_pelt;
 		u64 cur_idle_wall = 0, past_idle_wall;
 		u64 dom_pinned_task_time_wall, dom_pinned_task_time_invr;
-		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
-		struct cpdom_ctx __arena *cpdomc;
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		struct cpdom_ctx *cpdomc;
 
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -459,7 +459,7 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each CPU (phase 2).
 	 */
 	bpf_arena_for(cpu, 0, nr_cids) {
-		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -516,9 +516,9 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_arena_for(cpu, 0, nr_cids) {
-		struct scx_cmask __arena *steady;
-		struct cpdom_ctx __arena *cpu_cpdomc;
-		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+		struct scx_cmask *steady;
+		struct cpdom_ctx *cpu_cpdomc;
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -574,7 +574,7 @@ static void collect_sys_stat(void)
 
 static void calc_sys_stat(void)
 {
-	struct sys_stat_ctx __arena *c = &ctx;
+	struct sys_stat_ctx *c = &ctx;
 	static int __arena_global cnt = 0;
 	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr;
 	u32 cpdom_id;
@@ -711,7 +711,7 @@ static void calc_sys_stat(void)
 	 * tasks qualify, pushing more to the turbulent DSQ.
 	 */
 	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+		struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		if (cpdomc->nr_turb_cpus == 0 || cpdomc->cap_sum_turb == 0) {
 			cpdomc->vuln_thresh = 0;

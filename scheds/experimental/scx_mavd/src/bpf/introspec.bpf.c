@@ -33,8 +33,8 @@ struct {
 static __always_inline
 int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cid)
 {
-	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cid);
-	struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
+	struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpuc->cpdom_id);
 	struct msg_task_ctx *m;
 	int i;
 
@@ -55,7 +55,7 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cid)
 	m->taskc_x.suggested_cpu_id = scx_bpf_cid_to_cpu(taskc->suggested_cid);
 	m->taskc_x.waker_pid = taskc->waker_pid;
 	for (i = 0; i < sizeof(m->taskc_x.waker_comm) && can_loop; i++)
-		((char *)m->taskc_x.waker_comm)[i] = ((char __arena *)taskc->waker_comm)[i];
+		((char *)m->taskc_x.waker_comm)[i] = ((char *)taskc->waker_comm)[i];
 	m->taskc_x.slice_wall = taskc->slice_wall;
 	m->taskc_x.lat_cri = taskc->lat_cri;
 	m->taskc_x.avg_lat_cri = sys_stat.avg_lat_cri;

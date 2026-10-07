@@ -21,11 +21,11 @@
 /*
  * Sched related globals
  */
-struct scx_cmask __arena *turbo_cmask; /* CPU mask for turbo CPUs */
-struct scx_cmask __arena *big_cmask; /* CPU mask for big CPUs */
-struct scx_cmask __arena *active_cmask; /* CPU mask for active CPUs */
-struct scx_cmask __arena *ovrflw_cmask; /* CPU mask for overflow CPUs */
-struct scx_cmask __arena *steady_cmask; /* CPU mask for non-turbulent CPUs */
+struct scx_cmask *turbo_cmask; /* CPU mask for turbo CPUs */
+struct scx_cmask *big_cmask; /* CPU mask for big CPUs */
+struct scx_cmask *active_cmask; /* CPU mask for active CPUs */
+struct scx_cmask *ovrflw_cmask; /* CPU mask for overflow CPUs */
+struct scx_cmask *steady_cmask; /* CPU mask for non-turbulent CPUs */
 
 const volatile u64	nr_llcs;	/* number of LLC domains */
 volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
@@ -51,11 +51,11 @@ const volatile u8	verbose;
  */
 UEI_DEFINE(uei);
 
-struct cpu_ctx __arena *cpu_ctxs;
+struct cpu_ctx *cpu_ctxs;
 
 __hidden
 u64 __find_task_ctx(struct task_struct __arg_trusted *p,
-		      struct cpu_ctx __arena __arg_arena *cpuc, bool quiet)
+		      struct cpu_ctx __arg_arena *cpuc, bool quiet)
 {
 	u64 raw = (u64)(quiet ? __scx_task_data(p) : scx_task_data(p));
 
@@ -68,13 +68,13 @@ u64 __find_task_ctx(struct task_struct __arg_trusted *p,
 }
 
 __hidden
-struct cpu_ctx __arena *get_cpu_ctx(void)
+struct cpu_ctx *get_cpu_ctx(void)
 {
 	return get_cpu_ctx_id(scx_bpf_this_cid());
 }
 
 __hidden
-struct cpu_ctx __arena *get_cpu_ctx_id(s32 cid)
+struct cpu_ctx *get_cpu_ctx_id(s32 cid)
 {
 	asm volatile("" :: "r"(&arena));
 	if (cid < 0 || cid >= nr_cids || !cpu_ctxs)
@@ -86,7 +86,7 @@ struct cpu_ctx __arena *get_cpu_ctx_id(s32 cid)
 }
 
 __hidden
-struct cpu_ctx __arena *get_cpu_ctx_task(const struct task_struct *p)
+struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 {
 	return get_cpu_ctx_id(scx_bpf_task_cid(p));
 }
@@ -192,19 +192,19 @@ void reset_task_flag(task_ctx __arg_arena *taskc, u64 flag)
 }
 
 __hidden
-inline bool test_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
+inline bool test_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag)
 {
 	return (cpuc->flags & flag) == flag;
 }
 
 __hidden
-inline void set_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
+inline void set_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag)
 {
 	cpuc->flags |= flag;
 }
 
 __hidden
-inline void reset_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag)
+inline void reset_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag)
 {
 	cpuc->flags &= ~flag;
 }
@@ -222,7 +222,7 @@ bool is_lock_holder(task_ctx __arg_arena *taskc)
 }
 
 __hidden
-bool is_lock_holder_running(struct cpu_ctx __arena __arg_arena *cpuc)
+bool is_lock_holder_running(struct cpu_ctx __arg_arena *cpuc)
 {
 	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
 }
@@ -264,7 +264,7 @@ bool use_full_cpus(void)
 
 __hidden
 void set_affinity_flags(task_ctx __arg_arena *taskc,
-			const struct scx_cmask __arena __arg_arena *cpumask)
+			const struct scx_cmask __arg_arena *cpumask)
 {
 	bool is_affinitized, dom_pinned, dom_pinned_settled;
 	bool on_big = false, on_little = false;
@@ -287,7 +287,7 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 	}
 
 	cmask_for_each(cpu, cpumask) {
-		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 
 		if (cpuc->big_core)
 			on_big = true;
@@ -352,7 +352,7 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 /* the core's first cid is its primary; without SMT every cid is its own core */
 __hidden
 u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
-	struct cpu_ctx __arena *cpuc;
+	struct cpu_ctx *cpuc;
 
 	if (!is_smt_active)
 		return cpu;
@@ -367,7 +367,7 @@ u32 cpu_to_dsq(u32 cpu)
 }
 
 __hidden
-bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc)
+bool queued_on_cpu(struct cpu_ctx __arg_arena *cpuc)
 {
 	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cid))
 		return true;
@@ -385,7 +385,7 @@ bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc)
 }
 
 __hidden
-bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc)
+bool is_cpu_congested(struct cpu_ctx __arg_arena *cpuc)
 {
 	int nr;
 
@@ -433,10 +433,10 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
 }
 
 __hidden
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc,
 		      task_ctx *taskc)
 {
-	struct cpdom_ctx __arena *cpdomc;
+	struct cpdom_ctx *cpdomc;
 
 	/*
 	 * Route effectively pinned tasks (permanent pinning or
@@ -483,7 +483,7 @@ u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cid, u64 now)
  */
 __hidden
 void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
-			    struct cpu_ctx __arena __arg_arena *cpuc, u64 slice_used, u64 now)
+			    struct cpu_ctx __arg_arena *cpuc, u64 slice_used, u64 now)
 {
 	u64 gain, w;
 

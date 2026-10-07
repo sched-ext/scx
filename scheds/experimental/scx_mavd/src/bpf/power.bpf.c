@@ -92,7 +92,7 @@ volatile u64 __arena_global	last_power_mode_clk;
 volatile bool __arena_global	is_powersave_mode;
 
 __hidden
-void update_effective_capacity(struct cpu_ctx __arena __arg_arena *cpuc)
+void update_effective_capacity(struct cpu_ctx __arg_arena *cpuc)
 {
 	/* WARNING: This should be called after updating cpuc->cur_util. */
 	extern struct cpufreq_policy *cpufreq_cpu_data __ksym;
@@ -188,7 +188,7 @@ bool is_perf_cri(task_ctx __arg_arena *taskc)
 }
 
 __hidden
-const volatile u16 __arena *get_cpu_order(void)
+const volatile u16 *get_cpu_order(void)
 {
 	int i = READ_ONCE(pco_idx);
 
@@ -230,7 +230,7 @@ static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
 static int calc_nr_active_cpus(void)
 {
 	u64 req_cap, eff_cap, sum_eff_cap;
-	struct cpu_ctx __arena *cpuc;
+	struct cpu_ctx *cpuc;
 	int i, j;
 	u16 cpu;
 
@@ -257,7 +257,7 @@ static int calc_nr_active_cpus(void)
 		else
 			WRITE_ONCE(pco_idx, nr_pco_states - 1);
 
-		const volatile u16 __arena *cpu_order = get_cpu_order();
+		const volatile u16 *cpu_order = get_cpu_order();
 		sum_eff_cap = 0;
 		bpf_arena_for(i, 0, nr_cpu_ids) {
 			cpu = cpu_order[i];
@@ -279,7 +279,7 @@ static int calc_nr_active_cpus(void)
 		 */
 		bpf_arena_for(i, 0, nr_pco_states) {
 			if (pco_bounds[i] >= req_cap) {
-				const volatile u16 __arena *cpu_order = pco_table[i];
+				const volatile u16 *cpu_order = pco_table[i];
 				sum_eff_cap = 0;
 
 				bpf_arena_for(j, 0, pco_nr_primary[i]) {
@@ -308,9 +308,9 @@ __weak
 int do_core_compaction(void)
 {
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
-	struct scx_cmask __arena *active = active_cmask;
-	struct scx_cmask __arena *ovrflw = ovrflw_cmask;
-	const volatile u16 __arena *cpu_order;
+	struct scx_cmask *active = active_cmask;
+	struct scx_cmask *ovrflw = ovrflw_cmask;
+	const volatile u16 *cpu_order;
 	int nr_active, cpu, i;
 	u32 cpdom_id;
 
@@ -327,7 +327,7 @@ int do_core_compaction(void)
 	 * Assign active and overflow cores.
 	 */
 	bpf_arena_for(i, 0, nr_cpu_ids) {
-		struct cpu_ctx __arena *cpuc;
+		struct cpu_ctx *cpuc;
 
 		/*
 		 * Skip offline cpu
@@ -344,7 +344,7 @@ int do_core_compaction(void)
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
 		if (i < nr_active) {
-			struct cpdom_ctx __arena *cpdomc;
+			struct cpdom_ctx *cpdomc;
 
 			cmask_set(cpu, active);
 			ovrflw_test_and_clear(ovrflw, cpu);
@@ -416,7 +416,7 @@ int do_core_compaction(void)
 	 * Update nr_active_cpus and cap_sum_active_cpus.
 	 */
 	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+		struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
@@ -652,9 +652,9 @@ int update_thr_perf_cri(void)
 __weak
 int reinit_active_cpumask_for_performance(void)
 {
-	struct cpu_ctx __arena *cpuc;
-	struct scx_cmask __arena *active, *ovrflw;
-	const struct scx_cmask __arena *online;
+	struct cpu_ctx *cpuc;
+	struct scx_cmask *active, *ovrflw;
+	const struct scx_cmask *online;
 	u32 cpdom_id;
 	u32 nr_active_cpdoms = 0;
 	int cpu;
@@ -677,7 +677,7 @@ int reinit_active_cpumask_for_performance(void)
 	 */
 	if (have_little_core) {
 		bpf_arena_for(cpu, 0, nr_cids) {
-			struct cpdom_ctx __arena *cpdomc;
+			struct cpdom_ctx *cpdomc;
 
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc)
@@ -709,7 +709,7 @@ int reinit_active_cpumask_for_performance(void)
 		cmask_zero(ovrflw);
 
 		bpf_arena_for(cpu, 0, nr_cids) {
-			struct cpdom_ctx __arena *cpdomc;
+			struct cpdom_ctx *cpdomc;
 
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
@@ -728,7 +728,7 @@ int reinit_active_cpumask_for_performance(void)
 	 * Update nr_active_cpus, cap_sum_active_cpus, and pco_idx.
 	 */
 	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+		struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
@@ -756,7 +756,7 @@ static __always_inline u32 scx_only_util(u32 total, u32 steal)
 }
 
 __hidden
-int calc_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
+int calc_cpuperf_target(struct cpu_ctx __arg_arena *cpuc)
 {
 	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
 	u32 step, cur;
@@ -823,7 +823,7 @@ int calc_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
 }
 
 __hidden
-int update_cpuperf_target(struct cpu_ctx __arena __arg_arena *cpuc)
+int update_cpuperf_target(struct cpu_ctx __arg_arena *cpuc)
 {
 	u32 cpuperf_target = cpuc->cpuperf_target;
 

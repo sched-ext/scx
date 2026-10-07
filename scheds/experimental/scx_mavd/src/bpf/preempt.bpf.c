@@ -16,7 +16,7 @@
 struct preemption_info {
 	u64		est_stopping_clk;
 	u64		lat_cri;
-	struct cpu_ctx __arena *cpuc;
+	struct cpu_ctx *cpuc;
 };
 
 __hidden
@@ -48,7 +48,7 @@ static bool can_x_kick_y(struct preemption_info *prm_x,
 }
 
 static bool can_x_kick_cpu2(struct preemption_info *prm_x, struct preemption_info *prm_cpu2,
-			    struct cpu_ctx __arena *cpuc2)
+			    struct cpu_ctx *cpuc2)
 {
 	/*
 	 * A CPU taken by an RT/DL task cannot be a victim.
@@ -94,8 +94,8 @@ static bool is_worth_kick_other_task(task_ctx *taskc)
 	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
 
-static struct cpu_ctx __arena *find_victim_cpu(const struct scx_cmask __arena *cpumask,
-					       s32 preferred_cpu, task_ctx *taskc, u64 now)
+static struct cpu_ctx *find_victim_cpu(const struct scx_cmask *cpumask, s32 preferred_cpu,
+				       task_ctx *taskc, u64 now)
 {
 	/*
 	 * We see preemption as a load-balancing problem. In a system with N
@@ -106,7 +106,7 @@ static struct cpu_ctx __arena *find_victim_cpu(const struct scx_cmask __arena *c
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
-	struct cpu_ctx __arena *cpuc;
+	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
 	int i, v = 0;
@@ -190,7 +190,7 @@ null_out:
 	return NULL;
 }
 
-static void ask_cpu_yield_after(struct cpu_ctx __arena *victim_cpuc, u64 new_slice)
+static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 {
 	bpf_rcu_read_lock();
 	/*
@@ -251,7 +251,7 @@ static void ask_cpu_yield_after(struct cpu_ctx __arena *victim_cpuc, u64 new_sli
 }
 
 __hidden
-int shrink_boosted_slice_remote(struct cpu_ctx __arena __arg_arena *cpuc, u64 now)
+int shrink_boosted_slice_remote(struct cpu_ctx __arg_arena *cpuc, u64 now)
 {
 	u64 duration_wall, new_slice_wall = 0;
 	u64 target_slice_wall, slice_wall;
@@ -291,7 +291,7 @@ int shrink_boosted_slice_remote(struct cpu_ctx __arena __arg_arena *cpuc, u64 no
 }
 
 __hidden
-void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc,
 			  u64 now)
 {
 	u64 ub_wall, duration_wall, new_slice_wall;
@@ -334,7 +334,7 @@ void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_ar
 }
 
 __hidden
-void preempt_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc)
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc)
 {
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 	scx_bpf_task_set_slice(p, 0);
@@ -349,9 +349,9 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 u64 cpdom_id)
 {
 	struct preemption_info prm_t, prm_c;
-	struct scx_cmask __arena *cpumask;
-	struct cpu_ctx __arena *cpuc_victim;
-	struct cpu_ctx __arena *cpuc_cur = NULL;
+	struct scx_cmask *cpumask;
+	struct cpu_ctx *cpuc_victim;
+	struct cpu_ctx *cpuc_cur = NULL;
 	u64 now, duration_wall, new_slice_wall = 0;
 
 	/*
@@ -431,7 +431,7 @@ kick_out:
 }
 
 __hidden
-void reset_cpu_preemption_info(struct cpu_ctx __arena __arg_arena *cpuc)
+void reset_cpu_preemption_info(struct cpu_ctx __arg_arena *cpuc)
 {
 	/*
 	 * When the CPU is idle, set things easy to preempt.

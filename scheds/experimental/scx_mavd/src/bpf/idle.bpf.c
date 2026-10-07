@@ -27,17 +27,17 @@ struct sticky_ctx {
 	 */
 	unsigned int i_m;
 	unsigned int i_nm;
-	struct cpu_ctx __arena *cpuc_match[2];
-	struct cpu_ctx __arena *cpuc_not_match[2];
+	struct cpu_ctx *cpuc_match[2];
+	struct cpu_ctx *cpuc_not_match[2];
 };
 
 static __always_inline
-void init_idle_i_mask(struct pick_ctx *ctx, const struct scx_cmask __arena *idle)
+void init_idle_i_mask(struct pick_ctx *ctx, const struct scx_cmask *idle)
 {
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		ctx->i_mask = idle;
 	else {
-		struct scx_cmask __arena *_i_mask = ctx->cpuc_cur->i_mask;
+		struct scx_cmask *_i_mask = ctx->cpuc_cur->i_mask;
 		cmask_and(_i_mask, &ctx->taskc->allowed, idle);
 		ctx->i_mask = _i_mask;
 	}
@@ -70,7 +70,7 @@ void init_ao_masks(struct pick_ctx *ctx)
 static __always_inline
 bool is_preemption_vulnerable(struct pick_ctx *ctx)
 {
-	struct cpdom_ctx __arena *cpdc = get_cpdom_ctx(ctx->cpuc_cur->cpdom_id);
+	struct cpdom_ctx *cpdc = get_cpdom_ctx(ctx->cpuc_cur->cpdom_id);
 
 	return preemption_vulnerability(ctx->taskc->normalized_lat_cri,
 				       ctx->taskc->util_est) >= cpdc->vuln_thresh;
@@ -84,8 +84,8 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
 static __always_inline
 void repartition_masks_for_latency(struct pick_ctx *ctx)
 {
-	struct scx_cmask __arena *steady_set = ctx->cpuc_cur->a_mask;
-	struct scx_cmask __arena *turb_set = ctx->cpuc_cur->o_mask;
+	struct scx_cmask *steady_set = ctx->cpuc_cur->a_mask;
+	struct scx_cmask *turb_set = ctx->cpuc_cur->o_mask;
 
 	/*
 	 * Start from the unfiltered active/overflow masks and apply
@@ -112,7 +112,7 @@ void repartition_masks_for_latency(struct pick_ctx *ctx)
 }
 
 static __always_inline
-void init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *idle_mask)
+void init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask *idle_mask)
 {
 	/*
 	 * temp_mask is also used by find_cpu_in() earlier in pick_idle_cpu(),
@@ -141,12 +141,12 @@ void init_idle_ato_masks(struct pick_ctx *ctx, const struct scx_cmask __arena *i
 }
 
 __hidden
-s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
-		struct cpu_ctx __arena __arg_arena *cpuc_cur)
+s32 find_cpu_in(const struct scx_cmask __arg_arena *src_mask,
+		struct cpu_ctx __arg_arena *cpuc_cur)
 {
-	const volatile u16 __arena *cpu_order = get_cpu_order();
-	const struct scx_cmask __arena *online_mask;
-	struct scx_cmask __arena *online_src_mask = cpuc_cur->temp_mask;
+	const volatile u16 *cpu_order = get_cpu_order();
+	const struct scx_cmask *online_mask;
+	struct scx_cmask *online_src_mask = cpuc_cur->temp_mask;
 	s32 cpu;
 	unsigned int i;
 
@@ -178,8 +178,8 @@ s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
  */
 static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 {
-	const volatile u16 __arena *cpu_order;
-	struct scx_cmask __arena *online_src_mask;
+	const volatile u16 *cpu_order;
+	struct scx_cmask *online_src_mask;
 	s32 cpu, prev_llc;
 	unsigned int i;
 
@@ -232,8 +232,8 @@ __noinline
 s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx __arg_nonnull, s64 cpdom, u64 scope,
 			   bool *is_idle __arg_nonnull)
 {
-	struct scx_cmask __arena *cpd_mask = get_cpdom_mask(cpdom);
-	struct cpdom_ctx __arena *cpdc = get_cpdom_ctx(cpdom);
+	struct scx_cmask *cpd_mask = get_cpdom_mask(cpdom);
+	struct cpdom_ctx *cpdc = get_cpdom_ctx(cpdom);
 	s32 cpu;
 
 	if (!cpdc->is_valid)
@@ -273,7 +273,7 @@ s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx __arg_nonnull, s64 cpdom, u64 sc
 static __always_inline
 s32 cpumask_any_distribute(struct pick_ctx *ctx)
 {
-	const struct scx_cmask __arena *mask;
+	const struct scx_cmask *mask;
 	s32 cpu;
 
 	mask = ctx->a_mask;
@@ -295,7 +295,7 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 	 */
 	s32 cpu0 = cpumask_any_distribute(ctx);
 	s32 cpu1 = cpumask_any_distribute(ctx);
-	struct cpu_ctx __arena *cpuc0, *cpuc1;
+	struct cpu_ctx *cpuc0, *cpuc1;
 
 	if (cpu0 == cpu1 && cpu0 != -ENOENT)
 		return cpu0;
@@ -311,7 +311,7 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 static
 s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cpdom)
 {
-	struct scx_cmask __arena *cpd_mask;
+	struct scx_cmask *cpd_mask;
 	s32 cpu;
 
 	if (sticky_cpu >= 0)
@@ -343,8 +343,8 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 static __always_inline
 bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 {
-	struct scx_cmask __arena *a_mask;
-	struct scx_cmask __arena *o_mask;
+	struct scx_cmask *a_mask;
+	struct scx_cmask *o_mask;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
@@ -363,8 +363,8 @@ bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 static __always_inline
 bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 {
-	struct cpdom_ctx __arena *cpdc;
-	struct scx_cmask __arena *cpd_mask, *a_mask, *o_mask;
+	struct cpdom_ctx *cpdc;
+	struct scx_cmask *cpd_mask, *a_mask, *o_mask;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
@@ -388,7 +388,7 @@ bool test_cpu_stickable(struct pick_ctx *ctx, struct sticky_ctx *sctx,
 			s32 cpu, bool is_task_big)
 {
 	if (can_run_on_cpu(ctx, cpu)) {
-		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 
 		if (sctx->i_m >= 2 || sctx->i_nm >= 2)
 			return false;
@@ -425,8 +425,8 @@ __noinline
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx __arg_nonnull,
 			      s64 *sticky_cpdom __arg_nonnull)
 {
-	struct cpu_ctx __arena *p0, *p1, *cpuc;
-	struct cpdom_ctx __arena *d0, *d1;
+	struct cpu_ctx *p0, *p1, *cpuc;
+	struct cpdom_ctx *d0, *d1;
 	struct sticky_ctx sctx;
 
 	__builtin_memset(&sctx, 0, sizeof(sctx));
@@ -543,7 +543,7 @@ err_out:
 static
 bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 {
-	struct cpu_ctx __arena *cpuc_waker;
+	struct cpu_ctx *cpuc_waker;
 
 	if (ctx->sync_waker_cpu < 0)
 		return false;
@@ -569,10 +569,10 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 }
 
 static
-s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx __arena *cpdc, u64 scope,
+s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc, u64 scope,
 			s64 *sticky_cpdom, bool *is_idle)
 {
-	struct cpdom_ctx __arena *mig_cpdc;
+	struct cpdom_ctx *mig_cpdc;
 	s64 mig_cpdom, nr_nbr;
 	s32 cpu = -ENOENT;
 	int i, j;
@@ -626,10 +626,10 @@ __hidden __noinline
 s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrflw,
 		  bool *is_idle)
 {
-	const struct scx_cmask __arena *idle = NULL, *idle_smt = NULL;
+	const struct scx_cmask *idle = NULL, *idle_smt = NULL;
 	s32 cpu = -ENOENT, sticky_cpu;
 	s64 sticky_cpdom = -ENOENT;
-	struct cpdom_ctx __arena *cpdc;
+	struct cpdom_ctx *cpdc;
 	bool i_smt_empty;
 
 	/*
