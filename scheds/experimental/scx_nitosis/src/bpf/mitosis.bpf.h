@@ -26,13 +26,13 @@
 #include <lib/sdt_task.h>
 #include <lib/topology.h>
 
-extern struct cell __arena *cells;
+extern struct cell *cells;
 
 /*
  * Force an arena map reference. The verifier associates a program with an arena
  * by finding an LD_IMM64 that loads the arena map. Programs that only
  * dereference arena pointers handed to them never emit one and get rejected at
- * the first addr_space_cast without this.
+ * the first arena access without this.
  */
 #define MITOSIS_TOUCH_ARENA()                   \
 	do {                                    \
@@ -59,7 +59,7 @@ enum mitosis_constants {
  */
 const volatile bool enable_llc_awareness = false;
 
-static inline u64 cell_llc_vtime_read(struct cell __arena *cell, u32 llc)
+static inline u64 cell_llc_vtime_read(struct cell *cell, u32 llc)
 {
 	return READ_ONCE(cell->llcs[llc].vtime_now);
 }
@@ -92,7 +92,7 @@ struct mitosis_topo {
 	struct topo_range core_cids[MAX_CPUS];
 };
 
-extern struct mitosis_topo __arena *topo;
+extern struct mitosis_topo *topo;
 
 /*
  * Idle state, maintained by ops.update_idle(). One base-windowed cmask per
@@ -105,17 +105,17 @@ struct shard_cmask {
 			 u64 _bits[CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS)];);
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
-extern struct shard_cmask __arena *idle_masks;
+extern struct shard_cmask *idle_masks;
 
 /*
  * idle_smt mirrors the builtin idle core tracking: a core's whole cid range is
  * set iff every sibling was idle at the last transition. Same per-shard
  * windowed layout as the idle masks.
  */
-extern struct shard_cmask __arena *idle_smt_masks;
+extern struct shard_cmask *idle_smt_masks;
 
 /* cids with load-time topology, offline-possible tail cids excluded */
-extern struct scx_cmask __arena *topo_cids;
+extern struct scx_cmask *topo_cids;
 
 /*
  * Per-cell cid masks. scx_cmask ends in a flex array, the overlay gives every
@@ -137,12 +137,12 @@ struct cell_cmasks {
 	struct cell_cmask borrowable[MAX_CELLS];
 };
 
-extern struct cell_cmasks __arena *cell_masks;
+extern struct cell_cmasks *cell_masks;
 
-extern struct cpu_ctx __arena *cpu_ctxs;
+extern struct cpu_ctx *cpu_ctxs;
 
 /* in mitosis.bpf.c, shared with llc_aware.bpf.h */
-static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand, u32 shard_base, u32 nr_shards,
+static __always_inline s32 pick_idle_cid_shards(struct scx_cmask *cand, u32 shard_base, u32 nr_shards,
 						s32 prev_cid);
 
 /*
@@ -195,7 +195,7 @@ struct task_ctx {
 	};
 };
 
-static inline struct task_ctx __arena *lookup_task_ctx(struct task_struct *p);
+static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 
 extern const volatile bool use_lockless_peek;
 
@@ -215,14 +215,14 @@ static inline struct task_struct *dsq_peek(u64 dsq_id)
 	return NULL;
 }
 
-static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx __arena *cctx, s64 delta)
+static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
 {
 	cctx->cstats[cell][idx] += delta;
 }
 
-static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx __arena *cctx)
+static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 {
 	cstat_add(idx, cell, cctx, 1);
 }
 
-static inline int update_task_cmask(struct task_struct *p, struct task_ctx __arena *tctx);
+static inline int update_task_cmask(struct task_struct *p, struct task_ctx *tctx);

@@ -8,6 +8,7 @@ fn main() {
         .expect("BpfBuilder creation returned error")
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/mitosis.bpf.c", "bpf")
+        .add_cflag("-DSCX_ARENA_SCALAR")
         // arena.bpf.c's arena_init() calls into rbtree and atq, so those two
         // ride along even though nothing here uses them directly yet.
         .add_source("src/bpf/lib/arena.bpf.c")
