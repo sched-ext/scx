@@ -287,6 +287,8 @@ struct Scheduler<'a> {
     prev_cell_running_ns: [u64; MAX_CELLS],
     prev_cell_own_ns: [u64; MAX_CELLS],
     prev_cell_lent_ns: [u64; MAX_CELLS],
+    /// When the demand metrics were last sampled, the base of the next deltas
+    demand_sampled_at: Option<Instant>,
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
@@ -495,6 +497,7 @@ impl<'a> Scheduler<'a> {
             prev_cell_running_ns: [0; MAX_CELLS],
             prev_cell_own_ns: [0; MAX_CELLS],
             prev_cell_lent_ns: [0; MAX_CELLS],
+            demand_sampled_at: None,
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
@@ -1297,6 +1300,8 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
+        // the demand deltas are measured up to here, see collect_demand_metrics()
+        let sampled_at = Instant::now();
         let cpu_ctxs = read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for metrics")?;
 
         let cell_stats_delta = self
@@ -1310,7 +1315,7 @@ impl<'a> Scheduler<'a> {
         // zero-decisions early return inside log_all_queue_stats above.
         self.metrics.enforced_holdout = self.cell_manager.enforced_holdout() as u64;
 
-        self.collect_demand_metrics(&cpu_ctxs)
+        self.collect_demand_metrics(&cpu_ctxs, sampled_at)
             .context("collecting demand metrics")?;
 
         for (cell_id, cell) in &self.cells {
@@ -1333,7 +1338,23 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Compute per-cell demand metrics (utilization, borrowed, lent) from BPF running_ns counters.
-    fn collect_demand_metrics(&mut self, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Result<()> {
+    fn collect_demand_metrics(
+        &mut self,
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        sampled_at: Instant,
+    ) -> Result<()> {
+        // Deltas over the time that really passed: an iteration can take well
+        // over the nominal interval and events wake the loop early. Let half
+        // an interval build up before sampling again. sampled_at is taken right
+        // before the counters are read.
+        let half_interval = self.monitor_interval / 2;
+        let interval_ns = match self.demand_sampled_at {
+            Some(prev) if sampled_at.duration_since(prev) < half_interval => return Ok(()),
+            Some(prev) => Some(sampled_at.duration_since(prev).as_nanos() as u64),
+            None => None,
+        };
+        self.demand_sampled_at = Some(sampled_at);
+
         // Per-cell cumulative counters derived from BPF per-CPU running_ns:
         //   total_running_ns[c] = total time tasks in cell c ran (on any CPU)
         //   on_own_ns[c]        = time tasks in cell c ran on CPUs owned by cell c
@@ -1364,8 +1385,13 @@ impl<'a> Scheduler<'a> {
             lent_ns[owner] += total_on_cpu.saturating_sub(owner_on_cpu);
         }
 
-        // Compute deltas since last collection interval
-        let interval_ns = self.monitor_interval.as_nanos() as u64;
+        // the first call only seeds the deltas
+        let Some(interval_ns) = interval_ns else {
+            self.prev_cell_running_ns = total_running_ns;
+            self.prev_cell_own_ns = on_own_ns;
+            self.prev_cell_lent_ns = lent_ns;
+            return Ok(());
+        };
 
         let mut global_running_delta = 0u64;
         let mut global_borrowed_delta = 0u64;
@@ -1381,10 +1407,6 @@ impl<'a> Scheduler<'a> {
             self.prev_cell_running_ns[cell] = total_running_ns[cell];
             self.prev_cell_own_ns[cell] = on_own_ns[cell];
             self.prev_cell_lent_ns[cell] = lent_ns[cell];
-
-            if delta_running == 0 && delta_lent == 0 {
-                continue;
-            }
 
             // Borrowed = ran somewhere other than own CPUs
             let delta_borrowed = delta_running.saturating_sub(delta_on_own);
