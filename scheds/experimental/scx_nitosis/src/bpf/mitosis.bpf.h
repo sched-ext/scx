@@ -100,19 +100,19 @@ extern struct mitosis_topo __arena *topo;
  * SCX_CID_SHARD_MAX_CPUS cids. scx_cmask ends in a flex array, the overlay
  * gives the masks a fixed cacheline aligned stride for native indexing.
  */
-union shard_cmask {
-	struct scx_cmask cmask;
-	u8 storage[sizeof(struct scx_cmask) + CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS) * sizeof(u64)];
+struct shard_cmask {
+	TRAILING_OVERLAP(struct scx_cmask, cmask, bits,
+			 u64 _bits[CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS)];);
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
-extern union shard_cmask __arena *idle_masks;
+extern struct shard_cmask __arena *idle_masks;
 
 /*
  * idle_smt mirrors the builtin idle core tracking: a core's whole cid range is
  * set iff every sibling was idle at the last transition. Same per-shard
  * windowed layout as the idle masks.
  */
-extern union shard_cmask __arena *idle_smt_masks;
+extern struct shard_cmask __arena *idle_smt_masks;
 
 /* cids with load-time topology, offline-possible tail cids excluded */
 extern struct scx_cmask __arena *topo_cids;
@@ -122,9 +122,8 @@ extern struct scx_cmask __arena *topo_cids;
  * mask fixed MAX_CPUS capacity so that a configuration's masks form one
  * indexable generation.
  */
-union cell_cmask {
-	struct scx_cmask cmask;
-	u8 storage[sizeof(struct scx_cmask) + CMASK_NR_WORDS(MAX_CPUS) * sizeof(u64)];
+struct cell_cmask {
+	TRAILING_OVERLAP(struct scx_cmask, cmask, bits, u64 _bits[CMASK_NR_WORDS(MAX_CPUS)];);
 };
 
 /*
@@ -134,8 +133,8 @@ union cell_cmask {
  * always complete and stays valid until the end of the RCU section.
  */
 struct cell_cmasks {
-	union cell_cmask mask[MAX_CELLS];
-	union cell_cmask borrowable[MAX_CELLS];
+	struct cell_cmask mask[MAX_CELLS];
+	struct cell_cmask borrowable[MAX_CELLS];
 };
 
 extern struct cell_cmasks __arena *cell_masks;

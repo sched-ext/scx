@@ -455,20 +455,20 @@ scx_bpf_dsq_insert(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags)
 bool scx_bpf_task_set_slice___new(struct task_struct *p, u64 slice) __ksym __weak;
 bool scx_bpf_task_set_dsq_vtime___new(struct task_struct *p, u64 vtime) __ksym __weak;
 
-static inline void scx_bpf_task_set_slice(struct task_struct *p, u64 slice)
+static inline bool scx_bpf_task_set_slice(struct task_struct *p, u64 slice)
 {
 	if (bpf_ksym_exists(scx_bpf_task_set_slice___new))
-		scx_bpf_task_set_slice___new(p, slice);
-	else
-		p->scx.slice = slice;
+		return scx_bpf_task_set_slice___new(p, slice);
+	p->scx.slice = slice;
+	return true;
 }
 
-static inline void scx_bpf_task_set_dsq_vtime(struct task_struct *p, u64 vtime)
+static inline bool scx_bpf_task_set_dsq_vtime(struct task_struct *p, u64 vtime)
 {
 	if (bpf_ksym_exists(scx_bpf_task_set_dsq_vtime___new))
-		scx_bpf_task_set_dsq_vtime___new(p, vtime);
-	else
-		p->scx.dsq_vtime = vtime;
+		return scx_bpf_task_set_dsq_vtime___new(p, vtime);
+	p->scx.dsq_vtime = vtime;
+	return true;
 }
 
 /* v7.4: Add scx_bpf_task_set_lazy_resched(). */

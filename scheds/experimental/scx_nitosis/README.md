@@ -3,7 +3,7 @@
 An experimental fork of `scx_mitosis` being converted to the cid form of
 sched_ext ops with all state in a BPF arena, with the goal of becoming a root
 scheduler that other schedulers can plug into (sub-scheduling), one per cell.
-Requires kernel sched_ext/for-7.3 once the conversion lands.
+Requires a kernel with ops.sub_cid_sched_updated() (sched_ext/for-7.4 once it lands).
 
 A cgroup-aware scheduler that isolates workloads into *cells*. The eventual goal is to enable overcomitting workloads on datacenter servers.
 

@@ -27,6 +27,7 @@
 #define FAKE_FLAT_CELL_LLC 0
 
 #include <lib/sdt_cgroup.h>
+#include <lib/spinlock.h>
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
 #include "slice_shrinking.bpf.h"
@@ -65,8 +66,8 @@ UEI_DEFINE(uei);
 
 struct cell __arena *cells;
 struct mitosis_topo __arena *topo;
-union shard_cmask __arena *idle_masks;
-union shard_cmask __arena *idle_smt_masks;
+struct shard_cmask __arena *idle_masks;
+struct shard_cmask __arena *idle_smt_masks;
 struct scx_cmask __arena *topo_cids;
 /* Cell cmask generations, published in cell_masks and freed via scx_urcu */
 static struct scx_allocator cell_cmask_allocator;
@@ -101,6 +102,135 @@ static __always_inline void cell_cmasks_publish(struct cell_cmasks __arena *gen)
 
 	if (old)
 		scx_urcu_free(&cell_cmask_urcu, &cell_cmask_allocator, (void __arena *)old);
+}
+
+/*
+ * Sub-scheduler delegation. A sub attached to a cell-owner cgroup holds
+ * SUB_CAPS_FULL on the cell's primary cids and SCX_CAP_ENQ_IMMED alone on its
+ * borrowable cids, so it borrows under the same idle-only rule as our own
+ * cells.
+ */
+enum sub_caps {
+	/* a cell owner holds these on top of a borrower's SCX_CAP_ENQ_IMMED */
+	SUB_CAPS_OWNER_ONLY = SCX_CAP_ENQ | SCX_CAP_PREEMPT | SCX_CAP_PERF,
+	SUB_CAPS_FULL = SUB_CAPS_OWNER_ONLY | SCX_CAP_ENQ_IMMED,
+};
+
+struct sub_cap_scratch {
+	struct cell_cmask target_full;
+	struct cell_cmask target_immed;
+	struct cell_cmask held_full;
+	struct cell_cmask held_immed;
+	struct cell_cmask delta;
+};
+
+static struct sub_cap_scratch __arena sub_cap_scratch;
+
+/* the flags that keep the cap pass to one runner, see sub_cap_sync() */
+static u64 sub_cap_busy;
+static u64 sub_cap_pending;
+
+/*
+ * Serializes the writers of the cell records: the apply's record phases, attach
+ * and detach. The owner of a cell changes only while sub_cgid is zero. Readers
+ * take no lock.
+ */
+static arena_spinlock_t __arena cells_lock;
+
+/* only -ENODEV, the sub being gone, is an expected failure */
+static __always_inline void sub_grant(u64 cgid, u64 caps, struct scx_cmask __arena *cids)
+{
+	s32 ret = scx_bpf_sub_grant(cgid, caps, cids, NULL);
+
+	if (unlikely(ret && ret != -ENODEV))
+		scx_bpf_error("sub_grant(%llu, 0x%llx) failed (%d)", cgid, caps, ret);
+}
+
+/*
+ * Sync the caps of @cell_id's sub to the @cm masks, revoking what it holds
+ * beyond them (@grant false) or granting what it lacks (@grant true).
+ */
+static __noinline void
+sub_cap_sync_cell(struct cell_cmasks __arena *cm, u32 cell_id, bool grant)
+{
+	struct scx_cmask __arena *target_full = &sub_cap_scratch.target_full.cmask;
+	struct scx_cmask __arena *target_immed = &sub_cap_scratch.target_immed.cmask;
+	struct scx_cmask __arena *held_full = &sub_cap_scratch.held_full.cmask;
+	struct scx_cmask __arena *held_immed = &sub_cap_scratch.held_immed.cmask;
+	struct scx_cmask __arena *delta = &sub_cap_scratch.delta.cmask;
+	u64 cgid = READ_ONCE(cells[cell_id].sub_cgid);
+
+	if (!cgid)
+		return;
+
+	/* the caps query fails with -ENODEV once the kernel unlinked the sub */
+	if (scx_bpf_sub_caps(cgid, SCX_CAP_ENQ, held_full) ||
+	    scx_bpf_sub_caps(cgid, SCX_CAP_ENQ_IMMED, held_immed))
+		return;
+
+	cmask_copy(target_full, &cm->mask[cell_id].cmask);
+	if (enable_borrowing)
+		cmask_or(target_immed, target_full, &cm->borrowable[cell_id].cmask);
+	else
+		cmask_copy(target_immed, target_full);
+
+	if (grant) {
+		if (cmask_andnot(delta, target_full, held_full))
+			sub_grant(cgid, SUB_CAPS_FULL, delta);
+		if (cmask_andnot(delta, target_immed, held_immed))
+			sub_grant(cgid, SCX_CAP_ENQ_IMMED, delta);
+	} else {
+		if (cmask_andnot(delta, held_full, target_full))
+			scx_bpf_sub_revoke(cgid, SUB_CAPS_OWNER_ONLY, delta);
+		if (cmask_andnot(delta, held_immed, target_immed))
+			scx_bpf_sub_revoke(cgid, SCX_CAP_ENQ_IMMED, delta);
+	}
+}
+
+/*
+ * Bring every delegated cell's caps in line with the published cell masks. All
+ * revokes run before any grant so that a cid moving between cells is never held
+ * with SCX_CAP_ENQ by two subs.
+ *
+ * apply_cell_config() and ops.sub_attach() both call this and the kernel does
+ * not serialize them. Only one caller runs the pass at a time: a caller sets
+ * sub_cap_pending before it tries sub_cap_busy, and the holder reruns the pass
+ * while pending is set and checks it once more after releasing busy, so no
+ * request is lost.
+ */
+static void sub_cap_sync(void)
+{
+	u32 cell_id, i, j;
+
+	__sync_fetch_and_or(&sub_cap_pending, 1);
+
+	bpf_arena_for(i, 0, BPF_MAX_LOOPS) {
+		if (__sync_fetch_and_or(&sub_cap_busy, 1))
+			return;
+
+		bpf_arena_for(j, 0, BPF_MAX_LOOPS) {
+			__sync_fetch_and_and(&sub_cap_pending, 0);
+			scoped_guard(rcu) {
+				struct cell_cmasks __arena *cm = READ_ONCE(cell_masks);
+
+				bpf_arena_for(cell_id, 0, MAX_CELLS)
+					sub_cap_sync_cell(cm, cell_id, false);
+				bpf_arena_for(cell_id, 0, MAX_CELLS)
+					sub_cap_sync_cell(cm, cell_id, true);
+			}
+			if (!__sync_fetch_and_or(&sub_cap_pending, 0))
+				break;
+		}
+
+		/*
+		 * A caller that arrived between the last pending check and this
+		 * release saw sub_cap_busy set and left its request behind.
+		 * Take busy again for it.
+		 */
+		__sync_fetch_and_and(&sub_cap_busy, 0);
+		if (!__sync_fetch_and_or(&sub_cap_pending, 0))
+			return;
+	}
 }
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
@@ -669,7 +799,12 @@ static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
 			tctx->vtime_charge_cell = tctx->cell;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice_ns, 0);
+			/*
+			 * A borrowed cid is used only while idle. SCX_ENQ_IMMED
+			 * has the kernel enforce that.
+			 */
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, slice_ns,
+					   SCX_ENQ_IMMED);
 			if (kick)
 				scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 			return cid;
@@ -849,6 +984,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	 * enqueue() starts a new placement. A borrowed one that never ran still
 	 * carries the flag, since only stopping() clears it.
 	 */
+	if (tctx->borrowed)
+		cstat_inc(CSTAT_BORROW_BOUNCE, tctx->cell, cctx);
 	tctx->borrowed = false;
 
 	/*
@@ -957,13 +1094,17 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 	}
 
-	/* Shrink the running task's slice for this pinned waiter.
-	 * We know this task is pinned (!all_cell_cpus_allowed). */
+	/*
+	 * Shrink the running task's slice for this pinned waiter. The kernel
+	 * refuses the write on another sched's task, so a sub's task gets a
+	 * lazy preemption kick instead, which clears its slice.
+	 */
 	if (!tctx->all_cell_cpus_allowed && enable_slice_shrinking) {
 		struct task_struct *curr = scx_bpf_cid_curr(cid);
-		/* Likely overly defensive bc no other should read */
-		if (curr && !(curr->flags & PF_IDLE))
-			slice_shrink_on_enqueue(curr, tctx, tctx->cell, cctx);
+		/* an idle cid has nothing to shrink and a kick would wake it */
+		if (curr && !(curr->flags & PF_IDLE) &&
+		    !slice_shrink_on_enqueue(curr, tctx, tctx->cell, cctx))
+			scx_bpf_kick_cid(cid, SCX_KICK_PREEMPT_LAZY);
 	}
 
 	/* Kick the cid if needed */
@@ -980,13 +1121,15 @@ static __always_inline bool pinned_dsq_overdue(struct cpu_ctx __arena *cctx)
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	struct cpu_ctx __arena *cctx;
 	u32 cell;
+	u64 sub_cgid;
 
 	cctx = cur_cpu_ctx();
 	cell = READ_ONCE(cctx->cell);
+	sub_cgid = READ_ONCE(cells[cell].sub_cgid);
 
 	bool found = false;
 	dsq_id_t min_vtime_dsq = DSQ_INVALID;
@@ -1033,10 +1176,25 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		WRITE_ONCE(cctx->pinned_waiting_since, 0);
 	}
 
-	/* If we failed to find an eligible task, try the sibling LLC DSQs. */
+	/*
+	 * If we failed to find an eligible task, try the sibling LLC DSQs. A
+	 * delegated cid skips the scan. The cell's tasks run under the sub, so
+	 * its LLC DSQs hold only tasks in transit.
+	 */
 	if (!found) {
-		if (enable_llc_awareness && !try_stealing_work(cell, llc)) {
+		if (!sub_cgid && enable_llc_awareness && !try_stealing_work(cell, llc)) {
 			cstat_inc(CSTAT_STEAL, cell, cctx);
+			return;
+		}
+
+		/*
+		 * A delegated cell's tasks belong to its sub. Our queues still
+		 * come first: the per-cid DSQ holds tasks that can run nowhere
+		 * else, and a task on its way into the sub stays ours until the
+		 * kernel re-homes it.
+		 */
+		if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid)) {
+			cstat_inc(CSTAT_SUB_DISPATCH, cell, cctx);
 			return;
 		}
 
@@ -1074,8 +1232,12 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 	 */
 	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
 		min_vtime_dsq = min_vtime_dsq.raw == cell_dsq.raw ? cid_dsq : cell_dsq;
-		if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+		if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+			/* our queues are empty, so offer the cid to the sub */
+			if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid))
+				cstat_inc(CSTAT_SUB_DISPATCH, cell, cctx);
 			return;
+		}
 	}
 
 	/*
@@ -1362,11 +1524,120 @@ void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *f
 	return;
 }
 
+s32 BPF_STRUCT_OPS(mitosis_sub_attach, struct scx_sub_attach_args *args)
+{
+	u64 cgid = args->ops->sub_cgroup_id;
+	struct cgrp_ctx __arena *cgc;
+	struct cell __arena *cell;
+
+	MITOSIS_TOUCH_ARENA();
+
+	/* a sub takes over exactly one cell, so the cgroup must own one */
+	struct cgroup *cgrp __free(cgroup) = bpf_cgroup_from_id(cgid);
+	if (!cgrp)
+		return -ENOENT;
+
+	cgc = lookup_cgrp_ctx_fallible(cgrp);
+	if (!cgc || !READ_ONCE(cgc->cell_owner))
+		return -EINVAL;
+
+	cell = &cells[READ_ONCE(cgc->cell)];
+
+	scoped_guard(scx_spin_lock, &cells_lock) {
+		if (cell->owner_cgid != cgid)
+			return -EINVAL;
+		WRITE_ONCE(cell->sub_cgid, cgid);
+	}
+
+	sub_cap_sync();
+
+	return 0;
+}
+
+void BPF_STRUCT_OPS(mitosis_sub_detach, struct scx_sub_detach_args *args)
+{
+	u64 cgid = args->ops->sub_cgroup_id;
+	u32 i;
+
+	MITOSIS_TOUCH_ARENA();
+
+	/*
+	 * The kernel dropped the sub's caps with it, so there is nothing to
+	 * revoke. Clearing the record hands the cell back to the cell manager.
+	 */
+	guard(scx_spin_lock)(&cells_lock);
+	bpf_arena_for(i, 0, MAX_CELLS) {
+		if (cells[i].sub_cgid == cgid) {
+			WRITE_ONCE(cells[i].sub_cgid, 0);
+			break;
+		}
+	}
+}
+
+/* charge the open sub interval of cctx's cid up to now, cctx->sub_lock held */
+static void sub_charge(struct cpu_ctx __arena *cctx, u64 now)
+{
+	if (cctx->sub_cell < MAX_CELLS)
+		cctx->sub_ns[cctx->sub_cell] += time_delta(now, cctx->sub_since);
+	cctx->sub_since = now;
+}
+
+/*
+ * A sub's tasks never pass through stopping(), so this is where a delegated
+ * cell's cpu time is charged. The sub fields are written here and by
+ * sub_charge_cids() from the sampling cpu, under sub_lock.
+ */
+void BPF_STRUCT_OPS(mitosis_sub_cid_sched_updated, s32 cid, u64 sched)
+{
+	struct cpu_ctx __arena *cctx = &cpu_ctxs[cid];
+	u32 cell;
+
+	MITOSIS_TOUCH_ARENA();
+
+	if (sched == SCX_CID_SCHED_NONE || sched == SCX_CID_SCHED_SELF) {
+		cell = SUB_CELL_NONE;
+	} else if (READ_ONCE(cells[cctx->cell].sub_cgid) == sched) {
+		/* the usual holder is the sub of the cid's own cell */
+		cell = cctx->cell;
+	} else {
+		/* any other sub is resolved through its cgroup */
+		struct cgroup *cgrp __free(cgroup) = bpf_cgroup_from_id(sched);
+		struct cgrp_ctx __arena *cgc = cgrp ? lookup_cgrp_ctx_fallible(cgrp) : NULL;
+
+		cell = cgc ? READ_ONCE(cgc->cell) : SUB_CELL_NONE;
+	}
+
+	guard(scx_spin_lock)(&cctx->sub_lock);
+	sub_charge(cctx, scx_bpf_now());
+	cctx->sub_cell = cell;
+}
+
+/*
+ * Charge every open sub interval, so that the sampler reads cumulative counters
+ * only. Run by userspace before each sample, see collect_metrics().
+ */
+SEC("syscall")
+int sub_charge_cids(void *ctx)
+{
+	s32 cid;
+
+	MITOSIS_TOUCH_ARENA();
+
+	bpf_arena_for(cid, 0, topo->nr_cids) {
+		struct cpu_ctx __arena *cctx = &cpu_ctxs[cid];
+
+		/* sub_lock nests inside the rq lock, so irqs stay off */
+		guard(scx_spin_lock_irqsave)(&cctx->sub_lock);
+		sub_charge(cctx, scx_bpf_now());
+	}
+	return 0;
+}
+
 /* Tracepoints provide cgroup lifecycle tracking for cell management. */
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	int ret;
 
@@ -1544,11 +1815,12 @@ static void dump_cell_cmask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	dsq_id_t dsq_id;
 	int i;
 	u32 llc;
+	u64 sub_cgid;
 	struct cell __arena *cell;
 	struct cpu_ctx __arena *cpu_ctx;
 
@@ -1564,6 +1836,10 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CELL[%d] CPUS=", i);
 		dump_cell_cmask(i);
 		scx_bpf_dump("\n");
+
+		sub_cgid = READ_ONCE(cell->sub_cgid);
+		if (sub_cgid)
+			scx_bpf_dump("CELL[%d] SUB=%llu\n", i, sub_cgid);
 
 		if (enable_llc_awareness) {
 			u64 drain_mask = READ_ONCE(cell->llcs_to_drain);
@@ -1610,11 +1886,15 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		if (dsq_is_invalid(dsq_id))
 			return;
 		if (enable_llc_awareness) {
-			scx_bpf_dump("CID[%d] cell=%d llc=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell, cpu_ctx->llc,
-				     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
+			scx_bpf_dump("CID[%d] cell=%d sub_cell=%u llc=%d vtime=%llu nr_queued=%d\n",
+				     i, cpu_ctx->cell, cpu_ctx->sub_cell, cpu_ctx->llc,
+				     READ_ONCE(cpu_ctx->vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		} else {
-			scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
-				     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
+			scx_bpf_dump("CPU[%d] cell=%d sub_cell=%u vtime=%llu nr_queued=%d\n",
+				     i, cpu_ctx->cell, cpu_ctx->sub_cell,
+				     READ_ONCE(cpu_ctx->vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		}
 	}
 }
@@ -1623,7 +1903,8 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_st
 {
 	struct task_ctx __arena *tctx;
 
-	if (!(tctx = lookup_task_ctx(p)))
+	/* the error dump also walks the sub's tasks, which have no ctx here */
+	if (!(tctx = __scx_task_data(p)))
 		return;
 
 	scx_bpf_dump("Task[%d] vtime=%llu basis_vtime=%llu cell=%u llc=%d dsq=%llx all_cell_cpus_allowed=%d\n", p->pid,
@@ -1760,8 +2041,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Offline-possible cpus have no topology, collect the cids that do. */
-	topo_cids =
-		bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(union cell_cmask), PAGE_SIZE), NUMA_NO_NODE, 0);
+	topo_cids = bpf_arena_alloc_pages(&arena, NULL,
+					  div_round_up(sizeof(struct cell_cmask), PAGE_SIZE),
+					  NUMA_NO_NODE, 0);
 	if (!topo_cids)
 		return -ENOMEM;
 	cmask_init(topo_cids, 0, nr_cids);
@@ -1772,7 +2054,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Per-shard idle masks, windowed to each shard's cid range. */
-	u32 mask_pgs = div_round_up(nr_shards * sizeof(union shard_cmask), PAGE_SIZE);
+	u32 mask_pgs = div_round_up(nr_shards * sizeof(struct shard_cmask), PAGE_SIZE);
 
 	idle_masks = bpf_arena_alloc_pages(&arena, NULL, mask_pgs, NUMA_NO_NODE, 0);
 	if (!idle_masks)
@@ -1800,6 +2082,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	bpf_for(i, 0, MAX_CELLS) cmask_copy(&gen->mask[i].cmask, topo_cids);
 	cell_cmasks_publish(gen);
 
+	cmask_init(&sub_cap_scratch.target_full.cmask, 0, nr_cids);
+	cmask_init(&sub_cap_scratch.target_immed.cmask, 0, nr_cids);
+	cmask_init(&sub_cap_scratch.held_full.cmask, 0, nr_cids);
+	cmask_init(&sub_cap_scratch.held_immed.cmask, 0, nr_cids);
+	cmask_init(&sub_cap_scratch.delta.cmask, 0, nr_cids);
+
 	/* Per-cid contexts, read directly by userspace for stats. */
 	u32 ctx_pgs = div_round_up(nr_cids * sizeof(struct cpu_ctx), PAGE_SIZE);
 
@@ -1824,6 +2112,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 		cpu_ctx = &cpu_ctxs[i];
 		cpu_ctx->cpu = scx_bpf_cid_to_cpu(i);
+		cpu_ctx->sub_cell = SUB_CELL_NONE;
 		if (enable_llc_awareness)
 			cpu_ctx->llc = t->cid[i].llc_idx >= 0 ? t->cid[i].llc_idx : LLC_INVALID;
 		else
@@ -2014,7 +2303,9 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
  * The function operates in five phases:
  * 1. Mark all cells (except cell 0) as not in use
  * 2. Apply cell cpumasks and CPU-to-cell mappings
- * 3. Apply cell assignments for owner cgroups
+ * 3. Apply cell assignments for owner cgroups, bring delegated cells' caps
+ *    in line with the new masks and clear the owner of a cell that left
+ *    the configuration with no sub attached
  * 4. Walk cgroup hierarchy to propagate cells to children
  * 5. Bump applied_configuration_seq to signal completion
  *
@@ -2026,7 +2317,7 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 SEC("syscall")
 int apply_cell_config(void *ctx)
 {
-	scx_arena_subprog_init();
+	MITOSIS_TOUCH_ARENA();
 
 	struct cgrp_ctx __arena *cgc;
 	struct cell __arena *cell;
@@ -2044,12 +2335,16 @@ int apply_cell_config(void *ctx)
 	 * This handles cell destruction - cells not in the new config
 	 * will remain marked as not in use.
 	 */
-	bpf_for(i, 1, MAX_CELLS)
-	{
-		cell = &cells[i];
+	scoped_guard(scx_spin_lock, &cells_lock) {
+		bpf_arena_for(i, 1, MAX_CELLS) {
+			cell = &cells[i];
 
-		WRITE_ONCE(cell->in_use, 0);
-		cell->owner_cgid = 0;
+			/*
+			 * owner_cgid stays: a sub attaching mid-apply to a
+			 * cgroup that keeps its cell must still find it.
+			 */
+			WRITE_ONCE(cell->in_use, 0);
+		}
 	}
 
 	/*
@@ -2095,42 +2390,62 @@ int apply_cell_config(void *ctx)
 	if (config->num_cell_assignments > MAX_CELLS)
 		return -EINVAL;
 
-	bpf_for(i, 0, MAX_CELLS)
-	{
-		struct cell_assignment *assignment;
+	scoped_guard(scx_spin_lock, &cells_lock) {
+		bpf_arena_for(i, 0, MAX_CELLS) {
+			struct cell_assignment *assignment;
 
-		if (i >= config->num_cell_assignments)
-			break;
+			if (i >= config->num_cell_assignments)
+				break;
 
-		assignment = &config->assignments[i];
+			assignment = &config->assignments[i];
 
-		u64 cgid = assignment->cgid;
-		cell_id = assignment->cell_id;
+			u64 cgid = assignment->cgid;
+			cell_id = assignment->cell_id;
 
-		if (cell_id >= MAX_CELLS)
-			return -EINVAL;
+			if (cell_id >= MAX_CELLS)
+				return -EINVAL;
 
-		struct cgroup *cg __free(cgroup) = bpf_cgroup_from_id(cgid);
-		if (!cg)
 			/*
 			 * The cgroup may have been deleted between when
 			 * userspace populated the config and now. Skip it;
-			 * userspace will discover the deletion via inotify
-			 * and remove it from the next config.
+			 * userspace will discover the deletion via inotify and
+			 * remove it from the next config.
 			 */
-			continue;
+			struct cgroup *cg __free(cgroup) = bpf_cgroup_from_id(cgid);
+			if (!cg)
+				continue;
 
-		cgc = lookup_cgrp_ctx(cg);
-		if (!cgc)
-			return -ENOENT;
+			cgc = lookup_cgrp_ctx(cg);
+			if (!cgc)
+				return -ENOENT;
 
-		cell = &cells[cell_id];
+			cell = &cells[cell_id];
 
-		cell->in_use = 1;
-		cell->owner_cgid = cgid;
+			WRITE_ONCE(cell->in_use, 1);
+			WRITE_ONCE(cell->owner_cgid, cgid);
 
-		cgc->cell = cell_id;
-		cgc->cell_owner = true;
+			WRITE_ONCE(cgc->cell, cell_id);
+			WRITE_ONCE(cgc->cell_owner, true);
+		}
+	}
+
+	/*
+	 * Bring the delegated cells' caps in line with the new masks. A cell
+	 * held for a detaching sub has empty masks now, so the pass revokes
+	 * what its sub still holds.
+	 */
+	sub_cap_sync();
+
+	/*
+	 * A cell that left the configuration keeps its owner while a sub holds
+	 * it: the cell manager holds the id until the detach.
+	 */
+	scoped_guard(scx_spin_lock, &cells_lock) {
+		bpf_arena_for(i, 1, MAX_CELLS) {
+			cell = &cells[i];
+			if (!cell->in_use && !cell->sub_cgid)
+				WRITE_ONCE(cell->owner_cgid, 0);
+		}
 	}
 
 	/*
@@ -2194,7 +2509,7 @@ int apply_cell_config(void *ctx)
 					continue;
 				}
 				/* Former owner, cell no longer in use - clear flag and fall through */
-				cgrp_ctx->cell_owner = false;
+				WRITE_ONCE(cgrp_ctx->cell_owner, false);
 			}
 
 			/* Not a cell owner (or was, but cell no longer active) - inherit from parent */
@@ -2265,8 +2580,12 @@ SCX_OPS_CID_DEFINE(mitosis,
 		* a configuration change. dispatch() extends the slice of a solo
 		* task whose placement remains valid, so the enqueue only fires
 		* when the task must leave the cpu.
+		*
+		* A sub may set SCX_OPS_TID_TO_TASK to declare that it needs the
+		* tid lookup, and the kernel rejects it unless the root has the
+		* flag too.
 		*/
-	       .flags			= SCX_OPS_ENQ_LAST,
+	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_TID_TO_TASK,
 	       .select_cid		= (void *)mitosis_select_cid,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
@@ -2280,6 +2599,9 @@ SCX_OPS_CID_DEFINE(mitosis,
 	       .cpuctl_init		= (void *)mitosis_cpuctl_init,
 	       .cpuctl_exit		= (void *)mitosis_cpuctl_exit,
 	       .cpuctl_move		= (void *)mitosis_cpuctl_move,
+	       .sub_attach		= (void *)mitosis_sub_attach,
+	       .sub_detach		= (void *)mitosis_sub_detach,
+	       .sub_cid_sched_updated	= (void *)mitosis_sub_cid_sched_updated,
 	       .dump 			= (void *)mitosis_dump,
 	       .dump_task		= (void *)mitosis_dump_task,
 	       .init			= (void *)mitosis_init,

@@ -13,11 +13,26 @@ typedef unsigned long long u64;
 typedef unsigned int u32;
 #endif
 
+/*
+ * The sub fields of cpu_ctx are written under an arena spinlock. Userspace
+ * never takes it and only needs its word in the layout. The lock type exists
+ * only in a BPF compile with vmlinux.h: bindgen targets bpf without it and the
+ * editor view has it without the target.
+ */
+#if defined(__BPF__) && defined(__VMLINUX_H__)
+#include <lib/spinlock.h>
+#else
+typedef u32 arena_spinlock_t;
+#endif
+_Static_assert(sizeof(arena_spinlock_t) == sizeof(u32), "userspace reserves one u32");
+
 enum consts {
 	MAX_CPUS_SHIFT = 9,
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
+	/* cpu_ctx.sub_cell when no sub-scheduler holds the cid */
+	SUB_CELL_NONE = MAX_CELLS,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
 	MAX_CG_DEPTH = 256,
@@ -43,6 +58,8 @@ enum cell_stat_idx {
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
 	CSTAT_BORROWED,
+	CSTAT_BORROW_BOUNCE,
+	CSTAT_SUB_DISPATCH,
 	CSTAT_STEAL,
 	CSTAT_DRAIN_CNT,
 	CSTAT_DRAIN_AFFN_CNT,
@@ -69,6 +86,14 @@ struct cpu_ctx {
 	u32 llc;
 	/* cpu this cid maps to, used by userspace to translate array indices */
 	u32 cpu;
+	/* guards the sub fields below, see sub_charge() */
+	arena_spinlock_t sub_lock;
+	/* the cell of the sub holding this cid, SUB_CELL_NONE when none */
+	u32 sub_cell;
+	/* when that sub took the cid or was last charged */
+	u64 sub_since;
+	/* time subs' tasks ran on this cid, per cell */
+	u64 sub_ns[MAX_CELLS];
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 struct cgrp_ctx {
@@ -90,10 +115,13 @@ _Static_assert(sizeof(struct cell_llc) >= SCX_CACHELINE_SIZE,
 	       "cell_llc must be at least one cache line");
 
 struct cell {
-	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
+	// cgroup ID of the cell owner, kept while a detaching sub-scheduler
+	// still holds the cell (0 for cell 0 or none)
 	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
+	// cgroup ID of the attached sub-scheduler, 0 when none
+	u64 sub_cgid;
 	// Bitmap of LLC DSQs that have queued work but no CPUs in this cell
 	u64 llcs_to_drain;
 	// Bitmap of LLCs that contain CPUs assigned to this cell

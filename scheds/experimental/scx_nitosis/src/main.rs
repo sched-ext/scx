@@ -221,14 +221,15 @@ struct Opts {
 }
 
 // The subset of cstats we care about.
-// Local + Default + Hi + Lo = Total Decisions
+// Local + CPU + Cell + Borrowed + Sub = Total Decisions
 // Affinity violations are not queue decisions, but
 // will be calculated separately and reported as a percent of the total
-const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
+const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 5] = [
     bpf_intf::cell_stat_idx_CSTAT_LOCAL,
     bpf_intf::cell_stat_idx_CSTAT_CPU_DSQ,
     bpf_intf::cell_stat_idx_CSTAT_CELL_DSQ,
     bpf_intf::cell_stat_idx_CSTAT_BORROWED,
+    bpf_intf::cell_stat_idx_CSTAT_SUB_DISPATCH,
 ];
 
 // Per cell book-keeping
@@ -287,9 +288,11 @@ struct DistributionStats {
     cpu_q_pct: f64,
     cell_q_pct: f64,
     borrowed_pct: f64,
+    sub_q_pct: f64,
     affn_viol_pct: f64,
     steal_pct: f64,
     pin_skip_pct: f64,
+    borrow_bounce_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -311,16 +314,18 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% Sub:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}% Bounce:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
             self.cpu_q_pct,
             self.cell_q_pct,
             self.borrowed_pct,
+            self.sub_q_pct,
             self.affn_viol_pct,
             self.steal_pct,
             self.pin_skip_pct,
+            self.borrow_bounce_pct,
             width = descisions_width,
         )
     }
@@ -545,6 +550,8 @@ impl<'a> Scheduler<'a> {
             }
 
             // Periodic work on every iteration
+            self.release_detached_cells()
+                .context("releasing detached cells")?;
             self.refresh_bpf_cells()
                 .context("refreshing BPF cell state")?;
             self.check_cpuset_changes()
@@ -581,9 +588,11 @@ impl<'a> Scheduler<'a> {
     /// Process cell manager events (new/destroyed cgroups)
     fn process_cell_events(&mut self) -> Result<()> {
         let (num_new, num_destroyed, new_cell_ids, destroyed_cell_ids) = {
+            // the records decide whether a destroyed cell's ID is reused at
+            // once or waits for its sub-scheduler to detach
             let (new_cells, destroyed_cells) = self
                 .cell_manager
-                .process_events()
+                .process_events(|| read_cell_sub_cgids(&self.skel).context("reading cell records"))
                 .context("processing inotify events")?;
 
             if new_cells.is_empty() && destroyed_cells.is_empty() {
@@ -613,6 +622,29 @@ impl<'a> Scheduler<'a> {
             "Cell config updated ({} new, {} destroyed): {}",
             num_new,
             num_destroyed,
+            self.cell_manager.format_cell_config(&cpu_assignments)
+        );
+
+        Ok(())
+    }
+
+    /// Free the cells whose sub-scheduler detached since the last pass and
+    /// re-apply the configuration, which clears their owners. A detach is not
+    /// a cgroup event, so inotify does not report it.
+    fn release_detached_cells(&mut self) -> Result<()> {
+        let sub_cgids = read_cell_sub_cgids(&self.skel).context("reading cell records")?;
+        let released = self.cell_manager.release_detached_cells(&sub_cgids);
+        if released == 0 {
+            return Ok(());
+        }
+
+        let cpu_assignments = self
+            .compute_and_apply_cell_config(&[])
+            .context("recomputing cell configuration after a detach")?;
+
+        info!(
+            "Released {} detached cell(s): {}",
+            released,
             self.cell_manager.format_cell_config(&cpu_assignments)
         );
 
@@ -868,6 +900,7 @@ impl<'a> Scheduler<'a> {
         scope_affn_viols: u64,
         scope_steals: u64,
         scope_pin_skips: u64,
+        scope_borrow_bounces: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -904,7 +937,13 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_pin_skips as f64) / (scope_queue_decisions as f64)
         };
 
-        const EXPECTED_QUEUES: usize = 4;
+        let borrow_bounce_pct = if scope_queue_decisions == 0 {
+            0.0
+        } else {
+            100.0 * (scope_borrow_bounces as f64) / (scope_queue_decisions as f64)
+        };
+
+        const EXPECTED_QUEUES: usize = 5;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
                 "Expected {} queues, got {}",
@@ -920,9 +959,11 @@ impl<'a> Scheduler<'a> {
             cpu_q_pct: queue_pct[1],
             cell_q_pct: queue_pct[2],
             borrowed_pct: queue_pct[3],
+            sub_q_pct: queue_pct[4],
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
             pin_skip_pct,
+            borrow_bounce_pct,
             global_queue_decisions,
         })
     }
@@ -961,6 +1002,12 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize])
             .sum::<u64>();
 
+        // Sum borrow bounces over all cells
+        let scope_borrow_bounces: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_BORROW_BOUNCE as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self
             .calculate_distribution_stats(
@@ -970,6 +1017,7 @@ impl<'a> Scheduler<'a> {
                 scope_affn_viols,
                 scope_steals,
                 scope_pin_skips,
+                scope_borrow_bounces,
             )
             .context("calculating global queue distribution stats")?;
 
@@ -1033,6 +1081,10 @@ impl<'a> Scheduler<'a> {
             let scope_pin_skips: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
 
+            // Borrow bounces for this cell
+            let scope_borrow_bounces: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_BORROW_BOUNCE as usize];
+
             let stats = self
                 .calculate_distribution_stats(
                     &queue_counts,
@@ -1041,6 +1093,7 @@ impl<'a> Scheduler<'a> {
                     scope_affn_viols,
                     scope_steals,
                     scope_pin_skips,
+                    scope_borrow_bounces,
                 )
                 .with_context(|| {
                     format!("calculating queue distribution stats for cell {}", cell)
@@ -1107,6 +1160,12 @@ impl<'a> Scheduler<'a> {
 
         self.update_drain_metrics(cell_stats_delta);
 
+        // a delegated cell reports its sub whether or not it had decisions
+        let sub_cgids = read_cell_sub_cgids(&self.skel).context("reading cell records")?;
+        for (cell, cell_metrics) in self.metrics.cells.iter_mut() {
+            cell_metrics.sub_cgid = sub_cgids[*cell as usize];
+        }
+
         if global_queue_decisions == 0 {
             if self.metrics.drain_cnt == 0 {
                 warn!("No queueing decisions made globally");
@@ -1150,6 +1209,13 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
+        // close the open sub intervals so that the counters read below are
+        // current, see sub_charge_cids()
+        self.skel
+            .progs
+            .sub_charge_cids
+            .test_run(ProgramInput::default())
+            .context("running sub_charge_cids")?;
         // the demand deltas are measured up to here, see collect_demand_metrics()
         let sampled_at = Instant::now();
         let cpu_ctxs = read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for metrics")?;
@@ -1196,7 +1262,7 @@ impl<'a> Scheduler<'a> {
         // Deltas over the time that really passed: an iteration can take well
         // over the nominal interval and events wake the loop early. Let half
         // an interval build up before sampling again. sampled_at is taken right
-        // before the counters are read.
+        // after the sub intervals are closed, before the arena read.
         let half_interval = self.monitor_interval / 2;
         let interval_ns = match self.demand_sampled_at {
             Some(prev) if sampled_at.duration_since(prev) < half_interval => return Ok(()),
@@ -1213,10 +1279,14 @@ impl<'a> Scheduler<'a> {
         let mut on_own_ns = [0u64; MAX_CELLS];
         let mut lent_ns = [0u64; MAX_CELLS];
 
+        // the subs' time on a cid is charged apart from our own tasks' time,
+        // see sub_charge()
         for cpu_ctx in cpu_ctxs.iter() {
             let owner = cpu_ctx.cell as usize;
+            let running_ns: [u64; MAX_CELLS] =
+                std::array::from_fn(|cell| cpu_ctx.running_ns[cell] + cpu_ctx.sub_ns[cell]);
             for cell in 0..MAX_CELLS {
-                let ns = cpu_ctx.running_ns[cell];
+                let ns = running_ns[cell];
                 total_running_ns[cell] += ns;
                 if owner == cell {
                     on_own_ns[cell] += ns;
@@ -1230,8 +1300,8 @@ impl<'a> Scheduler<'a> {
                 );
             }
             // Lent time: non-owner cell tasks running on this CPU
-            let total_on_cpu: u64 = cpu_ctx.running_ns.iter().sum();
-            let owner_on_cpu = cpu_ctx.running_ns[owner];
+            let total_on_cpu: u64 = running_ns.iter().sum();
+            let owner_on_cpu = running_ns[owner];
             lent_ns[owner] += total_on_cpu.saturating_sub(owner_on_cpu);
         }
 
@@ -1473,6 +1543,24 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
             }
         }
     }
+}
+
+/// Every cell's attached sub-scheduler cgroup ID as the arena records it, 0 when none.
+fn read_cell_sub_cgids(skel: &BpfSkel) -> Result<Vec<u64>> {
+    let bss = skel
+        .maps
+        .bss_data
+        .as_ref()
+        .context("bss_data not available")?;
+    let ptr = bss.cells as *const bpf_intf::cell;
+    if ptr.is_null() {
+        bail!("cells arena array not initialized");
+    }
+    let mut cgids = Vec::with_capacity(MAX_CELLS);
+    for cell in 0..MAX_CELLS {
+        cgids.push(unsafe { std::ptr::addr_of!((*ptr.add(cell)).sub_cgid).read_volatile() });
+    }
+    Ok(cgids)
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
