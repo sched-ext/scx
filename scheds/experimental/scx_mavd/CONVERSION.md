@@ -9,8 +9,8 @@ the goals of the fork, the representation choices, the verifier constraints
 that shaped the code and how to measure them, the known issues, and the
 procedure for syncing with lavd.
 
-The last sync, on 2026-09-29, covered main through c9b90b3ad3d0
-("scheds/include: Sync with kernel sched_ext/for-7.4 (c6fe97c34a1a)").
+The last sync, on 2026-10-06, covered main through e7ed52c29856
+("Merge pull request #3868 from sched-ext/htejun/nitosis-mitosis-sync").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
