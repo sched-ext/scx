@@ -2497,11 +2497,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 	/* A mapped llcx always owns a live BTQ (BTQs are never destroyed). */
 	btq = READ_ONCE(llcx->btq);
 
-	ret = scx_atq_lock(btq);
-	if (ret) {
-		cbw_err("Failed to lock ATQ.");
-		return -EBUSY;
-	}
+	scx_spin_lock(&btq->lock);
 
 	/*
 	 * Re-verify under the BTQ lock that bill_id still maps to this llcx.
@@ -2512,7 +2508,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 	 * the task we insert.
 	 */
 	if (cbw_get_llc_ctx_with_id(bill_id, llc_id) != llcx) {
-		scx_atq_unlock(btq);
+		scx_spin_unlock(&btq->lock);
 		cbw_warn("put_aside skipped: cgroup exited: cgid=%llu", bill_id);
 		return -ESRCH;
 	}
@@ -2526,18 +2522,18 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 	 */
 	task_atq = (scx_atq_t *)READ_ONCE(taskc->atq);
 	if (task_atq == (scx_atq_t *)SCX_ATQ_DEAD) {
-		scx_atq_unlock(btq);
+		scx_spin_unlock(&btq->lock);
 		return 0;
 	}
 	if (task_atq) {
 		cbw_dbg("Possible double enqueue detected.");
-		scx_atq_unlock(btq);
+		scx_spin_unlock(&btq->lock);
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", bill_id);
 		return 0;
 	}
 
 	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
-	scx_atq_unlock(btq);
+	scx_spin_unlock(&btq->lock);
 
 	if (unlikely(ret == -ECANCELED)) {
 		return 0;
@@ -2764,19 +2760,16 @@ int cbw_cancel_with_hold(scx_task_common __arg_arena *taskc, bool *cancelled)
 		if (!atq || atq == (scx_atq_t *)SCX_ATQ_DEAD)
 			return 0;
 
-		if ((ret = scx_atq_lock(atq))) {
-			cbw_err("Failed to lock BTQ while moving task: %d", ret);
-			return ret;
-		}
+		scx_spin_lock(&atq->lock);
 
 		if (READ_ONCE(taskc->atq) != atq) {
-			scx_atq_unlock(atq);
+			scx_spin_unlock(&atq->lock);
 			continue;
 		}
 
 		scx_atq_task_hold(taskc);
 		ret = scx_atq_remove_unlocked(atq, taskc);
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 
 		if (ret) {
 			scx_atq_task_drop(taskc);

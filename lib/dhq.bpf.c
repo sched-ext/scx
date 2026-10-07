@@ -57,9 +57,7 @@ int __scx_dhq_insert_strand(scx_dhq_t *dhq, u64 taskc_ptr, u64 strand, u64 key)
 
 	heap = (strand == SCX_DHQ_STRAND_A) ? dhq->strand_a : dhq->strand_b;
 
-	ret = arena_spin_lock(&dhq->lock);
-	if (ret)
-		return ret;
+	scx_spin_lock(&dhq->lock);
 
 	/* Check total capacity */
 	if (unlikely(dhq->size_a + dhq->size_b == dhq->capacity)) {
@@ -96,12 +94,12 @@ int __scx_dhq_insert_strand(scx_dhq_t *dhq, u64 taskc_ptr, u64 strand, u64 key)
 	else
 		dhq->size_b += 1;
 
-	arena_spin_unlock(&dhq->lock);
+	scx_spin_unlock(&dhq->lock);
 
 	return 0;
 
 error:
-	arena_spin_unlock(&dhq->lock);
+	scx_spin_unlock(&dhq->lock);
 
 	return ret;
 }
@@ -192,15 +190,12 @@ __hidden
 u64 scx_dhq_pop_strand(scx_dhq_t *dhq, u64 strand)
 {
 	u64 taskc_ptr;
-	int ret;
 
-	ret = arena_spin_lock(&dhq->lock);
-	if (ret)
-		return (u64)NULL;
+	scx_spin_lock(&dhq->lock);
 
 	taskc_ptr = __scx_dhq_pop_strand_nolock(dhq, strand);
 
-	arena_spin_unlock(&dhq->lock);
+	scx_spin_unlock(&dhq->lock);
 
 	return taskc_ptr;
 }
@@ -211,15 +206,12 @@ u64 scx_dhq_pop(scx_dhq_t *dhq)
 	u64 taskc_ptr;
 	u64 vtime_a, vtime_b;
 	u64 strand;
-	int ret;
 
-	ret = arena_spin_lock(&dhq->lock);
-	if (ret)
-		return (u64)NULL;
+	scx_spin_lock(&dhq->lock);
 
 	/* If empty, return NULL */
 	if (scx_dhq_nr_queued(dhq) == 0) {
-		arena_spin_unlock(&dhq->lock);
+		scx_spin_unlock(&dhq->lock);
 		return (u64)NULL;
 	}
 
@@ -310,7 +302,7 @@ u64 scx_dhq_pop(scx_dhq_t *dhq)
 		break;
 	}
 
-	arena_spin_unlock(&dhq->lock);
+	scx_spin_unlock(&dhq->lock);
 
 	return taskc_ptr;
 }
@@ -332,15 +324,12 @@ __hidden
 u64 scx_dhq_peek_strand(scx_dhq_t *dhq, u64 strand)
 {
 	u64 taskc_ptr;
-	int ret;
 
-	ret = arena_spin_lock(&dhq->lock);
-	if (ret)
-		return (u64)NULL;
+	scx_spin_lock(&dhq->lock);
 
 	taskc_ptr = __scx_dhq_peek_strand_nolock(dhq, strand);
 
-	arena_spin_unlock(&dhq->lock);
+	scx_spin_unlock(&dhq->lock);
 
 	return taskc_ptr;
 }
@@ -351,14 +340,11 @@ u64 scx_dhq_peek(scx_dhq_t *dhq)
 	u64 taskc_ptr;
 	u64 vtime_a, vtime_b;
 	u64 strand;
-	int ret;
 
-	ret = arena_spin_lock(&dhq->lock);
-	if (ret)
-		return (u64)NULL;
+	scx_spin_lock(&dhq->lock);
 
 	if (scx_dhq_nr_queued(dhq) == 0) {
-		arena_spin_unlock(&dhq->lock);
+		scx_spin_unlock(&dhq->lock);
 		return (u64)NULL;
 	}
 
@@ -415,7 +401,7 @@ u64 scx_dhq_peek(scx_dhq_t *dhq)
 		break;
 	}
 
-	arena_spin_unlock(&dhq->lock);
+	scx_spin_unlock(&dhq->lock);
 
 	return taskc_ptr;
 }
