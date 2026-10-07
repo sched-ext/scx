@@ -483,12 +483,12 @@ lazy_static::lazy_static! {
     ];
 }
 
-/// Write `value` over the rodata variable `name` of an open object. Returns
-/// false when the object has no such variable.
-pub fn set_rodata_var(obj: &mut OpenObject, name: &str, value: &[u8]) -> Result<bool> {
+/// Offset and size of the rodata variable `name` in an open object's BTF,
+/// None when the object has no such variable.
+fn rodata_var(obj: &OpenObject, name: &str) -> Result<Option<(usize, usize)>> {
     let raw = unsafe { &*obj.as_libbpf_object().as_ptr() };
     let Some(btf) = libbpf_rs::btf::Btf::from_bpf_object(raw)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut var_off = None;
     for sec in btf.type_by_kind::<libbpf_rs::btf::types::DataSec<'_>>() {
@@ -504,7 +504,18 @@ pub fn set_rodata_var(obj: &mut OpenObject, name: &str, value: &[u8]) -> Result<
             }
         }
     }
-    let Some((off, size)) = var_off else {
+    Ok(var_off)
+}
+
+/// Whether an open object has the rodata variable `name`.
+pub fn has_rodata_var(obj: &OpenObject, name: &str) -> Result<bool> {
+    Ok(rodata_var(obj, name)?.is_some())
+}
+
+/// Write `value` over the rodata variable `name` of an open object. Returns
+/// false when the object has no such variable.
+pub fn set_rodata_var(obj: &mut OpenObject, name: &str, value: &[u8]) -> Result<bool> {
+    let Some((off, size)) = rodata_var(obj, name)? else {
         return Ok(false);
     };
     if size != value.len() {
@@ -945,6 +956,11 @@ macro_rules! scx_ops_open {
     };
 }
 
+/// BPF_PROG_LOAD flag under which a load or store through a plain scalar is an
+/// arena access, from 4c651a91bdfc in bpf-next. Not yet in the uapi header
+/// libbpf-sys 1.7 ships.
+pub const BPF_F_ARENA_SCALAR: u32 = 1 << 8;
+
 /// Open a cid-form (struct sched_ext_ops_cid) skeleton. Pair with
 /// scx_ops_cid_load!(), which skips the fix-ups for the cpu-form-only cgroup
 /// callbacks that don't exist in the cid form.
@@ -953,6 +969,11 @@ macro_rules! scx_ops_open {
 /// bpf_scx_reg(), so common.bpf.h's prolog probe gets repointed at it. Both
 /// the cid form and bpf_scx_reg_cid() appeared in v7.2, so a kernel that
 /// accepts this skeleton always has the symbol.
+///
+/// An object built with SCX_ARENA_SCALAR carries the __SCX_MARKER_arena_scalar
+/// rodata marker and is loaded with BPF_F_ARENA_SCALAR. One without the marker
+/// loads as before. The flag is in bpf-next (4c651a91bdfc) and due in v7.4, so
+/// a marked object needs a kernel that has it.
 #[macro_export]
 macro_rules! scx_ops_cid_open {
     ($builder: expr, $obj_ref: expr, $ops: ident, $open_opts: expr) => {
@@ -961,6 +982,19 @@ macro_rules! scx_ops_cid_open {
                 skel.progs
                     .scx_lib_init_probe
                     .set_attach_target(0, Some("bpf_scx_reg_cid".to_string()))?;
+                if $crate::compat::has_rodata_var(
+                    ::libbpf_rs::skel::OpenSkel::open_object(&skel),
+                    "__SCX_MARKER_arena_scalar",
+                )? {
+                    for mut prog in
+                        ::libbpf_rs::skel::OpenSkel::open_object_mut(&mut skel).progs_mut()
+                    {
+                        // libbpf-rs has no flags getter on an open program
+                        let ptr = ::libbpf_rs::AsRawLibbpf::as_libbpf_object(&prog).as_ptr();
+                        let flags = unsafe { ::libbpf_rs::libbpf_sys::bpf_program__flags(ptr) };
+                        prog.set_flags(flags | $crate::compat::BPF_F_ARENA_SCALAR);
+                    }
+                }
                 ::anyhow::Result::Ok(skel)
             },
         )

@@ -14,7 +14,28 @@
  */
 #endif
 
-#if defined(__BPF_FEATURE_ADDR_SPACE_CAST) && !defined(BPF_ARENA_FORCE_ASM)
+#if defined(SCX_ARENA_SCALAR)
+/*
+ * Arena pointers without address_space(1).
+ *
+ * Under BPF_F_ARENA_SCALAR a load or store through a plain scalar is an arena
+ * access: the JIT adds the arena base to the address's low 32 bits. A pointer
+ * loaded from arena memory is a scalar to the verifier anyway, so the tag and
+ * the casts LLVM emits for it can go, which makes the code a lot tidier.
+ *
+ * On a global, address_space(1) does two things: it places the variable in
+ * .addr_space.1, which libbpf maps into the arena, and it makes LLVM cast every
+ * access to it. SEC(".addr_space.1") does only the first, which is all that is
+ * still needed. An object that lives in the arena is therefore declared
+ * __arena_global, since __arena on it now places nothing.
+ */
+#define __arena
+#define __arena_global SEC(".addr_space.1")
+#define cast_kern(ptr)
+#define cast_user(ptr)
+/* the loader keys BPF_F_ARENA_SCALAR on this marker */
+const volatile bool __SCX_MARKER_arena_scalar __weak = true;
+#elif defined(__BPF_FEATURE_ADDR_SPACE_CAST) && !defined(BPF_ARENA_FORCE_ASM)
 #ifndef __arena
 #define __arena __attribute__((address_space(1)))
 #endif
