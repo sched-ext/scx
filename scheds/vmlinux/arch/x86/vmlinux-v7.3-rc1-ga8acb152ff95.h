@@ -32115,6 +32115,11 @@ enum scx_cid_consts {
 	SCX_CID_SHARD_MAX_CPUS = 512,
 };
 
+enum scx_cid_sched_consts {
+	SCX_CID_SCHED_NONE = 18446744073709551614ULL,
+	SCX_CID_SCHED_SELF = 18446744073709551615ULL,
+};
+
 enum scx_consts {
 	SCX_DSP_DFL_MAX_BATCH = 32,
 	SCX_DSP_MAX_LOOPS = 32,
@@ -32298,10 +32303,10 @@ enum scx_kick_flags {
 enum scx_opi {
 	SCX_OPI_BEGIN = 0,
 	SCX_OPI_NORMAL_BEGIN = 0,
-	SCX_OPI_NORMAL_END = 33,
-	SCX_OPI_CPU_HOTPLUG_BEGIN = 33,
-	SCX_OPI_CPU_HOTPLUG_END = 35,
-	SCX_OPI_END = 35,
+	SCX_OPI_NORMAL_END = 34,
+	SCX_OPI_CPU_HOTPLUG_BEGIN = 34,
+	SCX_OPI_CPU_HOTPLUG_END = 36,
+	SCX_OPI_END = 36,
 };
 
 enum scx_ops_flags {
@@ -56777,6 +56782,7 @@ struct sched_ext_ops {
 	void (*sub_detach)(struct scx_sub_detach_args *);
 	void (*sub_caps_updated)(const struct scx_cmask *, u64);
 	void (*sub_ecaps_updated)(s32, u64, u64);
+	void (*sub_cid_sched_updated)(s32, u64);
 	void (*cpu_online)(s32);
 	void (*cpu_offline)(s32);
 	s32 (*init_cids)(void);
@@ -56807,6 +56813,13 @@ struct bpf_struct_ops_sched_ext_ops {
 	long: 64;
 	long: 64;
 	struct sched_ext_ops data;
+	long: 64;
+	long: 64;
+	long: 64;
+	long: 64;
+	long: 64;
+	long: 64;
+	long: 64;
 };
 
 struct scx_enable_args;
@@ -56845,6 +56858,7 @@ struct sched_ext_ops_cid {
 	void (*sub_detach)(struct scx_sub_detach_args *);
 	void (*sub_caps_updated)(const struct scx_cmask *, u64);
 	void (*sub_ecaps_updated)(s32, u64, u64);
+	void (*sub_cid_sched_updated)(s32, u64);
 	void (*cid_online)(s32);
 	void (*cid_offline)(s32);
 	s32 (*init_cids)(void);
@@ -56874,7 +56888,6 @@ struct bpf_struct_ops_sched_ext_ops_cid {
 	long: 64;
 	long: 64;
 	struct sched_ext_ops_cid data;
-	long: 64;
 	long: 64;
 };
 
@@ -131142,7 +131155,6 @@ struct scx_rq {
 	struct scx_rq_rescue rescue;
 	struct list_head runnable_list;
 	struct list_head ddsp_deferred_locals;
-	long unsigned int ops_qseq;
 	u64 remote_activate_enq_flags;
 	struct scx_sched *remote_activate_sch;
 	u32 nr_running;
@@ -131152,6 +131164,7 @@ struct scx_rq {
 	u32 flags;
 	u32 nr_immed;
 	u64 clock;
+	struct scx_sched *sched;
 	struct llist_head ecaps_to_sync;
 	struct task_struct *sub_dispatch_prev;
 	cpumask_var_t cpus_to_sync;
@@ -132742,6 +132755,7 @@ struct sched_ext_entity {
 	s32 holding_cpu;
 	s32 selected_cpu;
 	s32 runnable_cpu;
+	u32 ops_qseq;
 	struct task_struct *kf_tasks[2];
 	struct list_head runnable_node;
 	long unsigned int runnable_at;
@@ -173632,6 +173646,7 @@ extern void cubictcp_cwnd_event_tx_start(struct sock *sk) __weak __ksym;
 extern void cubictcp_init(struct sock *sk) __weak __ksym;
 extern u32 cubictcp_recalc_ssthresh(struct sock *sk) __weak __ksym;
 extern void cubictcp_state(struct sock *sk, u8 new_state) __weak __ksym;
+extern u32 scx_bpf_cgroup_nr_cpus(struct cgroup *cgrp) __weak __ksym;
 extern struct task_struct *scx_bpf_cid_curr(s32 cid) __weak __ksym;
 extern s32 scx_bpf_cid_node(s32 cid) __weak __ksym;
 extern void scx_bpf_cid_override(const s32 __attribute__((address_space(1))) *cpu_to_cid__arena, u32 cpu_to_cid_cnt, const s32 __attribute__((address_space(1))) *shard_start__arena, u32 shard_start_cnt) __weak __ksym;
