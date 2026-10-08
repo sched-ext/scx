@@ -6,9 +6,9 @@
 #include "power.bpf.h"
 
 u32 nr_cids;
-struct scx_cmask __arena *online_cmask;
-struct scx_cmask __arena *idle_cmask;
-struct scx_cmask __arena *idle_smt_cmask;
+struct scx_cmask *online_cmask;
+struct scx_cmask *idle_cmask;
+struct scx_cmask *idle_smt_cmask;
 
 enum {
 	NR_GLOBAL_MASKS = 8,
@@ -16,17 +16,17 @@ enum {
 };
 
 /* the scratch masks share one arena pool, @mask_sz bytes apart */
-static struct scx_cmask __arena *pool_mask(u8 __arena *pool, u32 mask_sz, u32 slot)
+static struct scx_cmask *pool_mask(u8 *pool, u32 mask_sz, u32 slot)
 {
-	return (struct scx_cmask __arena *)(pool + slot * mask_sz);
+	return (struct scx_cmask *)(pool + slot * mask_sz);
 }
 
 __hidden
 int init_cid_masks(void)
 {
-	const struct scx_cmask __arena *online;
+	const struct scx_cmask *online;
 	struct scx_cid_topo topo;
-	u8 __arena *pool;
+	u8 *pool;
 	u32 pages, mask_sz;
 	s32 cid, cpu, i, j;
 
@@ -57,7 +57,7 @@ int init_cid_masks(void)
 	idle_smt_cmask = pool_mask(pool, mask_sz, 7);
 
 	bpf_arena_for(cid, 0, nr_cids) {
-		struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cid);
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
 
 		cpu = scx_bpf_cid_to_cpu(cid);
 		cpuc->cid = cid;
@@ -83,7 +83,7 @@ int init_cid_masks(void)
 		cpu_ctxs[cpuc->core_cid].core_nr_cids++;
 	}
 	bpf_arena_for(cid, 0, nr_cids) {
-		struct cpu_ctx __arena *cpuc = &cpu_ctxs[cid];
+		struct cpu_ctx *cpuc = &cpu_ctxs[cid];
 
 		cpuc->core_nr_cids = cpu_ctxs[cpuc->core_cid].core_nr_cids;
 	}
@@ -107,7 +107,7 @@ int init_cid_masks(void)
 		}
 	}
 	bpf_arena_for(i, 0, LAVD_CPDOM_MAX_NR) {
-		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(i);
+		struct cpdom_ctx *cpdomc = get_cpdom_ctx(i);
 
 		cmask_init(&cpdomc->cpus, 0, nr_cids);
 		cmask_init(&cpdomc->online, 0, nr_cids);
@@ -131,7 +131,7 @@ int init_cid_masks(void)
 __hidden
 s32 claim_idle_cid(s32 cid)
 {
-	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cid);
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
 
 	asm volatile("" :: "r"(&arena));
 	if (!cpuc)
@@ -143,7 +143,7 @@ s32 claim_idle_cid(s32 cid)
 }
 
 __hidden
-s32 pick_idle_cid(const struct scx_cmask __arena __arg_arena *allowed, u64 flags)
+s32 pick_idle_cid(const struct scx_cmask __arg_arena *allowed, u64 flags)
 {
 	s32 cid, claimed;
 
@@ -173,7 +173,7 @@ found:
 __hidden
 void update_idle_cid(s32 cid, bool idle)
 {
-	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cid);
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
 	s32 sibling;
 
 	asm volatile("" :: "r"(&arena));

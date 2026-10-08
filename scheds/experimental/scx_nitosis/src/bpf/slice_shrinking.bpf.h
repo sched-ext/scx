@@ -112,7 +112,7 @@ static inline u64 slice_shrink_limit(u64 avg_runtime_ns, enum slice_shrink_resul
  */
 static inline bool
 slice_shrink_apply(struct task_struct *p, u64 limit, enum slice_shrink_result result,
-		   u32 cell, struct cpu_ctx __arena *cctx)
+		   u32 cell, struct cpu_ctx *cctx)
 {
 	if (p->scx.slice > limit) {
 		if (!scx_bpf_task_set_slice(p, limit))
@@ -133,8 +133,8 @@ slice_shrink_apply(struct task_struct *p, u64 limit, enum slice_shrink_result re
  * EWMA runtime. Caller must check enable_slice_shrinking and curr.
  */
 static inline bool
-slice_shrink_on_enqueue(struct task_struct *curr, struct task_ctx __arena *pinned_waiter_tctx,
-			u32 cell, struct cpu_ctx __arena *cctx)
+slice_shrink_on_enqueue(struct task_struct *curr, struct task_ctx *pinned_waiter_tctx,
+			u32 cell, struct cpu_ctx *cctx)
 {
 	enum slice_shrink_result result;
 	u64 limit = slice_shrink_limit(pinned_waiter_tctx->avg_runtime_ns, &result);
@@ -146,7 +146,7 @@ slice_shrink_on_enqueue(struct task_struct *curr, struct task_ctx __arena *pinne
  * on our CPU DSQ. Peeks the head waiter for EWMA data.
  * Caller must check enable_slice_shrinking.
  */
-static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struct cpu_ctx __arena *cctx)
+static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struct cpu_ctx *cctx)
 {
 	dsq_id_t cid_dsq = get_cid_dsq_id(scx_bpf_task_cid(p));
 	if (dsq_is_invalid(cid_dsq))
@@ -173,7 +173,7 @@ static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struc
 	 * The waiter was peeked without pinning. The RCU-protected ctx lookup
 	 * fails if the waiter is already gone, see mitosis_exit_task().
 	 */
-	struct task_ctx __arena *wtctx = __scx_task_data(waiter);
+	struct task_ctx *wtctx = __scx_task_data(waiter);
 	if (!wtctx)
 		return 0;
 

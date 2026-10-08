@@ -8,6 +8,7 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .add_cflag("-DSCX_ARENA_SCALAR")
         .add_source("src/bpf/balance.bpf.c")
         .add_source("src/bpf/cid.bpf.c")
         .add_source("src/bpf/idle.bpf.c")

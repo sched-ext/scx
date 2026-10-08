@@ -10,4 +10,4 @@
  * linking the arena spinlock provides exactly one definition, so that the array
  * is emitted once rather than once per translation unit.
  */
-struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
+struct arena_qnode __arena_global __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];

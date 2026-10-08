@@ -29,9 +29,9 @@ static inline s32 llc_of_cid(s32 cid)
  * ranges come from the topology snapshot, so the old per-LLC cpumasks and the
  * cached task-and-LLC intersection are both just windowed scans now.
  */
-static inline bool cmask_intersects_llc(struct scx_cmask __arena *m, u32 llc)
+static inline bool cmask_intersects_llc(struct scx_cmask *m, u32 llc)
 {
-	struct mitosis_topo __arena *t = topo;
+	struct mitosis_topo *t = topo;
 	s32 base, end, cid;
 
 	base = t->llc_cids[llc].base;
@@ -43,9 +43,9 @@ static inline bool cmask_intersects_llc(struct scx_cmask __arena *m, u32 llc)
 	return cid >= base && cid < end;
 }
 
-static inline s32 choose_task_llc(struct task_ctx __arena *tctx, s32 preferred_cid)
+static inline s32 choose_task_llc(struct task_ctx *tctx, s32 preferred_cid)
 {
-	struct scx_cmask __arena *effective = &tctx->effective;
+	struct scx_cmask *effective = &tctx->effective;
 	u32 pick;
 
 	if (cmask_empty(effective))
@@ -69,7 +69,7 @@ static inline s32 choose_task_llc(struct task_ctx __arena *tctx, s32 preferred_c
  */
 #define DRAIN_CAS_TRIES (1U << 23)
 
-static inline void cell_llc_drain_enable(struct cell __arena *cell, u32 llc)
+static inline void cell_llc_drain_enable(struct cell *cell, u32 llc)
 {
 	u64 bit, old, new;
 	u32 i;
@@ -87,7 +87,7 @@ static inline void cell_llc_drain_enable(struct cell __arena *cell, u32 llc)
 	scx_bpf_error("drain_enable CAS exhausted at llc %u", llc);
 }
 
-static inline void cell_llc_drain_disable(struct cell __arena *cell, u32 llc)
+static inline void cell_llc_drain_disable(struct cell *cell, u32 llc)
 {
 	u64 bit, old, new;
 	u32 i;
@@ -111,17 +111,17 @@ static inline void cell_llc_drain_disable(struct cell __arena *cell, u32 llc)
  * scx_bpf_dsq_nr_queued() until the enqueue callback finishes. Drain
  * interlocking needs the queue depth visible before enabling llcs_to_drain.
  */
-static inline void cell_llc_nr_queued_inc(struct cell __arena *cell, u32 llc)
+static inline void cell_llc_nr_queued_inc(struct cell *cell, u32 llc)
 {
 	__sync_fetch_and_add(&cell->llcs[llc].nr_queued, 1);
 }
 
-static inline u32 cell_llc_nr_queued_dec(struct cell __arena *cell, u32 llc)
+static inline u32 cell_llc_nr_queued_dec(struct cell *cell, u32 llc)
 {
 	return __sync_sub_and_fetch(&cell->llcs[llc].nr_queued, 1);
 }
 
-static inline bool cell_llc_has_cpus(struct cell __arena *cell, u32 llc)
+static inline bool cell_llc_has_cpus(struct cell *cell, u32 llc)
 {
 	return READ_ONCE(cell->llcs_with_cpus) & (1LLU << llc);
 }
@@ -133,8 +133,8 @@ static inline bool cell_llc_has_cpus(struct cell __arena *cell, u32 llc)
  */
 static inline void kick_cell_idle_cpu(u32 cell_id)
 {
-	struct mitosis_topo __arena *t = topo;
-	struct scx_cmask __arena *cell_mask = &READ_ONCE(cell_masks)->mask[cell_id].cmask;
+	struct mitosis_topo *t = topo;
+	struct scx_cmask *cell_mask = &READ_ONCE(cell_masks)->mask[cell_id].cmask;
 	s32 cid;
 
 	cid = pick_idle_cid_shards(cell_mask, 0, t->nr_shards, -1);
@@ -144,7 +144,7 @@ static inline void kick_cell_idle_cpu(u32 cell_id)
 
 static inline int refresh_cell_llc_draining(u32 cell_id)
 {
-	struct cell __arena *cell;
+	struct cell *cell;
 	u64 llcs_with_cpus = 0;
 	u32 nr_llcs = topo->nr_llcs;
 	u32 llc;
@@ -154,7 +154,7 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 
 	cell = &cells[cell_id];
 
-	struct scx_cmask __arena *cell_mask = &READ_ONCE(cell_masks)->mask[cell_id].cmask;
+	struct scx_cmask *cell_mask = &READ_ONCE(cell_masks)->mask[cell_id].cmask;
 
 	bpf_for(llc, 0, nr_llcs)
 	{
@@ -191,7 +191,7 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 
 static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
 {
-	struct cell __arena *cell;
+	struct cell *cell;
 
 	if (!enable_llc_awareness)
 		return 0;
@@ -229,9 +229,9 @@ enum {
  * CONTINUE_DISPATCH when work was moved to a remote CPU DSQ, and a negative
  * error when no work was dispatched.
  */
-static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx __arena *local_cctx)
+static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *local_cctx)
 {
-	struct cell __arena *cell = &cells[cell_id];
+	struct cell *cell = &cells[cell_id];
 
 	u64 drain_mask = READ_ONCE(cell->llcs_to_drain);
 	if (!drain_mask)
@@ -318,7 +318,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx _
 			struct task_struct *p;
 
 			bpf_for_each(scx_dsq, p, candidate_dsq.raw, 0) {
-				struct task_ctx __arena *tctx;
+				struct task_ctx *tctx;
 				dsq_id_t target_dsq;
 				u64 basis_vtime;
 				s32 cid;
@@ -386,7 +386,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx _
 
 static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 {
-	struct cell __arena *cell = &cells[cell_id];
+	struct cell *cell = &cells[cell_id];
 
 	u32 nr_llcs = topo->nr_llcs;
 	u32 i;
@@ -426,7 +426,7 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 	return -ENOENT;
 }
 
-static inline int set_task_llc(struct task_struct *p, struct task_ctx __arena *tctx, u32 new_llc, bool reset_vtime)
+static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32 new_llc, bool reset_vtime)
 {
 	if (!tctx) {
 		scx_bpf_error("Invalid task context");
@@ -440,7 +440,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx __arena *t
 		return -EINVAL;
 	}
 
-	struct cell __arena *cell = &cells[tctx->cell];
+	struct cell *cell = &cells[tctx->cell];
 
 	u32 old_llc = tctx->llc;
 	if (!cmask_intersects_llc(&tctx->effective, new_llc)) {
@@ -466,7 +466,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx __arena *t
 	return 0;
 }
 
-static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx __arena *tctx, s32 preferred_cid)
+static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx, s32 preferred_cid)
 {
 	s32 new_llc;
 
@@ -477,7 +477,7 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 	return set_task_llc(p, tctx, new_llc, true);
 }
 
-static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx __arena *tctx, s32 preferred_cid)
+static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx, s32 preferred_cid)
 {
 	int ret;
 	s32 new_llc;

@@ -38,7 +38,7 @@ bool is_permanently_pinned(const struct task_struct *p);
 bool is_effectively_pinned(task_ctx __arg_arena *taskc);
 bool use_full_cpus(void);
 void set_affinity_flags(task_ctx __arg_arena *taskc,
-			const struct scx_cmask __arena __arg_arena *cpumask);
+			const struct scx_cmask __arg_arena *cpumask);
 bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
 
@@ -70,11 +70,11 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
  * preemptible or sleepable caller can tear a cache entry or write another
  * CPU's. Keep the returned pointer inside one RCU read-side critical section.
  */
-u64 __find_task_ctx(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
+u64 __find_task_ctx(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc,
 		      bool quiet);
 
 static __always_inline u64
-__get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx __arena *cpuc)
+__get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx *cpuc)
 {
 	if (cpuc) {
 #ifdef LAVD_DEBUG

@@ -45,7 +45,7 @@ static __always_inline u64 calc_mig_delta(u64 avg_load_invr, int nz_qlen,
  * calling loop, keeping the jump complexity of the caller manageable.
  */
 int __attribute__((noinline))
-classify_cpdom(struct cpdom_ctx __arena __arg_arena *cpdomc, u64 total_load_invr,
+classify_cpdom(struct cpdom_ctx __arg_arena *cpdomc, u64 total_load_invr,
 	       u64 total_cap_sum, int nz_qlen, u64 mig_delta_factor)
 {
 	u64 x_mig_delta = 0;
@@ -151,7 +151,7 @@ int plan_x_cpdom_migration(void)
 	 * Calculate load for each active compute domain.
 	 */
 	bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
-		struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+		struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 
 		if (!cpdomc->nr_active_cpus) {
 			if (cpdomc->cur_util_wall_sum > 0)
@@ -217,7 +217,7 @@ int plan_x_cpdom_migration(void)
 reset_and_skip_lb:
 	if (sys_stat.nr_stealee > 0) {
 		bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
-			struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+			struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 
 			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
@@ -232,7 +232,7 @@ reset_and_skip_lb:
 /*
  * dsq_id: candidate DSQ to consume from, can be per-cpdom or per-cpu.
  */
-static bool consume_dsq(struct cpdom_ctx __arena *cpdomc, u64 dsq_id)
+static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 {
 	bool ret;
 	u64 before = 0;
@@ -263,7 +263,7 @@ u64 __attribute__((noinline)) dsq_peek_task_load(u64 dsq_id)
 }
 
 u64 __attribute__((noinline))
-pick_most_loaded_dsq(struct cpdom_ctx __arena __arg_arena *cpdomc)
+pick_most_loaded_dsq(struct cpdom_ctx __arg_arena *cpdomc)
 {
 	u64 pick_dsq_id = -ENOENT;
 	u64 highest_load = 0;
@@ -309,9 +309,9 @@ pick_most_loaded_dsq(struct cpdom_ctx __arena __arg_arena *cpdomc)
 	return pick_dsq_id;
 }
 
-static bool try_to_steal_task(struct cpdom_ctx __arena *cpdomc)
+static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
-	struct cpdom_ctx __arena *cpdomc_pick;
+	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
 
 	/*
@@ -412,9 +412,9 @@ static bool try_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 	return false;
 }
 
-static bool force_to_steal_task(struct cpdom_ctx __arena *cpdomc)
+static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
-	struct cpdom_ctx __arena *cpdomc_pick;
+	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
 
 	/*
@@ -476,7 +476,7 @@ static bool force_to_steal_task(struct cpdom_ctx __arena *cpdomc)
 __hidden
 bool consume_task(u64 cpdom_id)
 {
-	struct cpdom_ctx __arena *cpdomc = get_cpdom_ctx(cpdom_id);
+	struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
 	u64 cpu_dsq_id, cpdom_dsq_id, cpdom_turb_dsq_id;
 	struct dsq_entry dsqs[3];
 	int i;

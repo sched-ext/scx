@@ -116,7 +116,7 @@ struct arena_qnode {
 
 #ifdef __BPF__
 
-extern struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
+extern struct arena_qnode __arena_global __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
 
 static inline u32 encode_tail(int cpu, int idx)
 {
