@@ -183,7 +183,7 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
-    /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
+    /// Force scx_bpf_dsq_peek() when available instead of using the compatibility helper.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     use_lockless_peek: bool,
 

@@ -146,19 +146,15 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
 extern const volatile bool use_lockless_peek;
 
 /*
- * Peek at the head of a DSQ. Uses lockless kfunc when available,
- * otherwise falls back to bpf_for_each iterator.
+ * Peek at the head of a DSQ. Force the lockless kfunc when requested and
+ * available; otherwise use the compatibility-selected implementation.
  */
 static inline struct task_struct *dsq_peek(u64 dsq_id)
 {
-	struct task_struct *p;
+	if (use_lockless_peek && bpf_ksym_exists(scx_bpf_dsq_peek))
+		return scx_bpf_dsq_peek(dsq_id);
 
-	if (use_lockless_peek)
-		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
-
-	bpf_for_each(scx_dsq, p, dsq_id, 0)
-		return p;
-	return NULL;
+	return __COMPAT_scx_bpf_dsq_peek(dsq_id);
 }
 
 static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
