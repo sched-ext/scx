@@ -118,10 +118,24 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (unlikely(!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
 	    scx_bpf_task_cpu(p), p, 0))) {
 		struct flow_task_ctx *lctx = flow_lookup(p);
+		u32 gval;
 		flow_gate_reject();
 		if (lctx)
 			lctx->wait_at = now;
-		flow_overflow_insert(p, enq_flags, (u32)FLOW_WEIGHT_BASE);
+		/* Gate misses thread the stored share plus critical when */
+		/* state holds, else BASE-only critical top value when absent. */
+		if (lctx) {
+			u32 gw = READ_ONCE(lctx->weight);
+			u32 ghw = READ_ONCE(lctx->hint_w);
+			u64 gavg = (u64)READ_ONCE(lctx->avg_ns);
+			u64 gdev = (u64)READ_ONCE(lctx->dev_ns);
+			u32 geff = flow_task_effective_weight(gw, ghw);
+			bool gcrit = flow_lat_crit(gavg, gdev);
+			gval = flow_red_value(geff, gcrit);
+		} else {
+			gval = flow_red_value((u32)FLOW_WEIGHT_BASE, true);
+		}
+		flow_overflow_insert(p, enq_flags, gval);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
@@ -133,15 +147,23 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* with no double count. Missing state is rare, so it stays unlikely. */
 	if (unlikely(!tctx)) {
 		s32 mc = flow_pick_target(p, sel);
-		u32 mh = flow_task_hint(p);
-		u64 mdl = flow_fallback_deadline(now, mh);
+		u32 mh = 0;
+		u32 mhw = (u32)FLOW_WEIGHT_BASE;
+		u64 mdl;
+		/* No state holds no predictor, so the hint weight threads */
+		/* with BASE-only task share and critical top value when */
+		/* state is absent with no extra map. */
+		flow_task_hint_weight(p, &mh, &mhw);
+		mdl = flow_fallback_deadline(now, mh);
 		if (flow_cpu_ok(p, mc)) {
 			flow_tier_insert(p, mc, mdl, now);
 			flow_count_admit();
 		} else {
+			u32 meff = flow_task_effective_weight(
+			    (u32)FLOW_WEIGHT_BASE, mhw);
 			flow_gate_reject();
 			flow_overflow_insert(p, enq_flags,
-			    (u32)FLOW_WEIGHT_BASE);
+			    flow_red_value(meff, true));
 		}
 		flow_kick_idle_allowed(p, sel);
 		return;

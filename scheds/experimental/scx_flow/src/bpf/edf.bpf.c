@@ -117,30 +117,6 @@ static __noinline bool flow_ready_before(u64 ready, u64 deadline)
 	return false;
 }
 /**
- * flow_cpu_meets_hint - test deadline against hoisted combined drain.
- * @local_q: hoisted own local depth, non-positive means empty.
- * @node_q: hoisted node depth, non-positive means empty.
- * @deadline: absolute deadline, zero meets all.
- * @now: current time in nanos.
- *
- * Adds now plus the hoisted combined drain with saturation and no
- * kfunc, so placement checks share the enqueue reads with no wrap to
- * an early view.
- *
- * Returns: true when the drain finishes before @deadline.
- */
-static __always_inline bool flow_cpu_meets_hint(s32 local_q, s32 node_q,
-	u64 deadline, u64 now)
-{
-	u64 drain;
-	u64 ready;
-	if (deadline == 0)
-		return true;
-	drain = flow_cpu_drain_hint(local_q, node_q);
-	ready = flow_sat_add(now, drain);
-	return flow_ready_before(ready, deadline);
-}
-/**
  * flow_cpu_meets - test deadline against one CPU drain.
  * @cpu: CPU id below the 1024 bound.
  * @deadline: absolute deadline, zero meets all.
@@ -207,8 +183,6 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * ordered outside dispatch, and a global saved credit at or past 128us
  * reclaims one head with positive laxity. Runs under the caller with
  * no lock and no RCU walk here, so the verifier stays small.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /**
  * flow_red_newcomer_exceed - exceeding time of one newcomer.

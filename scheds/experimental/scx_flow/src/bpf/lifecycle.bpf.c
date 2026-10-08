@@ -22,7 +22,11 @@
  * still meets the deadline plus predictor slack holds critical, else
  * the wall miss step holds. A wall completion past the deadline counts one
  * miss with no wait and no kick, since the task already left the CPU.
- * Enable clears vruntime plus deadline plus stamps plus predictor plus
+ * Miss plus Term where Term equals completions stay counters only with
+ * no queues, so misses plus completions record history with no extra
+ * queue. Frozen rejects plus on CPU plus overflow hold wire compat
+ * with no BPF writer. Enable
+ * clears vruntime plus deadline plus stamps plus predictor plus
  * lag plus weight plus slice plus hint plus hint weight plus misses plus
  * adapt miss plus sat plus delta, and Disable plus exit clear with no
  * charge, so each segment meets exactly one charge in stopping with no

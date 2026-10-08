@@ -99,8 +99,8 @@ enum flow_consts {
 	/* Machine queue id shared by every CPU. */
 	FLOW_MACHINE = 0x5A00ULL,
 	/* Overflow reject id for overload past tier order with value order. */
-/* Named overflow for wire compat only and it holds the value ordered */
-/* reject queue drained only by reclaim, never a tier overflow. */
+/* Named overflow frozen for wire compat only and it holds the value */
+/* ordered reject queue drained only by reclaim, never a tier overflow. */
 	FLOW_OVERFLOW = 0x5A01ULL,
 	/* Queue count of 1042. Holds 1024 local plus 16 node plus one */
 	/* machine plus one value ordered reject. */
@@ -282,12 +282,15 @@ struct flow_hint {
 /* Scheduler counters with 17 fields. Reject plus reclaim moves count */
 /* RED overload plus reclaim detail with no extra map, so stats stay at */
 /* 136B. Overflow plus steal moves count in the local bucket with no new */
-/* counter. Rejects stay dead at zero for wire compat only with no */
-/* writer, while real rejects count in gate plus RED rejects. Readers */
-/* must use gate_rejects for drops plus red_rejects for overload. */
-/* Preempt kicks count busy preempts sent, and preempt skipped counts */
-/* suppressed preempts held by margin plus tail plus eligibility. */
-/* Counters run with no knob and no fixed priority. */
+/* counter. Rejects plus on CPU stay frozen at zero in BPF snapshot-counted */
+/* for wire compat only with no BPF writer, while real rejects count in gate */
+/* plus RED rejects. Readers must use gate_rejects for drops plus red_rejects */
+/* for overload, and the snapshot counts live pids for the on CPU gauge. Miss */
+/* plus Term where Term equals completions stay counters only with no queues, */
+/* so misses plus completions record history with no extra queue. Preempt kicks */
+/* count busy preempts sent, and preempt skipped counts suppressed preempts held */
+/* by margin plus tail plus eligibility. Counters run with no knob and no fixed */
+/* priority. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
