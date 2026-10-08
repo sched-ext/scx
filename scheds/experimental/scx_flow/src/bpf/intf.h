@@ -155,16 +155,17 @@ enum flow_consts {
 	/* with no late run. Tolerance aids the guarantee with no order */
 	/* shaping. */
 	FLOW_RED_TOL_NS = 64000ULL,
-	/* Adaptive grow step of 64us with no knob. Widens the slice on */
-	/* a miss, so a short burst earns room with no storm. */
+	/* Proportional adapt cap of 256us with no knob. Caps one shift */
+	/* step, so a huge exceed plus slack moves at most one quarter */
+	/* slice with no storm. Exceed shrinks, slack grows, both shift 3. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
-	FLOW_ADAPT_GROW_NS = 64000ULL,
-	/* Adaptive shrink step of 128us with no knob. Narrows the slice */
-	/* on a hit, so an idle task returns room with no stall. */
-	/* Like fair.c, the step tracks load, unlike rt.c, no fixed priority holds. */
+	FLOW_ADAPT_PROP_MAX_NS = 256000ULL,
+	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
+	/* slack to one eighth with shifts only, so no divide runs in BPF. */
+	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
-	FLOW_ADAPT_SHRINK_NS = 128000ULL,
+	FLOW_ADAPT_PROP_SHIFT = 3ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine plus overflow plus steal drain in fair order through the */
@@ -800,46 +801,71 @@ static __always_inline u64 flow_reject_key(u32 value)
 	return (u64)((u32)FLOW_WEIGHT_MAX - v);
 }
 /**
- * flow_adapt_up - widen the slice by 64us with clamp.
+ * flow_adapt_prop - proportional slice from exceed plus slack with clamp.
  * @cur: stored slice in nanos, zero inherits the quantum.
+ * @exceed: lateness in nanos, now minus expiring deadline else zero.
+ * @slack: earliness in nanos, expiring deadline minus now else zero.
  *
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
- * holds. Adds 64us with saturation, then clamps to 10us plus 1ms,
- * so a miss earns room with no wrap. Virtual time stays untouched.
+ * holds. An exceed shrinks by exceed shifted right by 3, a slack grows
+ * by slack shifted right by 3, each capped at 256us with shifts only
+ * and no divide. Clamps to 10us plus 1ms, so one step never stalls nor
+ * holds the CPU. An on-time stop with both zero holds the clamped slice.
+ * Exceed wins when both hold with no wrap. Virtual time stays untouched,
+ * RED never writes the slice, and the caller keeps the carry gate first
+ * on the same expiring deadline.
  *
  * Returns: adapted slice in nanos from 10us to 1ms.
  */
-static __always_inline u32 flow_adapt_up(u32 cur)
+static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
+	u64 slack)
 {
-	u64 s = (u64)flow_slice_inherit(cur);
-	s = flow_sat_add(s, (u64)FLOW_ADAPT_GROW_NS);
-	if (s < (u64)FLOW_SLICE_MIN_NS)
+	u64 base = (u64)flow_slice_inherit(cur);
+	u64 step;
+	u64 nxt;
+	if (exceed) {
+		step = exceed >> 3;
+		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
+			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
+		if (step == 0) {
+			if (base < (u64)FLOW_SLICE_MIN_NS)
+				return (u32)FLOW_SLICE_MIN_NS;
+			if (base > (u64)FLOW_QUANTUM_NS)
+				return (u32)FLOW_QUANTUM_NS;
+			return (u32)base;
+		}
+		if (base <= step)
+			return (u32)FLOW_SLICE_MIN_NS;
+		nxt = base - step;
+		if (nxt < (u64)FLOW_SLICE_MIN_NS)
+			return (u32)FLOW_SLICE_MIN_NS;
+		if (nxt > (u64)FLOW_QUANTUM_NS)
+			return (u32)FLOW_QUANTUM_NS;
+		return (u32)nxt;
+	}
+	if (slack) {
+		step = slack >> 3;
+		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
+			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
+		if (step == 0) {
+			if (base < (u64)FLOW_SLICE_MIN_NS)
+				return (u32)FLOW_SLICE_MIN_NS;
+			if (base > (u64)FLOW_QUANTUM_NS)
+				return (u32)FLOW_QUANTUM_NS;
+			return (u32)base;
+		}
+		nxt = flow_sat_add(base, step);
+		if (nxt < (u64)FLOW_SLICE_MIN_NS)
+			return (u32)FLOW_SLICE_MIN_NS;
+		if (nxt > (u64)FLOW_QUANTUM_NS)
+			return (u32)FLOW_QUANTUM_NS;
+		return (u32)nxt;
+	}
+	if (base < (u64)FLOW_SLICE_MIN_NS)
 		return (u32)FLOW_SLICE_MIN_NS;
-	if (s > (u64)FLOW_QUANTUM_NS)
+	if (base > (u64)FLOW_QUANTUM_NS)
 		return (u32)FLOW_QUANTUM_NS;
-	return (u32)s;
-}
-/**
- * flow_adapt_down - narrow the slice by 128us with clamp.
- * @cur: stored slice in nanos, zero inherits the quantum.
- *
- * Like fair.c, the step tracks load, unlike rt.c, no fixed priority
- * holds. Subtracts 128us with floor at 10us, then clamps to 1ms, so
- * a hit returns room with no stall. Virtual time stays untouched.
- *
- * Returns: adapted slice in nanos from 10us to 1ms.
- */
-static __always_inline u32 flow_adapt_down(u32 cur)
-{
-	u64 s = (u64)flow_slice_inherit(cur);
-	if (s <= (u64)FLOW_ADAPT_SHRINK_NS)
-		return (u32)FLOW_SLICE_MIN_NS;
-	s -= (u64)FLOW_ADAPT_SHRINK_NS;
-	if (s < (u64)FLOW_SLICE_MIN_NS)
-		return (u32)FLOW_SLICE_MIN_NS;
-	if (s > (u64)FLOW_QUANTUM_NS)
-		return (u32)FLOW_QUANTUM_NS;
-	return (u32)s;
+	return (u32)base;
 }
 /**
  * flow_carry_for - carryover slice from unused quantum with clamp.

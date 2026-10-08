@@ -62,7 +62,7 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else `64us` up on wall miss else `128us` down. Misses stay lifetime, adapt streak stays window. Reclaim reserves credit past `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `256us` on late else grow `slack>>3` capped `256us` on early. Misses stay lifetime, adapt streak stays window. Reclaim reserves credit past `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
 
 ## Code map
 
