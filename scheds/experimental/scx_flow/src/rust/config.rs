@@ -33,13 +33,55 @@ pub const HINT_MAX: u64 = 8192;
 pub const RED_EMAX_NS: u64 = 128_000;
 /// RED tolerance in nanos at 64us. Holds hard task slack only.
 pub const RED_TOL_NS: u64 = 64_000;
-/// Adaptive grow step in nanos at 64us. Widens the slice on a miss.
-pub const ADAPT_GROW_NS: u64 = 64_000;
-/// Adaptive shrink step in nanos at 128us. Narrows the slice on a hit.
-pub const ADAPT_SHRINK_NS: u64 = 128_000;
+/// Proportional adapt cap in nanos at 256us. Caps one shift step.
+pub const ADAPT_PROP_MAX_NS: u64 = 256_000;
+/// Proportional adapt shift at 3. Maps exceed plus slack to one eighth.
+pub const ADAPT_PROP_SHIFT: u32 = 3;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
+
+/// Mirror of flow_adapt_prop in intf.h for host tests.
+/// Shifts only with no divide, capped at 256us, clamped 10us to 1ms.
+/// An exceed shrinks, a slack grows, both zero holds, exceed wins.
+#[cfg(test)]
+pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
+    let base = if cur == 0 { QUANTUM_NS } else { cur as u64 };
+    // Clamp helper keeps the same 10us plus 1ms bounds as BPF.
+    let clamp = |v: u64| -> u32 {
+        if v < SLICE_MIN_NS {
+            return SLICE_MIN_NS as u32;
+        }
+        if v > QUANTUM_NS {
+            return QUANTUM_NS as u32;
+        }
+        v as u32
+    };
+    if exceed != 0 {
+        let mut step = exceed >> ADAPT_PROP_SHIFT;
+        if step > ADAPT_PROP_MAX_NS {
+            step = ADAPT_PROP_MAX_NS;
+        }
+        if step == 0 {
+            return clamp(base);
+        }
+        if base <= step {
+            return SLICE_MIN_NS as u32;
+        }
+        return clamp(base - step);
+    }
+    if slack != 0 {
+        let mut step = slack >> ADAPT_PROP_SHIFT;
+        if step > ADAPT_PROP_MAX_NS {
+            step = ADAPT_PROP_MAX_NS;
+        }
+        if step == 0 {
+            return clamp(base);
+        }
+        return clamp(base.saturating_add(step));
+    }
+    clamp(base)
+}
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,9 +120,9 @@ impl Config {
     /// one kick per wait gated on eligibility. Fairness bounds lag at
     /// 2ms with vruntime plus virtual deadline pacing queue order.
     /// Stats hold 17 counters at 136B with preempt kicks plus skipped
-    /// plus RED rejects plus reclaims. Adaptive grows 64us on a miss
-    /// else shrinks 128us with clamp to 10us plus 1ms and no virtual
-    /// change.
+    /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
+    /// capped 256us on late else grows by slack right 3 capped 256us on
+    /// early with clamp to 10us plus 1ms and no virtual change.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -173,11 +215,20 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64 != RED_TOL_NS {
             bail!("red tol bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_GROW_NS as u64 != ADAPT_GROW_NS {
-            bail!("adapt grow bad");
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS as u64 != ADAPT_PROP_MAX_NS {
+            bail!("adapt prop max bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_SHRINK_NS as u64 != ADAPT_SHRINK_NS {
-            bail!("adapt shrink bad");
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_SHIFT as u64 != ADAPT_PROP_SHIFT as u64 {
+            bail!("adapt prop shift bad");
+        }
+        if ADAPT_PROP_MAX_NS != 256_000 {
+            bail!("prop max bounds bad");
+        }
+        if ADAPT_PROP_SHIFT != 3 {
+            bail!("prop shift bounds bad");
+        }
+        if ADAPT_PROP_MAX_NS >= QUANTUM_NS {
+            bail!("prop max over ceiling bad");
         }
         if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 136 {
             bail!("stats size bad");
@@ -281,8 +332,8 @@ mod tests {
         assert_eq!(HINT_MAX, 8192);
         assert_eq!(RED_EMAX_NS, 128_000);
         assert_eq!(RED_TOL_NS, 64_000);
-        assert_eq!(ADAPT_GROW_NS, 64_000);
-        assert_eq!(ADAPT_SHRINK_NS, 128_000);
+        assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
+        assert_eq!(ADAPT_PROP_SHIFT, 3);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1042);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64,
@@ -335,17 +386,47 @@ mod tests {
             RED_TOL_NS
         );
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_ADAPT_GROW_NS as u64,
-            ADAPT_GROW_NS
+            crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS as u64,
+            ADAPT_PROP_MAX_NS
         );
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_ADAPT_SHRINK_NS as u64,
-            ADAPT_SHRINK_NS
+            crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_SHIFT as u64,
+            ADAPT_PROP_SHIFT as u64
         );
+        assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
+        assert_eq!(ADAPT_PROP_SHIFT, 3);
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
             136
         );
         assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
+    }
+
+    #[test]
+    /// Proportional adapt shrinks on exceed plus grows on slack.
+    fn prop_shrink_grow_matches_intf_h() {
+        // Exceed 8us shrinks 1us with shift 3 only.
+        assert_eq!(adapt_prop(1_000_000, 8_000, 0), 999_000);
+        // Slack 1.6us grows 200ns with shift 3 only.
+        assert_eq!(adapt_prop(500_000, 0, 1_600), 500_200);
+        // Huge exceed caps at 256us shrink.
+        assert_eq!(adapt_prop(1_000_000, 10_000_000, 0), 744_000);
+        // Huge slack caps at 256us grow clamped to 1ms.
+        assert_eq!(adapt_prop(900_000, 0, 10_000_000), 1_000_000);
+        // Small base shrinks to the 10us floor.
+        assert_eq!(adapt_prop(10_000, 80_000, 0), 10_000);
+        // On-time hold keeps the clamped slice.
+        assert_eq!(adapt_prop(500_000, 0, 0), 500_000);
+        // Zero slice inherits the quantum then shrinks.
+        assert_eq!(adapt_prop(0, 8_000, 0), 999_000);
+        // Tiny exceed below 8ns holds with no divide.
+        assert_eq!(adapt_prop(500_000, 7, 0), 500_000);
+        // Early 500 plus 700 slack 200 grows 25ns.
+        assert_eq!(adapt_prop(500_000, 0, 200), 500_025);
+        // Exceed wins when both hold.
+        assert_eq!(
+            adapt_prop(500_000, 8_000, 1_600),
+            adapt_prop(500_000, 8_000, 0)
+        );
     }
 }
