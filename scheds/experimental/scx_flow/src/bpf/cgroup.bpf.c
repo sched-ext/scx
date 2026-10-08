@@ -95,33 +95,6 @@ static __always_inline u32 flow_hint_us(u64 cgid)
 		return 0;
 	return READ_ONCE(h->period_us);
 }
-/* Hint of one task from its hierarchy with paired release. */
-/* Weight reads share flow_task_hint_weight with one cache plus one */
-/* row read, so no single weight lookup helper is kept here. */
-static __always_inline u32 flow_task_hint(struct task_struct *p)
-{
-	u32 pid = (u32)p->pid;
-	u64 *cached;
-	u64 id;
-	u32 hint;
-	if (pid) {
-		cached = bpf_map_lookup_elem(&cgrp_cache_stor, &pid);
-		if (cached && *cached)
-			return flow_hint_us(*cached);
-	}
-	{
-		struct cgroup *cgrp = flow_task_cgrp(p);
-		if (!cgrp)
-			return 0;
-		id = flow_cgrp_id(cgrp);
-		flow_cgrp_put(cgrp);
-		if (pid)
-			bpf_map_update_elem(&cgrp_cache_stor,
-			    &pid, &id, BPF_ANY);
-		hint = flow_hint_us(id);
-		return hint;
-	}
-}
 /* Hint plus weight of one task with one cache plus one row read. */
 static __always_inline void flow_task_hint_weight(
 	struct task_struct *p, u32 *hint_us, u32 *weight)
