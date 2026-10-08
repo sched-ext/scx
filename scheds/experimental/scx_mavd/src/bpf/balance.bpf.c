@@ -309,7 +309,8 @@ pick_most_loaded_dsq(struct cpdom_ctx __arg_arena *cpdomc)
 	return pick_dsq_id;
 }
 
-static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
+bool __attribute__((noinline))
+try_to_steal_task(struct cpdom_ctx __arg_arena *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
@@ -412,7 +413,8 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 	return false;
 }
 
-static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
+bool __attribute__((noinline))
+force_to_steal_task(struct cpdom_ctx __arg_arena *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
