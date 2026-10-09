@@ -36,6 +36,8 @@ pub enum ScxExitKind {
     UnregBPF = bindings::scx_exit_kind_SCX_EXIT_UNREG_BPF as isize,
     UnregKern = bindings::scx_exit_kind_SCX_EXIT_UNREG_KERN as isize,
     SysRq = bindings::scx_exit_kind_SCX_EXIT_SYSRQ as isize,
+    Parent = bindings::scx_exit_kind_SCX_EXIT_PARENT as isize,
+    ParentKill = bindings::scx_exit_kind_SCX_EXIT_PARENT_KILL as isize,
     Error = bindings::scx_exit_kind_SCX_EXIT_ERROR as isize,
     ErrorBPF = bindings::scx_exit_kind_SCX_EXIT_ERROR_BPF as isize,
     ErrorStall = bindings::scx_exit_kind_SCX_EXIT_ERROR_STALL as isize,
@@ -246,7 +248,11 @@ impl UserExitInfo {
             _ => format!("<UNKNOWN>{cpu}"),
         };
 
-        if self.kind <= ScxExitKind::UnregKern as i32 {
+        // A sub-scheduler taken down with its parent, or by it, did not fail.
+        if self.kind <= ScxExitKind::UnregKern as i32
+            || self.kind == ScxExitKind::Parent as i32
+            || self.kind == ScxExitKind::ParentKill as i32
+        {
             eprintln!("{why}");
             Ok(())
         } else {

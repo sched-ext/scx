@@ -11,6 +11,22 @@ use std::time::Duration;
 pub fn monitor_stats<T>(
     stats_args: &[(String, String)],
     intv: Duration,
+    should_exit: impl FnMut() -> bool,
+    output: impl FnMut(T) -> Result<()>,
+) -> Result<()>
+where
+    T: for<'a> Deserialize<'a>,
+{
+    monitor_stats_sched(None, stats_args, intv, should_exit, output)
+}
+
+/// Like monitor_stats(), but for the stats server at `sched_path`, the path the
+/// server was given through StatsServer::set_sched_path(). None selects the
+/// default server.
+pub fn monitor_stats_sched<T>(
+    sched_path: Option<&Path>,
+    stats_args: &[(String, String)],
+    intv: Duration,
     mut should_exit: impl FnMut() -> bool,
     mut output: impl FnMut(T) -> Result<()>,
 ) -> Result<()>
@@ -25,7 +41,11 @@ where
     ];
 
     while !should_exit() {
-        let mut client = match StatsClient::new().connect(None) {
+        let mut client = StatsClient::new();
+        if let Some(sched_path) = sched_path {
+            client = client.set_sched_path(sched_path);
+        }
+        let mut client = match client.connect(None) {
             Ok(v) => v,
             Err(e) => match e.downcast_ref::<std::io::Error>() {
                 Some(ioe) if RETRYABLE_ERRORS.contains(&ioe.kind()) => {

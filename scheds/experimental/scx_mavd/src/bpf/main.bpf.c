@@ -221,6 +221,27 @@ const volatile u8	mig_delta_pct = 0;
 /* Disable batch-migration load balancer; set via --no-fast-lb. */
 const volatile u8	no_fast_lb = 0;
 
+/*
+ * A sub-scheduler, set via --cgroup: mavd schedules only the cids its parent
+ * grants, mapped onto the online view. Left for later:
+ *
+ * - A cid granted ENQ_IMMED alone is unused, see lavd_sub_ecaps_updated().
+ *   With it, another scheduler's cpu can be borrowed for an insert the cpu
+ *   takes at once.
+ * - Only mavd's own tasks are preemption victims. With PREEMPT on a cid,
+ *   another scheduler's task running there may be preempted too, which
+ *   matters once cpus are shared through IMMED-only grants.
+ */
+const volatile bool	sub_mode = false;
+/* the attach cgroup in sub mode */
+const volatile u64	sub_cgroup_id = 0;
+/* a cid was granted ENQ_IMMED alone, reported by userspace once */
+bool			sub_immed_only_seen;
+/* the set lock, see lavd.bpf.h */
+arena_spinlock_t __arena_global sub_set_lock;
+/* a change no armed grace period covers, see sub_request_sweep() */
+bool			sub_sweep_owed;
+
 /* Disable the proactive overflow-set extension on wake-up;
  * set via --no-ovrflw-extend. */
 const volatile u8	no_ovrflw_extend;
@@ -706,6 +727,51 @@ static void update_stat_for_refill(struct task_struct *p, task_ctx *taskc,
 					   taskc->acc_runtime_invr);
 }
 
+/*
+ * A sub-scheduler's task allowed on none of the cids mavd holds would sit on
+ * mavd's queues and never run. Hand it to the kernel's rescue path: an insert
+ * onto an allowed cid carrying SCX_ENQ_RESCUE is diverted there when mavd lacks
+ * ENQ on the cid.
+ */
+static bool rescue_needed(task_ctx *taskc)
+{
+	return sub_mode && !cmask_intersects(&taskc->allowed, online_cmask);
+}
+
+/* rescue on the task's last cid while still allowed so that rescues spread */
+static s32 rescue_cid(task_ctx *taskc)
+{
+	if (cmask_test(taskc->cid, &taskc->allowed))
+		return taskc->cid;
+	return cmask_any_distribute(&taskc->allowed);
+}
+
+static void dispatch_to_rescue(struct task_struct *p, task_ctx *taskc, u64 enq_flags)
+{
+	s32 cid = rescue_cid(taskc);
+
+	taskc->suggested_cid = cid;
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cid, LAVD_SLICE_MAX_NS_DFL,
+			   enq_flags | SCX_ENQ_RESCUE);
+}
+
+/*
+ * A re-enqueue arrives without a select, so the cached placement may lie
+ * outside the task's allowed mask, or in sub mode outside the held cids.
+ * Replace it with an allowed held cid, spread across them. With no such cid an
+ * allowed one is returned and the caller rescues, see rescue_needed().
+ */
+static s32 clamp_to_online(task_ctx *taskc, s32 cid)
+{
+	if (cmask_test(cid, &taskc->allowed) && (!sub_mode || cmask_test(cid, online_cmask)))
+		return cid;
+
+	cid = cmask_any_and_distribute(&taskc->allowed, online_cmask);
+	if (cid < cmask_end(&taskc->allowed))
+		return cid;
+	return cmask_any_distribute(&taskc->allowed);
+}
+
 static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 {
 	/*
@@ -844,6 +910,16 @@ s32 BPF_STRUCT_OPS(lavd_select_cid, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (!ictx.taskc)
 		return prev_cpu;
 
+	/* wake it where dispatch_to_rescue() inserts, so the insert is local */
+	if (rescue_needed(ictx.taskc))
+		return rescue_cid(ictx.taskc);
+
+	/* the picker works from the previous cid, which has to be held */
+	if (sub_mode) {
+		prev_cpu = clamp_to_online(ictx.taskc, prev_cpu);
+		ictx.prev_cpu = prev_cpu;
+	}
+
 	/*
 	 * Check whether it is a synchronous wake-up to boost
 	 * latency-criticality later.
@@ -922,6 +998,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
 	struct cpu_ctx *cpuc;
+	u32 reenq_reason = p->scx.flags & SCX_TASK_REENQ_REASON_MASK;
 	s32 task_cpu, cpu = -ENOENT;
 	bool is_idle = false;
 	task_ctx *taskc;
@@ -935,10 +1012,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	task_cpu = scx_bpf_task_cid(p);
 
 	/*
-	 * SCX_ENQ_REENQ returns a previously placed task after RT/DL takes the
-	 * CPU. The sched_switch hook drains its local DSQ.
+	 * SCX_ENQ_REENQ returns a previously placed task. Only a re-enqueue
+	 * from scx_bpf_dsq_reenq(), the RT/DL drain and the sweep, reuses the
+	 * cached placement, clamped to a held cid. Every other reason, and a
+	 * task left with no held cid, takes the full path, which rescues the
+	 * latter.
 	 */
-	if (unlikely(enq_flags & SCX_ENQ_REENQ)) {
+	if (unlikely(enq_flags & SCX_ENQ_REENQ) && reenq_reason == SCX_TASK_REENQ_KFUNC &&
+	    !rescue_needed(taskc)) {
 		/*
 		 * If the task’s cgroup is throttled, the task should be
 		 * backlogged, and its accounted load should be reverted since
@@ -973,13 +1054,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 *     task's affinity mask; if task_cpu is still allowed,
 		 *     the task is not re-enqueued, leaving the cache stale
 		 *   - CPU hotplug removes an offline CPU from cpus_ptr
-		 * Clamp to the task's allowed mask to prevent routing the task
-		 * to the per-CPU DSQ of a CPU that cannot run it.
+		 * Clamp it so the task is not routed to the DSQ of a cid that
+		 * cannot run it.
 		 */
-		if (!cmask_test(cpu, &taskc->allowed)) {
-			cpu = cmask_first_set(&taskc->allowed);
-			taskc->suggested_cid = cpu;
-		}
+		cpu = clamp_to_online(taskc, cpu);
+		taskc->suggested_cid = cpu;
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx for cid %d", cpu);
@@ -1024,7 +1103,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 *    neither changes between here and the dispatch below.
 	 * 2. If ops.select_cid() already chose the CPU (is_enq_cpu_selected),
 	 *    the kernel validated it and pi_lock spans select_cid()->enqueue(),
-	 *    so task_cpu is guaranteed to be within p->cpus_ptr.
+	 *    so task_cpu is guaranteed to be within p->cpus_ptr. In sub mode a
+	 *    revoke may have landed since the select, so it is clamped to the
+	 *    view.
 	 * 3. Otherwise (pure enqueue), task_cpu may lag a cpumask change --
 	 *    e.g. set_cpus_allowed()'s DEQUEUE_SAVE/ENQUEUE_RESTORE updates the
 	 *    mask and re-enqueues before affine_move_task() migrates -- so it
@@ -1038,13 +1119,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			.wake_flags = 0,
 		};
 
-		/* case 3: clamp a stale task_cpu to the allowed mask */
-		if (!cmask_test(ictx.prev_cpu, &taskc->allowed))
-			ictx.prev_cpu = cmask_first_set(&taskc->allowed);
+		/* case 3: a stale task_cpu may lie outside the allowed mask */
+		ictx.prev_cpu = clamp_to_online(taskc, task_cpu);
 
 		cpu = pick_idle_cpu(&ictx, p, false, &is_idle);
 	} else {
-		cpu = task_cpu;
+		cpu = clamp_to_online(taskc, task_cpu);
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
@@ -1074,6 +1154,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (enable_cpu_bw && (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
 		debugln("Task %s[pid%d/cgid%llu] is throttled.",
 			p->comm, p->pid, taskc->cgrp_id);
+		return;
+	}
+
+	if (rescue_needed(taskc)) {
+		dispatch_to_rescue(p, taskc, enq_flags);
 		return;
 	}
 
@@ -1152,6 +1237,11 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 		return 0;
 	}
 
+	if (rescue_needed(taskc)) {
+		dispatch_to_rescue(p, taskc, 0);
+		return 0;
+	}
+
 	/*
 	 * Note that we don't need to calculate p->scx.dsq_vtime again
 	 * since it was already calculated and assigned to p->scx.dsq_vtime
@@ -1181,16 +1271,13 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * the new mask while taskc->suggested_cid (only refreshed at
 	 * step 4) is still the stale pre-change pick.
 	 *
-	 * Fall back to the first cid of the allowed mask when the cached pick
-	 * is no longer valid. A full pick_idle_cpu() refresh would be more
-	 * accurate but extends the call chain (lavd_dispatch ->
-	 * scx_cgroup_bw_reenqueue -> cbw_reenqueue_cgroup ->
-	 * cbw_drain_btq_batch -> enqueue_cb -> pick_idle_cpu) past the
-	 * BPF verifier's combined-stack budget.
+	 * Clamp the cached pick when it is no longer valid. A full
+	 * pick_idle_cpu() refresh would be more accurate but extends the call
+	 * chain (lavd_dispatch -> scx_cgroup_bw_reenqueue ->
+	 * cbw_reenqueue_cgroup -> cbw_drain_btq_batch -> enqueue_cb ->
+	 * pick_idle_cpu) past the BPF verifier's combined-stack budget.
 	 */
-	cpu = taskc->suggested_cid;
-	if (!cmask_test(cpu, &taskc->allowed))
-		cpu = cmask_first_set(&taskc->allowed);
+	cpu = clamp_to_online(taskc, taskc->suggested_cid);
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -1414,6 +1501,80 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 	return false;
 }
 
+/*
+ * A cap change leaves tasks queued where no held cid serves them: on the DSQs
+ * of a core or cpdom that lost cids, and on any DSQ while nothing was held.
+ * Enqueue places every task against the current view, so the sweep re-enqueues
+ * the DSQs of every core and cpdom that is not fully held. It runs after an RCU
+ * grace period that began after the change: every op that read the old view has
+ * returned by then, so nothing it inserted is missed, and nothing placed
+ * afterwards uses the old view.
+ */
+struct sub_sweep_rcu {
+	struct bpf_rcu_head	rh;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct sub_sweep_rcu);
+} sub_sweep_rcu SEC(".maps");
+
+static int sub_sweep_cb(struct bpf_map *map, void *key, void *value);
+
+/*
+ * Arm the sweep for the changes recorded so far. While a callback queued on an
+ * older grace period is pending, the arm returns -EBUSY and that callback does
+ * not cover them. They stay owed and it arms the next one. The other errors
+ * mean the scheduler is exiting. Called with sub_set_lock held.
+ */
+static void sub_request_sweep(void)
+{
+	u32 key = 0;
+	struct sub_sweep_rcu *v = bpf_map_lookup_elem(&sub_sweep_rcu, &key);
+
+	if (!v)
+		return;
+	sub_sweep_owed = bpf_call_rcu(&v->rh, &sub_sweep_rcu, sub_sweep_cb) == -EBUSY;
+}
+
+static int sub_sweep_cb(struct bpf_map *map, void *key, void *value)
+{
+	u32 cpdom_id, cid;
+
+	if (use_per_cpu_dsq()) {
+		bpf_arena_for(cid, 0, nr_cids) {
+			struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
+
+			/* NULL once the scheduler is gone */
+			if (!cpuc)
+				continue;
+			/* one DSQ per core, swept unless fully held */
+			if (cpuc->core_cid != cid ||
+			    cmask_full_range(online_cmask, cid, cpuc->core_nr_cids))
+				continue;
+			scx_bpf_dsq_reenq(cpu_to_dsq(cid), SCX_REENQ_ANY);
+		}
+	}
+	if (use_cpdom_dsq()) {
+		bpf_arena_for(cpdom_id, 0, nr_cpdoms) {
+			struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
+
+			if (!cpdomc->is_valid || cmask_subset(&cpdomc->cpus, online_cmask))
+				continue;
+			scx_bpf_dsq_reenq(cpdom_to_dsq(cpdom_id), SCX_REENQ_ANY);
+			scx_bpf_dsq_reenq(cpdom_to_turb_dsq(cpdom_id), SCX_REENQ_ANY);
+		}
+	}
+
+	/* a change recorded while queued needs its own grace period */
+	guard(sub_set)();
+	if (sub_sweep_owed)
+		sub_request_sweep();
+	return 0;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct scx_cmask *active, *ovrflw;
@@ -1422,6 +1583,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
 	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 	int ret;
+
+	/* dispatch also runs on an ENQ_IMMED-only cid, where inserts bounce */
+	if (sub_mode && !cpuc->is_online)
+		return;
 
 	/*
 	 * When the CPU bandwidth control is enabled, check if there are
@@ -1910,6 +2075,77 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cid)
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
 }
 
+/* the view and the sets change together, see sub_set_lock */
+static void cid_online(struct cpu_ctx *cpuc, s32 cid)
+{
+	guard(sub_set)();
+	cpu_ctx_init_online(cpuc, cid);
+	__sync_fetch_and_add(&nr_cpus_onln, 1);
+	__sync_fetch_and_add(&total_max_capacity, cpuc->max_capacity);
+	update_autopilot_high_cap();
+}
+
+static void cid_offline(struct cpu_ctx *cpuc, s32 cid)
+{
+	guard(sub_set)();
+	cpu_ctx_init_offline(cpuc, cid);
+	/* keep the picker off the cid until the sets are rebuilt */
+	cmask_clear(cid, active_cmask);
+	cmask_clear(cid, ovrflw_cmask);
+	__sync_fetch_and_sub(&nr_cpus_onln, 1);
+	__sync_fetch_and_sub(&total_max_capacity, cpuc->max_capacity);
+	update_autopilot_high_cap();
+}
+
+/*
+ * A sub-scheduler's machine is the set of cids its parent grants. ENQ taking
+ * effect on a cid is its online transition and losing ENQ its offline one, the
+ * same transitions hotplug drives in root mode. Hotplug refreshes the stats at
+ * once. A grant delivers a cell's cids in one dispatch, so the periodic stat
+ * update picks the change up instead.
+ */
+void BPF_STRUCT_OPS(lavd_sub_ecaps_updated, s32 cid, u64 before, u64 after)
+{
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
+	bool had = before & SCX_CAP_ENQ;
+	bool has = after & SCX_CAP_ENQ;
+
+	/*
+	 * ENQ_IMMED alone marks a borrowable cid. Only an insert the cpu takes
+	 * at once may use it, and borrowing is not implemented, so the cid
+	 * stays offline. Userspace reports the first one.
+	 */
+	if (((after & ~before) & SCX_CAP_ENQ_IMMED) && !has)
+		WRITE_ONCE(sub_immed_only_seen, true);
+
+	/*
+	 * The parent may have moved the cpuperf target while it held PERF, so
+	 * restart from the default.
+	 */
+	if ((after & ~before) & SCX_CAP_PERF) {
+		scx_bpf_cidperf_set(cid, SCX_CPUPERF_ONE);
+		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
+	}
+
+	cpuc->ecaps = after;
+	if (has == had)
+		return;
+	if (has) {
+		cid_online(cpuc, cid);
+	} else {
+		cid_offline(cpuc, cid);
+		scoped_guard(sub_set)
+			sub_request_sweep();
+	}
+
+	/*
+	 * Compaction rebuilds the sets on the tick. Without it only a requested
+	 * rebuild adds or drops the cid, see update_sys_stat().
+	 */
+	if (no_core_compaction)
+		reinit_cpumask_for_performance = true;
+}
+
 void BPF_STRUCT_OPS(lavd_cid_online, s32 cpu)
 {
 	/*
@@ -1931,11 +2167,7 @@ void BPF_STRUCT_OPS(lavd_cid_online, s32 cpu)
 		return;
 	}
 
-	cpu_ctx_init_online(cpuc, cpu);
-
-	__sync_fetch_and_add(&nr_cpus_onln, 1);
-	__sync_fetch_and_add(&total_max_capacity, cpuc->max_capacity);
-	update_autopilot_high_cap();
+	cid_online(cpuc, cpu);
 	update_sys_stat();
 }
 
@@ -1947,11 +2179,7 @@ void BPF_STRUCT_OPS(lavd_cid_offline, s32 cpu)
 	 */
 	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 
-	cpu_ctx_init_offline(cpuc, cpu);
-
-	__sync_fetch_and_sub(&nr_cpus_onln, 1);
-	__sync_fetch_and_sub(&total_max_capacity, cpuc->max_capacity);
-	update_autopilot_high_cap();
+	cid_offline(cpuc, cpu);
 	update_sys_stat();
 }
 
@@ -2308,7 +2536,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	const struct scx_cmask *online = online_cmask;
 	int cpu;
 	u32 cpdom_id;
-	u32 kernel_cpu, sum_capacity = 0, big_capacity = 0;
+	u32 kernel_cpu, sum_capacity = 0, online_capacity = 0, big_capacity = 0;
 
 	/*
 	 * Initialize CPU info
@@ -2347,6 +2575,8 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
 
 		sum_capacity += cpuc->max_capacity;
+		if (cpuc->is_online)
+			online_capacity += cpuc->max_capacity;
 
 		if (cpuc->big_core) {
 			nr_cpus_big++;
@@ -2366,7 +2596,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			one_little_max_capacity = cpuc->max_capacity;
 	}
 	default_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
-	total_max_capacity = sum_capacity;
+	total_max_capacity = online_capacity;
 
 	/*
 	 * Initialize compute domain id.
@@ -2573,6 +2803,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	if (enable_cpu_bw) {
 		struct scx_cgroup_bw_config bw_config = {
 			.verbose = verbose > 2,
+			/* a sub's own cgroup is throttled by its parent */
+			.root_cgrp_id = sub_cgroup_id,
 		};
 		err = scx_cgroup_bw_lib_init(&bw_config);
 	}
@@ -2651,6 +2883,7 @@ SCX_OPS_CID_DEFINE(lavd_ops,
 	       .quiescent		= (void *)lavd_quiescent,
 	       .cid_online		= (void *)lavd_cid_online,
 	       .cid_offline		= (void *)lavd_cid_offline,
+	       .sub_ecaps_updated	= (void *)lavd_sub_ecaps_updated,
 	       .update_idle		= (void *)lavd_update_idle,
 	       .set_cmask		= (void *)lavd_set_cmask,
 	       .enable			= (void *)lavd_enable,

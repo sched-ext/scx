@@ -346,8 +346,9 @@ bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 	struct scx_cmask *a_mask;
 	struct scx_cmask *o_mask;
 
+	/* unpinned tasks run anywhere in root mode, on held cids in sub mode */
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
-		return true;
+		return !sub_mode || cmask_test(cpu, online_cmask);
 
 	if (!cmask_test(cpu, &ctx->taskc->allowed))
 		return false;
@@ -676,6 +677,11 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 */
 	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(p)) {
 		cpu = ctx->prev_cpu;
+		/* a cid mavd does not hold is left to enqueue's rescue */
+		if (sub_mode && !cmask_test(cpu, online_cmask)) {
+			*is_idle = false;
+			goto out;
+		}
 		if (!cmask_test(cpu, active_cmask)) {
 			/*
 			 * Extend the overflow set only for permanent pinning;

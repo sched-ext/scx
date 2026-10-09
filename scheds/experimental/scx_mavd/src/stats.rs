@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -434,8 +435,13 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
         )
 }
 
-pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
-    scx_utils::monitor_stats::<SchedSamples>(
+pub fn monitor_sched_samples(
+    nr_samples: u64,
+    shutdown: Arc<AtomicBool>,
+    sched_path: Option<PathBuf>,
+) -> Result<()> {
+    scx_utils::monitor_stats_sched::<SchedSamples>(
+        sched_path.as_deref(),
         &[
             ("target".into(), "sched_samples".into()),
             ("nr_samples".into(), nr_samples.to_string()),
@@ -452,8 +458,13 @@ pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Resu
     )
 }
 
-pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
-    scx_utils::monitor_stats::<SysStats>(
+pub fn monitor(
+    intv: Duration,
+    shutdown: Arc<AtomicBool>,
+    sched_path: Option<PathBuf>,
+) -> Result<()> {
+    scx_utils::monitor_stats_sched::<SysStats>(
+        sched_path.as_deref(),
         &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
