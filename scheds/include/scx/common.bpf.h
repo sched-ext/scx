@@ -127,6 +127,9 @@ void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps, const struct scx_cmask __arena 
 s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask __arena *out__arena) __ksym __weak;
 s32 scx_bpf_sub_kill_bstr(u64 cgroup_id, char *fmt, unsigned long long *data, u32 data__sz) __ksym __weak;
 
+int bpf_call_rcu(struct bpf_rcu_head *rh, void *map__const_map,
+		 bpf_rcu_callback_t callback) __ksym __weak;
+
 /*
  * Use the following as @it__iter when calling scx_bpf_dsq_move[_vtime]() from
  * within bpf_for_each() loops.

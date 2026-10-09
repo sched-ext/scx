@@ -580,6 +580,7 @@ struct cpu_ctx {
 
 	u16 core_cid;		/* first cid of this cid's core, which names the core's DSQ */
 	u16 core_nr_cids;	/* cids in the core */
+	u8 ecaps;		/* caps in effect on the cid as a sub */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
@@ -606,7 +607,42 @@ extern u8 __arena_global	cpu_turbo[LAVD_CPU_ID_MAX];
 
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
+extern const volatile bool	sub_mode;	/* attached as a sub-scheduler */
+extern const volatile u64	sub_cgroup_id;	/* the attach cgroup in sub mode */
 extern const volatile u8	verbose;
+
+/*
+ * The online view and the active and overflow sets change together under it, so
+ * neither a set rebuild nor an overflow extension can put a cid back after its
+ * offline transition.
+ */
+extern arena_spinlock_t __arena_global sub_set_lock;
+
+/*
+ * The sub_set guard takes sub_set_lock in sub mode only. sub_mode is rodata, so
+ * the verifier drops the locking at load for a root scheduler.
+ */
+struct sub_set_guard {
+	unsigned long flags;
+};
+
+typedef struct sub_set_guard *class_sub_set_t;
+
+static __always_inline class_sub_set_t __sub_set_guard_init(struct sub_set_guard *g)
+{
+	if (sub_mode)
+		scx_spin_lock_irqsave(&sub_set_lock, &g->flags);
+	return g;
+}
+
+static __always_inline void class_sub_set_destructor(class_sub_set_t *p)
+{
+	if (sub_mode)
+		scx_spin_unlock_irqrestore(&sub_set_lock, &(*p)->flags);
+}
+
+#define class_sub_set_constructor()						\
+	__sub_set_guard_init(&(struct sub_set_guard){})
 
 #define debugln(fmt, ...)						\
 ({									\
@@ -852,11 +888,24 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 /*
  * Atomically add @cpu to the global overflow cpumask. Mirrors the return
  * semantics of cmask_test_and_set(): true if the bit was already set, false if
- * it was newly set.
+ * it was newly set. A sub-scheduler tests the online view and sets the bit
+ * under sub_set_lock. A cid the sub does not hold is reported as already set so
+ * that no caller kicks it. A caller already holding sub_set_lock on an online
+ * cid uses cmask_test_and_set() directly.
+ *
+ * The picker calls this on every wakeup of a task pinned to a cid outside the
+ * active set. Test the bit first so that only the call that sets it takes the
+ * lock.
  */
 static __always_inline bool
 ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
 {
+	if (cmask_test(cpu, ovrflw))
+		return true;
+
+	guard(sub_set)();
+	if (sub_mode && !cmask_test(cpu, online_cmask))
+		return true;
 	return cmask_test_and_set(cpu, ovrflw);
 }
 
