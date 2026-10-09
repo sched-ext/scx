@@ -16,7 +16,10 @@ fn add_bpf_warning_suppression(flag: &str) {
         }
         Err(_) => flag.to_owned(),
     };
-    unsafe { std::env::set_var(KEY, value) };
+    /* SAFETY: build script runs single threaded. */
+    unsafe {
+        std::env::set_var(KEY, value);
+    }
 }
 
 fn main() {

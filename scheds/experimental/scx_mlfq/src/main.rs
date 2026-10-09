@@ -510,7 +510,7 @@ impl<'a> Scheduler<'a> {
          * bounded channel the run loop drains. try_send drops the sample
          * when the channel is full, which the ring-buffer backpressure
          * absorbs first. TreeSample is a repr(C) POD mirroring the
-         * 84-byte BPF record (1.3.11 ABI), so the parse is a plain byte
+         * 84-byte BPF record (1.3.12 ABI), so the parse is a plain byte
          * reinterpretation. The record's version tag is checked before
          * the record is admitted, so a record from a foreign producer or
          * a mismatched build is dropped instead of misread.

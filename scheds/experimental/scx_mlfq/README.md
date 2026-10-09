@@ -34,7 +34,7 @@ The loader's network sandbox is a seccomp filter the scheduler inherits and cann
 
 ## Real-time Core Avoidance
 
-Realtime tasks take a CPU over when they become runnable, since the kernel resolves them to their own classes before sched_ext. The scheduler detects every takeover on the context switch, drains the DSQs of the taken-over CPU, and skips occupied cores in placement. The drain uses the 7.1 queue-DSQ re-enqueue path. If a scheduling callback stalls for longer than the 30 s watchdog, the scheduler exits and the kernel reverts to CFS. The details live in `src/bpf/rtdl.bpf.c`.
+Realtime tasks take a CPU over when they become runnable, since the kernel resolves them to their own classes before sched_ext. The scheduler detects every takeover on the context switch, drains the local DSQ of the taken-over CPU, and skips occupied cores in placement. A wakeup moved off an occupied CPU always kicks the new CPU, so the moved work runs there. The drain runs only after initialization completes and only for CPUs with created queues, skipping offline CPUs before any queue id is formed, and requeues the three queue DSQs of the taken-over CPU when the kernel offers the generic requeue call, at most once per millisecond per CPU with the window moved only when work moved and each requeue checked against the reserved range as well as the queued depth, and the steal scans carry the queued work where the call is absent. The queue DSQs are served by the steal scans as the second channel. The dashboard Summary adds one line when takeovers were seen, so queued work moved off those CPUs is visible. If a scheduling callback stalls for longer than the 30 s watchdog, the scheduler exits and the kernel reverts to CFS. The details live in `src/bpf/rtdl.bpf.c`.
 
 
 ## Measuring Wakeup Latency
@@ -47,7 +47,7 @@ To measure the wakeup latency the scheduler delivers with cyclictest, pin the me
 - The bounded-lag guarantee is per-queue. Cross-queue lag conservation is absent.
 - The queues are per-CPU user dispatch queues, so locality comes from placement while idle CPUs steal owed tasks from wherever they sit.
 - The runnable gauges cover tracked tasks only and are advisory.
-- The largest-LLC bias trades clock speed for cache capacity, is Q1-only and non-exclusive, and is off on single-LLC and equal-size machines.
+- The largest-LLC bias trades clock speed for cache capacity, is Q1-only and non-exclusive, checks the winner against per-domain frequency so a slower stacked domain never pulls work off faster cores, skips domains the task may not run on, and is off on single-LLC and equal-size machines.
 - The topology is snapshotted at attach, so a CPU hotplug needs a restart.
 - sched_ext cannot schedule RT and DL tasks: the kernel resolves them to the rt and dl classes before sched_ext, so this scheduler handles SCHED_NORMAL, SCHED_BATCH and SCHED_IDLE tasks only.
 - GPU submitter awareness is optional and self pruning. The amdgpu and gpu_scheduler tracepoints are used when they exist, otherwise the feature stays at zero.

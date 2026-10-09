@@ -165,8 +165,19 @@ static __always_inline void mlfq_wakeup_classify(const struct task_struct *p,
 		tctx->pending_valid = 0;
 		pred = 0;
 	} else {
+		/*
+		 * Time-delta clamp: the sleep feature is capped to
+		 * MLFQ_TREE_LABEL_MAX_NS (192 ms) so a multi-second idle
+		 * cannot widen the fitter's exact-integer range. Normal
+		 * interactive sleeps (< 32 ms) never hit the bound; the
+		 * raw sleep_ns above stays unclamped for the boost,
+		 * hysteresis, Q3-seed and long-sleep decisions below.
+		 */
+		u64 feat_sleep = sleep_ns > MLFQ_TREE_LABEL_MAX_NS ?
+				 MLFQ_TREE_LABEL_MAX_NS : sleep_ns;
+
 		tctx->pending_feats.prev_burst_ns = tctx->prev_burst_ns;
-		tctx->pending_feats.sleep_ns = sleep_ns;
+		tctx->pending_feats.sleep_ns = feat_sleep;
 		tctx->pending_feats.ema = tctx->ema;
 		tctx->pending_feats.io_wait = io_wait;
 		tctx->pending_feats.wake_cnt = tctx->wake_cnt;
