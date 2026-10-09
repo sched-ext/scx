@@ -41,6 +41,12 @@
  * excluded. The loop bodies stay flat (one move per slot, one peek per
  * gated candidate) and the verifier state small.
  *
+ * Eligibility is advisory-only (mlfq_task_eligible(), vlag in [0, limit]).
+ * Every queued task is eligible, so the within-queue order stays the
+ * min-deadline order, and the quotas and the LLC tiers stay frozen. An
+ * ineligible head uses the skip-one fallback to the min-deadline head,
+ * so the test never blocks service.
+ *
  * The keep path runs first, before the slot loops. balance() runs before
  * put_prev_task() in the scheduling pass, and with SCX_OPS_ENQ_LAST set
  * the kernel does not keep prev automatically, so when prev is still
@@ -54,11 +60,12 @@
  * (put_prev_set_next_task() early-returns on next == prev), refilling the
  * task at the 20 ms SCX_SLICE_DFL granularity and freezing
  * running()/stopping() accounting until the next real context switch.
- * Before keeping, the three queue heads of one remote CPU (the rotating
- * scan candidate) are probed. A CPU whose own queues are empty should
- * still pull the most-owed remote task instead of running the previous
- * task for a full slice. Resolving the keep up front reads the queue
- * state once, before the slot loops churn it, and keeps the loop bodies
+ * Before keeping, a bounded window of remote candidates
+ * from the rotating scan is probed. A CPU whose own queues
+ * are empty should still pull the most-owed remote task
+ * instead of running the previous task for a full slice.
+ * Resolving the keep up front reads the queue state once,
+ * before the slot loops churn it, and keeps the loop bodies
  * to a single job each.
  *
  * Realtime-takeover interaction. Stealing from an occupied CPU's queue
@@ -191,7 +198,10 @@ mlfq_dispatch_queue(s32 cpu, u8 qid, u32 quota,
 			tier_a_nr = MLFQ_LLC_SCAN_MAX;
 	}
 
-	/* Hoist off and mlfq_dsq_id reuse: off computed once per queue, dsq ids reused via locals. 3072 tail cut documented: MLFQ_ALPHA 3072 is the EMA tail cut. No new bpf_for. */
+	/*
+	 * The steal offset is computed once per queue, so the
+	 * rotating window is shared by both tiers.
+	 */
 	u32 off = cpu_state ? cpu_state->steal_scan_off % (u32)nr_cpus : 0;
 
 	bpf_for(slot, 0, quota) {
@@ -496,13 +506,18 @@ void BPF_STRUCT_OPS(mlfq_dispatch, s32 cpu, struct task_struct *prev)
 	 * property is unaffected. The cost is that a solo task's
 	 * classification gauges under-count its run until the freeze ends.
 	 *
-	 * Before keeping, the three queue DSQ heads of one remote CPU (the
-	 * rotating scan candidate) are probed: a CPU whose own queues are
-	 * empty should still pull the most-owed remote task instead of
-	 * running the previous task for a full slice. The probe is gated
-	 * on nr_queued and is three lockless peeks.
+	 * Before keeping, a bounded window of remote candidates
+	 * is probed: a CPU whose own queues are empty should still
+	 * pull the most-owed remote task instead of running the
+	 * previous task for a full slice. Each probe is gated on
+	 * nr_queued and is three lockless peeks. The cached prev
+	 * task is revalidated on every reuse: a cpuset change that
+	 * dropped this CPU falls through to the slot loops instead
+	 * of keeping a task where it may no longer run. The slice
+	 * grant rides the compat wrapper, never a direct write.
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	    bpf_cpumask_test_cpu((u32)cpu, prev->cpus_ptr) &&
 	    !scx_bpf_dsq_nr_queued(mlfq_dsq_id(1, cpu)) &&
 	    !scx_bpf_dsq_nr_queued(mlfq_dsq_id(2, cpu)) &&
 	    !scx_bpf_dsq_nr_queued(mlfq_dsq_id(3, cpu))) {
@@ -518,17 +533,28 @@ void BPF_STRUCT_OPS(mlfq_dispatch, s32 cpu, struct task_struct *prev)
 
 				if (nr_cpus > 1) {
 					/*
-					 * Probe the rotating scan candidate.
+					 * Probe a bounded window of remote
+					 * candidates from the rotating scan.
 					 * On a one-CPU machine there is no
-					 * remote CPU to probe.
+					 * remote CPU to probe. The window is
+					 * capped, so the cost stays flat.
 					 */
-					cand = cpu_state ?
-						(s32)(cpu_state->steal_scan_off %
-						      (u32)nr_cpus) : 0;
-					if (cand == cpu)
-						cand = (s32)(((u32)cand + 1) %
-							     (u32)nr_cpus);
-					remote_work = mlfq_remote_work_probe(cand, cpu);
+					u32 k, base;
+
+					base = cpu_state ?
+					       cpu_state->steal_scan_off %
+					       (u32)nr_cpus : 0;
+					bpf_for(k, 0, MLFQ_KEEP_PROBE_MAX) {
+						cand = (s32)((base + k) %
+							(u32)nr_cpus);
+						if (cand == cpu)
+							continue;
+						if (mlfq_remote_work_probe(
+							    cand, cpu)) {
+							remote_work = true;
+							break;
+						}
+					}
 				}
 				if (!remote_work) {
 					scx_bpf_task_set_slice(prev, slice);

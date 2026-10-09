@@ -51,10 +51,19 @@ static __always_inline u64 mlfq_place_task(u32 qid, struct task_ctx *tctx,
  * @tctx: The task.
  * @delta_ns: Physical run time in nsecs.
  *
- * vruntime += calc_delta_fair(delta, weight) (fair.c:317-323).
+ * vruntime += calc_delta_fair(delta, weight) (fair.c:317-323). Time-delta
+ * clamp: the segment is capped to MLFQ_TREE_LABEL_MAX_NS (192 ms) before
+ * scaling, so a watchdog-scale stall cannot jump vruntime and (via the
+ * update-adjacent clock advance in stopping()) the queue clock. Normal
+ * 1/2/4 ms slices never hit the bound, so pure EEVDF is preserved; the
+ * bound only contains the pathological stall. The lifecycle caller
+ * clamps the same delta at the source; this second layer keeps direct
+ * callers bounded too.
  */
 static __always_inline void mlfq_update_vruntime(struct task_ctx *tctx,
 						 u64 delta_ns)
 {
+	if (delta_ns > MLFQ_TREE_LABEL_MAX_NS)
+		delta_ns = MLFQ_TREE_LABEL_MAX_NS;
 	tctx->vruntime += calc_delta_fair_bpf(delta_ns, tctx->weight);
 }
