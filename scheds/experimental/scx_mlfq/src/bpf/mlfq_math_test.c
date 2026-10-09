@@ -53,6 +53,23 @@ static void test_calc_delta_fair(void)
 		"delta 1ms weight 1 -> 100ms virtual");
 	TEST_OK(calc_delta_fair_bpf(1000000, 10000) == 10000,
 		"delta 1ms weight 10000 -> 10us virtual");
+	TEST_OK(calc_delta_fair_bpf(0, 100) == 0,
+		"zero delta stays zero at any weight");
+}
+
+/* The 1.3.12 clamp: the multiply never wraps, and a zero weight is one. */
+static void test_calc_delta_clamp(void)
+{
+	u64 ProductMax = 0xFFFFFFFFFFFFFFFFULL / 100;
+
+	TEST_OK(calc_delta_fair_bpf(0xFFFFFFFFFFFFFFFFULL, 1) == ProductMax * 100,
+		"max delta clamps before the multiply, no wrap");
+	TEST_OK(calc_delta_fair_bpf(0xFFFFFFFFFFFFFFFFULL, 100) == ProductMax,
+		"max delta at weight 100 clamps to the bound");
+	TEST_OK(calc_delta_fair_bpf(1000000, 0) == calc_delta_fair_bpf(1000000, 1),
+		"zero weight is treated as one, division stays defined");
+	TEST_OK(calc_delta_fair_bpf(ProductMax + 1, 1) == ProductMax * 100,
+		"one past the bound clamps to the bound");
 }
 
 static struct queue_ctx make_q(u64 clock, u64 max_slice_ns)
@@ -330,6 +347,54 @@ static void test_clock_advance(void)
 	mlfq_queue_advance_clock(&q, 10);
 	TEST_OK(q.clock == 10,
 		"wrapped advance across the u64 boundary is followed");
+}
+
+/* The single read estimate and the advisory eligibility of 1.3.12. */
+static void test_clock_read_eligible(void)
+{
+	struct queue_ctx q = make_q(1234567, 2000000);
+	struct task_ctx t;
+
+	TEST_OK(mlfq_clock_read(&q) == 1234567,
+		"clock read returns the estimated clock");
+	memset(&t, 0, sizeof(t));
+	t.vlag = 0;
+	TEST_OK(mlfq_task_eligible(&t),
+		"vlag 0 is eligible");
+	t.vlag = 3000000;
+	TEST_OK(mlfq_task_eligible(&t),
+		"vlag at the limit is eligible");
+	t.vlag = -1;
+	TEST_OK(!mlfq_task_eligible(&t),
+		"negative vlag is ineligible, fallback serves min deadline");
+}
+
+/* Lag stays in [0, limit] and FIRST_RUN halves the slice once. */
+static void test_place_lag_first_run(void)
+{
+	struct queue_ctx q = make_q(1ULL << 40, 2000000);
+	struct task_ctx t;
+	u64 limit, d1, d2;
+
+	memset(&t, 0, sizeof(t));
+	t.weight = 100;
+	t.vruntime = 0;
+	limit = mlfq_lag_limit(&q, 100);
+	mlfq_place_entity(&q, &t);
+	TEST_OK(t.vlag >= 0 && (u64)t.vlag <= limit,
+		"placed lag stays in [0, limit]");
+	TEST_OK(t.vruntime == q.clock - (u64)t.vlag,
+		"placed vruntime is clock minus lag");
+
+	q = make_q(0, 2000000);
+	memset(&t, 0, sizeof(t));
+	t.weight = 100;
+	t.flags = MLFQ_TF_FIRST_RUN;
+	d1 = mlfq_place_entity(&q, &t);
+	t.flags &= ~MLFQ_TF_FIRST_RUN;
+	d2 = mlfq_place_entity(&q, &t);
+	TEST_OK(d1 * 2 == d2,
+		"FIRST_RUN halves the vslice once");
 }
 
 static void test_ema_climb(void)
@@ -615,6 +680,32 @@ static void test_boost_eligible(void)
 		"sleep just past the window is not eligible");
 	TEST_OK(mlfq_boost_eligible(win, win, false),
 		"sleep exactly at the window is eligible");
+}
+
+/*
+ * Cycle 3 throughput: queue-pressure-aware slice (mlfq_pressure_slice).
+ * Solo (nr_queued == 0) grants 2x base with no waiter to delay; any
+ * pressure keeps base, the existing behavior. The virtual slice stays at
+ * base, so EEVDF order is untouched; only the physical grant varies.
+ */
+static void test_pressure_slice(void)
+{
+	TEST_OK(mlfq_pressure_slice(1000000, 0) == 2000000,
+		"Q1 solo grants 2x base (1ms -> 2ms)");
+	TEST_OK(mlfq_pressure_slice(2000000, 0) == 4000000,
+		"Q2 solo grants 2x base (2ms -> 4ms)");
+	TEST_OK(mlfq_pressure_slice(4000000, 0) == 8000000,
+		"Q3 solo grants 2x base (4ms -> 8ms)");
+	TEST_OK(mlfq_pressure_slice(1000000, 1) == 1000000,
+		"any pressure keeps Q1 base");
+	TEST_OK(mlfq_pressure_slice(2000000, 7) == 2000000,
+		"queued depth keeps Q2 base");
+	TEST_OK(mlfq_pressure_slice(4000000, 32) == 4000000,
+		"deep queue keeps Q3 base");
+	TEST_OK(mlfq_pressure_slice(4000000, 0xFFFFFFFFU) == 4000000,
+		"saturated depth keeps base, never shrinks");
+	TEST_OK(mlfq_pressure_slice(0, 0) == 0,
+		"zero base stays zero, no wrap");
 }
 
 /* MLFQ regression tree tests. */
@@ -951,7 +1042,7 @@ static void test_mlfq_check_tree_predicates(void)
 	TEST_OK(mlfq_check_tree_feature(0) && mlfq_check_tree_feature(8),
 		"feature ids 0 and 8 are in bounds (NR_FEATURES 9)");
 	TEST_OK(mlfq_check_tree_feature(5) && mlfq_check_tree_feature(7),
-		"feature ids 5 and 7 are now in bounds for 1.3.11 ABI");
+		"feature ids 5 and 7 are now in bounds for 1.3.12 ABI");
 	TEST_OK(!mlfq_check_tree_feature(0x80) &&
 		!mlfq_check_tree_feature(0x90) &&
 		!mlfq_check_tree_feature(9),
@@ -1634,15 +1725,109 @@ static void test_adapt_boundary_exacts(void)
 
 }
 
+/*
+ * Cycle 2 (1.3.13) vtime hardening: signed time_before audit. The
+ * wrapping comparison must order across the u64 epoch exactly like
+ * time_before64: a timestamp just before the wrap is before one just
+ * after it, equal timestamps are not before, and a last+interval that
+ * wraps still orders against now. Duration compares stay plain; only
+ * timestamps use this predicate (see the intf.h audit note).
+ */
+static void test_time_before_audit(void)
+{
+	TEST_OK(mlfq_time_before(0ULL - 100ULL, 100ULL),
+		"time_before: just-before-wrap is before just-after-wrap");
+	TEST_OK(!mlfq_time_before(100ULL, 0ULL - 100ULL),
+		"time_before: just-after-wrap is not before just-before-wrap");
+	TEST_OK(!mlfq_time_before(12345ULL, 12345ULL),
+		"time_before: equal timestamps are not before");
+	TEST_OK(mlfq_time_before(1000ULL, 2000ULL) &&
+		!mlfq_time_before(2000ULL, 1000ULL),
+		"time_before: plain order away from the wrap");
+	TEST_OK(mlfq_time_before((0ULL - 500ULL) + 100ULL, 0ULL - 300ULL) &&
+		!mlfq_time_before(0ULL - 300ULL, (0ULL - 500ULL) + 100ULL),
+		"time_before: last+interval that wraps still orders");
+}
+
+/*
+ * Cycle 2 (1.3.13) time-delta clamp bounds: the run-delta clamp
+ * (MLFQ_TREE_LABEL_MAX_NS, 192 ms) and the gauge clamp
+ * (MLFQ_SYS_LAT_MAX_NS, 16 ms) sit far above every normal slice and
+ * wait, so they never fire in normal operation and pure EEVDF is
+ * preserved; they only contain watchdog-scale stalls.
+ */
+static void test_time_delta_clamp_bounds(void)
+{
+	TEST_OK(MLFQ_Q1_SLICE_NS < MLFQ_TREE_LABEL_MAX_NS &&
+		MLFQ_Q2_SLICE_NS < MLFQ_TREE_LABEL_MAX_NS &&
+		MLFQ_Q3_SLICE_NS < MLFQ_TREE_LABEL_MAX_NS,
+		"clamp bounds: every policy slice is below the run-delta clamp");
+	TEST_OK(MLFQ_SYS_LAT_MAX_NS < MLFQ_TREE_LABEL_MAX_NS &&
+		MLFQ_BUDGET_MAX_NS < MLFQ_TREE_LABEL_MAX_NS,
+		"clamp bounds: the gauge ceilings sit below the run-delta clamp");
+	TEST_OK(calc_delta_fair_bpf(MLFQ_TREE_LABEL_MAX_NS, 1) ==
+		(u64)MLFQ_TREE_LABEL_MAX_NS * 100,
+		"clamp bounds: the clamped run delta scales without wrap");
+}
+
+/*
+ * Cycle 2 (1.3.13) deadline recompute on REENQ continuations: a task
+ * that placed, ran a segment, advanced the clock and is re-placed
+ * (the takeover-drain/cpu_release REENQ shape) must get a fresh
+ * deadline from the current clock and charged vruntime, with lag still
+ * in [0, limit]. The pure and committed deadline forms must agree on
+ * the re-placement exactly as on the first placement.
+ */
+static void test_place_reenq_recompute(void)
+{
+	struct queue_ctx q = make_q(1ULL << 40, 2000000);
+	struct task_ctx t;
+	u64 d_pure, d_commit, limit;
+
+	memset(&t, 0, sizeof(t));
+	t.weight = 100;
+	t.vruntime = 0;
+	d_commit = mlfq_place_entity(&q, &t);
+	TEST_OK(d_commit != 0 && t.vlag >= 0,
+		"reenq: first placement yields a deadline and bounded lag");
+
+	/*
+	 * Run a segment that lands ahead of the clock and advance it, the
+	 * stopping shape: placed at clock - limit (3 ms behind), a 4 ms
+	 * slice charges 4 ms virtual and lands 1 ms ahead, so the monotone
+	 * clock follows it.
+	 */
+	t.vruntime += calc_delta_fair_bpf(4000000, 100);
+	mlfq_queue_advance_clock(&q, t.vruntime);
+	TEST_OK(q.clock == t.vruntime,
+		"reenq: the clock follows the charged vruntime");
+
+	/* REENQ continuation: re-place against the advanced clock. */
+	limit = mlfq_lag_limit(&q, 100);
+	d_pure = mlfq_place_entity_deadline(&q, &t);
+	d_commit = mlfq_place_entity(&q, &t);
+	TEST_OK(d_pure == d_commit && d_commit != 0,
+		"reenq: pure and committed deadlines agree on the continuation");
+	TEST_OK(t.vlag >= 0 && (u64)t.vlag <= limit &&
+		t.vruntime == q.clock - (u64)t.vlag,
+		"reenq: the continuation lag stays in [0, limit] from the fresh clock");
+}
+
 int main(void)
 {
 	test_calc_delta_fair();
+	test_calc_delta_clamp();
+	test_time_before_audit();
+	test_time_delta_clamp_bounds();
 	test_place_entity();
 	test_place_entity_weight_edges();
 	test_place_charge_replacement();
 	test_place_entity_deadline_pure();
+	test_place_reenq_recompute();
 	test_sameq_preempt_owed();
 	test_clock_advance();
+	test_clock_read_eligible();
+	test_place_lag_first_run();
 	test_ema_climb();
 	test_ema_decay();
 	test_sys_lat_fold();
@@ -1661,6 +1846,7 @@ int main(void)
 	test_ss_boost_pending();
 	test_cpuperf_mapping();
 	test_boost_eligible();
+	test_pressure_slice();
 	test_mlfq_check_predicates();
 	test_bitmap();
 	test_mlfq_tree_layout();

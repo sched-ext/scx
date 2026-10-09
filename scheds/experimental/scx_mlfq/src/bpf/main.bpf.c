@@ -113,6 +113,19 @@ volatile u32 mlfq_steal_scan;
 volatile u32 mlfq_idle_count;
 
 /*
+ * Startup gate for the takeover drain and the shared
+ * kicks. mlfq_init_done is set once at the end of
+ * mlfq_init(), after the queue DSQ loop and the id
+ * space check. mlfq_created_cpus snapshots the CPU
+ * count the DSQs were created for. A create failure
+ * returns before either is set, so every early path
+ * stays inert. Both are zero by BSS default, which
+ * is the closed gate.
+ */
+volatile u8 mlfq_init_done;
+volatile u32 mlfq_created_cpus;
+
+/*
  * Per-LLC and per-queue runnable gauges, maintained by
  * mlfq_runnable_enter()/mlfq_runnable_exit() at every tracked insert
  * and leave-runnable event. mlfq_llc_runnable[llc] is the number of
@@ -188,7 +201,7 @@ volatile struct mlfq_tree_ctrl mlfq_tree_ctrl __attribute__((aligned(64)));
  * Training-sample ring buffer. The stopping path emits one completed
  * sample per rate-limit window (mlfq_tree_ctrl.sample_last_at); the
  * userspace daemon drains it every 100 ms for the regression-tree
- * training. 1 MB holds about 12.4k samples of 84 bytes (1.3.11 ABI),
+ * training. 1 MB holds about 12.4k samples of 84 bytes (1.3.12 ABI),
  * roughly 6.2 s of emission at the global rate limit, which absorbs a
  * multi-second daemon stall; drop-on-full is the natural backpressure
  * when the daemon cannot keep up, and the emission rate limits keep the
@@ -599,8 +612,64 @@ static __always_inline u32 mlfq_llc_of_cpu(u32 cpu)
 
 	if (cpu >= MLFQ_MAX_CPUS)
 		return MLFQ_MAX_LLCS;
-	llc = mlfq_cpu_llc[cpu];
+	/*
+	 * The index is masked to the array bound for the verifier. The
+	 * range check above proves cpu < MLFQ_MAX_CPUS at runtime, so the
+	 * mask is identity there, but the verifier cannot derive the bound
+	 * of a runtime CPU id (smp id, task cpu, or first-cpu fallback)
+	 * from the comparison alone once the call sites multiply. The
+	 * explicit mask keeps the rodata access bounded on every kernel.
+	 */
+	llc = mlfq_cpu_llc[cpu & (MLFQ_MAX_CPUS - 1)];
 	return llc < MLFQ_MAX_LLCS && llc < mlfq_nr_llcs ? llc : MLFQ_MAX_LLCS;
+}
+
+/*
+ * mlfq_cpu_allowed - Revalidate a cached CPU against the current affinity.
+ * @p: The task the CPU must be able to run.
+ * @cpu: The cached CPU (prev, target, or selected) to revalidate.
+ *
+ * Every reuse of a cached CPU must pass this: the CPU is in the online
+ * range and still present in the task's allowed mask. A concurrent cpuset
+ * change can drop a previously valid CPU between the claim and the reuse,
+ * so the check runs at each reuse with a fallback to the enqueueing CPU
+ * and a cache refresh (clearing wake_cpu_state) at the call site. A
+ * negative, out-of-range, or above-bound CPU never validates. The
+ * MLFQ_MAX_CPUS bound keeps every later rodata index derived from an
+ * allowed CPU verifier-bounded.
+ *
+ * Return: true when @cpu may be used for @p.
+ */
+static __always_inline bool mlfq_cpu_allowed(const struct task_struct *p,
+					     s32 cpu)
+{
+	if (cpu < 0 || cpu >= (s32)MLFQ_MAX_CPUS)
+		return false;
+	if (cpu >= (s32)nr_cpu_ids)
+		return false;
+	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
+}
+
+/*
+ * Arity stable requeue wrappers with a version gate.
+ * Each wrapper keeps one call shape on every kernel.
+ * The gate checks the release once per call, so old
+ * kernels skip the call without a new branch.
+ */
+static __always_inline bool mlfq_reenqueue_one(u64 dsq)
+{
+	if (LINUX_KERNEL_VERSION < KERNEL_VERSION(7, 1, 0))
+		return false;
+	scx_bpf_dsq_reenq(dsq, 0);
+	return true;
+}
+
+static __always_inline bool mlfq_reenqueue_local_step(void)
+{
+	if (LINUX_KERNEL_VERSION < KERNEL_VERSION(6, 19, 0))
+		return false;
+	scx_bpf_reenqueue_local_from_anywhere();
+	return true;
 }
 
 #include "vtime.bpf.c"
@@ -817,6 +886,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mlfq_init)
 	mlfq_adapt_state.t_int_eff_ns = mlfq_tree_t_int_ns;
 	mlfq_adapt_state.t_bnd_eff_ns = mlfq_tree_t_bound_ns;
 	mlfq_adapt_state.guard_eff_ns = mlfq_sameq_preempt_min_run_ns;
+
+	/*
+	 * Publish the startup gate last. The DSQ loop and the
+	 * id space check above have proven the queue ids, so
+	 * the snapshot covers exactly the created set. A
+	 * create failure returns before this point and leaves
+	 * the gate closed, so the drain stays inert.
+	 */
+	mlfq_created_cpus = nr_cpus;
+	mlfq_init_done = 1;
 
 	return 0;
 }

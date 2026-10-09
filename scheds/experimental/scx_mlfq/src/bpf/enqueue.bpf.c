@@ -10,21 +10,30 @@
  *   other (fork / SCX_ENQ_LAST / class switch) -> counter reset, placement
  *   wall-clock aging check for Q2/Q3 stays, then placement
  *
- * The wakeup preemption decision runs before the regular placement. A
- * wakeup outranks the task running on the CPU it was last running on when
- * it belongs to a higher queue, or when it belongs to the same queue and
- * the same-queue rule is met. The interactive same-queue rule (Q1 onto
- * Q1) preempts on a minimum residency alone. The non-interactive rule
- * additionally requires the wakeup's freshly computed deadline to be
- * earlier than the resident's. The wakeup is dispatched to that CPU's
- * local DSQ with SCX_ENQ_PREEMPT. The local-DSQ insert is FIFO. The
+ * The wakeup preemption decision runs before the regular placement, as a
+ * rank-first test. A wakeup outranks the task running on the CPU it was
+ * last running on when it belongs to a higher queue, or when it belongs
+ * to the same queue and the same-queue rule is met. The interactive
+ * same-queue rule (Q1 onto Q1) preempts on a minimum residency alone.
+ * The non-interactive rule additionally requires the wakeup's freshly
+ * computed deadline to be earlier than the resident's. The wakeup is
+ * dispatched to that CPU's local DSQ with SCX_ENQ_PREEMPT, capped at
+ * 150us, so the displaced task resumes at the next scheduling event.
+ * The local-DSQ insert is FIFO. The
  * wakee's deadline is computed only for the non-interactive preemption
  * test and is not committed, so no shared state is touched and the next
  * real placement re-anchors the task under the lag clamp. Same-queue
  * wakeups that do not meet their rule join the queue DSQ and are served
  * by virtual-time order at dispatch. A wakeup whose affinity no longer
  * includes the CPU it was last running on proceeds to the regular
- * path.
+ * path. The pinned-busy path shares the same decision through the
+ * shared helper: a pinned wakeup on a busy CPU that outranks its
+ * resident is dispatched to that CPU's local DSQ with SCX_ENQ_PREEMPT
+ * capped at 150us when the affinity and the FIFO veto pass, and joins
+ * the CPU's queue DSQ otherwise. A pinned wakeup on an idle CPU takes
+ * the pinned-idle path without displacing anyone, and a pinned task
+ * whose affinity no longer includes its CPU parks on the global DSQ,
+ * so every pinned path is covered and none shadows the preemption.
  *
  * The demotion path keys on the flags == 0 run-out re-enqueue. flags == 0
  * arrives from put_prev_task_scx() for a runnable task whose slice grant
@@ -111,16 +120,112 @@ static __always_inline void mlfq_stamp_enq_at(struct task_ctx *tctx, u64 now,
 }
 
 /*
- * A placement into another CPU's queue needs that CPU to run one more
- * scheduling cycle so a queued task is not stranded on a nohz-idle CPU.
- * The idle kick is a cheap flag that is consumed when the CPU next goes
- * idle. The enqueueing CPU needs no kick. Its own dispatch drains the
- * queue in the same scheduling cycle.
+ * Shared queue kick rule.
+ * A local insert never kicks.
+ * A redirected insert always kicks when the target can run it.
+ * A plain insert kicks only when no claim was made or when the task
+ * can run on a few CPUs only. One call site for shared queues.
  */
-static __always_inline void mlfq_idle_kick(u64 cpu)
+static __always_inline void mlfq_idle_kick_shared(const struct task_struct *p,
+						  u64 enq_flags, s32 target_cpu,
+						  bool redirected)
 {
-	if (cpu != bpf_get_smp_processor_id())
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (mlfq_needs_shared_kick(p, enq_flags, target_cpu, redirected))
+		scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+}
+
+/*
+ * Shared wakeup preemption, used by the pinned-busy path and the
+ * regular path alike, so both observe the same rank-first test.
+ * A wakeup outranks the task running on the CPU it was last running
+ * on when it belongs to a higher queue, or when it belongs to the
+ * same queue and the same-queue rule is met. The interactive
+ * same-queue rule preempts on the minimum residency alone. The
+ * non-interactive rule additionally requires the wakeup's freshly
+ * computed deadline to be earlier than the resident's. The wakee is
+ * dispatched to that CPU's local DSQ with SCX_ENQ_PREEMPT, capped at
+ * 150us, so the displaced task resumes at the next scheduling event.
+ * The target CPU is revalidated against the current affinity on every
+ * reuse, and the FIFO veto refuses an occupied or already-queued
+ * local, so the insert never lands on a CPU that cannot run it
+ * immediately. The wakee's deadline is computed only for the
+ * non-interactive comparison and is not committed, so no shared state
+ * is touched and the next real placement re-anchors the task under
+ * the lag clamp. The slice rides the insert kfunc, never a direct
+ * store. No kick follows a local insert. The caller gates on wakeup;
+ * a non-wakeup re-enqueue never reaches here.
+ *
+ * Return: true when the wakeup was dispatched with preemption.
+ */
+static __always_inline bool mlfq_try_preempt(struct task_struct *p,
+					     struct task_ctx *tctx, u32 qid,
+					     u64 slice, s32 prev_cpu, u64 now,
+					     u64 enq_flags)
+{
+	struct mlfq_cpu_state *prev_state;
+	bool owed = false;
+
+	if (!mlfq_cpu_allowed(p, prev_cpu))
+		return false;
+	if (!mlfq_local_insert_safe(prev_cpu))
+		return false;
+
+	prev_state = mlfq_lookup_cpu_state(prev_cpu);
+	if (prev_state && prev_state->running_pid &&
+	    prev_state->running_pid != p->pid &&
+	    prev_state->running_queue > 0) {
+		if ((s32)qid < prev_state->running_queue) {
+			owed = true;
+		} else if (qid == (u32)prev_state->running_queue) {
+			u64 wakee_deadline = 0;
+
+			/*
+			 * Same queue. The Q1 rule needs no
+			 * deadline, so the fresh placement is
+			 * computed (without committing it, see
+			 * above) only for the non-interactive
+			 * rule.
+			 */
+			if (qid > 1) {
+				struct queue_ctx *q = mlfq_lookup_queue(qid);
+
+				if (q)
+					wakee_deadline =
+						mlfq_place_entity_deadline(q, tctx);
+			}
+
+			owed = mlfq_sameq_preempt_owed(
+				(u8)qid, (u8)prev_state->running_queue,
+				wakee_deadline,
+				prev_state->running_deadline,
+				prev_state->run_start_at,
+				now, mlfq_adapt_state.guard_eff_ns);
+		}
+	}
+
+	if (!owed)
+		return false;
+
+	/*
+	 * Cap the grant: a preempting wakeup displaces a
+	 * running task, so it runs a bounded burst
+	 * (MLFQ_PREEMPT_SLICE_NS) and then yields, so the
+	 * displaced task (typically the waker, whose early
+	 * deadline puts it first in the virtual-time order)
+	 * resumes at the next scheduling event. The policy
+	 * slice still governs the regular path and the
+	 * continuation after the run-out re-enqueue.
+	 */
+	if (mlfq_preempt_slice_ns < slice)
+		slice = mlfq_preempt_slice_ns;
+	mlfq_runnable_enter(tctx, (u8)qid,
+			    mlfq_llc_of_cpu((u32)prev_cpu));
+	mlfq_stamp_enq_at(tctx, now, true);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u64)prev_cpu,
+			   slice, enq_flags | SCX_ENQ_PREEMPT);
+	__sync_fetch_and_add(&mlfq_stats.preemption_kicks, 1);
+	tctx->wake_cpu_state = 0;
+	return true;
 }
 
 void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
@@ -133,6 +238,7 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 	bool wakeup, runout, local_fast_path, migration_disabled;
 	bool sched_idle;
 	bool skip_preempt = false;
+	bool redirected = false;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	s32 target_cpu;
 
@@ -213,7 +319,12 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 		 * The SCX_ENQ_REENQ evacuation re-enqueues land here (the
 		 * neutral else branch). Count them as the realtime-takeover
 		 * reenqueue traffic diagnostic. A reenqueue is never a
-		 * wakeup, so the flag is exclusive with WAKEUP.
+		 * wakeup, so the flag is exclusive with WAKEUP. REENQ
+		 * continuations keep their queue and fall through to the
+		 * regular placement below, which recomputes the deadline
+		 * via mlfq_place_task() against the current clock: no
+		 * stale deadline is reused even when the queue is
+		 * unchanged (see the regular-path note).
 		 */
 		if (enq_flags & SCX_ENQ_REENQ)
 			__sync_fetch_and_add(&mlfq_stats.rt_reenqs, 1);
@@ -266,21 +377,20 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 
 	migration_disabled = mlfq_task_is_migration_disabled(p);
 	if (migration_disabled) {
-		if (prev_cpu < 0) {
+		if (prev_cpu < 0 || prev_cpu >= (s32)nr_cpu_ids) {
 			scx_bpf_error("pid %d pinned task without a CPU", p->pid);
 			mlfq_op_lat_charge(MLFQ_OP_LAT_ENQUEUE, op_lat_start);
 			return;
 		}
 
 		/*
-		 * The allowed CPU set may have changed since the last
-		 * placement; the pinned CPU is prev_cpu only when the task
-		 * may still run there. A task whose affinity no longer
-		 * includes prev_cpu is parked on the global DSQ, which the
-		 * kernel drains on every dispatch cycle without this
-		 * scheduler's involvement.
+		 * The cached pinned CPU is revalidated against the current
+		 * affinity on every reuse via the shared helper (range plus
+		 * mask). A task whose affinity no longer includes prev_cpu is
+		 * parked on the global DSQ, which the kernel drains on every
+		 * dispatch cycle without this scheduler's involvement.
 		 */
-		if (!bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr)) {
+		if (!mlfq_cpu_allowed(p, prev_cpu)) {
 			__sync_fetch_and_add(&mlfq_stats.enq_pinned_global, 1);
 			/*
 			 * The task leaves LLC ownership. The global DSQ is
@@ -308,37 +418,60 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 			goto done;
 		}
 
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		if (mlfq_local_insert_safe(prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			/*
-			 * The pinned CPU is idle, so the local DSQ is
-			 * empty. The task runs on the next scheduling
-			 * cycle and the local DSQ drains immediately after,
-			 * which keeps balance_one() from skipping
-			 * ops.dispatch() for the tasks queued behind it.
-			 * The FIFO local-DSQ insert does not consume a
-			 * deadline, so placement is deferred to the next
-			 * real placement, which re-anchors the task under
-			 * the lag clamp.
+			 * The pinned CPU is idle and the FIFO veto passes
+			 * (not occupied, local empty), so the local DSQ is
+			 * empty. The task runs on the next scheduling cycle
+			 * and the local DSQ drains immediately after, which
+			 * keeps balance_one() from skipping ops.dispatch()
+			 * for the tasks queued behind it. The FIFO local-DSQ
+			 * insert does not consume a deadline, so placement is
+			 * deferred to the next real placement, which re-anchors
+			 * the task under the lag clamp. In the pinned context
+			 * SCX_DSQ_LOCAL_ON targets the explicit CPU (no select
+			 * ran for migration-disabled tasks) with SCX_ENQ_IMMED,
+			 * so a lost idle race bounces back through enqueue into
+			 * the queue DSQ instead of stacking on a busy local.
+			 * The slice rides the insert kfunc, never a direct
+			 * store. No kick follows a local insert.
 			 */
 			__sync_fetch_and_add(&mlfq_stats.enq_pinned_idle, 1);
 			mlfq_runnable_enter(tctx, (u8)qid,
 					    mlfq_llc_of_cpu((u32)prev_cpu));
 			mlfq_stamp_enq_at(tctx, now, wakeup);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u64)prev_cpu,
-					   slice, enq_flags);
+					   slice, enq_flags | SCX_ENQ_IMMED);
 			mlfq_stat_placement(qid);
 			tctx->wake_cpu_state = 0;
 			goto done;
 		}
 
 		/*
-		 * The pinned CPU is busy. The task is placed into the
-		 * CPU's queue DSQ and shares the CPU by virtual time
+		 * The pinned CPU is busy or the FIFO veto refused the local
+		 * (occupied or already queued). A wakeup that outranks the
+		 * resident still preempts through the shared helper: the
+		 * helper revalidates the affinity and the FIFO veto and
+		 * dispatches to the CPU's local DSQ with SCX_ENQ_PREEMPT
+		 * capped at 150us, with the same counters as the regular
+		 * preemption. A wakeup that does not outrank the resident,
+		 * a non-wakeup re-enqueue, or a refused veto falls through
+		 * to the queue DSQ below and shares the CPU by virtual time
 		 * order. The owning CPU drains the queue at every slice
 		 * boundary, so the task is served without ever parking in
 		 * the local DSQ, which would shadow every other runnable
-		 * task on the CPU until the stall watchdog fires.
+		 * task on the CPU until the stall watchdog fires. The slice
+		 * and the deadline ride the vtime insert kfunc, never a
+		 * direct store. No kick follows: a busy owner drains at its
+		 * next slice boundary, and an idle owner was just claimed
+		 * above or will be woken by the regular shared-kick
+		 * discipline.
 		 */
+		if (wakeup &&
+		    mlfq_try_preempt(p, tctx, qid, slice, prev_cpu, now,
+				     enq_flags))
+			goto done;
 		deadline = mlfq_place_task(qid, tctx, p->pid);
 		if (!deadline) {
 			/* Unreachable for valid inputs; see the header note. */
@@ -352,39 +485,64 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 		mlfq_runnable_enter(tctx, (u8)qid,
 				    mlfq_llc_of_cpu((u32)prev_cpu));
 		mlfq_stamp_enq_at(tctx, now, wakeup);
+		/*
+		 * Cycle 3 throughput: queue-pressure-aware slice via the
+		 * existing nr_queued (no new state). A solo queue DSQ
+		 * (depth 0 before the insert) grants 2x base, halving the
+		 * switch rate with no waiter to delay; any pressure keeps
+		 * the base slice, the existing behavior. Pure EEVDF
+		 * preserved: the deadline above still uses the base vslice.
+		 */
+		slice = mlfq_pressure_slice(
+			slice,
+			scx_bpf_dsq_nr_queued(mlfq_dsq_id(qid, prev_cpu)));
 		scx_bpf_dsq_insert_vtime(p, mlfq_dsq_id(qid, prev_cpu),
 					 slice, deadline,
 					 enq_flags);
 		mlfq_stat_placement(qid);
 		tctx->wake_cpu_state = 0;
-		mlfq_idle_kick(prev_cpu);
 		goto done;
 	}
 
 	/*
-	 * The idle-CPU fast path. select_cpu() found an idle CPU and returned it,
-	 * so the wakeup can be served on that CPU's local DSQ immediately.
-	 * It is correct because the CPU is idle, so no runnable task is displaced.
+	 * The idle-CPU fast path. select_cpu() found an idle CPU and returned
+	 * it, so the wakeup can be served on that CPU's local DSQ immediately
+	 * without displacing any runnable task. The cached select claim is
+	 * revalidated on every reuse: the enqueue must carry the selected
+	 * marker, the claim bits must still be valid, and the enqueueing CPU
+	 * must still allow the task and must not be occupied. A concurrent
+	 * cpuset change or a takeover between the claim and this insert fails
+	 * the veto and falls through to the queue DSQ, with the stale claim
+	 * refreshed below. In the enqueue context with the selected marker,
+	 * SCX_DSQ_LOCAL resolves to the selected CPU (never LOCAL_ON here),
+	 * with SCX_ENQ_IMMED added so a lost idle race bounces back through
+	 * enqueue into the queue DSQ instead of stacking on a busy local.
+	 * The slice rides the insert kfunc, never a direct store. No kick
+	 * follows a local insert.
 	 */
 	local_fast_path = __COMPAT_is_enq_cpu_selected(enq_flags) &&
 			  (tctx->wake_cpu_state & MLFQ_WAKE_CPU_VALID) &&
 			  (tctx->wake_cpu_state & MLFQ_WAKE_CPU_IDLE) &&
-			  !mlfq_cpu_occupied(bpf_get_smp_processor_id());
+			  !migration_disabled &&
+			  mlfq_cpu_allowed(p, bpf_get_smp_processor_id()) &&
+			  !mlfq_cpu_occupied(bpf_get_smp_processor_id()) &&
+			  !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL);
 	if (local_fast_path) {
 		/*
 		 * The FIFO local-DSQ insert does not consume a deadline,
 		 * so placement is deferred to the next real placement,
-		 * which re-anchors the task under the lag clamp. The
-		 * occupied guard closes the window between the idle claim
-		 * and this insert: a realtime task taking the CPU over in
-		 * between would otherwise strand the wakeup in its local
-		 * DSQ until the takeover drain.
+		 * which re-anchors the task under the lag clamp. The veto
+		 * above closes the window between the idle claim and this
+		 * insert: a takeover or a cpuset change in between would
+		 * otherwise strand the wakeup in a bad local DSQ until the
+		 * drain. The slice rides the insert kfunc, never a direct
+		 * store.
 		 */
 		mlfq_runnable_enter(tctx, (u8)qid,
 				    mlfq_llc_of_cpu((u32)bpf_get_smp_processor_id()));
 		mlfq_stamp_enq_at(tctx, now, wakeup);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice,
-				   enq_flags);
+				   enq_flags | SCX_ENQ_IMMED);
 		__sync_fetch_and_add(&mlfq_stats.enq_fastpath, 1);
 		mlfq_stat_placement(qid);
 		tctx->wake_cpu_state = 0;
@@ -392,149 +550,125 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * The queue DSQ a task is placed in is owned by the CPU it is
-	 * enqueued to. A wakeup lands on prev_cpu, the CPU the task was
-	 * last running on, while run-out re-enqueues and fork/class-switch
-	 * placements run on the rq the task is being enqueued to, which is
-	 * the enqueueing CPU. Each CPU drains only its own three queue
-	 * DSQs (see dispatch.bpf.c), so the insert must target the owning
-	 * CPU's queue.
+	 * The queue DSQ a task is placed in is owned by the CPU
+	 * it is enqueued to. A wakeup lands on prev_cpu, while
+	 * run-out and fork placements run on the enqueueing CPU.
+	 * Each CPU drains only its own three queue DSQs, so the
+	 * insert must target the owning CPU queue. The cached
+	 * target is revalidated on every reuse, with a fallback
+	 * to the enqueueing CPU and then to the global DSQ, which
+	 * never counts as disallowed. The stale claim is cleared
+	 * so it cannot leak into the next enqueue.
 	 */
 	if (wakeup)
 		target_cpu = prev_cpu;
 	else
 		target_cpu = bpf_get_smp_processor_id();
-	/* A concurrent affinity change may have dropped target_cpu. Use the enqueueing CPU. */
-	if (!bpf_cpumask_test_cpu((u32)target_cpu, p->cpus_ptr))
-		target_cpu = bpf_get_smp_processor_id();
+	if (!mlfq_cpu_allowed(p, target_cpu)) {
+		s32 self_cpu = bpf_get_smp_processor_id();
 
-	/*
-	 * A placement targeted at a CPU a realtime task is occupying is
-	 * redirected to a non-occupied CPU, and a wakeup's preemption is
-	 * skipped. Preempting into an occupied CPU's local DSQ would
-	 * strand the wakeup behind the realtime task, so it proceeds
-	 * to the regular vtime placement into the owning queue
-	 * DSQ instead. The redirect covers wakeups and the reenqueues of
-	 * the takeover drain alike. A reenqueued task's target is the
-	 * enqueueing CPU, which is the taken-over one, so without the
-	 * redirect the evacuation would only re-anchor the task in
-	 * place. The regular placement kicks the fallback CPU, so the
-	 * redirected task runs there. Classification and the lag clamp
-	 * are untouched. Only the owning queue DSQ changes, and the
-	 * queue DSQs of different CPUs share the per-queue virtual
-	 * clock, so the placement is identical wherever it lands. Run-out
-	 * re-enqueues and pinned tasks get no redirect. A run-out can be
-	 * enqueued by the kernel while the CPU is being taken over,
-	 * before the hook marks it, and lands in the owning queue DSQ
-	 * where the takeover drain or the steal scans serve it. A pinned
-	 * task cannot legally run elsewhere.
-	 */
-	if ((wakeup || (enq_flags & SCX_ENQ_REENQ)) &&
-	    mlfq_cpu_occupied(target_cpu)) {
-		s32 fallback = mlfq_pick_unoccupied_cpu(p, bpf_get_smp_processor_id());
-
-		skip_preempt = true;
-		if (fallback >= 0) {
-			target_cpu = fallback;
-			__sync_fetch_and_add(&mlfq_stats.rt_redirects, 1);
-		}
-	}
-
-	/*
-	 * Wakeup preemption: a wakeup outranks the task running on the CPU
-	 * it was last running on when it belongs to a higher queue (the
-	 * check_preempt_wakeup semantics of the fair scheduler, where the
-	 * higher-priority arrival preempts), or when it belongs to the
-	 * same queue and the same-queue rule is met. An interactive wakeup
-	 * onto an interactive resident preempts on the residency guard
-	 * alone. Interactive wakeups need immediate service, and the
-	 * virtual-time order still governs the queue DSQ, while the
-	 * preemption is the wakeup-latency mechanism. The guard protects
-	 * the waker's own run and prevents preemption thrash. A Q2/Q3
-	 * wakeup preempts only when its fresh deadline is earlier than the
-	 * resident's, the conservative EEVDF rule. The wakee is dispatched
-	 * to that CPU's local DSQ with SCX_ENQ_PREEMPT, which the kernel
-	 * resolves into a preemption on the next scheduling event. The
-	 * ENQ_PREEMPT path puts the task at the local-DSQ head, zeroes the
-	 * resident's slice and rescheds. The preempting wakeup is granted
-	 * only a capped slice (MLFQ_PREEMPT_SLICE_NS), so it yields back to
-	 * the displaced task at the next scheduling event instead of holding
-	 * the CPU for a full policy slice. The local-DSQ insert is FIFO, so
-	 * the wakee's deadline is computed only for the non-interactive
-	 * comparison and is not committed. Placement is deferred to the
-	 * next real placement, which re-anchors the task under the lag
-	 * clamp. A concurrent affinity change between CPU selection and
-	 * enqueue must not target a CPU outside the allowed set; the
-	 * local-DSQ insert is a same-rq operation, so the failure is a
-	 * placement violation rather than a fatal error, and the queue
-	 * placement is the correct fallback. The redirect above sets
-	 * skip_preempt when the target CPU is occupied, so this block never
-	 * inserts into an occupied CPU's local DSQ.
-	 */
-	if (wakeup && !migration_disabled && !skip_preempt) {
-		struct mlfq_cpu_state *prev_state = mlfq_lookup_cpu_state(prev_cpu);
-		bool owed = false;
-
-		if (prev_state && prev_state->running_pid &&
-		    prev_state->running_pid != p->pid &&
-		    prev_state->running_queue > 0 &&
-		    bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr)) {
-			if ((s32)qid < prev_state->running_queue) {
-				owed = true;
-			} else if (qid == prev_state->running_queue) {
-				u64 wakee_deadline = 0;
-
-				/*
-				 * Same queue. The Q1 rule needs no
-				 * deadline, so the fresh placement is
-				 * computed (without committing it, see
-				 * above) only for the non-interactive
-				 * rule.
-				 */
-				if (qid > 1) {
-					struct queue_ctx *q = mlfq_lookup_queue(qid);
-
-					if (q)
-						wakee_deadline =
-							mlfq_place_entity_deadline(q, tctx);
-				}
-
-				owed = mlfq_sameq_preempt_owed(
-					qid, (u8)prev_state->running_queue,
-					wakee_deadline,
-					prev_state->running_deadline,
-					prev_state->run_start_at,
-					now, mlfq_adapt_state.guard_eff_ns);
-			}
-		}
-
-		if (owed) {
-			u64 preempt_slice = slice;
-
-			/*
-			 * Cap the grant: a preempting wakeup displaces a
-			 * running task, so it runs a bounded burst
-			 * (MLFQ_PREEMPT_SLICE_NS) and then yields, so the
-			 * displaced task (typically the waker, whose early
-			 * deadline puts it first in the virtual-time order)
-			 * resumes at the next scheduling event. The policy
-			 * slice still governs the regular path and the
-			 * continuation after the run-out re-enqueue.
-			 */
-			if (mlfq_preempt_slice_ns < preempt_slice)
-				preempt_slice = mlfq_preempt_slice_ns;
-			mlfq_runnable_enter(tctx, (u8)qid,
-					    mlfq_llc_of_cpu((u32)prev_cpu));
-			mlfq_stamp_enq_at(tctx, now, wakeup);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u64)prev_cpu,
-					   preempt_slice, enq_flags | SCX_ENQ_PREEMPT);
-			__sync_fetch_and_add(&mlfq_stats.preemption_kicks, 1);
+		target_cpu = mlfq_cpu_allowed(p, self_cpu) ?
+			     self_cpu : (s32)bpf_cpumask_first(p->cpus_ptr);
+		tctx->wake_cpu_state = 0;
+		/*
+		 * No allowed CPU found. Park on the global DSQ,
+		 * which never counts as disallowed. The kernel
+		 * drains it without this scheduler, so the task
+		 * still runs. The parked wait stays kernel side.
+		 */
+		if (!mlfq_cpu_allowed(p, target_cpu)) {
+			mlfq_runnable_exit(tctx);
+			tctx->enq_at = 0;
+			tctx->flags &= ~MLFQ_TF_ENQ_WAKEUP;
+			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL,
+					   slice, enq_flags);
 			tctx->wake_cpu_state = 0;
 			goto done;
 		}
 	}
 
-	/* Regular path: into the owning CPU's queue vtime DSQ. */
+	/*
+	 * A placement targeted at a CPU a realtime task is occupying, or
+	 * whose SMT sibling runs a Q1 task, is redirected to a better CPU,
+	 * and a wakeup's preemption is skipped. Preempting into an occupied
+	 * CPU's local DSQ would strand the wakeup behind the realtime task,
+	 * and settling beside a Q1 sibling would split the core, so the
+	 * wakeup proceeds to the regular vtime placement into the owning
+	 * queue DSQ instead. The SMT veto is exactly the selection's
+	 * predicate (is_smt_sibling_q1_busy, the Step-1/Q3 soft veto): no
+	 * new heuristic, no new threshold. The redirect covers wakeups and
+	 * the reenqueues of the takeover drain alike. A reenqueued task's
+	 * target is the enqueueing CPU, which is the taken-over one, so
+	 * without the redirect the evacuation would only re-anchor the task
+	 * in place. The fallback prefers the strict (realtime + SMT) pick
+	 * and degrades to the realtime-only pick only when the target was
+	 * realtime-occupied and no strict CPU exists, the same strict-then-
+	 * relaxed shape as the Q3 selection; an SMT-only target never
+	 * degrades to another SMT-busy CPU. The regular placement kicks the
+	 * fallback CPU, so the redirected task runs there. Classification
+	 * and the lag clamp are untouched. Only the owning queue DSQ
+	 * changes, and the queue DSQs of different CPUs share the per-queue
+	 * virtual clock, so the placement is identical wherever it lands.
+	 * Run-out re-enqueues and pinned tasks get no redirect. A run-out
+	 * can be enqueued by the kernel while the CPU is being taken over,
+	 * before the hook marks it, and lands in the owning queue DSQ
+	 * where the takeover drain or the steal scans serve it. A pinned
+	 * task cannot legally run elsewhere.
+	 */
+	if (mlfq_init_done && !migration_disabled &&
+	    (wakeup || (enq_flags & SCX_ENQ_REENQ)) &&
+	    (mlfq_cpu_occupied(target_cpu) ||
+	     is_smt_sibling_q1_busy(target_cpu))) {
+		bool rt_occ = mlfq_cpu_occupied(target_cpu);
+		s32 fallback = mlfq_pick_unoccupied_cpu(p,
+							bpf_get_smp_processor_id(),
+							true);
+
+		if (fallback < 0 && rt_occ)
+			fallback = mlfq_pick_unoccupied_cpu(
+				p, bpf_get_smp_processor_id(), false);
+		skip_preempt = true;
+		if (fallback >= 0 && fallback != target_cpu) {
+			target_cpu = fallback;
+			redirected = true;
+			__sync_fetch_and_add(&mlfq_stats.rt_redirects, 1);
+		}
+	}
+
+	/*
+	 * Wakeup preemption through the shared helper above. The helper
+	 * holds the rank-first test, the affinity revalidation, the FIFO
+	 * veto, the 150us cap and the counters, so this path and the
+	 * pinned-busy path observe one decision. The redirect above sets
+	 * skip_preempt when the target CPU is occupied, and the helper's
+	 * veto refuses an occupied local, so this block never inserts
+	 * into an occupied CPU's local DSQ. The explicit
+	 * SCX_DSQ_LOCAL_ON targets the prev CPU (never SCX_DSQ_LOCAL
+	 * here, which in enqueue would not name the prev CPU), with
+	 * SCX_ENQ_PREEMPT at the head; no IMMED is needed beside
+	 * PREEMPT, and no kick follows a local insert.
+	 */
+	if (wakeup && !skip_preempt &&
+	    mlfq_try_preempt(p, tctx, qid, slice, prev_cpu, now,
+			     enq_flags))
+		goto done;
+
+	/*
+	 * Regular path: into the owning CPU's queue vtime DSQ. The slice and
+	 * the deadline ride the vtime insert kfunc (the safe-direct
+	 * primitive), never a direct store to the task fields. Every
+	 * continuation that reaches here (wakeup, run-out, fork/class-switch
+	 * and SCX_ENQ_REENQ) recomputes its deadline from the current
+	 * queue clock and its charged vruntime: a REENQ that follows a
+	 * takeover drain or a cpu_release reenqueue is re-anchored under
+	 * the lag clamp exactly like a fresh placement, so the evacuation
+	 * cannot carry a pre-takeover deadline forward. Cycle 3 throughput:
+	 * the physical grant is queue-pressure-aware via the existing
+	 * nr_queued (no new state): solo (depth 0) grants 2x base, pressured
+	 * keeps base. The virtual slice stays at base, so pure EEVDF order
+	 * is untouched; only the switch rate varies, measurable as schbench
+	 * RPS with enq_regular/keep_running unchanged in shape.
+	 */
 	deadline = mlfq_place_task(qid, tctx, p->pid);
 	if (!deadline) {
 		/* Unreachable for valid inputs; see the header note. */
@@ -549,6 +683,8 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 	mlfq_runnable_enter(tctx, (u8)qid,
 			    mlfq_llc_of_cpu((u32)target_cpu));
 	mlfq_stamp_enq_at(tctx, now, wakeup);
+	slice = mlfq_pressure_slice(
+		slice, scx_bpf_dsq_nr_queued(mlfq_dsq_id(qid, target_cpu)));
 	scx_bpf_dsq_insert_vtime(p, mlfq_dsq_id(qid, target_cpu),
 				 slice, deadline, enq_flags);
 	mlfq_stat_placement(qid);
@@ -556,7 +692,11 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Keep the fast-path state from leaking into the next enqueue. */
 	tctx->wake_cpu_state = 0;
 
-	mlfq_idle_kick(target_cpu);
+	/*
+	 * A redirected task always kicks the new target.
+	 * The old claim does not cover it.
+	 */
+	mlfq_idle_kick_shared(p, enq_flags, target_cpu, redirected);
 
 done:
 	mlfq_op_lat_charge(MLFQ_OP_LAT_ENQUEUE, op_lat_start);

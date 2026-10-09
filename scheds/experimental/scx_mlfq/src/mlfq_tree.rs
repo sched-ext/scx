@@ -454,7 +454,7 @@ fn best_split_with_scratch(
 ///
 /// The growth is breadth-first so the serialized node order is the
 /// level-order layout the store requires (parents before children, index
-/// 0 = root). Each node is created as a placeholder, queued, and filled
+/// 0 = root). Each node is created empty, queued, and filled
 /// when processed. A node that clears the growth limits becomes an
 /// internal node (two new children) and everything else becomes a leaf
 /// predicting the weighted mean of its labels.
@@ -528,7 +528,7 @@ pub fn fit_with_scratch(
     // Node storage is in the scratch arena. Clear but keep capacity.
     let nodes = &mut scratch.nodes;
     let queue = &mut scratch.queue;
-    nodes.push(TreeNode::default()); /* root placeholder */
+    nodes.push(TreeNode::default()); /* Empty root, filled when dequeued. */
     // Build the weighted samples for the root. Reuse the left buffer as
     // temporary weighted storage, then move it into the root.
     scratch.left.clear();
@@ -585,7 +585,7 @@ pub fn fit_with_scratch(
                     feature,
                     pad: [0; 7],
                 };
-                /* Child placeholders, filled when dequeued. */
+                /* Empty children, filled when dequeued. */
                 nodes.push(TreeNode::default());
                 nodes.push(TreeNode::default());
                 // Reuse the left/right buffers from the scratch arena.

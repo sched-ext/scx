@@ -330,6 +330,34 @@ pub fn pick_largest_llc(sizes: &[u64], nr_llcs: u32) -> Option<u32> {
     argmax
 }
 
+/// Pick the strictly-largest cache domain with a frequency check.
+///
+/// The cache-size winner from `pick_largest_llc` is kept when its
+/// maximum frequency covers the other domains. When the winner runs
+/// slower than another domain the cache win trades against frequency,
+/// so the bias stays off and placement falls back to the waker domain
+/// and the global scans. An empty or short `freqs` slice disables the
+/// check and keeps the cache winner. A zero winner frequency also
+/// keeps the winner, so a failed frequency read never disables a
+/// cache win the size discovery proved.
+pub fn pick_largest_llc_freq_aware(sizes: &[u64], freqs: &[u64], nr_llcs: u32) -> Option<u32> {
+    let winner = pick_largest_llc(sizes, nr_llcs)?;
+    let nr = (nr_llcs as usize).min(sizes.len());
+    if freqs.len() < nr {
+        return Some(winner);
+    }
+    let win_freq = freqs[winner as usize];
+    if win_freq == 0 {
+        return Some(winner);
+    }
+    for (i, &f) in freqs[..nr].iter().enumerate() {
+        if i as u32 != winner && f > win_freq {
+            return None;
+        }
+    }
+    Some(winner)
+}
+
 /// The two placement plans produced by `init_topology()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopologyPlan {
@@ -394,9 +422,13 @@ pub fn init_topology(skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> Result<Topo
     );
 
     // Largest-LLC bias: per-domain cache sizes from a representative
-    // CPU of each domain, then the strictly-largest winner. Every read is
-    // best-effort; a failure leaves that domain's size at 0 and a full
-    // failure ties the zeros into the sentinel (feature off).
+    // CPU of each domain, then the strictly-largest winner with a
+    // frequency check. Every read is best-effort; a failure leaves that
+    // domain's size at 0 and a full failure ties the zeros into the
+    // sentinel (feature off). The frequency check keeps the bias when
+    // the cache winner covers the other domains and turns it off when
+    // the winner runs slower, so a stacked-cache domain never pulls
+    // frequency sensitive work onto slower cores.
     let mut llc_sizes = vec![0u64; llcs.nr_llcs as usize];
     for (llc, size) in llc_sizes.iter_mut().enumerate() {
         if let Some(&cpu) = llcs.llc_cpus[llc].first() {
@@ -404,7 +436,18 @@ pub fn init_topology(skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> Result<Topo
             *size = llc_size_bytes(&cache_path).unwrap_or(0);
         }
     }
-    let largest = pick_largest_llc(&llc_sizes, llcs.nr_llcs).unwrap_or(mlfq_consts_MLFQ_MAX_LLCS);
+    let mut llc_freqs = vec![0u64; llcs.nr_llcs as usize];
+    for (llc, freq) in llc_freqs.iter_mut().enumerate() {
+        let mut best = 0u64;
+        for &cpu in &llcs.llc_cpus[llc] {
+            if let Some(c) = topo.all_cpus.get(&(cpu as usize)) {
+                best = best.max(c.max_freq as u64);
+            }
+        }
+        *freq = best;
+    }
+    let largest = pick_largest_llc_freq_aware(&llc_sizes, &llc_freqs, llcs.nr_llcs)
+        .unwrap_or(mlfq_consts_MLFQ_MAX_LLCS);
 
     let rodata = skel
         .maps
@@ -920,6 +963,40 @@ mod tests {
         // One domain's size read failed (0): the other is strictly
         // largest and wins.
         assert_eq!(pick_largest_llc(&[16, 0], 2), Some(0));
+    }
+
+    #[test]
+    fn largest_llc_freq_aware_keeps_fast_winner() {
+        assert_eq!(
+            pick_largest_llc_freq_aware(&[16, 96], &[5000, 5000], 2),
+            Some(1)
+        );
+        assert_eq!(
+            pick_largest_llc_freq_aware(&[96, 32], &[5800, 5800], 2),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn largest_llc_freq_aware_disables_slow_winner() {
+        assert_eq!(
+            pick_largest_llc_freq_aware(&[32, 96], &[5800, 5200], 2),
+            None
+        );
+    }
+
+    #[test]
+    fn largest_llc_freq_aware_missing_freq_keeps_winner() {
+        assert_eq!(pick_largest_llc_freq_aware(&[16, 96], &[], 2), Some(1));
+        assert_eq!(pick_largest_llc_freq_aware(&[16, 96], &[0, 0], 2), Some(1));
+    }
+
+    #[test]
+    fn largest_llc_freq_aware_tie_stays_disabled() {
+        assert_eq!(
+            pick_largest_llc_freq_aware(&[32, 32], &[5000, 5000], 2),
+            None
+        );
     }
 
     #[test]

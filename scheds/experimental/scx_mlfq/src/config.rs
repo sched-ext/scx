@@ -401,9 +401,6 @@ pub struct ConfigBuilder {
  * uses Config::default().
  */
 #[cfg(test)]
-// The builder exposes a setter for every tunable for completeness; the
-// binary and the tests currently wire only a subset of them.
-#[allow(dead_code)]
 impl ConfigBuilder {
     /// Set the Q1 (interactive) request size in nsecs.
     pub fn q1_slice_ns(mut self, v: u64) -> Self {
@@ -748,6 +745,46 @@ mod tests {
     #[test]
     fn rejects_zero_aging_period() {
         assert!(ConfigBuilder::default().aging_period_ns(0).build().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_gauge_params() {
+        assert!(ConfigBuilder::default().budget_max_ns(0).build().is_err());
+        assert!(ConfigBuilder::default().alpha(0).build().is_err());
+        assert!(
+            ConfigBuilder::default()
+                .ema_half_life_ns(0)
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_zero_sleep_windows() {
+        assert!(ConfigBuilder::default().short_sleep_ns(0).build().is_err());
+        assert!(
+            ConfigBuilder::default()
+                .short_sleep_rate_limit_ns(0)
+                .build()
+                .is_err()
+        );
+        assert!(
+            ConfigBuilder::default()
+                .hysteresis_sleep_ns(0)
+                .build()
+                .is_err()
+        );
+        assert!(ConfigBuilder::default().long_sleep_ns(0).build().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_rtdl_drain_interval() {
+        assert!(
+            ConfigBuilder::default()
+                .rtdl_drain_interval_ns(0)
+                .build()
+                .is_err()
+        );
     }
 
     #[test]

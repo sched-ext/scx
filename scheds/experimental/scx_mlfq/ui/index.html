@@ -308,11 +308,15 @@
       var corr = (s.tree_corr_milli || 0) / 1000;
       var trained = (s.tree_model_generation || 0) > 0;
       var tldr, explanation;
+      var rtTook = (s.rt_takeovers || 0) > 0;
+      var rtNote = rtTook
+        ? ' Realtime tasks took over CPUs, queued work was moved off those CPUs.'
+        : '';
       if (!trained) {
         tldr = 'MLFQ is working as expected and is still learning your workload.';
         explanation = 'The classification model has not been published yet, so it is still collecting samples from your task behavior. ' +
           'As you can see from the wakeup-latency gauge, it shows ' + lat + ' us. ' +
-          'Based on the internal rules of this scheduler, a model is published only when it beats the EMA baseline on its held-out slice, and this shows that MLFQ is adapting correctly to your workload.';
+          'Based on the internal rules of this scheduler, a model is published only when it beats the EMA baseline on its held-out slice, and this shows that MLFQ is adapting correctly to your workload.' + rtNote;
       } else {
         tldr = corr > SUMMARY_GOOD_CORR
           ? 'MLFQ is working as expected and is adapting correctly to your workload.'
@@ -322,7 +326,7 @@
             ? 'The wakeup-rate gauge shows ' + fmt(rate) + ' per second, '
             : 'The wakeup-rate gauge is still warming up, ') +
           'and the classification model reports a mean absolute error of ' + maeTree + ' us, against ' + maeEma + ' us for the EMA gauge. ' +
-          'Based on the internal rules of this scheduler, the final result is a model correlation of ' + corr.toFixed(2) + ', and this shows that MLFQ is correctly adapting to your workload.';
+          'Based on the internal rules of this scheduler, the final result is a model correlation of ' + corr.toFixed(2) + ', and this shows that MLFQ is correctly adapting to your workload.' + rtNote;
       }
       return { tldr: tldr, explanation: explanation };
     }

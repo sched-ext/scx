@@ -222,6 +222,7 @@ void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
 	 */
 	if (tctx->enq_at && !mlfq_time_before(now, tctx->enq_at)) {
 		u64 wait = now - tctx->enq_at;
+		u64 gauge_wait;
 
 		if (wait > 0xFFFFFFFFULL)
 			wait = 0xFFFFFFFFULL;
@@ -231,7 +232,17 @@ void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
 			tctx->sq_ema = mlfq_ema_climb(tctx->sq_ema, wait,
 						      MLFQ_SQ_EMA_MAX_NS,
 						      mlfq_alpha);
-			mlfq_sys_gauge.wait_total += wait;
+			/*
+			 * Time-delta clamp: the gauge input is capped to
+			 * MLFQ_SYS_LAT_MAX_NS (16 ms), so one stalled
+			 * episode cannot saturate the 1 s half-life gauge
+			 * for seconds. The stored features keep the full
+			 * wait (capped to u32 above); only the advisory
+			 * gauge is bounded. Pure EEVDF untouched.
+			 */
+			gauge_wait = wait > MLFQ_SYS_LAT_MAX_NS ?
+				     MLFQ_SYS_LAT_MAX_NS : wait;
+			mlfq_sys_gauge.wait_total += gauge_wait;
 			mlfq_sys_gauge.wait_count++;
 		}
 	}
@@ -282,11 +293,32 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 	now = scx_bpf_now();
 	if (tctx->last_run_at && mlfq_time_before(tctx->last_run_at, now))
 		delta = now - tctx->last_run_at;
+	/* Update adjacent to check: clear the stamp on the same lines that
+	 * read it, so a later path cannot re-read a consumed run start. */
 	tctx->last_run_at = 0;
 
+	/*
+	 * Time-delta clamp: bound a stalled segment to
+	 * MLFQ_TREE_LABEL_MAX_NS (192 ms) before any virtual scaling, so a
+	 * watchdog-scale stall cannot jump vruntime and the queue clock.
+	 * Normal 1/2/4 ms slices never hit the bound; pure EEVDF preserved.
+	 * mlfq_update_vruntime() clamps again as defense in depth.
+	 */
+	if (delta > MLFQ_TREE_LABEL_MAX_NS)
+		delta = MLFQ_TREE_LABEL_MAX_NS;
+
 	if (delta) {
-		/* vruntime advance + EMA climb for this run segment. */
+		/*
+		 * Update adjacent to check: charge vruntime and immediately
+		 * advance the owning queue's clock from it, before the EMA
+		 * and per-CPU gauges are touched. The clock advance's
+		 * time_before check then observes the fresh service point
+		 * with no intervening queue-state churn.
+		 */
 		mlfq_update_vruntime(tctx, delta);
+		q = mlfq_lookup_queue(tctx->queue);
+		if (q)
+			mlfq_queue_advance_clock(q, tctx->vruntime);
 		mlfq_ema_climb_task(tctx, delta);
 		/*
 		 * The per-CPU busy gauge: the run segment climbs the
@@ -310,18 +342,6 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 						      mlfq_alpha);
 			cpu->cpu_ema_at = now;
 		}
-		/*
-		 * Advance the owning queue's virtual clock with the
-		 * virtual time just charged. The clock follows the
-		 * service given to the queue, and placement anchors new
-		 * arrivals to it. The queue lookup can fail when the task's
-		 * queue state was not carried over, which is tolerated. The
-		 * clock only needs to be near the service point and the
-		 * placement clamp bounds the staleness.
-		 */
-		q = mlfq_lookup_queue(tctx->queue);
-		if (q)
-			mlfq_queue_advance_clock(q, tctx->vruntime);
 		__sync_fetch_and_add(&mlfq_stats.total_runtime, delta);
 
 		tctx->prev_burst_ns = delta;
@@ -566,16 +586,15 @@ void BPF_STRUCT_OPS(mlfq_exit_task, struct task_struct *p,
  * guard and the stall watchdog cap the pathological loop.
  * scx_bpf_reenqueue_local() is restricted to this callback (ext.c).
  *
- * On kernels with the call-from-anywhere reenqueue
- * (scx_bpf_reenqueue_local___v2, v6.19+), the sched_switch hook in
- * rtdl.bpf.c evacuates the local DSQ on a higher-priority-class
+ * On kernels with the call from anywhere reenqueue,
+ * version 6.19 and later, the sched switch hook in
+ * rtdl.bpf.c evacuates the local DSQ on a higher priority class
  * takeover, so this callback has nothing left to drain there and stays
- * out of the way. On 6.18 it is the only local-DSQ evacuation path and
- * does the drain. The gate is the compat layer's ksym probe on the v2
- * kfunc, dead-folded to the drain on 6.18. The ops slot is registered on
- * every kernel (the ops initializer cannot fold the probe), so on newer
- * kernels the callback still engages the cpu_acquire/cpu_release
- * takeover path but does no work.
+ * out of the way. On 6.18 it is the only local DSQ evacuation path and
+ * does the drain. The gate is a compile time version check,
+ * folded to the drain on 6.18. The ops slot is registered on
+ * every kernel, so on newer kernels the callback still runs
+ * the takeover path but does no work.
  */
 void BPF_STRUCT_OPS(mlfq_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
 {
@@ -585,13 +604,13 @@ void BPF_STRUCT_OPS(mlfq_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 	 * must not survive a CPU offline when the CPU never cleared
 	 * its slot via stopping()/exit_task. Per-CPU map store, no
 	 * __sync_* on a shared line, never SCX_ENQ_HEAD, and bounded
-	 * bpf_for is untouched. Clear before the 7.1+ early return so
-	 * the drain-skip path still heals the veto.
+	 * bpf for is untouched. Clear before the 6.19 and later early return so
+	 * the drain skip path still heals the veto.
 	 */
 	if (cpu >= 0 && cpu < (s32)MLFQ_MAX_CPUS)
 		mlfq_q1_set((u32)cpu, false);
 
-	if (__COMPAT_scx_bpf_reenqueue_local_from_anywhere()) {
+	if (LINUX_KERNEL_VERSION >= KERNEL_VERSION(6, 19, 0)) {
 		mlfq_op_lat_charge(MLFQ_OP_LAT_CPU_RELEASE, op_lat_start);
 		return;
 	}

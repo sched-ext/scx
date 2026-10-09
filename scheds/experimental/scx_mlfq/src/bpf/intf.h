@@ -273,6 +273,13 @@ enum mlfq_consts {
 	MLFQ_STEER_LLC_MAX		= 4ULL,
 
 	/*
+	 * Keep probe cap: the number of remote candidates the keep
+	 * path may probe before granting the slice. The bound keeps
+	 * the probe cost flat on large machines.
+	 */
+	MLFQ_KEEP_PROBE_MAX		= 4ULL,
+
+	/*
 	 * Number of 64-bit words needed to hold one CPU bit per CPU.
 	 */
 	MLFQ_BITMAP_WORDS		= (MLFQ_MAX_CPUS + 63) / 64,
@@ -298,9 +305,10 @@ enum mlfq_consts {
 	MLFQ_SAMPLE_RING_BYTES		= (1 * 1024 * 1024),
 
 	/*
-	 * The ops watchdog timeout, in milliseconds. The kernel's
-	 * maximum detection latency for a stalled scheduler; the
-	 * scheduler exits and the kernel reverts to CFS when it fires.
+	 * The ops watchdog timeout, in milliseconds. The 30 s timeout is
+	 * the kernel's maximum detection latency for a stalled scheduler,
+	 * and the scheduler exits and the kernel reverts to CFS when it
+	 * fires.
 	 */
 	MLFQ_OPS_TIMEOUT_MS		= 30000,
 
@@ -320,7 +328,7 @@ enum mlfq_consts {
 	 * Number of features the CART splitter may use. The fitter caps
 	 * split feature ids to [0, MLFQ_TREE_NR_FEATURES), so a value
 	 * here is the contract with mlfq_tree.rs and the walk's feat[]
-	 * indexing. The 1.3.11 ABI carries nine split features
+	 * indexing. The 1.3.12 ABI carries nine split features
 	 * (prev_burst, sleep, ema, io_wait, wake_cnt, wake_lat,
 	 * queue_wait, sq_ema, gpu_submit) with sleep_var_ratio remain
 	 * carry-along quantised via FP_SHIFT (0..4 steps).
@@ -474,7 +482,7 @@ enum mlfq_task_flags {
  * 7.1 ABI adds sleep_var_ratio, the fixed-point (FP_SHIFT=8) variation
  * ratio of sleep intervals, to capture frame-cadence regularity; it
  * stays carry-along until the fitter promotes it. sq_ema remains at
- * offset 40, sleep_var_ratio at 48. The 1.3.11 ABI adds gpu_submit,
+ * offset 40, sleep_var_ratio at 48. The 1.3.12 ABI adds gpu_submit,
  * the quantised (FP_SHIFT 0..4) gpu submission count, at offset 56
  * with pad2 for 64-byte alignment. The resulting 64-byte record keeps
  * every u64 at an 8-byte offset and the packed sample at 84 bytes.
@@ -590,7 +598,7 @@ extern volatile struct mlfq_tree_ctrl mlfq_tree_ctrl;
  * MLFQ_TREE_LABEL_MAX_NS, so the fitter's f64 sums never sum near-u64
  * values.
  *
- * Why clamp: version is MLFQ_TREE_SAMPLE_VERSION (4 for 1.3.11 ABI);
+ * Why clamp: version is MLFQ_TREE_SAMPLE_VERSION (4 for 1.3.12 ABI);
  * mismatch drops the record instead of misreading fields.
  *
  * Observer helper: stopping path observes task state to emit this
@@ -636,7 +644,7 @@ _Static_assert(__builtin_offsetof(struct mlfq_tree_feats, queue_wait_us) == 36,
  * unconditional, so 9..15 never indexes OOB. NR_FEATURES 9.
  */
 _Static_assert(MLFQ_TREE_NR_FEATURES == 9,
-	       "NR_FEATURES must be 9 for 1.3.11 ABI (feat[16] 0..8 split, gpu_submit quant 0..4, 9 carry-along)");
+	       "NR_FEATURES must be 9 for 1.3.12 ABI (feat[16] 0..8 split, gpu_submit quant 0..4, 9 carry-along)");
 
 /*
  * Sentinel "no LLC owner" value for task_ctx.last_llc. Valid LLC domain
@@ -660,7 +668,7 @@ _Static_assert(MLFQ_TREE_NR_FEATURES == 9,
  * pending_valid padded to 64-bit) plus 24-byte sleep cadence EMA
  * block (mean 8, var 8, ratio 4 + pad 4) plus 4-byte gpu_submit
  * plus 4-byte pad plus 8-byte gpu_submit dedup timestamp.
- * Total 240 bytes aligned for the 1.3.11 ABI
+ * Total 240 bytes aligned for the 1.3.12 ABI
  * (232 before gpu_submit timestamp, 224 before gpu_submit, gpu_submit at 224,
  * last_gpu_submit_at at 232). The 64-byte vector keeps sq_ema at 40,
  * sleep_var_ratio at 48 and gpu_submit at 56 quantised 0..4.
@@ -784,7 +792,7 @@ struct task_ctx {
 };
 
 _Static_assert(sizeof(struct task_ctx) == 240,
-	       "task_ctx must be 240 bytes for 1.3.11 ABI (64-byte feats + cadence + gpu_submit + dedup timestamp, 8-byte aligned; 224 before gpu, 232 last_gpu_submit_at)");
+	       "task_ctx must be 240 bytes for 1.3.12 ABI (64-byte feats + cadence + gpu_submit + dedup timestamp, 8-byte aligned; 224 before gpu, 232 last_gpu_submit_at)");
 _Static_assert(__builtin_offsetof(struct task_ctx, pending_feats) == 144,
 	       "pending_feats at 144");
 _Static_assert(__builtin_offsetof(struct task_ctx, pending_queue) == 208,
@@ -1148,6 +1156,19 @@ static __always_inline void mlfq_bitmap_set_cpu(struct mlfq_bitmap *bm, u32 cpu)
  * Same convention as fair.c vruntime_cmp()/time_before64(): the kernel
  * DSQ orders by min deadline with the same wrapping semantics.
  *
+ * Audit (Cycle 2, 1.3.13): every timestamp delta in the scheduler uses
+ * this signed form (last_sleep_at, last_run_at, enq_at, run_start_at,
+ * cpu_ema_at, sample_last_at, last_gpu_submit_at, last_drain_at,
+ * step_at, queued_at + aging, clock/vruntime/deadline/dsq_vtime). A
+ * plain < on u64 timestamps would misorder across the u64 epoch wrap;
+ * the (s64)(b - a) > 0 form keeps the wrap point indistinguishable
+ * from any other point. Duration-vs-duration compares (sleep_ns vs
+ * window, delta vs budget, elapsed vs interval, run_elapsed vs guard)
+ * correctly stay plain compares: deltas are magnitudes, never
+ * timestamps, and all time deltas are additionally clamped before
+ * virtual scaling (see mlfq_update_vruntime and the lifecycle
+ * wait/gauge clamps), so no delta can approach the 2^63 wrap half.
+ *
  * Return: true if @a is before @b.
  */
 static __always_inline bool mlfq_time_before(u64 a, u64 b)
@@ -1251,12 +1272,20 @@ static __always_inline u32 mlfq_cpuperf_from_ema(u64 ema)
  * @weight: Task weight in scx scale (nice-0 = 100, min 1).
  *
  * EEVDF virtual time grows at rate w_i/NICE_0_LOAD while running. With
- * the scx weight scale this is delta * 100 / weight.
+ * the scx weight scale this is delta * 100 / weight, the fair.c
+ * calc_delta_fair() form on the scx weight scale. The delta is clamped
+ * before the multiply so the product never wraps the 64-bit range, and
+ * a zero weight is treated as one, so the division is always defined
+ * and the result stays in the virtual-time range.
  *
  * Return: The virtual time delta.
  */
 static __always_inline u64 calc_delta_fair_bpf(u64 delta, u32 weight)
 {
+	if (!weight)
+		weight = 1;
+	if (delta > 0xFFFFFFFFFFFFFFFFULL / 100)
+		delta = 0xFFFFFFFFFFFFFFFFULL / 100;
 	return delta * 100 / weight;
 }
 
@@ -1277,26 +1306,42 @@ static __always_inline u64 mlfq_lag_limit(const struct queue_ctx *q, u32 weight)
 }
 
 /**
+ * mlfq_clock_read - Read a queue virtual clock as an estimate.
+ * @q: The queue.
+ *
+ * A single read of the clock, with no lock and no retry. The value may
+ * be stale under a concurrent advance, and the placement clamp absorbs
+ * the staleness, so the estimate is exact enough for the bounded-lag
+ * safety properties while the read stays lock-free.
+ *
+ * Return: The estimated clock.
+ */
+static __always_inline u64 mlfq_clock_read(const struct queue_ctx *q)
+{
+	return q->clock;
+}
+
+/**
  * mlfq_queue_advance_clock - Advance a queue's virtual clock.
  * @q: The queue.
  * @vruntime: The virtual runtime just charged for the queue.
  *
  * The clock follows the service given to the queue. It is advanced to
  * @vruntime whenever @vruntime is ahead of it, as a monotone max update.
- * The clock never moves backward. The compare-and-swap stores only when
- * the clock still holds the value the advance read, and the winner of a
- * contended update is the store that lands first, not necessarily the
- * largest one. A losing update can therefore leave the clock behind the
- * true service point by at most the virtual-time spread of the
- * concurrent updates; the placement clamp bounds the error this creates
- * and the next advance heals it. The single-shot compare-and-swap never
- * retries, so the update cost is constant and contention degrades to a
- * stale clock, never to a convoy.
+ * The clock never moves backward. The single compare-and-swap stores
+ * only when the clock still holds the value the advance read, and the
+ * winner of a contended update is the store that lands first, not
+ * necessarily the largest one. A losing update can therefore leave the
+ * clock behind the true service point by at most the virtual-time
+ * spread of the concurrent updates, the placement clamp bounds the
+ * error this creates and the next advance heals it. The single-shot
+ * compare-and-swap never retries, so the update cost is constant and
+ * contention degrades to a stale clock, never to a convoy.
  */
 static __always_inline void mlfq_queue_advance_clock(struct queue_ctx *q,
 						     u64 vruntime)
 {
-	u64 cur = q->clock;
+	u64 cur = mlfq_clock_read(q);
 
 	if (mlfq_time_before(cur, vruntime))
 		__sync_val_compare_and_swap(&q->clock, cur, vruntime);
@@ -1323,7 +1368,7 @@ mlfq_place_entity_deadline(const struct queue_ctx *q,
 {
 	u64 w = tctx->weight;
 	u64 limit = mlfq_lag_limit(q, (u32)w);
-	u64 clock = q->clock;
+	u64 clock = mlfq_clock_read(q);
 	u64 lag, vslice, vruntime_new, deadline;
 
 	/*
@@ -1387,7 +1432,7 @@ static __always_inline u64 mlfq_place_entity(const struct queue_ctx *q,
 {
 	u64 w = tctx->weight;
 	u64 limit = mlfq_lag_limit(q, (u32)w);
-	u64 clock = q->clock;
+	u64 clock = mlfq_clock_read(q);
 	u64 lag, vruntime_new, deadline;
 
 	/*
@@ -1407,6 +1452,25 @@ static __always_inline u64 mlfq_place_entity(const struct queue_ctx *q,
 	tctx->deadline = deadline;
 
 	return deadline;
+}
+
+/**
+ * mlfq_task_eligible - Advisory eligibility test for a placed task.
+ * @tctx: The task.
+ *
+ * A placed task carries its lag in [0, limit], so every queued task is
+ * eligible and min-deadline selection over the queue DSQs is EEVDF
+ * selection over the queued set, the fair.c pick_eevdf() order. The
+ * test is advisory-only: it never blocks service, and the fallback is
+ * the min-deadline head, so an ineligible head is skipped at most once
+ * before the fallback serves it. The dispatch keeps the within-queue
+ * order, the quotas and the LLC tiers unchanged under the test.
+ *
+ * Return: True when the task is eligible for service.
+ */
+static __always_inline bool mlfq_task_eligible(const struct task_ctx *tctx)
+{
+	return tctx->vlag >= 0;
 }
 
 /**
@@ -1767,6 +1831,37 @@ static __always_inline u8 mlfq_queue_from_ema(u64 ema, u64 t_l, u64 t_h)
 }
 
 /**
+ * mlfq_pressure_slice - Queue-pressure-aware physical slice grant.
+ * @base: Base per-queue slice (mlfq_queue_slice(qid): 1/2/4 ms).
+ * @nr_queued: scx_bpf_dsq_nr_queued() depth of the target queue DSQ,
+ *	read before the insert (no new state, existing kfunc only).
+ *
+ * Solo-task batching without a new knob. When nothing is queued
+ * behind (nr_queued == 0) the grant is 2x base (Q1 2 ms, Q2 4 ms,
+ * Q3 8 ms), which halves the switch rate with no fairness cost
+ * because no task waits. Under any pressure the grant is capped
+ * at @base, so contention never stretches the slice. The virtual
+ * slice and deadline still use @base, only the physical grant
+ * varies, and charging follows the actual runtime, so a longer
+ * solo run simply places later next time.
+ * Overflow: @base <= 4 ms, so base << 1 fits u64, and the carry
+ * check keeps the fallback to @base on the impossible wrap.
+ *
+ * Return: The effective slice grant.
+ */
+static __always_inline u64 mlfq_pressure_slice(u64 base, u32 nr_queued)
+{
+	if (nr_queued == 0) {
+		u64 doubled = base << 1;
+
+		if (doubled < base)
+			return base;
+		return doubled;
+	}
+	return base;
+}
+
+/**
  * mlfq_promote_on_wakeup - Wakeup promotion state machine.
  * @tctx: The task.
  * @sleep_ns: Sleep duration at wakeup.
@@ -1907,7 +2002,7 @@ static __always_inline bool mlfq_check_tree_feature(u8 feature)
 {
 	/*
 	 * Theorem: the split feature must be within the populated ABI.
-	 * Derivation: 1.3.11 ABI populates nine split features (0..8:
+	 * Derivation: 1.3.12 ABI populates nine split features (0..8:
 	 * prev_burst, sleep, ema, io_wait, wake_cnt, wake_lat,
 	 * queue_wait, sq_ema, gpu_submit). The fitter caps splits to
 	 * [0, MLFQ_TREE_NR_FEATURES), and sleep_var_ratio at id 9 is
