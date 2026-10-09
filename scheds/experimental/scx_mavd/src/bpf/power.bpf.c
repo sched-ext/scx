@@ -329,6 +329,9 @@ int do_core_compaction(void)
 	bpf_arena_for(i, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc;
 
+		/* the view is read and the sets written under the lock */
+		guard(sub_set)();
+
 		/*
 		 * Skip offline cpu
 		 */
@@ -368,7 +371,7 @@ int do_core_compaction(void)
 				 * If there is something to run on this CPU,
 				 * add this CPU to the overflow set.
 				 */
-				ovrflw_test_and_set(ovrflw, cpu);
+				cmask_test_and_set(cpu, ovrflw);
 			} else {
 				if (!cmask_test(cpu, ovrflw))
 					continue;
@@ -679,6 +682,7 @@ int reinit_active_cpumask_for_performance(void)
 		bpf_arena_for(cpu, 0, nr_cids) {
 			struct cpdom_ctx *cpdomc;
 
+			guard(sub_set)();
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc)
 				continue;
@@ -692,7 +696,7 @@ int reinit_active_cpumask_for_performance(void)
 				cmask_set(cpu, active);
 				ovrflw_test_and_clear(ovrflw, cpu);
 			} else {
-				ovrflw_test_and_set(ovrflw, cpu);
+				cmask_test_and_set(cpu, ovrflw);
 				cmask_clear(cpu, active);
 			}
 			scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
@@ -704,9 +708,10 @@ int reinit_active_cpumask_for_performance(void)
 	} else {
 		online = online_cmask;
 		nr_cpus_onln = cmask_weight(online);
-		cmask_copy(active, online);
-
-		cmask_zero(ovrflw);
+		scoped_guard(sub_set) {
+			cmask_copy(active, online);
+			cmask_zero(ovrflw);
+		}
 
 		bpf_arena_for(cpu, 0, nr_cids) {
 			struct cpdom_ctx *cpdomc;
@@ -833,7 +838,8 @@ int update_cpuperf_target(struct cpu_ctx __arg_arena *cpuc)
 	 * from a CPU outside the policy unless the cpufreq driver allows DVFS
 	 * from any CPU.
 	 */
-	if (cpuc->cpuperf_cur != cpuperf_target) {
+	if (cpuc->cpuperf_cur != cpuperf_target &&
+	    (!sub_mode || (cpuc->ecaps & SCX_CAP_PERF))) {
 		scx_bpf_cidperf_set(cpuc->cid, cpuperf_target);
 		cpuc->cpuperf_cur = cpuperf_target;
 	}
