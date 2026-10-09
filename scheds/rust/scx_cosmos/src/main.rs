@@ -15,7 +15,7 @@ mod gpu;
 mod stats;
 use cgroup::CgroupReader;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{c_int, c_ulong};
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -38,6 +38,7 @@ use nvml_wrapper::bitmasks::InitFlags;
 use scx_stats::prelude::*;
 use scx_utils::GpuIndex;
 use scx_utils::NR_CPU_IDS;
+use scx_utils::NetDev;
 use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -48,6 +49,7 @@ use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::perf::PerfEventSpec;
 use scx_utils::perf::parse_perf_event;
 use scx_utils::perf::setup_perf_events;
+use scx_utils::read_netdevs;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -168,6 +170,10 @@ struct Opts {
     /// considered GPU-bound). Requires driver support (Maxwell or newer).
     #[clap(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..=100))]
     gpu_util_threshold: u32,
+
+    /// Discover and display NIC topology at startup.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    nic: bool,
 
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
@@ -543,6 +549,8 @@ struct Scheduler<'a> {
     nvml: Option<Nvml>,
     /// Host cgroup v2 reader used to discover peer processes of NVML GPU processes.
     gpu_cgroup_reader: Option<CgroupReader>,
+    /// NIC topology discovered at startup when --nic is enabled.
+    nic_topology: Option<BTreeMap<String, NetDev>>,
     /// Dynamic threshold state for perf event migrations (when --perf-threshold is 0/dynamic).
     perf_threshold_state: Option<DynamicThresholdState>,
     /// Dynamic threshold state for sticky perf events (when --perf-sticky-threshold is 0/dynamic).
@@ -699,6 +707,8 @@ impl<'a> Scheduler<'a> {
         } else {
             None
         };
+
+        let nic_topology = opts.nic.then(read_netdevs).transpose()?;
 
         // Set scheduler flags.
         skel.struct_ops.cosmos_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
@@ -859,6 +869,7 @@ impl<'a> Scheduler<'a> {
             previous_gpu_pids,
             nvml,
             gpu_cgroup_reader,
+            nic_topology,
             perf_threshold_state,
             perf_sticky_threshold_state,
         })
@@ -1117,6 +1128,16 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        if let Some(netdevs) = &self.nic_topology {
+            info!("NIC topology: {} interfaces", netdevs.len());
+            for netdev in netdevs.values() {
+                let node = netdev
+                    .node()
+                    .map_or_else(|| "unknown".to_string(), |node| node.to_string());
+                info!("NIC {}: NUMA node={}", netdev.iface(), node);
+            }
+        }
+
         let (res_ch, req_ch) = self.stats_server.channels();
 
         // Periodic (option -p) updates of the dynamic perf thresholds.
