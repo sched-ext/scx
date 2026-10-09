@@ -2803,6 +2803,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	if (enable_cpu_bw) {
 		struct scx_cgroup_bw_config bw_config = {
 			.verbose = verbose > 2,
+			/* a sub's own cgroup is throttled by its parent */
+			.root_cgrp_id = sub_cgroup_id,
 		};
 		err = scx_cgroup_bw_lib_init(&bw_config);
 	}
