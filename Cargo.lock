@@ -6396,6 +6396,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_rustsched_abi"
+version = "1.1.4"
+
+[[package]]
 name = "scx_rusty"
 version = "1.1.4"
 dependencies = [
