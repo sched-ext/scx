@@ -50,6 +50,8 @@ lazy_static::lazy_static! {
         read_enum("scx_ops_flags", "SCX_OPS_ALWAYS_ENQ_IMMED").unwrap_or(0);
     pub static ref SCX_OPS_TID_TO_TASK: u64 =
         read_enum("scx_ops_flags", "SCX_OPS_TID_TO_TASK").unwrap_or(0);
+    pub static ref SCX_OPS_ENQ_BLOCKED: u64 =
+        read_enum("scx_ops_flags", "SCX_OPS_ENQ_BLOCKED").unwrap_or(0);
 
     pub static ref SCX_PICK_IDLE_CORE: u64 =
         read_enum("scx_pick_idle_cpu_flags", "SCX_PICK_IDLE_CORE").unwrap_or(0);
