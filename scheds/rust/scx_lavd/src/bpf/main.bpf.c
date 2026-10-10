@@ -2279,7 +2279,7 @@ void BPF_STRUCT_OPS(lavd_dump, struct scx_dump_ctx *dctx)
 	 * Dump the cpu.max status of the entire cgroup hierarchy.
 	 */
 	if (enable_cpu_bw) {
-		scx_cgroup_bw_dump(1, true, true, true);
+		scx_cgroup_bw_dump(0, true, true, true);
 	}
 }
 

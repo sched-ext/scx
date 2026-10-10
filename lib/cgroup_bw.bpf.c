@@ -62,11 +62,19 @@ enum scx_cgroup_consts {
  * change this value -- they create a virtual root *view* but the
  * underlying struct cgroup objects keep their kernel-level ids.
  *
- * Kept as a named constant rather than a literal 1 so future
- * cgroup-namespace-aware support (where the scheduler's effective
- * scope is some non-root cgroup) has a clear hook to plug into.
+ * This is the default root, see cbw_root_cgid below.
  */
 #define ROOT_CGID	1ULL
+
+/*
+ * The library's root: the cgroup named by scx_cgroup_bw_config.root_cgrp_id, or
+ * the hierarchy root. It plays the root's part everywhere below: its own
+ * cpu.max is never enforced, billing walks stop at it, and a task outside its
+ * subtree bills to it and is never throttled. Both are set once by
+ * scx_cgroup_bw_lib_init().
+ */
+static u64 cbw_root_cgid;
+static int cbw_root_level;
 
 /*
  * TGID of the loader process (e.g., scx_lavd) captured at
@@ -900,6 +908,27 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 		return -EINVAL;
 	cbw_config = *config;
 
+	/*
+	 * Set the root. A configured root is looked up by id. The hierarchy
+	 * root is resolved through the loader task instead, see
+	 * cbw_get_root_cgrp().
+	 */
+	if (config->root_cgrp_id && config->root_cgrp_id != ROOT_CGID) {
+		struct cgroup *root = bpf_cgroup_from_id(config->root_cgrp_id);
+
+		if (!root) {
+			cbw_err("Failed to resolve the root cgroup %llu",
+				config->root_cgrp_id);
+			return -ENOENT;
+		}
+		cbw_root_cgid = config->root_cgrp_id;
+		cbw_root_level = root->level;
+		bpf_cgroup_release(root);
+	} else {
+		cbw_root_cgid = ROOT_CGID;
+		cbw_root_level = 0;
+	}
+
 	/* Capture the loader's TGID; see cbw_get_root_cgrp(). */
 	cbw_loader_tgid = (u32)(bpf_get_current_pid_tgid() >> 32);
 
@@ -1135,7 +1164,7 @@ int cbw_free_llc_ctx(u64 cgrp_id)
 	 * Root's LLC contexts are invariant for the scheduler's
 	 * lifetime; refuse to tear them down regardless of caller.
 	 */
-	if (unlikely(cgrp_id == ROOT_CGID))
+	if (unlikely(cgrp_id == cbw_root_cgid))
 		return 0;
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
@@ -1156,9 +1185,9 @@ int cbw_free_llc_ctx(u64 cgrp_id)
 			continue;
 
 		/*
-		 * Move all the throttled exiting tasks into the root cgroup.
+		 * Move all the throttled exiting tasks into the root.
 		 */
-		if (cgrp_id != ROOT_CGID) {
+		if (cgrp_id != cbw_root_cgid) {
 			while (can_loop && (taskc = scx_atq_pop(btq, true))) {
 				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
 				/*
@@ -1190,7 +1219,7 @@ int cbw_free_llc_ctx(u64 cgrp_id)
 				 * cgroup, so it has to wait until the next
 				 * replenishment interval anyway.
 				 */
-				ret = cbw_put_aside(taskc, 0, ROOT_CGID);
+				ret = cbw_put_aside(taskc, 0, cbw_root_cgid);
 				if (likely(!ret)) {
 					nr_moved++;
 				} else {
@@ -1321,11 +1350,29 @@ struct cgroup *cbw_cgroup_ancestor(struct cgroup *cgrp, int ancestor_level)
 }
 
 /*
+ * Whether @cgrp is the root or below it. Walks the ancestor table, so it
+ * accepts an unreferenced cgroup.
+ */
+static __always_inline
+bool cbw_under_root(struct cgroup *cgrp)
+{
+	struct cgroup *anc;
+
+	if (cbw_root_cgid == ROOT_CGID)
+		return true;
+
+	anc = cbw_cgroup_ancestor(cgrp, cbw_root_level);
+	return anc && cgroup_get_id(anc) == cbw_root_cgid;
+}
+
+/*
  * Id of @cgrp's effective parent -- the nearest ancestor that has a context:
  * the nearest limited (finite cpu.max) ancestor, or the root; infinite
- * ancestors are skipped. 0 if @cgrp is the root (it has no ancestor).
- * Walks cbw_cgroup_ancestor(), so it accepts an unreferenced cgroup and
- * needs no reference or RCU read lock.
+ * ancestors are skipped. The walk stops at the root's level, so it returns 0
+ * for the root itself and for a cgroup above it. A cgroup beside the root's
+ * subtree returns 0 too, since no cgroup outside the tree ever gets a context.
+ * Walks cbw_cgroup_ancestor(), so it accepts an unreferenced cgroup and needs
+ * no reference or RCU read lock.
  */
 static __always_inline
 u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
@@ -1334,7 +1381,7 @@ u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
 	u64 id = 0;
 	int i, level = BPF_CORE_READ(cgrp, level);
 
-	bpf_for(i, 1, level + 1) {
+	bpf_for(i, 1, level - cbw_root_level + 1) {
 		anc = cbw_cgroup_ancestor(cgrp, level - i);
 		if (!anc)
 			break;
@@ -1349,8 +1396,8 @@ u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
 /*
  * Billing cgroup for @cgrp: the cgroup itself if it has a context (is limited),
  * otherwise its effective parent (nearest managed ancestor). The root always
- * terminates the walk, so a cgroup under only-infinite ancestors bills to the
- * root. @cgrp is borrowed, not released.
+ * terminates the walk, so a cgroup under only-infinite ancestors, and one
+ * outside the root's subtree, bills to it. @cgrp is borrowed, not released.
  *
  * @cgrp must come from a source that is not filtered by the caller's cgroup
  * namespace -- cbw_task_cgroup() (from the task) or a trusted cgroup
@@ -1367,7 +1414,7 @@ u64 cbw_resolve_bill_cgid(struct cgroup *cgrp)
 	else
 		bill = cbw_eff_parent_cgid(cgrp);
 
-	return bill ? bill : ROOT_CGID;
+	return bill ? bill : cbw_root_cgid;
 }
 
 /*
@@ -1398,7 +1445,7 @@ u64 cbw_bill_task(scx_task_cgroup_bw_t *taskc, struct task_struct *p)
 
 	/* A NULL cgroup is the root (see cbw_task_cgroup()): bill to the root. */
 	cgrp = cbw_task_cgroup(p);
-	bill = cgrp ? cbw_resolve_bill_cgid(cgrp) : ROOT_CGID;
+	bill = cgrp ? cbw_resolve_bill_cgid(cgrp) : cbw_root_cgid;
 
 	if (taskc)
 		taskc->bill_cgrp_id = bill;
@@ -1491,13 +1538,22 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 {
 	struct cbw_cgrp_entry entry;
 	scx_cgroup_ctx_t *cgx;
-	u64 cgrp_id;
+	u64 cgrp_id, quota_us;
+	bool is_root;
 	int ret;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
 
 	cgrp_id = cgroup_get_id(cgrp);
+
+	/*
+	 * A cgroup outside the root's subtree gets no context and takes no
+	 * reservation: its tasks bill to the root and are never throttled.
+	 */
+	if (!cbw_under_root(cgrp))
+		return 0;
+	is_root = cgrp_id == cbw_root_cgid;
 
 	/*
 	 * Abort past the static limits rather than run a cgroup unmanaged.
@@ -1512,14 +1568,15 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * When ops.cgroup_set_bandwidth() is non-sleepable it cannot allocate, so
 	 * a cgroup that may gain a finite cpu.max at runtime needs its context set
 	 * pre-reserved here, in this sleepable ops.cgroup_init(). Take a
-	 * reservation for every non-root cgroup under the height cap and hold it
-	 * until the cgroup either publishes a context below or exits, so
-	 * cbw_nr_pending_reservations always equals the number of live non-root
-	 * cgroups that have no context, and scx_cgroup_bw_exit() releases on
-	 * context-absence alone. When set_bandwidth is sleepable, materialize
-	 * allocates on demand and nothing is reserved.
+	 * reservation for every non-root cgroup of the root's subtree under the
+	 * height cap and hold it until the cgroup either publishes a context
+	 * below or exits, so cbw_nr_pending_reservations always equals the
+	 * number of such live cgroups that have no context, and
+	 * scx_cgroup_bw_exit() releases on context-absence alone. When
+	 * set_bandwidth is sleepable, materialize allocates on demand and
+	 * nothing is reserved.
 	 */
-	if (!bw_set_sleepable && cgrp->level > 0)
+	if (!bw_set_sleepable && !is_root)
 		__sync_fetch_and_add(&cbw_nr_pending_reservations, 1);
 
 	/*
@@ -1528,7 +1585,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * its tasks are billed to the nearest limited ancestor, and the roll-up
 	 * and throttle propagation treat it as a pass-through gap.
 	 */
-	if (cgrp->level > 0 && args->bw_quota_us == CBW_RUNTUME_INF_RAW) {
+	if (!is_root && args->bw_quota_us == CBW_RUNTUME_INF_RAW) {
 		/* Build the spare its reservation covers (non-sleepable path). */
 		if (!bw_set_sleepable)
 			cbw_build_spare();
@@ -1553,9 +1610,8 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
 	 *
-	 * For the cgroup directly under the root cgroup
-	 * (i.e., its level == 1), budget the full quota to itself,
-	 * so the cgroup can distribute the budget to its descendants
+	 * For a cgroup directly under the root, budget the full quota to
+	 * itself, so the cgroup can distribute the budget to its descendants
 	 * when requested.
 	 */
 	cgx = cbw_alloc_cgx_sleepable();
@@ -1566,7 +1622,12 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 		goto out_unreserve;
 	}
 
-	cbw_init_cgx(cgrp, (u64)cgx, args->bw_period_us, args->bw_quota_us,
+	/*
+	 * The root's own cpu.max is for whoever schedules it to enforce. Its
+	 * context only terminates billing and parks tasks, so it is unlimited.
+	 */
+	quota_us = is_root ? CBW_RUNTUME_INF_RAW : args->bw_quota_us;
+	cbw_init_cgx(cgrp, (u64)cgx, args->bw_period_us, quota_us,
 		      args->bw_burst_us);
 
 	/*
@@ -1620,7 +1681,7 @@ out_unreserve:
 	 * scx_cgroup_bw_exit() to release later. Only the non-sleepable path
 	 * reserves (see the init gate).
 	 */
-	if (!bw_set_sleepable && cgrp->level > 0)
+	if (!bw_set_sleepable && !is_root)
 		__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 
 	return ret;
@@ -1697,14 +1758,15 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	if (!cbw_get_cgroup_ctx_with_id(cgrp_id)) {
 		/*
 		 * Release the reservation @cgrp took in scx_cgroup_bw_init().
-		 * Every non-root cgroup under the height cap holds one for as
-		 * long as it has no context, so context-absence alone decides
-		 * this -- @cgrp's current cpu.max does not matter, and a limit
-		 * that changed while it stayed context-less cannot unbalance it.
-		 * Only the non-sleepable path reserves (see the init gate).
+		 * Every non-root cgroup of the root's subtree under the height
+		 * cap holds one for as long as it has no context, so
+		 * context-absence alone decides this -- @cgrp's current cpu.max
+		 * does not matter, and a limit that changed while it stayed
+		 * context-less cannot unbalance it. Only the non-sleepable path
+		 * reserves (see the init gate).
 		 */
-		if (!bw_set_sleepable &&
-		    cgrp->level > 0 && cgrp->level < tree_height_max)
+		if (!bw_set_sleepable && cgrp_id != cbw_root_cgid &&
+		    cgrp->level < tree_height_max && cbw_under_root(cgrp))
 			__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 		return 0;
 	}
@@ -1892,16 +1954,21 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 
 	cbw_dbg_cgrp();
 
+	/* the root's own cpu.max is not ours to enforce */
+	if (cgroup_get_id(cgrp) == cbw_root_cgid)
+		return 0;
+
 	/* Update the cgroup's bandwidth. */
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 	if (!cgx_raw) {
 		/*
 		 * Unmanaged cgroup. A finite cpu.max makes it eligible for
 		 * management: materialize a context from a reserved spare. An
-		 * infinite quota (or being over the static limits) leaves it
-		 * unmanaged, with nothing to configure.
+		 * infinite quota, being over the static limits, or sitting
+		 * outside the root's subtree leaves it unmanaged, with nothing
+		 * to configure.
 		 */
-		if (quota_us == CBW_RUNTUME_INF_RAW)
+		if (quota_us == CBW_RUNTUME_INF_RAW || !cbw_under_root(cgrp))
 			return 0;
 		return cbw_manage_cgroup(cgrp, period_us, quota_us, burst_us);
 	}
@@ -2072,7 +2139,8 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
 		cur_cgrp = pos->cgroup;
 		cur_level = cur_cgrp->level;
-		if (can_loop && cur_level == 0) /* cgroup_root */
+		/* the root comes last and is never throttled */
+		if (can_loop && cur_level == cbw_root_level)
 			break;
 		/*
 		 * A cgroup deeper than the height cap has no accumulator slot
@@ -2202,7 +2270,7 @@ u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 			if (!anc_css)
 				break;
 			cur_anc_cgrp = anc_css->cgroup;
-			if (!cur_anc_cgrp || cur_anc_cgrp->level == 0)
+			if (!cur_anc_cgrp || cur_anc_cgrp->level <= cbw_root_level)
 				break;
 			cur_anc_cgx = cbw_get_cgroup_ctx(cur_anc_cgrp);
 			if (cur_anc_cgx && READ_ONCE(cur_anc_cgx->is_throttled)) {
@@ -2266,7 +2334,7 @@ int cbw_billed_throttled(u64 bill_id, scx_task_cgroup_bw_t *taskc)
 	scx_cgroup_ctx_t *cgx;
 	u64 cgx_raw;
 
-	if (bill_id == ROOT_CGID || unlikely(bill_id == 0))
+	if (bill_id == cbw_root_cgid || unlikely(bill_id == 0))
 		return 0;
 
 	if (taskc && taskc->cgx_raw) {
@@ -2330,7 +2398,7 @@ int scx_cgroup_bw_throttled(struct task_struct *p __arg_trusted __arg_nullable, 
 	 * subtree bills to the root, which is never throttled. bill_cgrp_id is
 	 * cached after the first resolution below.
 	 */
-	if (taskc->bill_cgrp_id == ROOT_CGID)
+	if (taskc->bill_cgrp_id == cbw_root_cgid)
 		return 0;
 
 	return cbw_billed_throttled(cbw_bill_task(taskc, p), taskc);
@@ -2380,7 +2448,7 @@ int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u6
 	 * subtree bills to the root and needs no accounting. bill_cgrp_id is
 	 * cached after the first resolution below.
 	 */
-	if (taskc->bill_cgrp_id == ROOT_CGID)
+	if (taskc->bill_cgrp_id == cbw_root_cgid)
 		return 0;
 
 	/*
@@ -2402,7 +2470,7 @@ int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u6
 			__sync_fetch_and_add(&taskc->pending_ns, carry + consumed_ns);
 			return 0;
 		}
-		if (bill_id == ROOT_CGID)
+		if (bill_id == cbw_root_cgid)
 			return 0;
 		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw)
@@ -2811,7 +2879,15 @@ static struct cgroup *cbw_get_root_cgrp(void)
 	 *
 	 * Caller owns the returned reference and must release it via
 	 * bpf_cgroup_release().
+	 *
+	 * A configured root is looked up by id. bpf_cgroup_from_id() stopped
+	 * filtering by the caller's cgroup namespace in v6.18, and every kernel
+	 * with sub-schedulers is newer than that.
 	 */
+	if (cbw_root_cgid != ROOT_CGID) {
+		root = bpf_cgroup_from_id(cbw_root_cgid);
+		goto out;
+	}
 
 	if (unlikely(!cbw_loader_tgid))
 		goto out;
@@ -2830,8 +2906,8 @@ static struct cgroup *cbw_get_root_cgrp(void)
 
 out:
 	if (unlikely(!root)) {
-		cbw_err("Failed to resolve root cgroup via loader task "
-			"(tgid=%u)", cbw_loader_tgid);
+		cbw_err("Failed to resolve the root cgroup (cgid%llu, loader tgid=%u)",
+			cbw_root_cgid, cbw_loader_tgid);
 	}
 
 	return root;
@@ -3299,7 +3375,7 @@ int scx_cgroup_bw_reenqueue(void)
 		cur_cgx = cbw_get_cgroup_ctx_with_id(cur_cgrp_id);
 		if (!cur_cgx) {
 			/* Never tear down root; see cbw_get_root_cgrp(). */
-			if (cur_cgrp_id == ROOT_CGID)
+			if (cur_cgrp_id == cbw_root_cgid)
 				continue;
 			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu",
 				cur_cgrp_id);
@@ -3519,7 +3595,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 				 p->comm, p->pid, cgroup_get_id(to));
 		}
 
-		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
+		if (!(ret = cbw_put_aside(task_ptr, 0, cbw_root_cgid)))
 			goto out_drop;
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
@@ -3621,7 +3697,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 /**
  * scx_cgroup_bw_dump - Dump the cgroup status
  *
- * @cgrp_id: cgroup id
+ * @cgrp_id: cgroup id, 0 for the library's root
  * @descendent: If true, dump the cgroup and its descendent in preorder.
  * Otherwise, dump only itself.
  * @accurate: If true, update runtime total before dumping the status to
@@ -3642,7 +3718,7 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
 	 * case; cbw_get_root_cgrp() handles it. Other ids fall through
 	 * to bpf_cgroup_from_id().
 	 */
-	if (cgrp_id == ROOT_CGID)
+	if (!cgrp_id || cgrp_id == cbw_root_cgid)
 		start_cgrp = cbw_get_root_cgrp();
 	else
 		start_cgrp = bpf_cgroup_from_id(cgrp_id);
