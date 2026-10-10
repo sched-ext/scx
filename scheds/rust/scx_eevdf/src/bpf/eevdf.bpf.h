@@ -87,6 +87,7 @@ extern const volatile bool no_place_rel_deadline;
 extern const volatile bool no_vref_update;
 extern const volatile bool no_delay_dequeue;
 extern const volatile bool no_delay_requeue;
+extern const volatile bool proxy_exec;
 extern const volatile bool no_hrtick;
 
 extern u32 nr_sched_idle_curr;
@@ -563,6 +564,26 @@ static u64 cid_clock_task_at(s32 cid, u64 now)
 static bool is_task_queued(const struct task_struct *p)
 {
 	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
+ * Return true if @p is a proxy-execution donor: blocked on a mutex and kept
+ * runnable so that its scheduling context can run the mutex owner.
+ *
+ * fair.c keeps such a task where it is. It stays on its runqueue with the
+ * vruntime and deadline it blocked with, and can_migrate_task() refuses it:
+ *
+ *	if (task_is_blocked(p))
+ *		return 0;
+ *
+ * Only proxy execution itself moves a donor, to the runqueue of the owner.
+ * The balancers here refuse it the same way.
+ */
+static __always_inline bool task_is_blocked(const struct task_struct *p)
+{
+	if (!proxy_exec || !bpf_core_field_exists(p->is_blocked))
+		return false;
+	return p->is_blocked;
 }
 
 /*

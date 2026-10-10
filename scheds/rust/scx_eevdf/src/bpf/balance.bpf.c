@@ -602,7 +602,8 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 		outcome = ACTIVE_BALANCE_PINNED;
 		goto out;
 	}
-	if (!cid_idle_test(dst_cid))
+	/* A donor running a mutex owner stays, see task_is_blocked(). */
+	if (task_is_blocked(p) || !cid_idle_test(dst_cid))
 		goto out;
 	src = cid_topo(src_cid);
 	dst = cid_topo(dst_cid);
@@ -1350,7 +1351,7 @@ busy_balance_move_to_local(s32 dst_cid, s32 src_cid, bool has_prev,
 			continue;
 		}
 		p = scx_bpf_tid_to_task(at->tid);
-		if (!p || !cid_allowed(p, dst_cid)) {
+		if (!p || !cid_allowed(p, dst_cid) || task_is_blocked(p)) {
 			scx_edq_task_drop(&at->common);
 			continue;
 		}
