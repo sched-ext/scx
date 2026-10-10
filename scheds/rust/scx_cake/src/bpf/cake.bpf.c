@@ -593,29 +593,51 @@ static __always_inline bool cake_stage(const struct task_struct *p)
 }
 
 /* Does this task wait longer than it runs? run_delay/pcount is the mean wait,
- * sum_exec_runtime/nvcsw the mean burst; cross-multiplied, the shared
- * pre-scale cancels. The threshold is a definition, not a tuning. */
+ * sum_exec_runtime/nvcsw the mean burst. Keep the scaled cross-multiply cheap
+ * while its operands fit in 32 bits; wide operands use unscaled integer means.
+ * The threshold is a definition, not a tuning. */
 static __always_inline bool cake_starved(const struct task_struct *p)
 {
 	u64 wait = p->sched_info.run_delay >> CAKE_RATIO_SHIFT;
 	u64 run = p->se.sum_exec_runtime >> CAKE_RATIO_SHIFT;
+	u64 nvcsw = p->nvcsw | 1;
+	u64 pcount = p->sched_info.pcount | 1;
 
 	if (!run)
 		return false;
-	return wait * (p->nvcsw | 1) > run * (p->sched_info.pcount | 1);
+
+	if (!((wait | run | nvcsw | pcount) >> 32))
+		return wait * nvcsw > run * pcount;
+
+	return p->sched_info.run_delay / pcount >
+	       p->se.sum_exec_runtime / nvcsw;
 }
 
 /* Does this task wait longer than one turn of its own? cake_starved has no
  * dead zone (a microsecond worker reads starved on the wake hop alone), and
- * relocation pays only past a whole turn: the margin is the task's own slice. */
+ * relocation pays only past a whole turn: the margin is the task's own slice.
+ * Wide operands compare unscaled means without multiplying by two. */
 static __always_inline bool cake_starved_turn(const struct task_struct *p)
 {
 	u64 wait = p->sched_info.run_delay >> CAKE_RATIO_SHIFT;
 	u64 run = p->se.sum_exec_runtime >> CAKE_RATIO_SHIFT;
+	u64 nvcsw = p->nvcsw | 1;
+	u64 pcount = p->sched_info.pcount | 1;
+	u64 mean_wait, mean_run;
 
 	if (!run)
 		return false;
-	return wait * (p->nvcsw | 1) > (run << 1) * (p->sched_info.pcount | 1);
+
+	if (!((wait | run | nvcsw | pcount) >> 32)) {
+		u64 turn_run = run << 1;
+
+		if (!(turn_run >> 32))
+			return wait * nvcsw > turn_run * pcount;
+	}
+
+	mean_wait = p->sched_info.run_delay / pcount;
+	mean_run = p->se.sum_exec_runtime / nvcsw;
+	return mean_wait > mean_run && mean_wait - mean_run > mean_run;
 }
 
 _Static_assert(sizeof(struct cake_slot) == STATE_SLOT_BYTES,
