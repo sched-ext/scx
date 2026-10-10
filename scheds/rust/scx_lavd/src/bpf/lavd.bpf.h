@@ -18,6 +18,12 @@
  */
 #define U64_MAX		((u64)~0ULL)
 #define S64_MAX		((s64)(U64_MAX >> 1))
+/*
+ * "Never" for a completion-time estimate: far above any real value, so it
+ * never wins a comparison, yet far below U64_MAX, so a caller can add a
+ * residual to it without wrapping. Positive as s64 as well.
+ */
+#define LAVD_COMP_TIME_INF	(U64_MAX >> 2)
 #define U32_MAX		((u32)~0U)
 #define S32_MAX		((s32)(U32_MAX >> 1))
 
@@ -123,7 +129,6 @@ enum consts_internal {
 	LAVD_CPDOM_MIG_SHIFT		= 3, /* when mildly loaded: 1/2**3 = [-12.5%, +12.5%] */
 	LAVD_CPDOM_MIG_SHIFT_OL		= 4, /* when over-loaded:   1/2**4 = [-6.25%, +6.25%] */
 	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / LAVD_SLICE_MAX_NS_DFL), /* roughly twice per interval */
-	LAVD_CPU_CONGESTED_THRES	= 1, /* the CPU is congested when one or more tasks are waiting across its DSQs */
 
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
@@ -159,6 +164,7 @@ enum consts_flags {
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
 	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
 	LAVD_FLAG_WARM_CPU		= (0x1 << 17), /* wait on the previous CPU: enqueue on its per-CPU DSQ */
+	LAVD_FLAG_QUEUED_ON_LOCAL	= (0x1 << 18), /* this task is queued on a local DSQ, so its service time is in qload_svc_local_invr too */
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
@@ -245,9 +251,13 @@ struct task_ctx {
 	u32	cpu_id;			/* where a task is running now */
 	u32	prev_cpu_id;		/* where a task ran last time */
 	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
-	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
+	s16	queued_on_cpu_id;	/* logical CPU id this task was queued on; the per-core
+					   counters are charged to its primary sibling, the
+					   local-DSQ counter to the CPU itself; -1 = not queued */
 	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
+	u64	queued_svc_snapshot;	/* avg_runtime_invr snapshotted at enqueue time for the per-cpdom counter */
+	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
@@ -284,6 +294,7 @@ struct cpdom_ctx {
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
+	u64	qload_svc_invr;			    /* queued service time: sum of avg_runtime_invr for all queued tasks, tracked atomically */
 	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
@@ -300,6 +311,14 @@ struct cpdom_ctx {
 	u32	avg_dom_pinned_util_invr_sum;	    /* the sum of average invariant domain-pinned task utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
+	u32	nr_overflow_cpus;		    /* count of overflow CPUs in this cpdom,
+						     * maintained via atomic inc/dec at every
+						     * overflow cpumask mutation. clang does
+						     * not support atomic ops on 16-bit fields,
+						     * so this is u32 (not u16 like
+						     * nr_active_cpus). */
+	u32	cap_sum_overflow_cpus;		    /* sum of effective_capacity of overflow
+						     * CPUs in this cpdom, atomic. */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 
 	/* per-cpdom preemption vulnerability threshold tracking */
@@ -563,6 +582,18 @@ struct cpu_ctx {
 	 * decremented likewise on dispatch/dequeue/exit.
 	 */
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
+	u64	qload_svc_invr;		/* queued service time: sum of avg_runtime_invr,
+					   inclusive of this core's per-CPU DSQ and the
+					   local DSQs of both SMT siblings. Charged to the
+					   primary sibling, which is where the per-CPU DSQ
+					   lives; same write pattern as qload_invr */
+	u64	qload_svc_local_invr;	/* this logical CPU's own local DSQ, charged to the
+					   CPU itself rather than its primary sibling -- a
+					   local DSQ has exactly one drainer.
+					   Misses a task moved straight to the local
+					   DSQ by consume_dsq(), which has no taskc
+					   to charge; bounded by one task, for the
+					   dispatch-to-running window */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
@@ -648,6 +679,7 @@ extern volatile u64		powersave_mode_ns;
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 extern const volatile u64	pinned_slice_ns;
+extern const volatile u64	xmig_min_gain_ns;
 extern const volatile u8	no_ovrflw_extend;
 
 extern volatile bool		reinit_cpumask_for_performance;
@@ -738,9 +770,59 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 	       cpdomc->nr_steady_cpus == 0;
 }
 
+u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
+		   u64 nr_cpus);
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc);
+u64 calc_comp_time_on_local(u64 task_svc_invr, struct cpu_ctx *cpuc);
+u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc);
+
+/*
+ * Time until whatever is running on @cpuc stops, in wall-clock ns.
+ *
+ * Kept apart from the calc_comp_time_on_*() estimators, which carry no
+ * residual so that they stay comparable with one another. A caller that needs
+ * a wall-clock wait rather than a comparison adds this on top.
+ *
+ * SCX_SLICE_INF means nothing is running: lavd only ever writes it to
+ * est_stopping_clk when a CPU goes idle, is taken offline, or is initialized,
+ * and never as a task's slice. So there is nothing to wait for and the
+ * residual is zero.
+ *
+ * est_stopping_clk is the running task's average runtime counted from its
+ * start, not its slice. While it lies ahead it is the better guess, bounded
+ * by the slice the kernel will enforce. Once the task has outrun its average
+ * there is nothing left to predict from, so guess twice and take the larger:
+ * a quarter of the average, as the spread of its runtimes, so a task a
+ * little past its average still reads as about to stop; and the overrun
+ * itself, so a task deep into a burst reads as staying for as long again.
+ * Each guess is wrong where the other is right, and the larger is wrong
+ * only where both are optimistic. The remaining slice caps them, being the
+ * bound the kernel enforces.
+ */
+static __always_inline u64 calc_residual_time(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 est = READ_ONCE(cpuc->est_stopping_clk);
+	struct task_struct *curr;
+	u64 remaining;
+
+	if (est == SCX_SLICE_INF)
+		return 0;
+
+	curr = __COMPAT_scx_bpf_cpu_curr(cpuc->cpu_id);
+	remaining = curr ? curr->scx.slice : 0;
+	if (now >= est) {
+		u64 spread = time_delta(est, cpuc->running_clk) / 4;
+		u64 overrun = time_delta(now, est);
+
+		return min(max(spread, overrun), remaining);
+	}
+
+	return min(time_delta(est, now), remaining);
+}
+
 bool queued_on_cpu(struct cpu_ctx *cpuc);
-bool is_cpu_congested(struct cpu_ctx *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
+u64 pick_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
 
 /*
@@ -763,29 +845,25 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
  * budget? The base budget is warm_cpu_ns; warm cache and TLB state on @cpu
  * stretch it up to 2x, so a task still warm there waits rather than migrate to
  * a cold CPU and refill. The wait is the time until the running task stops plus
- * the service time of tasks already queued ahead on that CPU's DSQ.
+ * the service time already queued on that CPU.
  */
 static __always_inline
 bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 {
 	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
-	u64 heat, budget, est, wait;
+	u64 heat, budget, wait;
 
 	if (!cpuc)
 		return false;
 
 	heat = task_cpu_warmth(taskc, cpu, now);
 	budget = (warm_cpu_ns * (LAVD_SCALE + heat)) >> LAVD_SHIFT;
-	est = READ_ONCE(cpuc->est_stopping_clk);
-	wait = time_delta(est, now);
 
 	/*
-	 * Add the wait for tasks already queued ahead on @cpu. This is rough: it
-	 * assumes @p is served last and that every queued task runs the
-	 * system-average slice. A per-core qload_invr would sharpen the latter;
-	 * revisit once per-core queued load is tracked.
+	 * The wait is the queued backlog on @cpu plus the running task's
+	 * residual: a wall-clock wait, not a comparison, so the residual counts.
 	 */
-	wait += (u64)scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) * sys_stat.slice_wall;
+	wait = calc_residual_time(cpuc, now) + calc_comp_time_on_cpu(0, cpuc);
 
 	return wait <= budget;
 }
@@ -823,25 +901,54 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 /* Overflow-set bookkeeping helpers. */
 
 /*
- * Atomically add @cpu to the global overflow cpumask. Mirrors the return
- * semantics of bpf_cpumask_test_and_set_cpu(): true if the bit was
- * already set, false if it was newly set.
+ * Atomically add @cpu to the global overflow cpumask and, on a 0->1
+ * transition, bump the per-cpdom (nr_overflow_cpus,
+ * cap_sum_overflow_cpus) counters used by completion-time-based
+ * migration to estimate cpdom throughput over active+overflow CPUs.
+ *
+ * Returns true if the bit was already set (no counter update); false if
+ * it was newly set (counters bumped). Mirrors the return semantics of
+ * bpf_cpumask_test_and_set_cpu().
  */
 static __always_inline bool
 ovrflw_test_and_set(struct bpf_cpumask *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (bpf_cpumask_test_and_set_cpu(cpu, ovrflw))
+		return true;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !(cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])))
+		return false;
+	__sync_fetch_and_add(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_add(&cpdc->cap_sum_overflow_cpus,
+			     cpuc->effective_capacity);
+	return false;
 }
 
 /*
- * Atomically remove @cpu from the global overflow cpumask. Mirrors the
- * return semantics of bpf_cpumask_test_and_clear_cpu(): true if the bit
- * was set before this call, false if it was already clear.
+ * Atomically remove @cpu from the global overflow cpumask and, on a
+ * 1->0 transition, decrement the per-cpdom counters. Returns true if
+ * the bit was set before this call (counters decremented); false if it
+ * was already clear. Mirrors the return semantics of
+ * bpf_cpumask_test_and_clear_cpu().
  */
 static __always_inline bool
 ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (!bpf_cpumask_test_and_clear_cpu(cpu, ovrflw))
+		return false;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !(cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])))
+		return true;
+	__sync_fetch_and_sub(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_sub(&cpdc->cap_sum_overflow_cpus,
+			     cpuc->effective_capacity);
+	return true;
 }
 
 /* Load balancer helpers. */
@@ -857,7 +964,7 @@ void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc);
 
 /* Scheduler introspection-related helpers. */
 
-u64 get_est_stopping_clk(task_ctx *taskc, u64 now);
+u64 get_est_stopping_clk(task_ctx *taskc, u64 slice, u64 now);
 void try_proc_introspec_cmd(struct task_struct *p, task_ctx *taskc);
 void reset_cpu_preemption_info(struct cpu_ctx *cpuc);
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);

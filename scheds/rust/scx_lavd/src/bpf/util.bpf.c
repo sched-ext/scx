@@ -386,6 +386,28 @@ u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
 	return ((cpu < *sibling) ? cpu : *sibling);
 }
 
+/*
+ * The SMT sibling of @cpu, or @cpu itself when SMT is inactive or the sibling
+ * is unknown. lavd models 2-way SMT: cpu_sibling[] holds a single id.
+ */
+__hidden
+u32 __attribute__ ((noinline)) get_sibling_cpu(u32 cpu) {
+	const volatile u32 *sibling;
+
+	if (!is_smt_active)
+		return cpu;
+
+	/*
+	 * Userspace stores -1 for a core with a single thread -- an E-core on
+	 * a hybrid part, or a core whose sibling is offline -- so bound the id.
+	 */
+	sibling = MEMBER_VPTR(cpu_sibling, [cpu]);
+	if (!sibling || *sibling >= nr_cpu_ids)
+		return cpu;
+
+	return *sibling;
+}
+
 __hidden
 u32 cpu_to_dsq(u32 cpu)
 {
@@ -406,34 +428,6 @@ bool queued_on_cpu(struct cpu_ctx *cpuc)
 
 	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id)))
 		return true;
-
-	return false;
-}
-
-__hidden
-bool is_cpu_congested(struct cpu_ctx *cpuc)
-{
-	int nr;
-
-	nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
-	if (nr >= LAVD_CPU_CONGESTED_THRES)
-		return true;
-
-	if (use_cpdom_dsq()) {
-		nr += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
-		if (nr >= LAVD_CPU_CONGESTED_THRES)
-			return true;
-
-		nr += scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id));
-		if (nr >= LAVD_CPU_CONGESTED_THRES)
-			return true;
-	}
-
-	if (use_per_cpu_dsq()) {
-		nr += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id));
-		if (nr >= LAVD_CPU_CONGESTED_THRES)
-			return true;
-	}
 
 	return false;
 }
@@ -479,6 +473,20 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 		return cpdom_to_dsq(cpuc->cpdom_id);
 
 	return cpdom_to_turb_dsq(cpuc->cpdom_id);
+}
+
+/*
+ * The queue @p joins on @cpuc unless dispatched directly: the per-CPU DSQ
+ * while it waits for a warm CPU, else get_target_dsq_id(). Does not consume
+ * the warm-CPU flag; ops.select_cpu() asks before ops.enqueue() does.
+ */
+__hidden
+u64 pick_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc)
+{
+	if (test_task_flag(taskc, LAVD_FLAG_WARM_CPU))
+		return cpu_to_dsq(cpuc->cpu_id);
+
+	return get_target_dsq_id(p, cpuc, taskc);
 }
 
 /*
