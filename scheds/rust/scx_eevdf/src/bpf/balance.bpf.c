@@ -1220,7 +1220,7 @@ capacity_pressure_target(const struct task_struct *p, s32 src_cid, u64 now)
 		interval_ms--;
 	WRITE_ONCE(cid_ctx(src_cid)->pressure_migrate_next,
 		   now + (u64)interval_ms * NSEC_PER_MSEC);
-	src_load = READ_ONCE(cid_pack(src_cid)->vsum_w);
+	src_load = pack_runnable_w(cid_pack(src_cid));
 	if (!src_load)
 		return -1;
 
@@ -1240,7 +1240,7 @@ capacity_pressure_target(const struct task_struct *p, s32 src_cid, u64 now)
 			else
 				smt_rank = 2;
 		}
-		load = READ_ONCE(cid_pack(cid)->vsum_w);
+		load = pack_runnable_w(cid_pack(cid));
 		cap = READ_ONCE(cid_ctx(cid)->pressure_demand) &&
 		      READ_ONCE(cid_ctx(cid)->pressure_valid) ?
 			READ_ONCE(cid_ctx(cid)->busy_balance_cap) :
