@@ -20,6 +20,9 @@
 //! - `cid_table`: tables in the arena with one entry per CID.
 //! - `edq`, `queue`: the eligible deadline queue, and one per CID with the
 //!   custody of the tasks in them.
+//! - `cids`, `cid_idle`, `cid_ranges`, `tiers`, `topology`: the runtime's
+//!   per-CID words, the idle CIDs and the scans of them by topology, the
+//!   capacity tiers, and what the kernel's asymmetric packing says.
 //! - `uei`: the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
@@ -36,7 +39,10 @@
 #![feature(asm_experimental_arch)]
 #![allow(internal_features)]
 
+pub mod cid_idle;
+pub mod cid_ranges;
 pub mod cid_table;
+pub mod cids;
 pub mod config;
 pub mod edq;
 pub mod helpers;
@@ -48,7 +54,9 @@ pub mod pool;
 pub mod queue;
 pub mod slab;
 pub mod task;
+pub mod tiers;
 pub mod timer;
+pub mod topology;
 pub mod uei;
 
 pub use ops::{cpumask, task_struct};

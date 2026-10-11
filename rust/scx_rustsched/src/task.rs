@@ -8,8 +8,8 @@
 use core::ptr::read_volatile;
 
 use crate::{
-    config, helpers,
-    kfuncs::{bpf_cpumask_test_cpu, scx_bpf_cid_to_cpu, scx_bpf_task_cid},
+    cid_idle, config, helpers,
+    kfuncs::{bpf_cpumask_test_cpu, scx_bpf_task_cid},
     ops::{SCX_TASK_QUEUED, cpumask, task_struct},
 };
 
@@ -128,5 +128,5 @@ pub unsafe fn task_cid(task: *mut task_struct) -> i32 {
 /// on, which enqueue chose within its affinity, migration disabled or not.
 #[inline(always)]
 pub unsafe fn allowed_on(task: *mut task_struct, cid: i32) -> bool {
-    unsafe { scx_bpf_task_cid(task) == cid || runs_on(task, scx_bpf_cid_to_cpu(cid)) }
+    unsafe { scx_bpf_task_cid(task) == cid || runs_on(task, cid_idle::cpu(cid)) }
 }
