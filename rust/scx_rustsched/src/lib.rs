@@ -4,6 +4,9 @@
 //! The sched_ext runtime for a scheduler whose BPF program is written in
 //! Rust: what every such scheduler needs and no policy owns.
 //!
+//! - `sched`, `dsq`, `idle`: a scheduler as an `impl` block of typed
+//!   callbacks, `#[scheduler]`, with the dispatch queues and the idle picks
+//!   over `Task` and `Cid`. The smallest scheduler needs nothing else.
 //! - `ops`: the kernel types the callbacks take, the enqueue, dequeue, kick
 //!   and ops flags, and `scx_ops!`, which declares the struct_ops map from
 //!   the callbacks the scheduler implements.
@@ -46,8 +49,10 @@ pub mod cid_table;
 pub mod cids;
 pub mod clock;
 pub mod config;
+pub mod dsq;
 pub mod edq;
 pub mod helpers;
+pub mod idle;
 pub mod kfuncs;
 pub mod loops;
 pub mod mem;
@@ -55,6 +60,7 @@ pub mod ops;
 pub mod pool;
 pub mod queue;
 pub mod ravg;
+pub mod sched;
 pub mod slab;
 pub mod task;
 pub mod tiers;
@@ -63,6 +69,15 @@ pub mod topology;
 pub mod uei;
 
 pub use ops::{cpumask, task_struct};
+pub use sched::scheduler;
+
+/// What a scheduler written with `#[scheduler]` uses, see `sched`.
+pub mod prelude {
+    pub use crate::dsq::{self, Dsq, SLICE_DFL};
+    pub use crate::idle::{self, Kind, Scope};
+    pub use crate::sched::{Cid, DeqFlags, EnqFlags, WakeFlags};
+    pub use crate::task::Task;
+}
 
 /// Wrapping time comparison: is `first` before `second`?
 #[inline(always)]

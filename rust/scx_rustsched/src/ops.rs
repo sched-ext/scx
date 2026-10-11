@@ -98,6 +98,29 @@ pub const SCX_OPS_ENQ_MIGRATION_DISABLED: u64 = 16;
 pub const SCX_OPS_ALLOW_QUEUED_WAKEUP: u64 = 32;
 /// Lets dispatch resolve a queued task from its tid, scx_bpf_tid_to_task().
 pub const SCX_OPS_TID_TO_TASK: u64 = 256;
+/// Proxy execution: a task that blocks on a mutex stays runnable as a
+/// donor, handed to ops.enqueue() with SCX_ENQ_BLOCKED, and when it is
+/// picked its scheduling context runs the mutex owner. A kernel without it
+/// refuses the flag: user space adds it where the kernel has it, see
+/// `Task::is_blocked()`.
+pub const SCX_OPS_ENQ_BLOCKED: u64 = 1 << 10;
+
+/// The ops flags under the names `#[scheduler(flags = ...)]` takes.
+pub mod flags {
+    pub const ENQ_LAST: u64 = super::SCX_OPS_ENQ_LAST;
+    pub const ENQ_EXITING: u64 = super::SCX_OPS_ENQ_EXITING;
+    pub const ENQ_MIGRATION_DISABLED: u64 = super::SCX_OPS_ENQ_MIGRATION_DISABLED;
+    pub const ALLOW_QUEUED_WAKEUP: u64 = super::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+    pub const TID_TO_TASK: u64 = super::SCX_OPS_TID_TO_TASK;
+    pub const ENQ_BLOCKED: u64 = super::SCX_OPS_ENQ_BLOCKED;
+}
+
+/// Was the scheduler loaded with all of the ops `flags`, as `#[scheduler]`
+/// declares them and its user space changed them?
+#[inline(always)]
+pub fn enabled(flags: u64) -> bool {
+    crate::config::get(crate::config::OPS_FLAGS) & flags == flags
+}
 
 /// The kernel's prototype of each callback, by member name. The cgroup
 /// callbacks appear under both their cpuctl_* and cgroup_* names.
@@ -148,6 +171,12 @@ macro_rules! callback {
         }
     };
 }
+
+/// The watchdog timeout of a scheduler whose `#[scheduler]` names none:
+/// how long a runnable task may wait before the kernel ejects the
+/// scheduler. Shorter than the kernel's 30 s default, so that a stall
+/// shows up as one. The loader's --timeout-ms replaces it at run time.
+pub const TIMEOUT_MS: u32 = 5000;
 
 /// One struct_ops type and map: `$type` declares the members listed, and
 /// `$map` in `$section` is its instance.

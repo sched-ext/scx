@@ -130,3 +130,47 @@ pub unsafe fn task_cid(task: *mut task_struct) -> i32 {
 pub unsafe fn allowed_on(task: *mut task_struct, cid: i32) -> bool {
     unsafe { scx_bpf_task_cid(task) == cid || runs_on(task, cid_idle::cpu(cid)) }
 }
+
+/// A task, as a callback of `#[scheduler]` takes it: a reference to the
+/// kernel's task_struct that is valid for the callback it was passed to.
+#[repr(transparent)]
+pub struct Task(task_struct);
+
+impl Task {
+    /// # Safety
+    /// `task` must be a task the kernel passed to the running callback.
+    #[inline(always)]
+    pub unsafe fn from_ptr<'task>(task: *mut task_struct) -> &'task Task {
+        unsafe { &*task.cast::<Task>() }
+    }
+
+    /// The task as the kfuncs take it.
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *mut task_struct {
+        (self as *const Task).cast_mut().cast()
+    }
+
+    /// The task's weight, from its nice level: 1024 at nice 0.
+    #[inline(always)]
+    pub fn weight(&self) -> u64 {
+        unsafe { task_weight(self.as_ptr()) }
+    }
+
+    /// The CID the task is on, or last ran on.
+    #[inline(always)]
+    pub fn cid(&self) -> crate::sched::Cid {
+        crate::sched::Cid(unsafe { task_cid(self.as_ptr()) })
+    }
+
+    /// May the task run on `cid`?
+    #[inline(always)]
+    pub fn allowed_on(&self, cid: crate::sched::Cid) -> bool {
+        unsafe { allowed_on(self.as_ptr(), cid.0) }
+    }
+
+    /// Is the task exiting?
+    #[inline(always)]
+    pub fn exiting(&self) -> bool {
+        unsafe { exiting(self.as_ptr()) }
+    }
+}

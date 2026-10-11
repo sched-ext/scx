@@ -2,3 +2,4 @@ target
 # Libraries outside the workspace: cargo run in one writes a lockfile that
 # pins nothing, since the BPF crates that build them have their own.
 scx_rustsched/Cargo.lock
+scx_rustsched_macros/Cargo.lock
