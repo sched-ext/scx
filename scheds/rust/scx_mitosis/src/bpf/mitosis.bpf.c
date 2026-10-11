@@ -2188,8 +2188,14 @@ SCX_OPS_DEFINE(mitosis,
 		* a configuration change. dispatch() extends the slice of a solo
 		* task whose placement remains valid, so the enqueue only fires
 		* when the task must leave the cpu.
+		*
+		* ENQ_EXITING: without it the core skips ops.enqueue() for an
+		* exiting ENQ_LAST task and leaves it on the local DSQ while the
+		* cpu idles, stalling it until the watchdog. Remove once the
+		* kernel fix "sched_ext: Fix stall when a task enqueued with
+		* SCX_ENQ_LAST lands back on its CPU's local DSQ" is deployed.
 		*/
-	       .flags			= SCX_OPS_ENQ_LAST,
+	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_ENQ_EXITING,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
