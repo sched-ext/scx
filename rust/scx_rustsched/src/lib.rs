@@ -11,7 +11,11 @@
 //!   the build reads too.
 //! - `helpers`, `timer`: the BPF helpers, called by number, and the timer
 //!   maps built on them.
+//! - `config`: the configuration table the loader fills in from the
+//!   running kernel's BTF, laid out as `scx_rustsched_abi` says.
+//! - `task`: what the program reads from a task_struct.
 //! - `loops`: loops the verifier can bound.
+//! - `uei`: the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
 //! Its global functions,
@@ -23,13 +27,18 @@
 
 #![no_std]
 #![allow(non_camel_case_types)]
+#![feature(core_intrinsics)]
 #![feature(asm_experimental_arch)]
+#![allow(internal_features)]
 
+pub mod config;
 pub mod helpers;
 pub mod kfuncs;
 pub mod loops;
 pub mod ops;
+pub mod task;
 pub mod timer;
+pub mod uei;
 
 pub use ops::{cpumask, task_struct};
 
