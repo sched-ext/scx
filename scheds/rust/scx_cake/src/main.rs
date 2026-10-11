@@ -66,6 +66,11 @@ struct Opts {
     #[clap(long, value_name = "NEW_CSV")]
     signal_report: Option<std::path::PathBuf>,
 
+    /// Experimental lean idle claim (custom kernel): off, on, or lazy (on plus
+    /// the deferred core-word clear). Missing support falls back.
+    #[clap(long, value_enum, default_value_t = LeanIdle::Off)]
+    lean_idle: LeanIdle,
+
     /// Require native CTZ/POPCNT. By default, detect support at startup and fall back.
     #[clap(long)]
     native_bitops: bool,
@@ -123,6 +128,24 @@ enum KernelSignals {
     Off,
     Observe,
     On,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+enum LeanIdle {
+    #[default]
+    Off,
+    On,
+    Lazy,
+}
+
+/// The ops flags a --lean-idle mode asks for; zero when the kernel lacks them.
+fn lean_idle_flags(requested: LeanIdle, lean: u64, lazy: u64) -> u64 {
+    match requested {
+        LeanIdle::Off => 0,
+        LeanIdle::On => lean,
+        LeanIdle::Lazy if lean != 0 && lazy != 0 => lean | lazy,
+        LeanIdle::Lazy => 0,
+    }
 }
 
 fn signal_mode(requested: KernelSignals, supported: bool) -> (bool, bool) {
@@ -183,6 +206,15 @@ fn aggregate_signal_counters(per_cpu: &[Vec<u8>]) -> Result<Vec<u64>> {
 #[cfg(test)]
 mod signal_tests {
     use super::*;
+
+    #[test]
+    fn lean_idle_asks_only_for_flags_the_kernel_has() {
+        assert_eq!(lean_idle_flags(LeanIdle::Off, 1 << 10, 1 << 11), 0);
+        assert_eq!(lean_idle_flags(LeanIdle::On, 1 << 10, 1 << 11), 1 << 10);
+        assert_eq!(lean_idle_flags(LeanIdle::Lazy, 1 << 10, 1 << 11), 3 << 10);
+        assert_eq!(lean_idle_flags(LeanIdle::On, 0, 0), 0);
+        assert_eq!(lean_idle_flags(LeanIdle::Lazy, 1 << 10, 0), 0);
+    }
 
     #[test]
     fn modes_preserve_fallback_and_observation_does_not_enable_policy() {
@@ -334,6 +366,20 @@ impl<'a> Scheduler<'a> {
         );
         if opts.kernel_signals != KernelSignals::Off && !signal_support {
             warn!("Kernel signal v1 support absent; using existing Cake policy");
+        }
+        let lean_flags = lean_idle_flags(
+            opts.lean_idle,
+            compat::read_enum("scx_ops_flags", "SCX_OPS_LEAN_IDLE").unwrap_or(0),
+            compat::read_enum("scx_ops_flags", "SCX_OPS_LEAN_IDLE_LAZY_SMT").unwrap_or(0),
+        );
+        if opts.lean_idle != LeanIdle::Off {
+            info!(
+                "Lean idle    requested={:?} flags={lean_flags:#x}",
+                opts.lean_idle
+            );
+            if lean_flags == 0 {
+                warn!("Lean idle claim absent from this kernel; using the regular claim");
+            }
         }
 
         // The startup banner is cake's only telemetry, one-shot: version, machine
@@ -832,6 +878,7 @@ impl<'a> Scheduler<'a> {
         if signals_enabled {
             skel.struct_ops.cake_ops_mut().flags |= signal_flag;
         }
+        skel.struct_ops.cake_ops_mut().flags |= lean_flags;
         if idle_exit_max_ns == 0 {
             skel.progs.cake_cpu_idle.set_autoload(false);
         }
@@ -991,6 +1038,8 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Detach first: ops.exit copies the event and pool counters, and no record is mid-write.
+        self.struct_ops.take();
         // Diagnostics (--toggle probe=1): black box of placements that waited > 10 ms, then the census.
         if let (true, Some(bss)) = (self.probe_on, self.skel.maps.bss_data.as_ref()) {
             let n = bss.cake_blackbox_n;
@@ -1094,7 +1143,7 @@ impl<'a> Scheduler<'a> {
             info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
         }
         if self.probe_on {
-            const NAMES: [&str; 138] = [
+            const NAMES: [&str; 120] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -1132,29 +1181,19 @@ impl<'a> Scheduler<'a> {
                 "home_busy",
                 "home_localq",
                 "h300_home_busy",
-                "ui_enter",
-                "ui_enter_idlew",
-                "ui_exit",
-                "ui_exit_idlew",
                 "qmark_set",
                 "qmark_set_skip",
                 "qmark_clr",
                 "qmark_clr_skip",
-                "seat_clr",
-                "seat_set",
                 "running",
                 "frontier_st",
                 "wake_served_st",
                 "wake_mark_st",
                 "taci",
                 "taci_win",
-                "taci_stage",
                 "taci_home",
                 "taci_groove",
-                "taci_warm_core",
-                "taci_warm_thread",
                 "taci_warm",
-                "taci_hint",
                 "taci_notify",
                 "pick_idle",
                 "kick",
@@ -1173,13 +1212,9 @@ impl<'a> Scheduler<'a> {
                 "cpu_curr",
                 "core_contended",
                 "stage_probe",
-                "taciw_stage",
                 "taciw_home",
                 "taciw_groove",
-                "taciw_warm_core",
-                "taciw_warm_thread",
                 "taciw_warm",
-                "taciw_hint",
                 "taciw_notify",
                 "t_nrq",
                 "t_taci",
@@ -1189,18 +1224,15 @@ impl<'a> Scheduler<'a> {
                 "t_task_storage",
                 "t_move",
                 "t_insert",
-                "t_ui_idlew",
                 "t_qmark",
                 "t_cal",
                 "leak_home",
-                "leak_kick",
                 "leak_dispatch",
                 "seat_immune",
                 "seat_retake",
                 "seat_reroute",
                 "seat_decline",
                 "pool_forward",
-                "claim_retry",
                 "kt_pool",
                 "x_serial",
                 "kt_local",
@@ -1216,7 +1248,6 @@ impl<'a> Scheduler<'a> {
                 "x_steal_moved",
                 "pool_direct",
                 "kick_alone",
-                "seat_skip",
                 "grant_vacant",
                 "grant_expired",
                 "grant_lt_tick",
@@ -1271,6 +1302,29 @@ impl<'a> Scheduler<'a> {
                     tot[i] as f64 * 100.0 / sel
                 );
             }
+            for broken in census_violations(&NAMES, &tot) {
+                warn!("   census  identity broken: {broken}");
+            }
+        }
+        if let (Some(bss), Some(ro)) = (
+            self.skel.maps.bss_data.as_ref(),
+            self.skel.maps.rodata_data.as_ref(),
+        ) {
+            let nr = (ro.nr_llcs as usize).min(bss.cake_exit_pending.len());
+            let pending: Vec<i64> = bss.cake_exit_pending[..nr]
+                .iter()
+                .map(|v| *v as i64)
+                .collect();
+            for (pool, left) in pending.iter().enumerate().filter(|(_, v)| **v != 0) {
+                warn!("   pool    {pool}: {left} tokens left at exit; a pool token leaked");
+            }
+            if self.verbose {
+                info!(
+                    "   pool    exit pending {:?} unserved {:?}",
+                    pending,
+                    &bss.cake_exit_unserved[..nr]
+                );
+            }
         }
 
         if let (true, Some(bss)) = (self.verbose, self.skel.maps.bss_data.as_mut()) {
@@ -1283,7 +1337,6 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        self.struct_ops.take();
         if let Some(mut report) = self.signal_report.take() {
             use std::io::Write;
             let values = self
@@ -1357,6 +1410,54 @@ impl<'a> Scheduler<'a> {
             info!("   irq     sinks {named:?} steered around");
         }
     }
+}
+
+/// Census identities that hold by construction, read after detach. A broken
+/// one is a probe or accounting bug, not a scheduling result.
+fn census_violations(names: &[&str], tot: &[u64]) -> Vec<String> {
+    let get = |name: &str| {
+        names
+            .iter()
+            .position(|n| *n == name)
+            .and_then(|i| tot.get(i).copied())
+    };
+    let sum = |parts: &[String]| -> Option<u64> { parts.iter().map(|n| get(n)).sum() };
+    let sites = ["home", "groove", "warm", "notify"];
+    let clocks = [
+        "period",
+        "ticksoon",
+        "occupant",
+        "handoff",
+        "wakeclock",
+        "running",
+        "probe",
+    ];
+    let tries: Vec<String> = sites.iter().map(|s| format!("taci_{s}")).collect();
+    let wins: Vec<String> = sites.iter().map(|s| format!("taciw_{s}")).collect();
+    let reads: Vec<String> = clocks.iter().map(|s| format!("kt_{s}")).collect();
+    let equal = [
+        ("taci", get("taci"), sum(&tries)),
+        ("taci_win", get("taci_win"), sum(&wins)),
+        ("home_warm", get("home_warm"), get("taciw_home")),
+        ("kt", get("kt"), sum(&reads)),
+        ("running", get("running"), get("kt_running")),
+    ];
+    let mut broken = Vec::new();
+    for (name, whole, parts) in equal {
+        match (whole, parts) {
+            (Some(w), Some(p)) if w != p => broken.push(format!("{name} {w} != sum of parts {p}")),
+            (Some(_), Some(_)) => {}
+            _ => broken.push(format!("{name}: a counter is missing from the name table")),
+        }
+    }
+    for (t, w) in tries.iter().zip(&wins) {
+        if let (Some(tried), Some(won)) = (get(t), get(w))
+            && won > tried
+        {
+            broken.push(format!("{w} {won} > {t} {tried}"));
+        }
+    }
+    broken
 }
 
 fn sink_words<const N: usize>(set: &[bool]) -> [u64; N] {
@@ -2628,5 +2729,63 @@ mod tests {
         deltas[13] = 4;
         let hot = sinks_by_widest_gap(&deltas).unwrap();
         assert_eq!(flagged(&hot), vec![13]);
+    }
+
+    /// The 2026-10-04 appsim census; `taci_win` as read while still attached.
+    fn census_1004(taci_win: u64) -> (Vec<&'static str>, Vec<u64>) {
+        let rows = [
+            ("select_calls", 3071675),
+            ("home_warm", 813870),
+            ("running", 3124740),
+            ("taci", 3125109),
+            ("taci_win", taci_win),
+            ("taci_home", 817872),
+            ("taci_groove", 4742),
+            ("taci_warm", 2247710),
+            ("taci_notify", 54785),
+            ("kt", 9453561),
+            ("kt_period", 3132465),
+            ("kt_ticksoon", 53550),
+            ("kt_occupant", 13969),
+            ("kt_handoff", 2),
+            ("kt_wakeclock", 2911),
+            ("kt_running", 3124740),
+            ("kt_probe", 3125924),
+            ("taciw_home", 813870),
+            ("taciw_groove", 4699),
+            ("taciw_warm", 2206488),
+            ("taciw_notify", 53754),
+        ];
+        rows.iter().copied().unzip()
+    }
+
+    #[test]
+    fn census_identities_hold_on_a_frozen_read() {
+        let (names, tot) = census_1004(3078811);
+        assert!(super::census_violations(&names, &tot).is_empty());
+    }
+
+    #[test]
+    fn census_identities_catch_a_read_taken_while_attached() {
+        // Two wins landed between the total and its sites.
+        let (names, tot) = census_1004(3078809);
+        let broken = super::census_violations(&names, &tot);
+        assert_eq!(broken.len(), 1, "{broken:?}");
+        assert!(broken[0].starts_with("taci_win 3078809"), "{broken:?}");
+    }
+
+    #[test]
+    fn census_identities_report_wins_above_tries_and_missing_names() {
+        let (names, mut tot) = census_1004(3078811);
+        let groove = names.iter().position(|n| *n == "taciw_groove").unwrap();
+        tot[groove] = 4743;
+        let broken = super::census_violations(&names, &tot);
+        assert!(
+            broken
+                .iter()
+                .any(|b| b.starts_with("taciw_groove 4743 > taci_groove 4742"))
+        );
+        let broken = super::census_violations(&names[..3], &tot[..3]);
+        assert!(broken.iter().all(|b| b.contains("missing")), "{broken:?}");
     }
 }
