@@ -2,14 +2,24 @@
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 
 //! The sched_ext runtime for a scheduler whose BPF program is written in
-//! Rust: what every such scheduler needs and no policy owns.
+//! Rust: what every such scheduler needs and no policy owns. It is two
+//! layers.
 //!
-//! - `sched`, `dsq`, `idle`: a scheduler as an `impl` block of typed
-//!   callbacks, `#[scheduler]`, with the dispatch queues and the idle picks
-//!   over `Task` and `Cid`. The smallest scheduler needs nothing else.
-//! - `var`, `state`, `time`: what the callbacks share, as `Var` globals
-//!   and a typed state per task and per CID, and the clock.
-//! - `param`: the tunables the loader sets by name.
+//! The framework is what a scheduler is written in. A scheduler that uses
+//! nothing else has no `unsafe`:
+//!
+//! - `sched`: a scheduler as an `impl` block of typed callbacks,
+//!   `#[scheduler]`, over `Task` and `Cid`, and `#[global]` for a function
+//!   the verifier checks once.
+//! - `dsq`, `idle`: the kernel's dispatch queues, and the picks of an idle
+//!   CID by topology.
+//! - `var`, `state`, `param`, `time`: what the callbacks share, as `Var`
+//!   globals and a typed state per task and per CID, the tunables the
+//!   loader sets by name, and the clock.
+//!
+//! The core is what the framework stands on, and what a scheduler reaches
+//! for when it needs more than the framework wraps:
+//!
 //! - `ops`: the kernel types the callbacks take, the enqueue, dequeue, kick
 //!   and ops flags, and `scx_ops!`, which declares the struct_ops map from
 //!   the callbacks the scheduler implements.
@@ -20,17 +30,20 @@
 //! - `config`: the configuration table the loader fills in from the
 //!   running kernel's BTF, laid out as `scx_rustsched_abi` says.
 //! - `task`: what the program reads from a task_struct.
-//! - `mem`: loads, stores and atomic updates in the arena, by arena address.
-//! - `pool`, `slab`, `loops`: the arena, the pool of per-task slots in it,
-//!   and loops the verifier can bound.
-//! - `cid_table`: tables in the arena with one entry per CID.
-//! - `edq`, `queue`: the eligible deadline queue, and one per CID with the
-//!   custody of the tasks in them.
-//! - `cids`, `cid_idle`, `cid_ranges`, `tiers`, `topology`, `clock`: the
-//!   runtime's per-CID words, the idle CIDs and the scans of them by
-//!   topology, the capacity tiers, what the kernel's asymmetric packing
-//!   says, and the per-CID task clock.
-//! - `ravg`, `uei`: running averages, and the exit record.
+//! - `pool`, `mem`, `loops`: the arena, loads, stores and atomic updates
+//!   in it by arena address, and loops the verifier can bound.
+//! - `cid_table`, `cids`, `cid_idle`, `cid_ranges`, `tiers`, `topology`:
+//!   tables in the arena with one entry per CID, the idle CIDs and the
+//!   scans of them by topology, the capacity tiers and what the kernel's
+//!   asymmetric packing says.
+//! - `edq`, `slab`, `ravg`, `clock`: the eligible deadline queue and the
+//!   free list, over any memory, running averages, and the per-CID task
+//!   clock.
+//! - `queue`: an eligible deadline queue per CID, with the custody of the
+//!   tasks in them.
+//! - `slots`: the pool of per-task slots in the arena, where a queued
+//!   task's node lives.
+//! - `uei`: the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
 //! Its global functions,
@@ -67,6 +80,7 @@ pub mod queue;
 pub mod ravg;
 pub mod sched;
 pub mod slab;
+pub mod slots;
 pub mod state;
 pub mod task;
 pub mod tiers;

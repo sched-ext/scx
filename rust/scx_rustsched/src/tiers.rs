@@ -18,8 +18,7 @@ use crate::kfuncs::{bpf_arena_alloc_pages, scx_bpf_cid_to_cpu};
 use crate::{
     cid_idle,
     edq::{Memory, View},
-    pool::arena,
-    queue::Arena,
+    pool::{Arena, arena},
 };
 
 const MAX_CPUS: usize = 8192;
@@ -94,7 +93,7 @@ pub fn asym_packing() -> bool {
 #[inline(always)]
 fn entry(cid: i32) -> u64 {
     let base = table(0);
-    if base == 0 || cid < 0 || cid as u32 >= crate::queue::cid_count() {
+    if base == 0 || cid < 0 || cid as u32 >= crate::cids::count() {
         return 0;
     }
     unsafe { Arena.load(base + cid as u32 as u64 * ENTRY_BYTES) }
@@ -133,7 +132,7 @@ pub fn llc_place_tier(cid: i32) -> u32 {
 /// The SMT domain of `cid` packs: its core's threads rank too.
 pub fn smt_asym_packing(cid: i32) -> bool {
     let base = table(0);
-    if base == 0 || cid < 0 || cid as u32 >= crate::queue::cid_count() {
+    if base == 0 || cid < 0 || cid as u32 >= crate::cids::count() {
         return false;
     }
     unsafe { Arena.load(base + cid as u32 as u64 * ENTRY_BYTES + 8) & 1 != 0 }
@@ -143,7 +142,7 @@ pub fn smt_asym_packing(cid: i32) -> bool {
 /// in CPUs, 0 for none.
 pub fn asym_span(cid: i32) -> u32 {
     let base = table(0);
-    if base == 0 || cid < 0 || cid as u32 >= crate::queue::cid_count() {
+    if base == 0 || cid < 0 || cid as u32 >= crate::cids::count() {
         return 0;
     }
     unsafe { (Arena.load(base + cid as u32 as u64 * ENTRY_BYTES + 8) >> 32 & 0x3fff) as u32 }
