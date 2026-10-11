@@ -18,7 +18,8 @@
 //! - `pool`, `slab`, `loops`: the arena, the pool of per-task slots in it,
 //!   and loops the verifier can bound.
 //! - `cid_table`: tables in the arena with one entry per CID.
-//! - `edq`: the eligible deadline queue.
+//! - `edq`, `queue`: the eligible deadline queue, and one per CID with the
+//!   custody of the tasks in them.
 //! - `uei`: the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
@@ -44,6 +45,7 @@ pub mod loops;
 pub mod mem;
 pub mod ops;
 pub mod pool;
+pub mod queue;
 pub mod slab;
 pub mod task;
 pub mod timer;
