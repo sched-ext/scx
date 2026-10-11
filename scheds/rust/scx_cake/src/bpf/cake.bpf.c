@@ -148,29 +148,19 @@ enum cake_stat {
 	CAKE_STAT_HOME_LOCALQ,		/* home claim succeeded on a CPU whose local DSQ is non-empty */
 	CAKE_STAT_H3_HOME_BUSY,		/* ... and the wakee then waited >300us */
 	/* PROBE site census: shared-line writes, clock reads and claiming kfuncs. */
-	CAKE_SITE_UI_ENTER,
-	CAKE_SITE_UI_ENTER_IDLEW,
-	CAKE_SITE_UI_EXIT,
-	CAKE_SITE_UI_EXIT_IDLEW,
 	CAKE_SITE_QMARK_SET,
 	CAKE_SITE_QMARK_SET_SKIP,
 	CAKE_SITE_QMARK_CLR,
 	CAKE_SITE_QMARK_CLR_SKIP,
-	CAKE_SITE_SEAT_CLR,
-	CAKE_SITE_SEAT_SET,
 	CAKE_SITE_RUNNING,
 	CAKE_SITE_FRONTIER_ST,
 	CAKE_SITE_WAKE_SERVED_ST,
 	CAKE_SITE_WAKE_MARK_ST,
 	CAKE_SITE_TACI,
 	CAKE_SITE_TACI_WIN,
-	CAKE_SITE_TACI_STAGE,
 	CAKE_SITE_TACI_HOME,
 	CAKE_SITE_TACI_GROOVE,
-	CAKE_SITE_TACI_WARM_CORE,
-	CAKE_SITE_TACI_WARM_THREAD,
 	CAKE_SITE_TACI_WARM,
-	CAKE_SITE_TACI_HINT,
 	CAKE_SITE_TACI_NOTIFY,
 	CAKE_SITE_PICK_IDLE,
 	CAKE_SITE_KICK,
@@ -189,13 +179,9 @@ enum cake_stat {
 	CAKE_SITE_CPU_CURR,
 	CAKE_SITE_CORE_CONTENDED,
 	CAKE_SITE_STAGE_PROBE,
-	CAKE_SITE_TACIW_STAGE,
 	CAKE_SITE_TACIW_HOME,
 	CAKE_SITE_TACIW_GROOVE,
-	CAKE_SITE_TACIW_WARM_CORE,
-	CAKE_SITE_TACIW_WARM_THREAD,
 	CAKE_SITE_TACIW_WARM,
-	CAKE_SITE_TACIW_HINT,
 	CAKE_SITE_TACIW_NOTIFY,
 	/* clock-pair sums (ns) around one call each; T_CAL is the empty pair. */
 	CAKE_SITE_T_NRQ,
@@ -206,12 +192,10 @@ enum cake_stat {
 	CAKE_SITE_T_TASK_STORAGE,
 	CAKE_SITE_T_MOVE,
 	CAKE_SITE_T_INSERT,
-	CAKE_SITE_T_UI_IDLEW,
 	CAKE_SITE_T_QMARK,
 	CAKE_SITE_T_CAL,
 	/* Seat leaks, counted whether or not the toggle blocks them. */
 	CAKE_SITE_LEAK_HOME,
-	CAKE_SITE_LEAK_KICK,
 	CAKE_SITE_LEAK_DISPATCH,
 	/* Seat rules, one count per fire. */
 	CAKE_SITE_SEAT_IMMUNE,
@@ -220,8 +204,7 @@ enum cake_stat {
 	CAKE_SITE_SEAT_DECLINE,
 	/* A pool head this CPU may not run, forwarded to one that may. */
 	CAKE_SITE_POOL_FORWARD,
-	/* A second or later bit tried; a kthread wake sent to the pool. */
-	CAKE_SITE_CLAIM_RETRY,
+	/* A kthread wake sent to the pool. */
 	CAKE_SITE_KT_POOL,
 	/* Cross-LLC census: destination die differs from the task's previous die. */
 	CAKE_SITE_SERIAL_X,
@@ -238,7 +221,6 @@ enum cake_stat {
 	CAKE_SITE_STEAL_MOVED_X,
 	CAKE_STAT_POOL_DIRECT,		/* pool-bound wake directly used an idle claim */
 	CAKE_SITE_KICK_ALONE,		/* continuation alone at its owner: no idle kick */
-	CAKE_SITE_SEAT_SKIP,		/* running: seat held elsewhere, this task holds none */
 	/* PROBE: the occupant's remaining grant when a continuation wake pools behind it. */
 	CAKE_SITE_GRANT_VACANT,		/* slot mid-switch or torn: not priced */
 	CAKE_SITE_GRANT_EXPIRED,	/* past its grant, the tick has not fired */
@@ -253,7 +235,7 @@ enum cake_stat {
 	CAKE_STAT_SELECT_DIRECT,	/* undecided wake claimed an idle CPU from select_cpu */
 	CAKE_SITE_UI_KICK,		/* update_idle saw the pool token and kicked self */
 	CAKE_SITE_PEND_KICK,		/* both-empty dispatch waited for a landing */
-	CAKE_SITE_PEND_HEAL,		/* pool token cleared after the wait bound */
+	CAKE_SITE_PEND_HEAL,		/* unserved reset under a zero token: pops the serve never saw */
 	CAKE_SITE_RELEASE_SERVE,	/* cpu_release found own-queue work and kicked an idle CPU */
 	CAKE_SITE_PINNED_PREEMPT,	/* pinned wake preempted the occupant on its insert */
 	CAKE_STAT_NR,
@@ -316,6 +298,10 @@ static __always_inline void cake_stat_inc2(u32 idx, u32 site)
 		cake_stat_inc2_cold(idx, site);
 }
 
+_Static_assert(CAKE_SITE_TACIW_NOTIFY - CAKE_SITE_TACIW_HOME ==
+	       CAKE_SITE_TACI_NOTIFY - CAKE_SITE_TACI_HOME,
+	       "claim wins mirror claim sites one for one");
+
 /* PROBE site timing: a clock pair around one call, summed per CPU; the
  * running callback records an empty pair (T_CAL) to subtract. The call is
  * spelled in both arms so no clock value lives across it in the hot arm. */
@@ -353,7 +339,7 @@ static __noinline bool cake_taci_probe(s32 cpu, u32 site)
 	cake_stat_inc2_cold(CAKE_SITE_TACI, site);
 	if (won)
 		cake_stat_inc2_cold(CAKE_SITE_TACI_WIN,
-				    site + (CAKE_SITE_TACIW_STAGE - CAKE_SITE_TACI_STAGE));
+				    site + (CAKE_SITE_TACIW_HOME - CAKE_SITE_TACI_HOME));
 	return won;
 }
 
@@ -826,8 +812,10 @@ static __always_inline u64 cake_pool_unserved(u32 llc)
 	if (u && !ps->pending && __sync_bool_compare_and_swap(&ps->unserved, u, 0)) {
 		/* An insert between the token read and the CAS raised both words;
 		 * its count was taken with the stale one: give it back. */
-		if (!ps->pending)
+		if (!ps->pending) {
+			cake_stat_inc(CAKE_SITE_PEND_HEAL);
 			return 0;
+		}
 		__sync_fetch_and_add(&ps->unserved, 1);
 		return 1;
 	}
@@ -1394,6 +1382,7 @@ static __always_inline bool cake_seat_blocks(s32 cpu, const struct task_struct *
 	 * constant here re-ran select_cpu's register allocation (+10 spills). */
 	return cake_one_word != 0;
 }
+/* Wide hosts: actual idle occupancy, never claim availability; the serial gate counts it. */
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 /* PROBE scratch: the pool head this CPU is about to take is from another die. */
 static u8 cake_probe_pool_x[MAX_CPUS] __attribute__((aligned(STATE_SLOT_BYTES)));
@@ -1725,10 +1714,6 @@ static __noinline bool cake_wake_preempt(struct task_struct *p, struct task_stru
 }
 
 
-/* Idle census: one-word hosts popcount the idle word; wider hosts keep this
- * counter, flipped with the bit by ops.update_idle and seeded by ops.init. */
-static u64 cake_idle_nr __attribute__((aligned(STATE_SLOT_BYTES)));
-
 
 /* Claimed warm placement, narrow hosts only: a whole idle core, then any idle
  * thread, each taken with the atomic idle claim so no second waker stacks
@@ -1798,11 +1783,17 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted, u64 c
 static __noinline bool cake_system_serial(u32 wc)
 {
 	u32 c = wc & (MAX_CPUS - 1);
+	u32 i, n = 0;
 
 	if (cake_one_word)
 		return cake_popcnt64(cake_idle_word() & cpu_llc_word[c]) * 4 >=
 		       cpu_llc_online3[c];
-	return (u32)cake_idle_nr * 4 >= nr_cpu_online3;
+	for (i = 0; i < QMASK_WORDS; i++) {
+		if ((i << 6) >= nr_cpu_span)
+			break;
+		n += cake_popcnt64(cake_idle_words[i]);
+	}
+	return n * 4 >= nr_cpu_online3;
 }
 
 /* The serial gate's first call, counted as the gate reached; not inline in
@@ -3345,30 +3336,27 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime = cake_vtime_ceil(charged, ceil);
 }
 
-/* ops.update_idle: the idle census. KEEP_BUILTIN_IDLE keeps the kernel tracking
- * every pick uses; this only mirrors it into one word. */
+/* ops.update_idle: the pool interlock's self-kick; wide hosts also mirror
+ * occupancy into words. KEEP_BUILTIN_IDLE keeps the kernel tracking picks use. */
 void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 {
-	u32 c = (u32)cpu & (MAX_CPUS - 1);
-	u64 bit = 1ULL << (c & 63);
+	u32 c;
+	u64 bit;
 
 	/* The kernel sets the idle bit before this call: an insert that read the
 	 * old bit raised the token, seen here; kicking self runs dispatch again. */
-	if (cake_one_word) {
-		if (idle && cake_pool_unserved(cake_llc_of(cpu))) {
-			cake_stat_inc(CAKE_SITE_UI_KICK);
-			scx_bpf_kick_cpu(cpu, 0);
-		}
+	if (idle && cake_pool_unserved(cake_llc_of(cpu))) {
+		cake_stat_inc(CAKE_SITE_UI_KICK);
+		scx_bpf_kick_cpu(cpu, 0);
+	}
+	if (cake_one_word)
 		return;
-	}
-	/* Wide-host count is actual idle occupancy, never claim availability. */
-	if (idle) {
-		if (!(__sync_fetch_and_or(&cake_idle_words[c >> 6], bit) & bit))
-			__sync_fetch_and_add(&cake_idle_nr, 1);
-	} else {
-		if (__sync_fetch_and_and(&cake_idle_words[c >> 6], ~bit) & bit)
-			__sync_fetch_and_sub(&cake_idle_nr, 1);
-	}
+	c = (u32)cpu & (MAX_CPUS - 1);
+	bit = 1ULL << (c & 63);
+	if (idle)
+		__atomic_fetch_or(&cake_idle_words[c >> 6], bit, __ATOMIC_RELAXED);
+	else
+		__atomic_fetch_and(&cake_idle_words[c >> 6], ~bit, __ATOMIC_RELAXED);
 }
 
 /* ops.enable: a fresh task starts at the vtime frontier, neither starved nor
@@ -3462,17 +3450,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 	/* Seed wide actual-idle occupancy only. */
 	if (!cake_one_word) {
 		const struct cpumask *im = scx_bpf_get_idle_cpumask();
-		u32 c, n = 0;
+		u32 c;
 
 		bpf_for(c, 0, nr_cpu_span) {
-			if (bpf_cpumask_test_cpu((s32)c, im)) {
+			if (bpf_cpumask_test_cpu((s32)c, im))
 				cake_idle_words[(c & (MAX_CPUS - 1)) >> 6] |=
 					1ULL << (c & 63);
-				n++;
-			}
 		}
 		scx_bpf_put_idle_cpumask(im);
-		cake_idle_nr = n;
 	}
 
 	return 0;
@@ -3480,10 +3465,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 
 /* Core event counters, copied out at exit for the loader's report. */
 struct scx_event_stats cake_events;
+/* Pool counters at ops.exit, after every ops.disable: nonzero pending is a leak. */
+u64 cake_exit_pending[MAX_LLCS];
+u64 cake_exit_unserved[MAX_LLCS];
 
 void BPF_STRUCT_OPS(cake_exit, struct scx_exit_info *ei)
 {
+	u32 i;
+
 	__COMPAT_scx_bpf_events(&cake_events, sizeof(cake_events));
+	for (i = 0; i < MAX_LLCS; i++) {
+		cake_exit_pending[i] = cake.pool[i].pending;
+		cake_exit_unserved[i] = cake.pool[i].unserved;
+	}
 	UEI_RECORD(uei, ei);
 }
 
