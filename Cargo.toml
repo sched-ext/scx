@@ -4,6 +4,7 @@ members = [
     "rust/scx_arena/libarena_selftests",
     "rust/scx_arena/selftests",
     "rust/scx_rustsched_abi",
+    "rust/scx_rustsched_build",
     "rust/scx_cargo",
     "rust/scx_raw_pmu",
     "rust/scx_rustland_core",

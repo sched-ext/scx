@@ -6400,6 +6400,13 @@ name = "scx_rustsched_abi"
 version = "1.1.4"
 
 [[package]]
+name = "scx_rustsched_build"
+version = "1.1.4"
+dependencies = [
+ "libbpf-rs 0.27.2",
+]
+
+[[package]]
 name = "scx_rusty"
 version = "1.1.4"
 dependencies = [
