@@ -8,7 +8,8 @@
 //!   callbacks, `#[scheduler]`, with the dispatch queues and the idle picks
 //!   over `Task` and `Cid`. The smallest scheduler needs nothing else.
 //! - `var`, `state`, `time`: what the callbacks share, as `Var` globals
-//!   and a typed state per task, and the clock.
+//!   and a typed state per task and per CID, and the clock.
+//! - `param`: the tunables the loader sets by name.
 //! - `ops`: the kernel types the callbacks take, the enqueue, dequeue, kick
 //!   and ops flags, and `scx_ops!`, which declares the struct_ops map from
 //!   the callbacks the scheduler implements.
@@ -60,6 +61,7 @@ pub mod kfuncs;
 pub mod loops;
 pub mod mem;
 pub mod ops;
+pub mod param;
 pub mod pool;
 pub mod queue;
 pub mod ravg;
@@ -76,11 +78,13 @@ pub mod var;
 
 pub use ops::{cpumask, task_struct};
 pub use sched::{global, scheduler};
+pub use scx_rustsched_macros::opts;
 
 /// What a scheduler written with `#[scheduler]` uses, see `sched`.
 pub mod prelude {
     pub use crate::dsq::{self, Dsq, SLICE_DFL};
     pub use crate::idle::{self, Kind, Scope};
+    pub use crate::params;
     pub use crate::sched::{Cid, DeqFlags, EnqFlags, Error, KickFlags, WakeFlags};
     pub use crate::task::Task;
     pub use crate::time;

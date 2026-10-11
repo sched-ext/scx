@@ -12,6 +12,9 @@
 //! result back through `sched::Ret`, and it lists the entry points in the
 //! struct_ops map. It parses the token stream by hand, so that the BPF
 //! build needs no crate from the registry.
+//!
+//! `#[global]` makes a function a BPF global function, and `opts!()`
+//! declares the scheduler's tunables from the options of its loader.
 
 use proc_macro::{Delimiter, TokenStream, TokenTree};
 
@@ -383,4 +386,210 @@ pub fn global(_arguments: TokenStream, item: TokenStream) -> TokenStream {
         Ok(output) => output,
         Err(_) => error("#[global]: could not generate the function"),
     }
+}
+
+/// The types of an option that is a tunable as it stands.
+const TUNABLE_TYPES: [&str; 9] = ["bool", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"];
+
+/// The default a `#[clap(...)]` or `#[arg(...)]` attribute gives its
+/// option, from `default_value = "text"` or `default_value_t = value`.
+fn option_default(attribute: &[TokenTree]) -> Option<String> {
+    let [TokenTree::Ident(kind), TokenTree::Group(list)] = attribute else {
+        return None;
+    };
+    if !matches!(kind.to_string().as_str(), "clap" | "arg") {
+        return None;
+    }
+    let list: Vec<TokenTree> = list.stream().into_iter().collect();
+    list.split(|token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == ','))
+        .find_map(|setting| match setting {
+            [TokenTree::Ident(key), TokenTree::Punct(_), value @ ..] => {
+                match key.to_string().as_str() {
+                    "default_value" => Some(source(value).trim().trim_matches('"').to_owned()),
+                    "default_value_t" => Some(source(value)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+}
+
+/// Whether an attribute is `#[opts(no_bpf)]`, or an `#[opts(...)]` that
+/// says something else, which is an error.
+fn opts_marker(attribute: &[TokenTree]) -> Option<Result<(), String>> {
+    let [TokenTree::Ident(kind), TokenTree::Group(list)] = attribute else {
+        return None;
+    };
+    if kind.to_string() != "opts" {
+        return None;
+    }
+    let list = list.stream().to_string();
+    Some(if list.trim() == "no_bpf" {
+        Ok(())
+    } else {
+        Err(format!(
+            "#[opts({list})]: the only marker is #[opts(no_bpf)]"
+        ))
+    })
+}
+
+/// The derive that lets a field of the loader's options carry
+/// `#[opts(no_bpf)]`: an option that only the loader uses, for which
+/// `opts!()` declares no tunable on the BPF side.
+///
+/// ```ignore
+/// #[derive(clap::Args, scx_rustsched_macros::Opts)]
+/// struct Opts {
+///     /// Scheduling slice duration in microseconds.
+///     #[clap(short = 's', long, default_value = "5000")]
+///     slice_us: u64,
+///
+///     /// Treat every CPU as having the same capacity.
+///     #[opts(no_bpf)]
+///     #[clap(long)]
+///     uniform_capacity: bool,
+/// }
+/// ```
+///
+/// It generates nothing: the marker is read by `opts!()`, from the source.
+#[proc_macro_derive(Opts, attributes(opts))]
+pub fn derive_opts(_item: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
+
+/// The stem and the factor to nanoseconds of a tunable named after an
+/// option in microseconds or milliseconds: `SLICE_US` is `SLICE`, 1000.
+fn time_unit(name: &str) -> Option<(&str, u64)> {
+    [("_US", 1_000), ("_MS", 1_000_000)]
+        .into_iter()
+        .find_map(|(suffix, factor)| Some((name.strip_suffix(suffix)?, factor)))
+}
+
+/// `opts!()` declares the scheduler's tunables from the options of its
+/// loader, so that they are written once: for each field of `struct Opts`
+/// in `../src/main.rs` that is an integer or a `bool`, a `params!` tunable
+/// of the field's name in upper case, with its type, its documentation and
+/// the default its `clap` attribute gives it.
+///
+/// ```ignore
+/// // src/main.rs, the loader
+/// #[derive(clap::Args)]
+/// struct Opts {
+///     /// Scheduling slice duration in microseconds.
+///     #[clap(short = 's', long, default_value = "5000")]
+///     slice_us: u64,
+/// }
+///
+/// // bpf/src/main.rs, the scheduler
+/// scx::opts!();
+///
+/// dsq::insert(task, Dsq::Global, SLICE_NS.get(), flags);
+/// ```
+///
+/// A time is in nanoseconds in the scheduler: an option in microseconds
+/// or milliseconds, named `_us` or `_ms`, gives the tunable named `_NS`,
+/// with the default converted, and the loader converts what it is given.
+///
+/// A field of any other type, such as a `String`, is not a tunable: the
+/// loader turns it into one the scheduler declares with `params!`. Nor is
+/// a field marked `#[opts(no_bpf)]`, an option only the loader uses, see
+/// the `Opts` derive. `opts!("path")` reads another file, relative to the
+/// BPF crate.
+#[proc_macro]
+pub fn opts(arguments: TokenStream) -> TokenStream {
+    let relative = match arguments.into_iter().collect::<Vec<_>>().as_slice() {
+        [] => "../src/main.rs".to_owned(),
+        [TokenTree::Literal(path)] => path.to_string().trim_matches('"').to_owned(),
+        _ => return error("opts!() takes at most the path of the loader's source"),
+    };
+    let path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join(relative);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return error(&format!("opts!() cannot read {}", path.display()));
+    };
+    let Ok(file) = text.parse::<TokenStream>() else {
+        return error(&format!("opts!() cannot parse {}", path.display()));
+    };
+    let file: Vec<TokenTree> = file.into_iter().collect();
+    let Some(TokenTree::Group(body)) = file
+        .windows(3)
+        .find(|window| {
+            matches!(window, [TokenTree::Ident(keyword), TokenTree::Ident(name), TokenTree::Group(body)]
+                if keyword.to_string() == "struct"
+                    && name.to_string() == "Opts"
+                    && body.delimiter() == Delimiter::Brace)
+        })
+        .map(|window| &window[2])
+    else {
+        return error(&format!("opts!() finds no `struct Opts {{ ... }}` in {}", path.display()));
+    };
+    // The file is part of the build: a change to it rebuilds the crate.
+    let mut output = format!(
+        "const _: &[u8] = include_bytes!({:?});\n",
+        path.display().to_string()
+    );
+    output += "::scx_rustsched::params! {\n";
+    let body: Vec<TokenTree> = body.stream().into_iter().collect();
+    let (mut index, mut documentation, mut default) = (0, String::new(), None);
+    let mut no_bpf = false;
+    while index < body.len() {
+        match (&body[index], body.get(index + 1)) {
+            // An attribute: the documentation is kept, and clap's gives
+            // the default.
+            (TokenTree::Punct(punct), Some(TokenTree::Group(attribute)))
+                if punct.as_char() == '#' =>
+            {
+                let attribute: Vec<TokenTree> = attribute.stream().into_iter().collect();
+                if matches!(attribute.first(), Some(TokenTree::Ident(name)) if name.to_string() == "doc")
+                {
+                    documentation += &format!("#[{}]\n", source(&attribute));
+                }
+                default = option_default(&attribute).or(default);
+                match opts_marker(&attribute) {
+                    Some(Ok(())) => no_bpf = true,
+                    Some(Err(message)) => return error(&message),
+                    None => {}
+                }
+                index += 2;
+            }
+            // A field: its type runs to the next comma outside angle
+            // brackets.
+            (TokenTree::Ident(name), Some(TokenTree::Punct(punct))) if punct.as_char() == ':' => {
+                let (mut end, mut depth) = (index + 2, 0);
+                while end < body.len() {
+                    match &body[end] {
+                        TokenTree::Punct(punct) if punct.as_char() == '<' => depth += 1,
+                        TokenTree::Punct(punct) if punct.as_char() == '>' => depth -= 1,
+                        TokenTree::Punct(punct) if punct.as_char() == ',' && depth == 0 => break,
+                        _ => {}
+                    }
+                    end += 1;
+                }
+                let ty = source(&body[index + 2..end]);
+                if TUNABLE_TYPES.contains(&ty.trim()) && !no_bpf {
+                    let default = default
+                        .take()
+                        .unwrap_or_else(|| if ty.trim() == "bool" { "false" } else { "0" }.into());
+                    // Time is in nanoseconds in the scheduler, whatever
+                    // unit the option takes it in.
+                    let name = name.to_string().to_uppercase();
+                    let (name, default) = match time_unit(&name) {
+                        Some((stem, factor)) if ty.trim() != "bool" => {
+                            (format!("{stem}_NS"), format!("({default}) * {factor}"))
+                        }
+                        _ => (name, default),
+                    };
+                    output += &format!("{documentation}{name}: {ty} = {default};\n");
+                }
+                (documentation, default, no_bpf) = (String::new(), None, false);
+                index = end + 1;
+            }
+            // `pub` and its like, before the field's name.
+            _ => index += 1,
+        }
+    }
+    output += "}\n";
+    output
+        .parse()
+        .unwrap_or_else(|_| error("opts!() cannot declare the tunables of `struct Opts`"))
 }

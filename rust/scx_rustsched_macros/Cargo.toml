@@ -2,7 +2,7 @@
 name = "scx_rustsched_macros"
 version = "1.1.4"
 edition = "2024"
-description = "The #[scheduler] attribute of scx_rustsched, the sched_ext runtime for Rust BPF schedulers"
+description = "The macros of scx_rustsched, the sched_ext runtime for Rust BPF schedulers"
 license = "GPL-2.0-only"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 repository = "https://github.com/sched-ext/scx"
