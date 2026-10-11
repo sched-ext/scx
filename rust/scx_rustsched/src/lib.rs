@@ -14,6 +14,7 @@
 //! - `config`: the configuration table the loader fills in from the
 //!   running kernel's BTF, laid out as `scx_rustsched_abi` says.
 //! - `task`: what the program reads from a task_struct.
+//! - `mem`: loads, stores and atomic updates in the arena, by arena address.
 //! - `loops`: loops the verifier can bound.
 //! - `edq`: the eligible deadline queue.
 //! - `uei`: the exit record.
@@ -37,6 +38,7 @@ pub mod edq;
 pub mod helpers;
 pub mod kfuncs;
 pub mod loops;
+pub mod mem;
 pub mod ops;
 pub mod task;
 pub mod timer;
