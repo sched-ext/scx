@@ -17,6 +17,7 @@
 //! - `mem`: loads, stores and atomic updates in the arena, by arena address.
 //! - `pool`, `slab`, `loops`: the arena, the pool of per-task slots in it,
 //!   and loops the verifier can bound.
+//! - `cid_table`: tables in the arena with one entry per CID.
 //! - `edq`: the eligible deadline queue.
 //! - `uei`: the exit record.
 //!
@@ -34,6 +35,7 @@
 #![feature(asm_experimental_arch)]
 #![allow(internal_features)]
 
+pub mod cid_table;
 pub mod config;
 pub mod edq;
 pub mod helpers;
