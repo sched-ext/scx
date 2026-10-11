@@ -1289,6 +1289,9 @@ void BPF_STRUCT_OPS(eevdf_cpuctl_move, struct task_struct *p,
 
 	if (!tctx)
 		return;
+	/* A delayed member leaves the old group's queue first. */
+	if (READ_ONCE(tctx->delayed))
+		delay_dequeue(tctx, scx_bpf_now());
 	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, to, 0, 0);
 	tctx->grp = cgc ? cgc->ents : NULL;
 	tctx->delay_cid = -1;

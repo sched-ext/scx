@@ -202,8 +202,6 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 		lag = task_lag_at(p, tctx, pk, now);
 		tctx->se.vlag = lag;
 	}
-	task_vref_leave(tctx);
-
 	/*
 	 * A task that blocks over-served is what fair.c keeps in the tree,
 	 *
@@ -215,10 +213,22 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 	 *	}
 	 *
 	 * and only for a sleep: a task dequeued for a change of its
-	 * parameters is put straight back. Remember what is needed to pay
-	 * the debt off with the pack's progress when the task returns, see
-	 * delay_settle(). The reference is read after the task has left,
-	 * since that is the value that goes on moving.
+	 * parameters is put straight back, and an exiting one is not left
+	 * behind either. It stays a member of its pack, see delay_keep().
+	 */
+	if (!no_delay_dequeue && (deq_flags & SCX_DEQ_SLEEP) && lag < 0 &&
+	    pk && tctx->se.vpack == pk && !(p->flags & PF_EXITING)) {
+		tctx->delay_limit = (s64)lag_limit(p, tctx);
+		if (delay_keep(pk, tctx))
+			return;
+	}
+	task_vref_leave(tctx);
+
+	/*
+	 * A pack with no slot left lets the task go and remembers what is
+	 * needed to pay the debt off with the pack's progress when the task
+	 * returns, see delay_settle(). The reference is read after the task
+	 * has left, since that is the value that goes on moving.
 	 */
 	if (!no_delay_dequeue && (deq_flags & SCX_DEQ_SLEEP) && lag < 0 &&
 	    pk) {
@@ -274,18 +284,25 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 	 * balancer or an idle pull, carries a vruntime that means nothing
 	 * against this cid's pack: taken from a pack that was far ahead it
 	 * would wait here until the pack climbs past it, seconds under
-	 * load. Carry the lag instead, the way a migration does in
-	 * place_entity(): how far the task was from the pack it left is how
-	 * far it is placed from the pack it joins.
+	 * load. Carry the lag instead, the way a migration does: dequeued
+	 * without sleeping, it keeps what is left of its request, and
+	 * place_entity() places it from its lag, inflated so that it is
+	 * what the join leaves, and only on a runqueue with something on it,
+	 *
+	 *	if (sched_feat(PLACE_LAG) && nr_queued && se->vlag) {
+	 *		...
+	 *		lag *= load + weight;
+	 *		...
+	 *		lag = div64_long(lag, load);
+	 *
+	 * which is place_task() for a task that did not sleep. A move made
+	 * here is the one arrival in a new pack that does not otherwise go
+	 * through it.
 	 */
-	if (tctx->se.vpack && cid_valid(cid) &&
+	if (!placed && tctx->se.vpack && cid_valid(cid) &&
 	    tctx->se.vpack != task_pack(tctx, cid)) {
-		s64 lag = task_lag_at(p, tctx, tctx->se.vpack, now);
-
-		set_vruntime(&tctx->se,
-			     pack_vref_place(task_pack(tctx, cid),
-					     tctx->last_run_at) - lag,
-			     false);
+		place_task(cid, p, tctx, now, false);
+		placed = true;
 	}
 
 	/*
@@ -512,6 +529,9 @@ void BPF_STRUCT_OPS(eevdf_set_cmask, struct task_struct *p,
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	if (READ_ONCE(tctx->delayed) && tctx->se.vpack &&
+	    !cmask_test(tctx->se.vpack->cid, cmask))
+		delay_dequeue(tctx, scx_bpf_now());
 	cid = tctx->delay_cid;
 	if (cid_valid(cid) && !cmask_test(cid, cmask))
 		delay_settle(tctx, scx_bpf_now());
@@ -545,6 +565,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init_task, struct task_struct *p,
 	WRITE_ONCE(at->slice, 0);
 	WRITE_ONCE(at->enq_flags, 0);
 	WRITE_ONCE(tctx->se.vpack, NULL);
+	WRITE_ONCE(tctx->delayed, 0);
 	tctx->delay_cid = -1;
 	tctx->recent_used_cid = -1;
 	WRITE_ONCE(tctx->grp, NULL);
@@ -576,6 +597,8 @@ void BPF_STRUCT_OPS(eevdf_exit_task, struct task_struct *p,
 		return;
 	tctx = ref->tctx;
 	ref->tctx = NULL;
+	if (READ_ONCE(tctx->delayed))
+		delay_dequeue(tctx, scx_bpf_now());
 	ret = scx_edq_task_detach(&tctx->se.edq.common);
 	if (ret) {
 		scx_bpf_error("EDQ detach failed for pid %d: %d", p->pid, ret);

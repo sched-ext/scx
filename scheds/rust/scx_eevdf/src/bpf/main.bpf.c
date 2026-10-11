@@ -316,9 +316,6 @@ const volatile bool no_hrtick;
 volatile u64 nr_sis_updates;
 volatile u64 sis_scan_sum;
 
-volatile u64 user_util_sum __hot_written;
-volatile u64 user_util_snapshot_at __hot_written;
-
 /*
  * Scheduler's exit status.
  */
@@ -634,34 +631,45 @@ queue:
 
 	/*
 	 * Queue the task for @prev_cid, ordered by deadline unless it wins
-	 * wakeup preemption below.
+	 * wakeup preemption below. Any cid of the node can take it from
+	 * there, but only while dispatching.
 	 *
-	 * Any cid of the node can take it from there, but only while
-	 * dispatching: if @prev_cid went idle in the meantime and the rest
-	 * of the node is idle too, nothing would ever look at it. Kick
-	 * @prev_cid, which either wakes it or lets the local insertion interrupt
-	 * what it is running, see queued_cid_should_preempt().
+	 * SCX_ENQ_LAST says the task is the only sched_ext work left for a
+	 * CPU that has already picked a lower class, the idle task. The kernel
+	 * keeps it runnable but requires the BPF scheduler to trigger a
+	 * follow-up scheduling event: without one, @prev_cid goes idle with the
+	 * task queued, and it waits until some other cid steals it, which a
+	 * machine whose other cids stay busy may not do for a long time. A
+	 * rejected active-balance handoff can reach this path, but it is not
+	 * the only source of the flag.
 	 *
-	 * SCX_ENQ_LAST says the task is the only sched_ext work available to a
-	 * CPU that is about to run a higher scheduling class. The kernel keeps
-	 * it runnable but requires the BPF scheduler to trigger a follow-up
-	 * scheduling event. A rejected active-balance handoff can reach this
-	 * path, but it is not the only source of the flag.
-	 *
-	 * If the task is the only waiter, the queue can exist for less than a
-	 * tick: the higher-class task blocks, @prev_cid takes its waiter back,
-	 * and an idle cid never observes the transient imbalance. Tell one idle
-	 * peer at enqueue time. It is also told to ignore hotness for this pull,
-	 * since otherwise the one guaranteed dispatch can reject the waiter and
-	 * go idle again. Restrict this to a depth of one: deeper queues survive
-	 * until the tick path notices them, and wakeup-heavy loads should not pay
-	 * an idle scan and a cache-cold migration on every enqueue.
+	 * If the task is the only waiter, tell one idle peer at enqueue time,
+	 * so that the CPU the task could not run on is not left idle beside it.
+	 * The peer is also told to ignore hotness for this pull, since
+	 * otherwise the one guaranteed dispatch can reject the waiter and go
+	 * idle again. Restrict this to a depth of one: deeper queues survive
+	 * until the tick path notices them, and wakeup-heavy loads should not
+	 * pay an idle scan and a cache-cold migration on every enqueue. Without
+	 * such a peer, kick @prev_cid itself: once it is idle, its dispatch
+	 * takes the task back.
 	 *
 	 * A preempting wakee is either the EEVDF pick or PREEMPT_SHORT's
 	 * one-shot short buddy. Put it directly on the rq-owned local DSQ so
 	 * the kernel can expire curr's slice and request rescheduling
 	 * synchronously under the rq lock, instead of queueing it here and
 	 * delivering an SCX_KICK_PREEMPT later through irq_work.
+	 *
+	 * The reschedule is a lazy one, as fair.c asks for,
+	 *
+	 *	preempt:
+	 *		...
+	 *		resched_curr_lazy(rq);
+	 *
+	 * so that the running task gives the CPU up at its next return to
+	 * user space or tick. A waker on its way to block, as a pipe writer
+	 * is, gets there first and is not preempted at all. Where the kernel
+	 * has no SCX_ENQ_PREEMPT_LAZY it reads as 0, and SCX_ENQ_PREEMPT
+	 * stands in.
 	 *
 	 * Do not combine this with SCX_ENQ_IMMED. A running task can have a
 	 * protected slice, in which case the kernel refuses the preemption.
@@ -695,7 +703,7 @@ queue:
 						     tnow);
 			cid_edq_mark_dispatched(tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cid,
-					   slice, enq_flags | SCX_ENQ_PREEMPT);
+					   slice, enq_flags | (SCX_ENQ_PREEMPT_LAZY ?: SCX_ENQ_PREEMPT));
 			return;
 		}
 	}
@@ -721,12 +729,13 @@ queue:
 	 */
 	if (displaced)
 		hrtick_start(prev_cid, tnow);
-	if ((enq_flags & SCX_ENQ_LAST) &&
-	    cid_queue_nr(prev_cid) == 1) {
-		cid = idle_peer_cid(p, prev_cid);
+	if (enq_flags & SCX_ENQ_LAST) {
+		cid = cid_queue_nr(prev_cid) == 1 ? idle_peer_cid(p, prev_cid) : -1;
 		if (cid >= 0 && cid != prev_cid) {
 			WRITE_ONCE(cid_ctx(cid)->force_steal, 1);
 			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+		} else {
+			scx_bpf_kick_cid(prev_cid, SCX_KICK_IDLE);
 		}
 	}
 }
@@ -743,6 +752,8 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 		return;
 	now = scx_bpf_now();
 	tnow = cid_clock_task_owned(cid, now);
+	/* The pick dequeues the delayed members it would run, see delay_keep(). */
+	delay_prune(cid, now, false);
 
 	/*
 	 * Tasks that were waiting on their cgroup's cpu.max go back in the
@@ -919,6 +930,9 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 			hrtick_start(cid, tnow);
 		return;
 	}
+
+	/* An idle cid's picks go through its delayed members. */
+	delay_prune(cid, now, true);
 
 	/*
 	 * Nothing to run: the CPU is going idle. ops.update_idle() will not

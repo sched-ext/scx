@@ -901,7 +901,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	u32 pct;
 
 	this_eff = MAX(cid_wake_load(this_cid),
-		       READ_ONCE(cid_pack(this_cid)->vsum_w));
+		       pack_runnable_w(cid_pack(this_cid)));
 	if (sync) {
 		u64 current_load = wctx ? task_load(waker, wctx, now) : 0;
 
@@ -918,7 +918,7 @@ static __always_inline s32 wake_affine_weight_cid(const struct task_struct *p,
 	pct = smt_enabled && cid_topo(prev_cid)->ranges.core_base == cid_topo(this_cid)->ranges.core_base ?
 	      100 + (110 - 100) / 2 : 100 + (117 - 100) / 2;
 	prev_eff = (s64)MAX(cid_wake_load(prev_cid),
-			    READ_ONCE(cid_pack(prev_cid)->vsum_w)) - (s64)load;
+			    pack_runnable_w(cid_pack(prev_cid))) - (s64)load;
 	prev_eff *= pct;
 	prev_eff *= cid_topo(this_cid)->cap;
 	if (sync)
@@ -1435,10 +1435,10 @@ static __always_inline void fork_pick_accumulate(const struct task_struct *p,
 		 * representations as two runnable tasks.
 		 */
 		if (running && (edq_nr || local_nr) &&
-		    READ_ONCE(pk->vsum_w) == READ_ONCE(pk->curr_w))
+		    pack_runnable_w(pk) == READ_ONCE(pk->curr_w))
 			nr--;
 		/* Cover a task between EDQ dispatch and ops.running(). */
-		if (!nr && READ_ONCE(pk->vsum_w))
+		if (!nr && pack_runnable_w(pk))
 			nr = 1;
 		env->runnable += nr;
 	}
@@ -1448,7 +1448,7 @@ static __always_inline void fork_pick_accumulate(const struct task_struct *p,
 		env->load += cid_load(cid, now);
 		env->util += cid_util(cid, now);
 	} else {
-		env->load += READ_ONCE(cid_pack(cid)->vsum_w);
+		env->load += pack_runnable_w(cid_pack(cid));
 	}
 }
 
@@ -1568,7 +1568,7 @@ fork_pick_cid(const struct task_struct *p, u64 range, u64 now)
 			continue;
 		}
 		load = restricted ? cid_load(cid, now) :
-			READ_ONCE(cid_pack(cid)->vsum_w);
+			pack_runnable_w(cid_pack(cid));
 		/* A short-lived child leaves vsum_w before the next fork. */
 		if (best < 0 || load * best_cap < best_load * cap ||
 		    (!restricted && load * best_cap == best_load * cap &&
