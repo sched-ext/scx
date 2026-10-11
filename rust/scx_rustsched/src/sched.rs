@@ -24,13 +24,16 @@
 //! implements `Arg` for that position: `&Task` or `Option<&Task>` for a
 //! task, `Cid` for a CID, a flags type or `u64` for flags, `bool`. It may
 //! leave trailing arguments out. It returns what `Ret` converts: nothing, a
-//! `Cid`, a `bool`, or `Result<(), i32>` with a negative errno.
+//! `Cid`, a `bool`, or `Result<(), Error>`.
 //!
 //! The callbacks: select_cid(task, prev, wake_flags) -> Cid,
 //! enqueue(task, enq_flags), dequeue(task, deq_flags), dispatch(cid, prev),
 //! tick(task), running(task), stopping(task, runnable),
-//! quiescent(task, deq_flags), enable(task), update_idle(cid, idle) and
-//! init().
+//! quiescent(task, deq_flags), enable(task), update_idle(cid, idle),
+//! init_task(task), exit_task(task) and init().
+//!
+//! `task = Type` in the attribute gives every task a `Type` of the
+//! scheduler's own, see `state`.
 //!
 //! The runtime does its own part in three of them, before or after the
 //! scheduler's: ops.init() sets up the idle tracking, ops.update_idle()
@@ -42,7 +45,7 @@
 
 use crate::{
     cid_idle, config,
-    kfuncs::scx_bpf_dsq_nr_queued,
+    kfuncs::{scx_bpf_dsq_nr_queued, scx_bpf_kick_cid, scx_bpf_this_cid},
     ops::{SCX_DSQ_LOCAL, task_struct},
     task::Task,
 };
@@ -62,6 +65,32 @@ impl Cid {
     pub fn raw(self) -> i32 {
         self.0
     }
+
+    /// The CID the callback runs on.
+    #[inline(always)]
+    pub fn current() -> Cid {
+        Cid(unsafe { scx_bpf_this_cid() })
+    }
+
+    /// Make the CID go through the scheduler again: wake it if it is
+    /// idle, and with `KickFlags::PREEMPT` take the CPU from what runs
+    /// there. `KickFlags::IDLE` kicks it only if it is idle.
+    #[inline(always)]
+    pub fn kick(self, flags: KickFlags) {
+        unsafe { scx_bpf_kick_cid(self.0, flags.0) };
+    }
+}
+
+/// Why a callback failed, as the negative errno the kernel takes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Error(pub i32);
+
+impl Error {
+    pub const ENOENT: Error = Error(-2);
+    pub const ENOMEM: Error = Error(-12);
+    pub const EBUSY: Error = Error(-16);
+    pub const EINVAL: Error = Error(-22);
 }
 
 macro_rules! flags {
@@ -123,6 +152,50 @@ flags! {
         HEAD = 1 << 4,
         /// Preempt the task running on the target CPU.
         PREEMPT = 1 << 32,
+    }
+}
+
+flags! {
+    /// How `Cid::kick()` kicks.
+    KickFlags {
+        NONE = 0,
+        /// Only if the CID is idle.
+        IDLE = 1,
+        /// Preempt the task running there.
+        PREEMPT = 2,
+    }
+}
+
+impl EnqFlags {
+    /// Is the task the last runnable one of a CPU that found nothing else
+    /// to run? The kernel enqueues it so only for a scheduler that asked
+    /// with the `ENQ_LAST` flag, and otherwise keeps it running. The CPU
+    /// has made its pick by then and goes idle: a task left on a queue
+    /// stays there until something makes a CPU look, such as a kick.
+    #[inline(always)]
+    pub fn last(self) -> bool {
+        let last = crate::config::get(crate::config::ENQ_LAST);
+        last != 0 && self.0 & last != 0
+    }
+
+    /// Is the task a proxy-execution donor that has just blocked on a
+    /// mutex? Only with the `ENQ_BLOCKED` flag, see `Task::is_blocked()`.
+    #[inline(always)]
+    pub fn blocked(self) -> bool {
+        let blocked = crate::config::get(crate::config::ENQ_BLOCKED);
+        blocked != 0 && self.0 & blocked != 0
+    }
+
+    /// Did ops.select_cid() run for this enqueue? It does not for a wakeup
+    /// the kernel queued to the task's CPU, which the `ALLOW_QUEUED_WAKEUP`
+    /// flag allows, nor for an enqueue that is not a wakeup. A scheduler
+    /// that places tasks in ops.select_cid() looks for a CID in
+    /// ops.enqueue() when this is false and the task is not running. True
+    /// on a kernel that does not say.
+    #[inline(always)]
+    pub fn cid_selected(self) -> bool {
+        let selected = crate::config::get(crate::config::ENQ_CPU_SELECTED);
+        selected == 0 || self.0 & selected != 0
     }
 }
 
@@ -220,12 +293,12 @@ impl Ret for bool {
     }
 }
 
-impl Ret for Result<(), i32> {
+impl Ret for Result<(), Error> {
     #[inline(always)]
     fn ret(self) -> u64 {
         match self {
             Ok(()) => 0,
-            Err(errno) => errno as u64,
+            Err(error) => error.0 as u64,
         }
     }
 }
@@ -238,13 +311,26 @@ pub fn enter() {
 }
 
 /// The runtime's part of ops.init(): the idle tracking and the per-CID
-/// table under it. Returns 0 or a negative errno.
+/// table under it.
 ///
 /// # Safety
 /// Only from ops.init().
 #[inline(always)]
-pub unsafe fn init() -> i32 {
-    unsafe { cid_idle::init() }
+pub unsafe fn init() -> Result<(), Error> {
+    match unsafe { cid_idle::init() } {
+        0 => Ok(()),
+        errno => Err(Error(errno)),
+    }
+}
+
+/// The runtime's part of ops.init_task(task, args) for a scheduler with
+/// per-task state `T`: create it.
+///
+/// # Safety
+/// `context` must be ops.init_task()'s.
+#[inline(always)]
+pub unsafe fn init_task<T: crate::state::TaskState>(context: *const u64) -> Result<(), Error> {
+    unsafe { crate::state::create::<T>(*context as *mut task_struct) }
 }
 
 /// The runtime's part of ops.update_idle(cid, idle).

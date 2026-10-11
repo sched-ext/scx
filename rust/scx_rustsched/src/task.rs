@@ -9,7 +9,7 @@ use core::ptr::read_volatile;
 
 use crate::{
     cid_idle, config, helpers,
-    kfuncs::{bpf_cpumask_test_cpu, scx_bpf_task_cid},
+    kfuncs::{bpf_cpumask_test_cpu, scx_bpf_task_cid, scx_bpf_task_set_slice},
     ops::{SCX_TASK_QUEUED, cpumask, task_struct},
 };
 
@@ -172,5 +172,67 @@ impl Task {
     #[inline(always)]
     pub fn exiting(&self) -> bool {
         unsafe { exiting(self.as_ptr()) }
+    }
+
+    /// The task's pid: the id of the thread.
+    #[inline(always)]
+    pub fn pid(&self) -> i32 {
+        unsafe { self.field::<i32>(config::PID) }
+    }
+
+    /// Is the task bound to one CPU, by its affinity or because it
+    /// disabled migration?
+    #[inline(always)]
+    pub fn pinned(&self) -> bool {
+        unsafe { pinned(self.as_ptr()) }
+    }
+
+    /// Is the task still runnable, rather than going to sleep? What
+    /// ops.stopping() and ops.dispatch() ask of the task that just ran.
+    #[inline(always)]
+    pub fn queued(&self) -> bool {
+        unsafe { task_queued(self.as_ptr()) }
+    }
+
+    /// What is left of the task's slice, in nanoseconds.
+    #[inline(always)]
+    pub fn slice(&self) -> u64 {
+        unsafe { self.field::<u64>(config::SCX_SLICE) }
+    }
+
+    /// Set what is left of the task's slice. Zero makes a running task
+    /// give the CPU up.
+    #[inline(always)]
+    pub fn set_slice(&self, slice: u64) {
+        unsafe { scx_bpf_task_set_slice(self.as_ptr(), slice) };
+    }
+
+    /// `value` scaled inversely by the task's weight: unchanged at nice
+    /// 0, smaller for a heavier task. Turns run time into virtual time.
+    #[inline(always)]
+    pub fn scale_inverse(&self, value: u64) -> u64 {
+        (value * NICE_0_WEIGHT)
+            .checked_div(self.weight())
+            .unwrap_or(value)
+    }
+
+    /// The scheduler's state of the task, see `state`.
+    #[inline(always)]
+    pub fn state<T: crate::state::TaskState>(&self) -> Option<&T> {
+        unsafe { crate::state::get(self.as_ptr()) }
+    }
+
+    /// The field of the task at the offset in entry `index` of the
+    /// configuration table.
+    #[inline(always)]
+    unsafe fn field<T: Copy>(&self, index: usize) -> T {
+        unsafe {
+            read_volatile(
+                self.as_ptr()
+                    .cast::<u8>()
+                    .add(config::offset(index))
+                    .cast::<T>(),
+            )
+        }
     }
 }

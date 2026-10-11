@@ -17,7 +17,7 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 
 /// The callbacks an `impl` block may define: the struct_ops member, and
 /// whether the kernel lets it sleep.
-const CALLBACKS: [(&str, bool); 11] = [
+const CALLBACKS: [(&str, bool); 13] = [
     ("select_cid", false),
     ("enqueue", false),
     ("dequeue", false),
@@ -28,6 +28,8 @@ const CALLBACKS: [(&str, bool); 11] = [
     ("quiescent", false),
     ("enable", false),
     ("update_idle", false),
+    ("init_task", true),
+    ("exit_task", false),
     ("init", true),
 ];
 
@@ -88,8 +90,9 @@ fn parameters(list: TokenStream) -> usize {
 ///
 /// `name` is required. `flags` is an expression over the names of
 /// `ops::flags`, zero by default. `timeout_ms` is the watchdog timeout,
-/// scx_rustsched's `ops::TIMEOUT_MS` (5 s) by default. The attribute declares the
-/// type the block implements.
+/// scx_rustsched's `ops::TIMEOUT_MS` (5 s) by default. `task` names the type of
+/// the scheduler's per-task state, which the runtime then creates in
+/// ops.init_task(). The attribute declares the type the block implements.
 #[proc_macro_attribute]
 pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let arguments: Vec<TokenTree> = arguments.into_iter().collect();
@@ -99,6 +102,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let flags = argument(&arguments, "flags").unwrap_or_else(|| "0".into());
     let timeout = argument(&arguments, "timeout_ms")
         .unwrap_or_else(|| "::scx_rustsched::ops::TIMEOUT_MS".into());
+    let task = argument(&arguments, "task");
 
     let tokens: Vec<TokenTree> = item.clone().into_iter().collect();
     let (Some(TokenTree::Ident(keyword)), Some(TokenTree::Ident(ty)), Some(TokenTree::Group(body))) =
@@ -136,12 +140,16 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let defined = |member: &str| functions.iter().find(|(function, _)| function == member);
 
     let mut output = format!("pub struct {ty};\n");
+    if let Some(task) = &task {
+        output += &format!("::scx_rustsched::task_state!({task});\n");
+    }
     let mut members = String::new();
     for (member, sleepable) in CALLBACKS {
         let user = defined(member);
         // The runtime has work of its own in these three, so they exist
         // whether the scheduler defines them or not.
-        let runtime = matches!(member, "init" | "update_idle" | "dispatch");
+        let runtime = matches!(member, "init" | "update_idle" | "dispatch")
+            || (member == "init_task" && task.is_some());
         if user.is_none() && !runtime {
             continue;
         }
@@ -153,12 +161,23 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
             format!("{ty}::{member}({arguments})")
         });
         let body = match (member, call) {
-            ("init", Some(call)) => format!(
-                "let result = ::scx_rustsched::sched::init();
-                 if result != 0 {{ return result as u64; }}
-                 ::scx_rustsched::sched::Ret::ret({call})"
+            ("init", call) => format!(
+                "if let Err(error) = ::scx_rustsched::sched::init() {{
+                     return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
+                 }}
+                 {}",
+                call.map(|call| format!("::scx_rustsched::sched::Ret::ret({call})"))
+                    .unwrap_or_else(|| "0".into())
             ),
-            ("init", None) => "::scx_rustsched::sched::init() as u64".into(),
+            ("init_task", call) if task.is_some() => format!(
+                "if let Err(error) = ::scx_rustsched::sched::init_task::<{}>(context) {{
+                     return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
+                 }}
+                 {}",
+                task.as_ref().unwrap(),
+                call.map(|call| format!("::scx_rustsched::sched::Ret::ret({call})"))
+                    .unwrap_or_else(|| "0".into())
+            ),
             ("update_idle", call) => format!(
                 "::scx_rustsched::sched::update_idle(context);
                  {}

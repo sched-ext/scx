@@ -7,6 +7,8 @@
 //! - `sched`, `dsq`, `idle`: a scheduler as an `impl` block of typed
 //!   callbacks, `#[scheduler]`, with the dispatch queues and the idle picks
 //!   over `Task` and `Cid`. The smallest scheduler needs nothing else.
+//! - `var`, `state`, `time`: what the callbacks share, as `Var` globals
+//!   and a typed state per task, and the clock.
 //! - `ops`: the kernel types the callbacks take, the enqueue, dequeue, kick
 //!   and ops flags, and `scx_ops!`, which declares the struct_ops map from
 //!   the callbacks the scheduler implements.
@@ -43,6 +45,7 @@
 #![feature(asm_experimental_arch)]
 #![allow(internal_features)]
 
+mod builtins;
 pub mod cid_idle;
 pub mod cid_ranges;
 pub mod cid_table;
@@ -62,11 +65,14 @@ pub mod queue;
 pub mod ravg;
 pub mod sched;
 pub mod slab;
+pub mod state;
 pub mod task;
 pub mod tiers;
+pub mod time;
 pub mod timer;
 pub mod topology;
 pub mod uei;
+pub mod var;
 
 pub use ops::{cpumask, task_struct};
 pub use sched::scheduler;
@@ -75,8 +81,10 @@ pub use sched::scheduler;
 pub mod prelude {
     pub use crate::dsq::{self, Dsq, SLICE_DFL};
     pub use crate::idle::{self, Kind, Scope};
-    pub use crate::sched::{Cid, DeqFlags, EnqFlags, WakeFlags};
+    pub use crate::sched::{Cid, DeqFlags, EnqFlags, Error, KickFlags, WakeFlags};
     pub use crate::task::Task;
+    pub use crate::time;
+    pub use crate::var::Var;
 }
 
 /// Wrapping time comparison: is `first` before `second`?

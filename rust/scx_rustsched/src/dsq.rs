@@ -12,11 +12,11 @@
 
 use crate::{
     kfuncs::{
-        scx_bpf_create_dsq, scx_bpf_dsq_insert, scx_bpf_dsq_move_to_local___v2,
-        scx_bpf_dsq_nr_queued,
+        scx_bpf_create_dsq, scx_bpf_dsq_insert, scx_bpf_dsq_insert_vtime,
+        scx_bpf_dsq_move_to_local, scx_bpf_dsq_nr_queued,
     },
     ops::{SCX_DSQ_LOCAL, SCX_DSQ_LOCAL_ON},
-    sched::{Cid, EnqFlags},
+    sched::{Cid, EnqFlags, Error},
     task::Task,
 };
 
@@ -52,13 +52,15 @@ impl Dsq {
     }
 }
 
-/// Create `Dsq::User(id)`, from ops.init(). Returns a negative errno if
-/// the kernel refuses.
+/// Create a `Dsq::User` queue, from ops.init().
 #[inline(always)]
-pub fn create(id: u64) -> Result<(), i32> {
+pub fn create(dsq: Dsq) -> Result<(), Error> {
+    let Dsq::User(id) = dsq else {
+        return Err(Error::EINVAL);
+    };
     match unsafe { scx_bpf_create_dsq(id, -1) } {
         0 => Ok(()),
-        errno => Err(errno),
+        errno => Err(Error(errno)),
     }
 }
 
@@ -69,6 +71,13 @@ pub fn insert(task: &Task, dsq: Dsq, slice: u64, flags: EnqFlags) {
     unsafe { scx_bpf_dsq_insert(task.as_ptr(), dsq.id(), slice, flags.0) };
 }
 
+/// Queue `task` on a `Dsq::User` queue ordered by `vtime`: the lowest runs
+/// first. A queue takes either this or `insert()`, not both.
+#[inline(always)]
+pub fn insert_vtime(task: &Task, dsq: Dsq, slice: u64, vtime: u64, flags: EnqFlags) {
+    unsafe { scx_bpf_dsq_insert_vtime(task.as_ptr(), dsq.id(), slice, vtime, flags.0) };
+}
+
 /// Move the first task of `dsq` that may run here to this CPU's local DSQ,
 /// from ops.dispatch(). Returns whether it moved one. The kernel does this
 /// for `Dsq::Global` before it calls ops.dispatch(), so for that queue
@@ -76,7 +85,7 @@ pub fn insert(task: &Task, dsq: Dsq, slice: u64, flags: EnqFlags) {
 #[inline(always)]
 pub fn move_to_local(dsq: Dsq) -> bool {
     match dsq {
-        Dsq::User(id) => unsafe { scx_bpf_dsq_move_to_local___v2(id, 0) },
+        Dsq::User(id) => unsafe { scx_bpf_dsq_move_to_local(id) },
         _ => false,
     }
 }
