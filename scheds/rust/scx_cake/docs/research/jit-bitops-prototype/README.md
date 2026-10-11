@@ -2,6 +2,15 @@
 
 For reviewers: [exact file changes, bundle inventory and validation handoff](HANDOFF.md).
 
+**Newest all-in-one patch (2026-10-05):**
+[0001-cake-kernel-full-signals-idle-experimental-cachyos-7.2.9.patch](0001-cake-kernel-full-signals-idle-experimental-cachyos-7.2.9.patch)
+for CachyOS 7.2.9-1. Its header indexes four sections by feature and file: BPF
+scalar bit operations, sched_ext DSQ lookup, wake signals (these three are the
+installed 7.2.8 patch, split without code changes), and the new lean idle claim
+K1-K4 (`SCX_OPS_LEAN_IDLE`, Cake `--lean-idle on|lazy`). It applies without
+offsets or fuzz and every touched object compiles with the running config; it
+has not been built whole, booted or measured.
+
 **Current startup default:** [automatic native bitops](AUTO_NATIVE_BITOPS_2026-10-02.md)
 selects CTZ/POPCNT when supported and otherwise falls back. `--portable-bitops`
 provides a comparison mode. Older reports below describe their original opt-in

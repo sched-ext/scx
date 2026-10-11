@@ -5,10 +5,15 @@ History: `docs/archive/STATE_ARCHIVE.md`, newest first; grep it, do not read it 
 Offload rule: once nothing in an entry is owed, move it word for word to the archive
 top; owed items move to Owed first.
 
-## Now (2026-10-04)
+## Now (2026-10-05)
 
 - Code: `567715cc8` on `RitzDaCat/scx_cake-nightly`, committed locally, not pushed.
   Last upstream merge: PR #3786 (`c410fcbd7`).
+- Uncommitted (2026-10-05, arm A′ `88988e81571c`; awaiting the go): wide-host idle
+  count by popcount (D), the pool interlock in `update_idle` on every host (F),
+  pool tokens checked at `ops.exit`, census identities checked after detach (port
+  of the lost `2f4bc9a6c`), `PEND_HEAL` wired, 18 dead census sites removed. Fmt,
+  clippy debug and release clean; `cargo test -p scx_cake` 45 pass, 1 ignored.
 - Host: 7.2.9-1-cachyos-custom with
   `docs/research/jit-bitops-prototype/0001-cake-kernel-full-signals-experimental-cachyos-7.2.8.patch`
   (applies to 7.2.9 with offsets only). `sched_ext.dsq_direct=Y` serves every cake
@@ -18,11 +23,12 @@ top; owed items move to Owed first.
   ops.running). Policy base: the 2026-09-28 pool-serving C entry (archive).
 - Test-only flags (the release is flagless): `--native-bitops`, `--portable-bitops`,
   `--native-ring`, `--native-hist`, `--kernel-signals`, `--signal-report`,
-  `--handoff-ns`, `--toggle probe=1`, `--inspect-bpf`.
-- A/B binaries kept: `target/cake_receipt_builds/cost_c1c1e5aad80f` (base) and
-  `cost_400e7a766333` (E1).
+  `--handoff-ns`, `--toggle probe=1`, `--inspect-bpf`, `--lean-idle` (uncommitted).
+- A/B binaries: `cost_c1c1e5aad80f` (base) and `cost_400e7a766333` (E1) were lost
+  when `target/` was wiped on 2026-10-05 about 11:26 (not by this repo's session);
+  rebuild them from those commits (`cakebench cost` builds arms by SHA).
 
-## Pattern ledger with kernel requirement (2026-10-04)
+## Pattern ledger with kernel requirement (2026-10-05)
 
 "Stock" means any upstream/CachyOS kernel with sched_ext at the stated version;
 "custom" means `0001-cake-kernel-full-signals-experimental-cachyos-7.2.8.patch`.
@@ -40,7 +46,29 @@ Levels follow CLAUDE.md's metric order; game frames (level 1) are owed for all.
 | Division-free quotients | Portable, or custom MULHI/CLZ | Portable arithmetic | BPF +5.8 %, select +11 ns | Removed |
 | Per-CPU claim line | Stock | — | select +3.23, enqueue +71.31 ns | Rejected |
 | E2: whole-core word from idle word | Stock | — | select −0.01 ns | No effect |
-| K1–K3: inline/aligned/no-SMT idle claim | Custom (not written) | Current kfunc | Perf: claim ≈ 60 % of select | Proposed |
+| K1–K4: lean idle claim (`SCX_OPS_LEAN_IDLE`, K3 as `_LAZY_SMT`) | Custom: `0001-cake-kernel-full-signals-idle-experimental-cachyos-7.2.9.patch` | Flags ignored; regular claim | Claim ≈ 60 % of select; masks 32 lines apart (10-05); patch applies and compiles, not booted | Written; same-boot A/B owed (`--lean-idle off/on/lazy`) |
+| Spread pick: ties in the best tier go to the first CPU above the caller (rotate form B, mask form B2) | Stock | — | select +8.1 / +11.7 / +8.3 ns in three rounds; profile +130 cyc/run (+31 insns, rest stalls); retakes −42 %, evictee claims −31 % (census); total BPF equal or +2.9 %; appsim p99 equal | Rejected at levels 2–3, removed; patch kept in `docs/research/counting-classifiers-20261005/` |
+| D+F: wide-host idle count by popcount; `update_idle` pool interlock on every host | Stock (> 64 CPUs) | Global atomic counter; no interlock on wide hosts | Forced-wide on this host, two rounds: `update_idle` −1.09 / −0.64 ns, running −2.69 / −1.05 ns; 0 stalls; one-word arm neutral | Keep (uncommitted); a real > 64-CPU host owed |
+| Exit pool check, census identities, detach-first reports | Stock | — | Identities exact in 4 probe slots; pending 0 at every exit; the `-v` events row is no longer 0 0 0 | Keep (uncommitted, diagnostics only) |
+| Kernel wake signals (input/fence tags) in a game | Custom | — | KovaaK's 90 s, focused: 0 input- and 0 fence-tagged wakes in 8.4M (input reaches the game through KWin's socket; NVIDIA uses private waits) | Nothing to act on in this stack |
+| Wake classes by waker context (in IRQ handler / kthread / game / other) | Stock | — | KovaaK's 90 s census: `dxvk-queue` woken from IRQ context 731k times (GPU completion), mean 0.6 µs, worst 1.08 ms; game-to-game worst 4.8 ms | Classifier works; policy under test |
+| IRQ-woken wakes run next (idle CPU, else head of prev with PREEMPT; never an IRQ CPU or a seated stage) | Stock | — | KovaaK's A/B under 16 nice-10 hogs paused after 5 of 8 slots (maintainer's heavy tasks); data not read | Under test |
+| Preferred-core re-read at runtime | — | — | Ranking identical on 2026-09-26 and 10-05 (cores 4=5 > 3 > 1 > 2 > 0 > 6 > 7) | Dropped: static here; the startup read is correct |
+
+## Evidence, 2026-10-05
+
+`cakebench cost`, appsim 20 s slots, all slots valid. A busy host: round 2 had two
+outside bursts (enqueue 669k–724k per slot); compare inside one round only.
+
+| What | Run | Result |
+|---|---|---|
+| Spread census A vs B, probe, 2 slots/arm | `cost/20261005T093740_appsim` | warm-claim failures 2.04, 1.93 → 1.70, 1.80 %; retakes ~100k → ~58k; evictee claims ~111k → ~77k; identities exact |
+| Round 1: HEAD / A / B | `cost/20261005T094221_appsim` | select 87.25 / 89.49 / 97.57 ns; enqueue calls −35 % with B; total 26.14 / 27.03 / 27.08 ms/s; p99 0.62 all |
+| Round 2: HEAD / A / B2 | `cost/20261005T095506_appsim` | select 91.73 / 90.26 / 102.03 ns; frames unreadable (bursts) |
+| Profile A vs B2 | `cost/20261005T100619_profile` | select 870 → 1000 cycles, 1438.6 → 1469.7 insns per run |
+| Wide rounds: HEAD / B2, both forced wide | `cost/20261005T101121_appsim`, `…T101840_appsim` | `update_idle` 11.47 → 10.38, 13.08 → 12.44 ns; running 18.06 → 15.37, 22.03 → 20.98 ns |
+| Round 3: HEAD / A′ / B2′ at 42 % busy | `cost/20261005T102722_appsim` | select 108.22 / 108.52 / 116.77 ns; `update_idle` 10.26 / 10.14 / 9.99; total 40.91 / 41.04 / 42.10 ms/s; p99 0.62 / 0.63 / 0.62 |
+| Mask layout (diagnostic build) | session log | idle mask `0xffff8ddc800b1310`, SMT mask `0xffff8ddc800b1b00`: 32 lines apart |
 
 ## Evidence, 2026-10-04
 
@@ -59,15 +87,18 @@ busy 30–31 %. Runs under `scx_cake_bench/runs/`.
 Kernel facts: `scx_bpf_now()` reads the TSC whenever `SCX_RQ_CLK_VALID` is clear
 (skipped clock update after wake preemption, balance unpin), common at ops.running.
 With NR_CPUS=8192 and CPUMASK_OFFSTACK the scx idle cpu/smt masks are kmalloc(8)
-objects that may share a line with others; addresses unverified.
+objects that may share a line with others; on 2026-10-05 they sat in different lines.
 
 ## Owed
 
 1. Game A/B (KovaaK's) for E1 and native bitops, using the kept binaries.
 2. Signals observe in a real game; appsim produces no input or fence wakes.
 3. DSQ direct A/B: reboot with `sched_ext.dsq_direct=0`.
-4. K1–K3 kernel patch (inline claim, aligned masks, claim without the SMT store):
-   write, compile-check; the maintainer installs and reboots.
+4. Lean idle claim K1–K4: written and compile-checked in
+   `docs/research/jit-bitops-prototype/0001-cake-kernel-full-signals-idle-experimental-cachyos-7.2.9.patch`.
+   The maintainer builds and installs it; then a same-boot `cakebench cost` A/B
+   of `--lean-idle off` vs `on` vs `lazy` (K3 hides a just-claimed sibling from
+   `cake_core_busy` until that CPU runs), then KovaaK's.
 5. `irq_leave` reads 550–1,010 ns/run (09-25 profile: 946 cycles / 600 insns); cause open.
 6. Flagless release: decide or remove each test-only flag above.
 7. `cake.bpf.c` comment density 0.25, over the 0.20 ceiling (also true before 10-04).
@@ -75,6 +106,14 @@ objects that may share a line with others; addresses unverified.
    archive): `verifier_load_topologies` on multi-LLC, >64-CPU and sparse rows;
    HZ 250/300 stall runs; WoW GPU-bound A/B; OSLTT against `9db04489e`; the §G93
    trace; tester probe logs for §G96.
+9. Commit go for arm A′ (above); D+F on a real > 64-CPU host (tester).
+10. Spread pick: a game A/B only if the retake drop is worth testing in frames
+    (patch in `docs/research/counting-classifiers-20261005/`).
+11. IRQ-woken wake priority: rerun the KovaaK's A/B on a quiet host. Tools and patch
+    scripts: `scx_cake_bench/runs/kovaaks_irqwake_20261005/tools/` (`run.sh`,
+    `irq_wake.py`, `diag_wake.py`; set PID/WIN in `kv_ab.py` and `CAKE_DIAG_TGID` per
+    launch). Arms `target/cake_receipt_builds/kv-x` (base + diag) and `kv-y` (+ IRQ
+    priority). Slots 1–5 of the paused run are in `run1/`, likely skewed.
 
 ## Research index
 
@@ -99,5 +138,6 @@ All under `docs/research/jit-bitops-prototype/` unless noted.
 | `REPEAT_5X_2026-10-01.md`, `QUICK_TEST_2026-10-01.md`, `HARDWARE_SMOKE_2026-10-01.md` | Bitops small gain; division-free loss |
 | `QUOTIENT_IMPLEMENTATION.md`, `quotient/` | Exact reciprocal division (removed; sources kept) |
 | `README.md` | Index of the JIT/bitops experiment |
+| `../counting-classifiers-20261005/README.md` | Decision data by measurement level, classifiers, counting identities; spread pick rejected, D+F kept |
 
 Documentation map: `docs/README.md`. Supported use: `README.md`.

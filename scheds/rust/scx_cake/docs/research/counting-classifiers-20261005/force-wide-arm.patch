@@ -1,0 +1,13 @@
+diff --git a/scheds/rust/scx_cake/src/main.rs b/scheds/rust/scx_cake/src/main.rs
+index a81694aac..2bbb8a337 100644
+--- a/scheds/rust/scx_cake/src/main.rs
++++ b/scheds/rust/scx_cake/src/main.rs
+@@ -451,7 +451,7 @@ impl<'a> Scheduler<'a> {
+         rodata.nr_cpu_span = span as u32;
+         // The census word covers PRESENT ids; hotplug headroom past 64 costs
+         // nothing, a present id past 64 turns the one-word paths off.
+-        let one_word = *NR_CPU_IDS <= 64;
++        let one_word = false;
+         rodata.cake_one_word = u8::from(one_word);
+         rodata.cake_tick_ns = coarse_tick_ns();
+         // Expiry is seen at a tick: the longest grant (a kthread's SLICE_NS) runs a tick over.
