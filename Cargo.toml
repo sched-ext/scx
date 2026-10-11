@@ -38,6 +38,9 @@ members = [
     "tools/vmlinux_docify",
     "tools/xtask",
 ]
+# The Rust BPF runtime is built for a BPF target by a scheduler's build
+# script, as a workspace of its own.
+exclude = ["rust/scx_rustsched"]
 resolver = "3"
 
 [profile.release]
