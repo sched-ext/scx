@@ -24,7 +24,7 @@
 //!   runtime's per-CID words, the idle CIDs and the scans of them by
 //!   topology, the capacity tiers, what the kernel's asymmetric packing
 //!   says, and the per-CID task clock.
-//! - `uei`: the exit record.
+//! - `ravg`, `uei`: running averages, and the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
 //! Its global functions,
@@ -54,6 +54,7 @@ pub mod mem;
 pub mod ops;
 pub mod pool;
 pub mod queue;
+pub mod ravg;
 pub mod slab;
 pub mod task;
 pub mod tiers;
