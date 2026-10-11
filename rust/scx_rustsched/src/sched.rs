@@ -33,7 +33,10 @@
 //! init_task(task), exit_task(task) and init().
 //!
 //! `task = Type` in the attribute gives every task a `Type` of the
-//! scheduler's own, see `state`.
+//! scheduler's own, and `cid = Type` every CID, see `state`.
+//!
+//! `#[global]` makes a function of the scheduler's one the verifier checks
+//! once, see `scx_rustsched_macros`.
 //!
 //! The runtime does its own part in three of them, before or after the
 //! scheduler's: ops.init() sets up the idle tracking, ops.update_idle()
@@ -50,7 +53,7 @@ use crate::{
     task::Task,
 };
 
-pub use scx_rustsched_macros::scheduler;
+pub use scx_rustsched_macros::{global, scheduler};
 
 /// A CPU as the scheduler sees it: an index into the kernel's
 /// topology-ordered CID space, where the CPUs of a core, an LLC and a node
@@ -72,12 +75,72 @@ impl Cid {
         Cid(unsafe { scx_bpf_this_cid() })
     }
 
+    /// The CID of a CPU, by the kernel's number for it.
+    #[inline(always)]
+    pub fn from_cpu(cpu: i32) -> Cid {
+        Cid(unsafe { crate::kfuncs::scx_bpf_cpu_to_cid(cpu) })
+    }
+
+    /// The number of CPU numbers the kernel has, nr_cpu_ids: a task allowed
+    /// on fewer CPUs is restricted.
+    #[inline(always)]
+    pub fn nr_cpus() -> u32 {
+        crate::cids::nr_cpu_ids()
+    }
+
+    /// Tell the frequency governor how busy the CID is, of 1024.
+    #[inline(always)]
+    pub fn set_perf(self, perf: u32) {
+        unsafe { crate::kfuncs::scx_bpf_cidperf_set(self.0, perf) };
+    }
+
+    /// The number of CIDs: they are `Cid(0)` to `Cid(count - 1)`.
+    #[inline(always)]
+    pub fn count() -> u32 {
+        crate::cids::count()
+    }
+
+    /// Every CID, in topology order.
+    #[inline(always)]
+    pub fn all() -> Cids {
+        Cids(crate::loops::range(0, Self::count()))
+    }
+
+    /// The CIDs of `scope` around this one, itself among them: its core,
+    /// its LLC, its node.
+    #[inline(always)]
+    pub fn scope(self, scope: crate::cid_idle::Scope) -> Cids {
+        let (base, count) = cid_idle::scope_cids(self.0, scope);
+        Cids(crate::loops::range(base, base + count))
+    }
+
+    /// The scheduler's state of the CID, see `state`. `None` for a number
+    /// that is not a CID.
+    #[inline(always)]
+    pub fn state<T: crate::state::CidState>(self) -> Option<&'static T> {
+        crate::state::cid(self)
+    }
+
     /// Make the CID go through the scheduler again: wake it if it is
     /// idle, and with `KickFlags::PREEMPT` take the CPU from what runs
     /// there. `KickFlags::IDLE` kicks it only if it is idle.
     #[inline(always)]
     pub fn kick(self, flags: KickFlags) {
         unsafe { scx_bpf_kick_cid(self.0, flags.0) };
+    }
+}
+
+/// CIDs to loop over, from `Cid::all()` or `Cid::scope()`. The loop is one
+/// the verifier can bound, so it may also end early, when the program has
+/// used up its loop budget, which no topology comes near.
+pub struct Cids(crate::loops::Range);
+
+impl Iterator for Cids {
+    type Item = Cid;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Cid> {
+        self.0.next().map(|cid| Cid(cid as i32))
     }
 }
 
@@ -303,6 +366,70 @@ impl Ret for Result<(), Error> {
     }
 }
 
+/// A value as a BPF global function takes or returns it, for `#[global]`:
+/// a scalar, or a pointer to a task the build tags as trusted.
+pub trait Abi {
+    type Raw;
+
+    fn into_raw(self) -> Self::Raw;
+
+    /// # Safety
+    /// `raw` must come from `into_raw()`, in the same callback.
+    unsafe fn from_raw(raw: Self::Raw) -> Self;
+}
+
+macro_rules! scalar_abi {
+    ($($name:ty),*) => {
+        $(impl Abi for $name {
+            type Raw = $name;
+
+            #[inline(always)]
+            fn into_raw(self) -> $name {
+                self
+            }
+
+            #[inline(always)]
+            unsafe fn from_raw(raw: $name) -> $name {
+                raw
+            }
+        })*
+    };
+}
+scalar_abi!((), bool, i32, u32, i64, u64);
+
+macro_rules! wrapped_abi {
+    ($($name:ident: $raw:ty),*) => {
+        $(impl Abi for $name {
+            type Raw = $raw;
+
+            #[inline(always)]
+            fn into_raw(self) -> $raw {
+                self.0
+            }
+
+            #[inline(always)]
+            unsafe fn from_raw(raw: $raw) -> $name {
+                $name(raw)
+            }
+        })*
+    };
+}
+wrapped_abi!(Cid: i32, WakeFlags: u64, EnqFlags: u64, DeqFlags: u64, KickFlags: u64);
+
+impl<'task> Abi for &'task Task {
+    type Raw = *mut task_struct;
+
+    #[inline(always)]
+    fn into_raw(self) -> *mut task_struct {
+        self.as_ptr()
+    }
+
+    #[inline(always)]
+    unsafe fn from_raw(raw: *mut task_struct) -> &'task Task {
+        unsafe { Task::from_ptr(raw) }
+    }
+}
+
 /// The entry of every callback: reference the arena, which a program that
 /// reads arena memory must do once.
 #[inline(always)]
@@ -321,6 +448,16 @@ pub unsafe fn init() -> Result<(), Error> {
         0 => Ok(()),
         errno => Err(Error(errno)),
     }
+}
+
+/// The runtime's part of ops.init() for a scheduler with per-CID state
+/// `T`: set each CID's to `T::default()`.
+///
+/// # Safety
+/// Only from ops.init(), after init().
+#[inline(always)]
+pub unsafe fn init_cids<T: crate::state::CidState>() -> Result<(), Error> {
+    unsafe { crate::state::init_cids::<T>() }
 }
 
 /// The runtime's part of ops.init_task(task, args) for a scheduler with

@@ -67,7 +67,7 @@ use core::{
 
 use crate::kfuncs::{
     bpf_arena_alloc_pages, bpf_cpumask_test_cpu, scx_bpf_cid_curr, scx_bpf_cid_node,
-    scx_bpf_cid_to_cpu, scx_bpf_cid_topo, scx_bpf_nr_cpu_ids, scx_bpf_nr_online_cids,
+    scx_bpf_cid_to_cpu, scx_bpf_cid_topo, scx_bpf_nr_online_cids,
 };
 use crate::ops::scx_cid_topo;
 use crate::{
@@ -1179,7 +1179,7 @@ pub unsafe extern "C" fn rust_llc_windows(
     let end = end.max(base);
     let offset = config::get(config::NR_CPUS_ALLOWED) as usize;
     let allowed = unsafe { read_volatile(task.cast::<u8>().add(offset).cast::<u32>()) };
-    let restricted = allowed < unsafe { scx_bpf_nr_cpu_ids() };
+    let restricted = allowed < cids::nr_cpu_ids();
     let mut budget = if restricted && budget >= allowed {
         u32::MAX
     } else {
@@ -1392,6 +1392,14 @@ unsafe fn scope_range(anchor: i32, scope: u32) -> u64 {
         return 0;
     }
     u64::from(end - base) << 32 | u64::from(base)
+}
+
+/// The CIDs of `scope` around `anchor`, as the first and how many: none
+/// for an anchor that is not a CID.
+#[inline(always)]
+pub fn scope_cids(anchor: i32, scope: Scope) -> (u32, u32) {
+    let range = unsafe { scope_range(anchor, scope as u32) };
+    (range as u32, (range >> 32) as u32)
 }
 
 /// scx_cid_idle_scope_same(): do scopes `a` and `b` hold the same CIDs

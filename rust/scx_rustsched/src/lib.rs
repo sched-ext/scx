@@ -33,9 +33,9 @@
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
 //! Its global functions,
-//! `rust_*`, are BPF global functions the verifier checks once; the
-//! scheduler's build lists the ones whose kernel-pointer parameters need
-//! an `arg:trusted` tag. Everything else is `#[inline(always)]`, and the
+//! `rust_*`, are BPF global functions the verifier checks once, as are the
+//! scheduler's own under `#[global]`; the build tags their task
+//! parameters `arg:trusted`. Everything else is `#[inline(always)]`, and the
 //! scheduler's release profile links with LTO so that it stays so across
 //! the crate boundary.
 
@@ -75,7 +75,7 @@ pub mod uei;
 pub mod var;
 
 pub use ops::{cpumask, task_struct};
-pub use sched::scheduler;
+pub use sched::{global, scheduler};
 
 /// What a scheduler written with `#[scheduler]` uses, see `sched`.
 pub mod prelude {

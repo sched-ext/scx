@@ -3,7 +3,8 @@
 
 //! The runtime's per-CID words, in a table of their own in the arena: the
 //! idle scans' budgets and the task clock's offset, and a few flags the
-//! policy sets once. Two words per CID.
+//! policy sets once. Two words per CID. The header also keeps the
+//! kernel's nr_cpu_ids, which does not change once loaded.
 
 use core::ptr::{read_volatile, write_volatile};
 
@@ -17,12 +18,25 @@ pub const CLOCK_OFF: u64 = 1;
 /// Flags: whether the idle scan is bounded by SIS_UTIL.
 pub const SCAN_BOUNDED: u64 = 1;
 
-// The table, with the flags in its header's extra word.
-crate::cid_table!(Cids, CIDS in ".data.cids", bytes: 16, extra: 1);
+// The table, with the flags and nr_cpu_ids in its header's extra words.
+crate::cid_table!(Cids, CIDS in ".data.cids", bytes: 16, extra: 2);
+
+/// The extra header word that holds nr_cpu_ids.
+const NR_CPU_IDS: usize = 1;
 
 /// Allocate the table for `count` CIDs, from init.
 pub unsafe fn init(count: u32) -> i32 {
-    unsafe { Cids::init(count) }
+    let result = unsafe { Cids::init(count) };
+    if result == 0 {
+        unsafe { Cids::set_extra(NR_CPU_IDS, u64::from(crate::kfuncs::scx_bpf_nr_cpu_ids())) };
+    }
+    result
+}
+
+/// nr_cpu_ids, as init read it.
+#[inline(always)]
+pub fn nr_cpu_ids() -> u32 {
+    Cids::extra(NR_CPU_IDS) as u32
 }
 
 /// The number of CIDs.

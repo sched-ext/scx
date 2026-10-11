@@ -92,7 +92,8 @@ fn parameters(list: TokenStream) -> usize {
 /// `ops::flags`, zero by default. `timeout_ms` is the watchdog timeout,
 /// scx_rustsched's `ops::TIMEOUT_MS` (5 s) by default. `task` names the type of
 /// the scheduler's per-task state, which the runtime then creates in
-/// ops.init_task(). The attribute declares the type the block implements.
+/// ops.init_task(), and `cid` the type of its per-CID state, set up in
+/// ops.init(). The attribute declares the type the block implements.
 #[proc_macro_attribute]
 pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let arguments: Vec<TokenTree> = arguments.into_iter().collect();
@@ -103,6 +104,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let timeout = argument(&arguments, "timeout_ms")
         .unwrap_or_else(|| "::scx_rustsched::ops::TIMEOUT_MS".into());
     let task = argument(&arguments, "task");
+    let cid = argument(&arguments, "cid");
 
     let tokens: Vec<TokenTree> = item.clone().into_iter().collect();
     let (Some(TokenTree::Ident(keyword)), Some(TokenTree::Ident(ty)), Some(TokenTree::Group(body))) =
@@ -143,6 +145,9 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     if let Some(task) = &task {
         output += &format!("::scx_rustsched::task_state!({task});\n");
     }
+    if let Some(cid) = &cid {
+        output += &format!("::scx_rustsched::cid_state!({cid});\n");
+    }
     let mut members = String::new();
     for (member, sleepable) in CALLBACKS {
         let user = defined(member);
@@ -165,7 +170,15 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                 "if let Err(error) = ::scx_rustsched::sched::init() {{
                      return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
                  }}
+                 {}
                  {}",
+                cid.as_ref()
+                    .map(|cid| format!(
+                        "if let Err(error) = ::scx_rustsched::sched::init_cids::<{cid}>() {{
+                             return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
+                         }}"
+                    ))
+                    .unwrap_or_default(),
                 call.map(|call| format!("::scx_rustsched::sched::Ret::ret({call})"))
                     .unwrap_or_else(|| "0".into())
             ),
@@ -231,4 +244,143 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     };
     output.extend(item);
     output
+}
+
+/// Split a token list at its top-level commas.
+fn split(list: TokenStream) -> Vec<Vec<TokenTree>> {
+    let (mut items, mut depth) = (vec![Vec::new()], 0_i32);
+    let mut previous = ' ';
+    for token in list {
+        if let TokenTree::Punct(punct) = &token {
+            match punct.as_char() {
+                '<' => depth += 1,
+                // The `>` of `->` closes nothing.
+                '>' if previous != '-' => depth -= 1,
+                ',' if depth == 0 => {
+                    items.push(Vec::new());
+                    previous = ',';
+                    continue;
+                }
+                _ => {}
+            }
+            previous = punct.as_char();
+        } else {
+            previous = ' ';
+        }
+        items.last_mut().unwrap().push(token);
+    }
+    if items.last().is_some_and(Vec::is_empty) {
+        items.pop();
+    }
+    items
+}
+
+fn source(tokens: &[TokenTree]) -> String {
+    tokens.iter().cloned().collect::<TokenStream>().to_string()
+}
+
+/// Make a function a BPF global function: one the verifier checks once,
+/// by itself, instead of at every call.
+///
+/// ```ignore
+/// #[scx::global]
+/// fn steal(cid: Cid) -> bool {
+///     for peer in cid.scope(Scope::Llc) { ... }
+///     false
+/// }
+/// ```
+///
+/// A scheduler's callbacks are otherwise inlined into one program each,
+/// and the verifier walks every path through all of it. A loop, or a long
+/// search called from several places, is what to put behind `#[global]`:
+/// the verifier then checks its body once and treats each call as opaque.
+///
+/// The function is called as written. It takes up to five parameters and
+/// returns one value, of the types `sched::Abi` covers: `Cid`, `&Task`,
+/// integers, `bool` and the flags types. The verifier knows nothing of the
+/// arguments but their types, so the body cannot rely on a value being in
+/// range because the caller checked it.
+#[proc_macro_attribute]
+pub fn global(_arguments: TokenStream, item: TokenStream) -> TokenStream {
+    let tokens: Vec<TokenTree> = item.into_iter().collect();
+    let Some(start) = tokens
+        .iter()
+        .position(|token| matches!(token, TokenTree::Ident(ident) if ident.to_string() == "fn"))
+    else {
+        return error("#[global] goes on a function");
+    };
+    let (Some(TokenTree::Ident(name)), Some(TokenTree::Group(list)), Some(TokenTree::Group(body))) =
+        (tokens.get(start + 1), tokens.get(start + 2), tokens.last())
+    else {
+        return error("#[global] goes on `fn name(...) -> Type { ... }`, without generics");
+    };
+    if list.delimiter() != Delimiter::Parenthesis || body.delimiter() != Delimiter::Brace {
+        return error("#[global] goes on `fn name(...) -> Type { ... }`, without generics");
+    }
+    let prefix = source(&tokens[..start]);
+    if prefix
+        .split_whitespace()
+        .any(|word| matches!(word, "unsafe" | "async" | "const" | "extern"))
+    {
+        return error("#[global] goes on a plain function");
+    }
+    // What follows the parameters is `-> Type`, or nothing.
+    let result = &tokens[start + 3..tokens.len() - 1];
+    let result = match result {
+        [] => "()".to_string(),
+        [TokenTree::Punct(dash), TokenTree::Punct(angle), ty @ ..]
+            if dash.as_char() == '-' && angle.as_char() == '>' && !ty.is_empty() =>
+        {
+            source(ty)
+        }
+        _ => return error("#[global]: expected `-> Type` after the parameters"),
+    };
+    let mut types = Vec::new();
+    for parameter in split(list.stream()) {
+        let Some(colon) = parameter
+            .iter()
+            .position(|token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == ':'))
+        else {
+            return error("#[global] takes `name: Type` parameters, and no `self`");
+        };
+        types.push(source(&parameter[colon + 1..]));
+    }
+    if types.len() > 5 {
+        return error("#[global]: a BPF function takes at most five parameters");
+    }
+    let name = name.to_string();
+    let abi = "::scx_rustsched::sched::Abi";
+    let join = |each: &dyn Fn(usize, &String) -> String| {
+        types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| each(index, ty))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let outer = join(&|index, ty| format!("a{index}: {ty}"));
+    let raw = join(&|index, ty| format!("a{index}: <{ty} as {abi}>::Raw"));
+    let unpack = join(&|index, ty| format!("<{ty} as {abi}>::from_raw(a{index})"));
+    let pack = join(&|index, ty| format!("<{ty} as {abi}>::into_raw(a{index})"));
+    let parameters = list.stream();
+    let body = body.stream();
+    let output = format!(
+        "#[inline(always)]
+         {prefix} fn {name}({outer}) -> {result} {{
+             #[unsafe(no_mangle)]
+             #[inline(never)]
+             extern \"C\" fn scx_global_{name}({raw}) -> <{result} as {abi}>::Raw {{
+                 #[inline(always)]
+                 fn {name}({parameters}) -> {result} {{ {body} }}
+                 #[allow(unused_unsafe)]
+                 <{result} as {abi}>::into_raw(unsafe {{ {name}({unpack}) }})
+             }}
+             #[allow(unused_unsafe)]
+             unsafe {{ <{result} as {abi}>::from_raw(scx_global_{name}({pack})) }}
+         }}"
+    );
+    match output.parse() {
+        Ok(output) => output,
+        Err(_) => error("#[global]: could not generate the function"),
+    }
 }

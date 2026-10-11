@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 
-//! The scheduler's own state per task, as a type.
+//! The scheduler's own state per task and per CID, as types.
 //!
 //! ```ignore
 //! #[derive(Default)]
@@ -24,13 +24,22 @@
 //! fields are `Var`s. It is `None` only for a task the scheduler was never
 //! given, such as the idle task or one of another scheduling class.
 //!
-//! The state lives in BPF task storage, which the verifier bounds-checks:
-//! the kernel finds a task's storage from the task, and a reference to it
-//! is an ordinary map value.
+//! `cid = CidCtx` does the same per CID: every CID has a `CidCtx`, set to
+//! `CidCtx::default()` in ops.init(), which `Cid::state()` hands out from
+//! any CPU. It is `None` only for a number that is not a CID.
+//!
+//! The state lives in BPF maps, which the verifier bounds-checks: task
+//! storage, which the kernel finds from the task, and an array indexed by
+//! CID, which the loader sizes to the machine. A reference to either is an
+//! ordinary map value.
 
 use core::ffi::c_void;
 
-use crate::{helpers, ops::task_struct, sched::Error};
+use crate::{
+    helpers,
+    ops::task_struct,
+    sched::{Cid, Error},
+};
 
 /// The BTF-defined map of a task storage whose value is `T`.
 #[repr(C)]
@@ -108,4 +117,81 @@ pub unsafe fn get<'task, T: TaskState>(task: *mut task_struct) -> Option<&'task 
     } else {
         Some(unsafe { &*state })
     }
+}
+
+/// The BTF-defined map of an array whose values are `T`, one per CID. The
+/// loader sets its size to the number of possible CPUs, which CIDs never
+/// exceed.
+#[repr(C)]
+pub struct CidArray<T> {
+    r#type: *const [u32; 2],
+    max_entries: *const [u32; 1],
+    key: *const u32,
+    value: *const T,
+}
+
+impl<T> CidArray<T> {
+    #[allow(clippy::new_without_default)]
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            max_entries: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+        }
+    }
+}
+
+/// A type that is the scheduler's per-CID state, which `cid_state!`
+/// implements.
+pub trait CidState: Default + 'static {
+    /// The array that holds it.
+    fn map() -> *mut c_void;
+}
+
+/// Declare `$type` as the per-CID state: its map, `cid_state`, and its
+/// `CidState`. `#[scheduler(cid = $type)]` does this.
+#[macro_export]
+macro_rules! cid_state {
+    ($type:ty) => {
+        #[unsafe(no_mangle)]
+        #[unsafe(link_section = ".maps")]
+        pub static mut cid_state: $crate::state::CidArray<$type> = $crate::state::CidArray::new();
+
+        impl $crate::state::CidState for $type {
+            #[inline(always)]
+            fn map() -> *mut core::ffi::c_void {
+                (&raw mut cid_state).cast()
+            }
+        }
+    };
+}
+
+/// The state of `cid`, or `None` if it is not a CID.
+#[inline(always)]
+pub fn cid<T: CidState>(cid: Cid) -> Option<&'static T> {
+    let key = cid.0 as u32;
+    let state: *mut T = unsafe { helpers::map_lookup_elem(T::map(), &raw const key) };
+    if state.is_null() {
+        None
+    } else {
+        Some(unsafe { &*state })
+    }
+}
+
+/// Set the state of every CID to `T::default()`, from ops.init().
+///
+/// # Safety
+/// Only from ops.init(), once the runtime knows the CIDs.
+#[inline(always)]
+pub unsafe fn init_cids<T: CidState>() -> Result<(), Error> {
+    for cid in Cid::all() {
+        let key = cid.0 as u32;
+        let state: *mut T = unsafe { helpers::map_lookup_elem(T::map(), &raw const key) };
+        if state.is_null() {
+            return Err(Error::ENOENT);
+        }
+        unsafe { state.write(T::default()) };
+    }
+    Ok(())
 }
