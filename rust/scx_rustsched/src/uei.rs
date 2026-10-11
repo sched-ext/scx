@@ -72,6 +72,7 @@ unsafe fn read_str(destination: *mut u8, size: u32, source: u64) {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = "struct_ops/exit")]
 pub unsafe extern "C" fn rust_exit(context: *const u64) -> u64 {
+    crate::pool::touch();
     unsafe {
         let info = *context as *const u8;
         let uei = &raw mut UEI;
