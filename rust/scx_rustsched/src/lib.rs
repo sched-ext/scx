@@ -15,6 +15,7 @@
 //!   running kernel's BTF, laid out as `scx_rustsched_abi` says.
 //! - `task`: what the program reads from a task_struct.
 //! - `loops`: loops the verifier can bound.
+//! - `edq`: the eligible deadline queue.
 //! - `uei`: the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
@@ -32,6 +33,7 @@
 #![allow(internal_features)]
 
 pub mod config;
+pub mod edq;
 pub mod helpers;
 pub mod kfuncs;
 pub mod loops;
