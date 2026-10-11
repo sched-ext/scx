@@ -6360,6 +6360,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_reevdf"
+version = "1.1.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libbpf-rs 0.27.2",
+ "log",
+ "scx_rustsched_abi",
+ "scx_rustsched_build",
+ "scx_rustsched_loader",
+ "scx_stats",
+ "scx_stats_derive",
+ "serde",
+]
+
+[[package]]
 name = "scx_rlfifo"
 version = "1.1.4"
 dependencies = [
