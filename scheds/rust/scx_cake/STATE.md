@@ -55,6 +55,31 @@ Levels follow CLAUDE.md's metric order; game frames (level 1) are owed for all.
 | IRQ-woken wakes run next (idle CPU, else head of prev with PREEMPT; never an IRQ CPU or a seated stage) | Stock | — | KovaaK's A/B under 16 nice-10 hogs paused after 5 of 8 slots (maintainer's heavy tasks); data not read | Under test |
 | Preferred-core re-read at runtime | — | — | Ranking identical on 2026-09-26 and 10-05 (cores 4=5 > 3 > 1 > 2 > 0 > 6 > 7) | Dropped: static here; the startup read is correct |
 
+## Evidence, 2026-10-12: cache-line contention (perf c2c, IBS)
+
+KovaaK's menu + cake (lean `lazy`), 20 s quiet and 20 s under 16 hogs.
+Tools and derived reports: `scx_cake_bench/runs/c2c_20261012/` (`capture.sh`
+starts perf before attach so BPF symbols resolve; `fields.py` names task_struct
+fields from BTF). Kernel code is unnamed (`kptr_restrict=2`).
+
+| HITM loads (quiet) | Share | Note |
+|---|---|---|
+| Game/Wine userspace | 85.5 % | outside cake |
+| Kernel code | 14.0 % | ttwu, rq, task line 0: intrinsic |
+| Cake BPF code | 0.5 % | 141 samples; `select_cpu` 96 of them, mean 84 cycles |
+
+Cake's HITMs by cause:
+1. Wake classification in `select_cpu`/`select_undecided`: the wakee's
+   `se.sum_exec_runtime`, `nvcsw`, `sched_info.{run_delay,pcount}` sit on
+   three task_struct lines last written by the CPU the task ran on. About
+   half of cake's quiet HITMs. Same reads on the home CPU's running task (`hc`).
+2. Global idle line (lean K2): 61 HITMs all readers, cake 22 (smt word 15
+   in `select_cpu`/`pick_idle_clean`, cpu word 6 in `claim_warm`). True sharing.
+3. Direct `p->scx.slice`/`dsq_vtime` stores (`admit_direct`, `stopping`),
+   read remotely by the kernel; also the kernel's deprecation warning.
+4. Cake's own globals: small; one queue-signal line (`dispatch_search`,
+   `enqueue`) 178 cycles under load. True sharing by design.
+
 ## Evidence, 2026-10-05
 
 `cakebench cost`, appsim 20 s slots, all slots valid. A busy host: round 2 had two
@@ -116,6 +141,12 @@ objects that may share a line with others; on 2026-10-05 they sat in different l
     `irq_wake.py`, `diag_wake.py`; set PID/WIN in `kv_ab.py` and `CAKE_DIAG_TGID` per
     launch). Arms `target/cake_receipt_builds/kv-x` (base + diag) and `kv-y` (+ IRQ
     priority). Slots 1–5 of the paused run are in `run1/`, likely skewed.
+
+12. Cache-line follow-ups (evidence 10-12): (a) compute the wake class in
+    `ops.stopping(!runnable)` on the task's own CPU (`nvcsw`, `sum_exec_runtime`,
+    `sched_info` are final there) and read one word at wake, 3 remote lines to 1;
+    (b) skip the smt-word read when no whole-core search follows; (c) setters
+    `scx_bpf_task_set_slice/dsq_vtime`. Each needs a KovaaK's A/B.
 
 ## Research index
 
