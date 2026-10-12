@@ -1,0 +1,375 @@
+diff --git a/scheds/rust/scx_cake/src/bpf/cake.bpf.c b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+index ef0ca8a03..18474197e 100644
+--- a/scheds/rust/scx_cake/src/bpf/cake.bpf.c
++++ b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+@@ -238,6 +238,8 @@ enum cake_stat {
+ 	CAKE_SITE_PEND_HEAL,		/* unserved reset under a zero token: pops the serve never saw */
+ 	CAKE_SITE_RELEASE_SERVE,	/* cpu_release found own-queue work and kicked an idle CPU */
+ 	CAKE_SITE_PINNED_PREEMPT,	/* pinned wake preempted the occupant on its insert */
++	CAKE_SITE_BLK_HIT,		/* wake classified from the block stash */
++	CAKE_SITE_BLK_MISS,		/* wake read the task's own lines */
+ 	CAKE_STAT_NR,
+ };
+ 
+@@ -365,7 +367,7 @@ const volatile u64 cake_tick_ns;	/* the loader's clock_getres(CLOCK_MONOTONIC_CO
+ u64 cake_jiffies_offset;	/* precise ns minus jiffies * tick, at init */
+ const volatile u64 cake_vcap_unit_ns = SLICE_NS + TICK_MAX_NS;	/* longest run: grant plus a tick */
+ 
+-static __always_inline u64 cake_task_age(const struct task_struct *p, u32 site)
++static __always_inline u64 cake_age_since(u64 start, u32 site)
+ {
+ 	u64 now;
+ 
+@@ -374,9 +376,10 @@ static __always_inline u64 cake_task_age(const struct task_struct *p, u32 site)
+ 		now = bpf_jiffies64() * cake_tick_ns + cake_jiffies_offset;
+ 	else
+ 		now = bpf_ktime_get_ns();
+-	return time_delta(now, p->start_time);
++	return time_delta(now, start);
+ }
+ 
++
+ /* The rq clock: stamps compared only with others of this family (run start,
+  * pool served), never with cake_now(). Cross-CPU deltas are clamped by the
+  * reader: the rq clock orders per CPU only. */
+@@ -575,13 +578,22 @@ struct cake_run_slot {
+ 	/* PROBE, on the slot's second line so the hot ops stay on the first: what
+ 	 * ops.stopping knew about a task a higher class displaced, for
+ 	 * ops.cpu_release (the local DSQ has no peek): burst inputs, slice left,
+-	 * IMMED, and the release stamp for cpu_acquire's hold length. */
++	 * IMMED (bit 63 of out_slice), and the release stamp for cpu_acquire's
++	 * hold length. */
+ 	u64 out_sum;
+ 	u64 out_nvcsw;
+ 	u64 out_slice;
+-	u64 out_immed;
+ 	u64 release;
+-	u64 pad[STATE_SLOT_WORDS - 13];
++	/* Block stash: what a waker reads about the task that last blocked here,
++	 * written by ops.stopping on this CPU where the task's lines are local, so
++	 * a remote wake reads one line instead of three task_struct lines.
++	 * blk_id is pid << 32 | nvcsw at wake, written last; blk_run carries the
++	 * starved (63) and starved-turn (62) classes; blk_vt is the vtime the
++	 * charge left, which any later stop changes (see cake_wv_load). */
++	u64 blk_id;
++	u64 blk_run;
++	u64 blk_start;
++	u64 blk_vt;
+ };
+ 
+ enum {
+@@ -605,34 +617,42 @@ static __always_inline u64 cake_burst_ns(const struct task_struct *p)
+ /* A burst shorter than one handoff: no relocation costs less than the wait it
+  * would cure, so the starved gate keeps the warm home. Cross-multiplied; past
+  * 2^32 switches the task leaves the class. */
+-static __always_inline bool cake_subhandoff(const struct task_struct *p)
++static __always_inline bool cake_subhandoff_rn(u64 run, u64 n)
+ {
+-	u64 n = p->nvcsw | 1;
+-
+-	return !(n >> 32) && p->se.sum_exec_runtime < cake_handoff_max_ns * n;
++	return !(n >> 32) && run < cake_handoff_max_ns * n;
+ }
+ 
++
+ /* Stage class: cross-multiply only while the product fits; beyond that no u64
+  * runtime reaches the threshold. */
+-static __always_inline bool cake_stage(const struct task_struct *p)
++static __always_inline bool cake_stage_rn(u64 run, u64 n)
+ {
+-	u64 n = p->nvcsw | 1;
++	return n <= (~0ULL / SEAT_BURST_MIN_NS) && run >= SEAT_BURST_MIN_NS * n;
++}
+ 
+-	return n <= (~0ULL / SEAT_BURST_MIN_NS) &&
+-	       p->se.sum_exec_runtime >= SEAT_BURST_MIN_NS * n;
++static __always_inline bool cake_stage(const struct task_struct *p)
++{
++	return cake_stage_rn(p->se.sum_exec_runtime, p->nvcsw | 1);
+ }
+ 
+ /* Does this task wait longer than it runs? run_delay/pcount is the mean wait,
+  * sum_exec_runtime/nvcsw the mean burst; cross-multiplied, the shared
+  * pre-scale cancels. The threshold is a definition, not a tuning. */
+-static __always_inline bool cake_starved(const struct task_struct *p)
++static __always_inline bool cake_starved_v(u64 delay, u64 pcount, u64 runtime, u64 n,
++					   u32 margin_shift)
+ {
+-	u64 wait = p->sched_info.run_delay >> CAKE_RATIO_SHIFT;
+-	u64 run = p->se.sum_exec_runtime >> CAKE_RATIO_SHIFT;
++	u64 wait = delay >> CAKE_RATIO_SHIFT;
++	u64 run = runtime >> CAKE_RATIO_SHIFT;
+ 
+ 	if (!run)
+ 		return false;
+-	return wait * (p->nvcsw | 1) > run * (p->sched_info.pcount | 1);
++	return wait * n > (run << margin_shift) * (pcount | 1);
++}
++
++static __always_inline bool cake_starved(const struct task_struct *p)
++{
++	return cake_starved_v(p->sched_info.run_delay, p->sched_info.pcount,
++			      p->se.sum_exec_runtime, p->nvcsw | 1, 0);
+ }
+ 
+ /* Does this task wait longer than one turn of its own? cake_starved has no
+@@ -640,12 +660,8 @@ static __always_inline bool cake_starved(const struct task_struct *p)
+  * relocation pays only past a whole turn: the margin is the task's own slice. */
+ static __always_inline bool cake_starved_turn(const struct task_struct *p)
+ {
+-	u64 wait = p->sched_info.run_delay >> CAKE_RATIO_SHIFT;
+-	u64 run = p->se.sum_exec_runtime >> CAKE_RATIO_SHIFT;
+-
+-	if (!run)
+-		return false;
+-	return wait * (p->nvcsw | 1) > (run << 1) * (p->sched_info.pcount | 1);
++	return cake_starved_v(p->sched_info.run_delay, p->sched_info.pcount,
++			      p->se.sum_exec_runtime, p->nvcsw | 1, 1);
+ }
+ 
+ _Static_assert(sizeof(struct cake_slot) == STATE_SLOT_BYTES,
+@@ -679,6 +695,74 @@ _Static_assert(sizeof(((struct cake_state *)0)->qmask) <= STATE_SLOT_BYTES,
+ 
+ static struct cake_state cake;
+ 
++/* A sleeping task's classifier inputs: the block stash on its CPU when it
++ * still describes this task, else the task's own lines (see cake_run_slot). */
++struct cake_wv {
++	u64 run;
++	u64 n;		/* nvcsw | 1, as the classifiers take it */
++	u64 start;
++	bool starved;
++	bool turn;
++};
++
++/* The stash holds while nothing ran the task since its block: pid and id
++ * stable across the read (the writer zeroes the id first), the vtime its
++ * stop left still in place (every later stop charges it), and the task off
++ * CPU (ttwu waits for on_cpu before select_cpu, so a running task fails). */
++static __always_inline void cake_wv_load(const struct task_struct *p, struct cake_wv *w)
++{
++	struct cake_run_slot *rs = &cake.run[p->thread_info.cpu & (MAX_CPUS - 1)];
++	u64 id = rs->blk_id;
++
++	if (id && (u32)(id >> 32) == (u32)p->pid && !p->on_cpu) {
++		u64 run, start, vt;
++
++		barrier();
++		run = rs->blk_run;
++		start = rs->blk_start;
++		vt = rs->blk_vt;
++		barrier();
++		if (rs->blk_id == id && vt == p->scx.dsq_vtime) {
++			w->run = run & ((1ULL << 62) - 1);
++			w->n = (u32)id | 1;
++			w->start = start;
++			w->starved = run >> 63;
++			w->turn = (run >> 62) & 1;
++			cake_stat_inc(CAKE_SITE_BLK_HIT);
++			return;
++		}
++	}
++	cake_stat_inc(CAKE_SITE_BLK_MISS);
++	w->run = p->se.sum_exec_runtime;
++	w->n = p->nvcsw | 1;
++	w->start = p->start_time;
++	w->starved = cake_starved(p);
++	w->turn = cake_starved_turn(p);
++}
++
++/* ops.stopping of a blocking task, on its own CPU: __schedule counts this
++ * switch in nvcsw after pick_next_task, so the wake reads one more. A
++ * property change also stops with !runnable; its stash is one switch ahead
++ * until the task runs again. */
++static __always_inline void cake_blk_stash(struct cake_run_slot *rs, struct task_struct *p)
++{
++	u64 n = p->nvcsw + 1;
++	u64 run = p->se.sum_exec_runtime;
++	u64 delay = p->sched_info.run_delay, pcount = p->sched_info.pcount;
++
++	rs->blk_id = 0;
++	if ((n >> 32) || (run >> 62))
++		return;
++	barrier();
++	rs->blk_run = run |
++		      ((u64)cake_starved_v(delay, pcount, run, n | 1, 0) << 63) |
++		      ((u64)cake_starved_v(delay, pcount, run, n | 1, 1) << 62);
++	rs->blk_start = p->start_time;
++	rs->blk_vt = p->scx.dsq_vtime;
++	barrier();
++	rs->blk_id = (u64)(u32)p->pid << 32 | n;
++}
++
+ /* The retake's occupant read, counted as the gate reached, in its own frame
+  * (inline, the count spilled prev_cpu across select_cpu). Only the seat's
+  * holder passes the pid test, so the plain count is exact. */
+@@ -1730,8 +1814,10 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted, u64 c
+ 	w = cake_idle_word() & p->cpus_ptr->bits[0];
+ 	if (cake_multi_llc()) {
+ 		u64 pref = cake_llc_pref_word;
++		struct cake_wv wv;
+ 
+-		if (cake_stage(p)) {
++		cake_wv_load(p, &wv);
++		if (cake_stage_rn(wv.run, wv.n)) {
+ 			/* A stage thread off the preferred die re-homes when a whole
+ 			 * core is free there; on it, its own die as usual. */
+ 			if (pref && !(cpu_llc_word[prev] & pref) && (w & pref & cores)) {
+@@ -1866,12 +1952,14 @@ static __always_inline u64 cake_slice_from_service(u64 runtime, u64 age, u64 n,
+  * Age reads the tick clock; a task younger than a tick reads as one slice old. */
+ static __noinline u64 cake_task_slice(struct task_struct *p __arg_trusted)
+ {
+-	u64 age = cake_task_age(p, CAKE_SITE_KT_PERIOD);
+-	u64 q;
++	struct cake_wv w;
++	u64 age, q;
+ 
++	cake_wv_load(p, &w);
++	age = cake_age_since(w.start, CAKE_SITE_KT_PERIOD);
+ 	if (age < SLICE_NS)
+ 		age = SLICE_NS;
+-	return cake_slice_from_service(p->se.sum_exec_runtime, age, p->nvcsw | 1, &q);
++	return cake_slice_from_service(w.run, age, w.n, &q);
+ }
+ 
+ /* Three quarters of the unused slice, as two shifts. */
+@@ -1897,15 +1985,18 @@ _Static_assert((CAKE_FLOOR_WINDOW_NS << (RATE_FLOOR_SHIFT + 1)) > CAKE_KEY_BUDGE
+  * left unused, starved tasks only (ungated a worker outranks a stage). */
+ static __always_inline u64 cake_admit_frame(struct task_struct *p, u64 *vt)
+ {
+-	u64 age = cake_task_age(p, CAKE_SITE_KT_PERIOD);
+-	u64 runtime = p->se.sum_exec_runtime;
+-	u64 n = p->nvcsw | 1;
++	struct cake_wv w;
++	u64 age, runtime, n;
+ 	u64 q, slice, depth = 0, lo, d;
+ 
++	cake_wv_load(p, &w);
++	age = cake_age_since(w.start, CAKE_SITE_KT_PERIOD);
++	runtime = w.run;
++	n = w.n;
+ 	if (age < SLICE_NS)
+ 		age = SLICE_NS;
+ 	slice = cake_slice_from_service(runtime, age, n, &q);
+-	if (cake_starved(p)) {
++	if (w.starved) {
+ 		u64 burst = runtime <= ((age >> PERIOD_SLICE_CAP_SHIFT) >> 1) ?
+ 			    q : runtime / n;
+ 
+@@ -1946,9 +2037,13 @@ static __noinline s32 cake_select_undecided(struct task_struct *p __arg_trusted,
+ 					    s32 prev_cpu)
+ {
+ 	struct task_struct *hc;
++	struct cake_wv w;
+ 	s32 idle;
+ 
+-	if (prev_cpu < 0 || (p->flags & PF_KTHREAD) || cake_starved_turn(p))
++	if (prev_cpu < 0 || (p->flags & PF_KTHREAD))
++		return prev_cpu;
++	cake_wv_load(p, &w);
++	if (w.turn)
+ 		return prev_cpu;
+ 	hc = cake_cpu_curr(prev_cpu);
+ 	if (!hc || hc == p || (hc->flags & PF_IDLE) || cake_starved(hc))
+@@ -1969,7 +2064,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
+ 		   u64 wake_flags)
+ {
+ 	bool device_wake = cake_signal_wake(p);
+-	bool stage;
++	bool stage, home_starved;
++	struct cake_wv w;
+ 	/* A busy/ineligible home is not a warm-half candidate. */
+ 	bool home_askable = false, seat_blocked;
+ 	u32 home_decline = CAKE_STAT_HD_SYNC;
+@@ -2011,7 +2107,9 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
+ 	}
+ 
+ 	/* Serial placement above needs neither groove storage nor stage class. */
+-	stage = cake_stage(p);
++	cake_wv_load(p, &w);
++	stage = cake_stage_rn(w.run, w.n);
++	home_starved = w.turn && !cake_subhandoff_rn(w.run, w.n);
+ 
+ 	/* Seat retake: a stage whose own seat runs a non-stage occupant takes it back
+ 	 * at once, behind the occupant with PREEMPT; ops.enqueue reroutes the evictee
+@@ -2062,7 +2160,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
+ 		cake_stat_inc(CAKE_SITE_STAGE_PROBE);
+ 	if ((!(wake_flags & CAKE_WAKE_SYNC) || stage) &&
+ 	    prev_cpu >= 0 && !seat_blocked) {
+-		if (cake_starved_turn(p) && !cake_subhandoff(p))
++		if (home_starved)
+ 			home_decline = CAKE_STAT_HD_STARVED;
+ 		/* The thread, not the core: the ISR shadow is the handler's own thread; the
+ 		 * sibling pays at most the sink's share of the core, less than a cold home. */
+@@ -2450,10 +2548,14 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
+ 
+ 	/* Stage wakeups are global, everything else local: the routing key is the
+ 	 * wakeup bit and the burst class. Single-CPU tasks take the continuation arm. */
+-	if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1 &&
+-	    cake_starved_turn(p)) {
+-		cake_enqueue_wake(p, tcpu);
+-		return;
++	if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1) {
++		struct cake_wv w;
++
++		cake_wv_load(p, &w);
++		if (w.turn) {
++			cake_enqueue_wake(p, tcpu);
++			return;
++		}
+ 	}
+ 
+ 	/* The continuation arm: ordinary continuations stay on their owner's queue,
+@@ -3072,7 +3174,7 @@ static __noinline void cake_probe_release(s32 cpu, struct scx_cpu_release_args *
+ {
+ 	struct cake_run_slot *rs = &cake.run[(u32)cpu & (MAX_CPUS - 1)];
+ 	struct task_struct *d = args->task;
+-	u32 path = !rs->out_slice ? 2 : rs->out_immed ? 1 : 0;
++	u32 path = !(rs->out_slice << 1) ? 2 : rs->out_slice >> 63 ? 1 : 0;
+ 	u32 reason = (u32)args->reason;
+ 	u64 burst = d ? d->se.sum_exec_runtime / (d->nvcsw | 1) : 0;
+ 	u32 band = cake_release_band(burst);
+@@ -3282,8 +3384,9 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
+ 		if (runnable) {
+ 			rs->out_sum = p->se.sum_exec_runtime;
+ 			rs->out_nvcsw = p->nvcsw;
+-			rs->out_slice = p->scx.slice;
+-			rs->out_immed = p->scx.flags & CAKE_TASK_IMMED;
++			rs->out_slice = p->scx.slice & ~(1ULL << 63);
++			if (p->scx.flags & CAKE_TASK_IMMED)
++				rs->out_slice |= 1ULL << 63;
+ 		} else {
+ 			cake_probe_quantum(p, used, rs->hint & CAKE_HINT_WOKE);
+ 		}
+@@ -3332,6 +3435,9 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
+ 	/* Direct write: scx_bpf_task_set_dsq_vtime()'s authority check cost +28-36%
+ 	 * on this, the hottest per-switch callback. */
+ 	p->scx.dsq_vtime = cake_vtime_ceil(charged, ceil);
++	/* Last: the stash carries the vtime just written. */
++	if (!runnable)
++		cake_blk_stash(rs, p);
+ }
+ 
+ /* ops.update_idle: the pool interlock's self-kick; wide hosts also mirror
+diff --git a/scheds/rust/scx_cake/src/main.rs b/scheds/rust/scx_cake/src/main.rs
+index 2b2cea0ce..bf5d68bf6 100644
+--- a/scheds/rust/scx_cake/src/main.rs
++++ b/scheds/rust/scx_cake/src/main.rs
+@@ -1144,7 +1144,7 @@ impl<'a> Scheduler<'a> {
+             info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
+         }
+         if self.probe_on {
+-            const NAMES: [&str; 120] = [
++            const NAMES: [&str; 122] = [
+                 "select_calls",
+                 "serial",
+                 "home_warm",
+@@ -1265,6 +1265,8 @@ impl<'a> Scheduler<'a> {
+                 "pend_heal",
+                 "release_serve",
+                 "pinned_preempt",
++                "blk_hit",
++                "blk_miss",
+             ];
+             // The name table must match the BPF enum exactly; a drift prints
+             // zeros silently because out-of-range lookups fail quietly.
