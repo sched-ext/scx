@@ -8,7 +8,10 @@
  * depths hoist once, so tiers plus steal plus perf share the same
  * reads with no second poll. Three PRIQ tiers hold strict order
  * through the kernel priority queue with insert vtime, so the
- * earliest key always wins with no load swap. The reject queue stays
+ * earliest key always wins with no load swap. In-tier keys cap at
+ * now plus one period at enqueue, so far keys never starve past one
+ * period and eight visits per pass bound each tier with resume next
+ * pass. The reject queue stays
  * value ordered outside dispatch with no tier move here, so overload
  * never inverts the PRIQ order. The reject queue holds overload with
  * no drop and reclaims at most one per pass with tiers-empty fallback
@@ -182,7 +185,16 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 	rdl = READ_ONCE(rctx->deadline);
 	ravg = (u64)READ_ONCE(rctx->avg_ns);
 	rdev = (u64)READ_ONCE(rctx->dev_ns);
-	rcrit = flow_lat_crit(ravg, rdev);
+	{
+		u32 rhint = READ_ONCE(rctx->hint_us);
+		u32 rtw = READ_ONCE(rctx->weight);
+		u32 rhw = READ_ONCE(rctx->hint_w);
+		u32 reff;
+		if (rtw == 0)
+			rtw = (u32)FLOW_WEIGHT_BASE;
+		reff = flow_task_effective_weight(rtw, rhw);
+		rcrit = flow_is_lat(ravg, rdev, rhint, 0, 0, reff);
+	}
 	rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
 	rtol = flow_red_tol(rcrit);
 	rres = flow_red_residual(rdl, now, rcost);

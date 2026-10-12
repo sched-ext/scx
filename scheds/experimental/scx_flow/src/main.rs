@@ -397,12 +397,14 @@ mod tests {
     fn kick_rule_matches_header() {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
-            100_000
+            crate::config::PREEMPT_MARGIN_NS
         );
+        assert_eq!(crate::config::PREEMPT_MARGIN_NS, 100_000);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
-            100_000
+            crate::config::PREEMPT_TAIL_NS
         );
+        assert_eq!(crate::config::PREEMPT_TAIL_NS, 100_000);
     }
 
     #[test]

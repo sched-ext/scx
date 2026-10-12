@@ -218,7 +218,9 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
  * at or before the newcomer, so only work ahead of the overload pays.
  * Callers test the newcomer itself as the bounded O(1) victim with no
  * scan, so a full least value scan stays a noted alternative with no
- * knob here. A critical victim never passes with no swap.
+ * knob here. A critical victim never passes with no swap. A capped
+ * latency slice at 100us never passes the 128us bound, so latency
+ * never pays as victim.
  *
  * Returns: true when the victim may cover the exceed.
  */

@@ -14,10 +14,12 @@
  * this arrival in a tier queue. Rechecks keep the same order with one
  * hoist. Strict fair order gates the bypass with eligibility plus
  * drain, so hogs pace through tiers with no direct jump and one kick
- * per wait stays. A direct preempt needs predictor slack plus an
- * eligible arrival plus a 100us margin lead with more than 100us still
- * left on the owner, so near ties plus nearly done owners never bounce
- * while one kick per wait stays with no storm. Exiting tasks stay
+ * per wait stays. A direct preempt needs unified latency with
+ * probation plus an eligible lat arrival against a batch owner plus a
+ * 100us margin lead with more than 100us still left on the owner, so
+ * near ties plus nearly done owners never bounce while one kick per
+ * wait stays with no storm. Arrival plus occupant latency use unified
+ * base plus ext with probation and no extra task reads. Exiting tasks stay
  * exempt with no queue wait and no gate. Runs under the caller with no
  * lock.
  *
@@ -198,7 +200,12 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	struct task_struct *trusted;
 	struct flow_task_ctx *octx;
 	u64 occ_deadline;
-	u64 occ_start;
+	u64 occ_run_at;
+	u32 occ_cur;
+	u64 o_avg;
+	u64 o_dev;
+	bool occ_lat = false;
+	bool arr_lat = true;
 	if (!st)
 		return;
 	/* Idle kicks gate on the hoisted eligibility, so hogs pace */
@@ -251,7 +258,22 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 		return;
 	}
 	occ_deadline = READ_ONCE(octx->deadline);
-	occ_start = READ_ONCE(octx->run_at);
+	occ_run_at = READ_ONCE(octx->run_at);
+	occ_cur = READ_ONCE(octx->slice_ns);
+	/* Occupant latency uses the unified base plus ext with the same */
+	/* occupant lookup, so RED and preempt agree with probation. */
+	o_avg = (u64)READ_ONCE(octx->avg_ns);
+	o_dev = (u64)READ_ONCE(octx->dev_ns);
+	{
+		u32 o_hint = READ_ONCE(octx->hint_us);
+		u32 o_tw = READ_ONCE(octx->weight);
+		u32 o_hw = READ_ONCE(octx->hint_w);
+		u32 o_eff;
+		if (o_tw == 0)
+			o_tw = (u32)FLOW_WEIGHT_BASE;
+		o_eff = flow_task_effective_weight(o_tw, o_hw);
+		occ_lat = flow_is_lat(o_avg, o_dev, o_hint, 0, 0, o_eff);
+	}
 	if (occ_deadline == 0) {
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
@@ -262,31 +284,52 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	/* expiry with one skipped preempt, so only latency-critical work */
 	/* with slack within one quantum preempts at once. Eligibility */
 	/* already passed above, so this plus lead plus tail gate the kick. */
+	/* Arrival latency uses the unified base plus ext with the same */
+	/* arrival lookup, so hint plus weight shape the gate with sleep */
+	/* plus uclamp failed open and newcomers stay batch with probation. */
 	{
 		struct flow_task_ctx *actx = flow_lookup(p);
 		if (actx) {
 			u64 a_avg = (u64)READ_ONCE(actx->avg_ns);
 			u64 a_dev = (u64)READ_ONCE(actx->dev_ns);
-			if (!flow_lat_crit(a_avg, a_dev)) {
+			u32 a_hint = READ_ONCE(actx->hint_us);
+			u32 a_tw = READ_ONCE(actx->weight);
+			u32 a_hw = READ_ONCE(actx->hint_w);
+			u32 a_eff;
+			if (a_tw == 0)
+				a_tw = (u32)FLOW_WEIGHT_BASE;
+			a_eff = flow_task_effective_weight(a_tw, a_hw);
+			arr_lat = flow_is_lat(a_avg, a_dev, a_hint, 0,
+			    0, a_eff);
+			if (!arr_lat) {
 				bpf_task_release(trusted);
 				bpf_rcu_read_unlock();
 				flow_count_preempt_skip();
 				return;
 			}
+		} else {
+			arr_lat = false;
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			flow_count_preempt_skip();
+			return;
 		}
 	}
 	/* An urgent latency-critical arrival leads by 100us with more than */
 	/* 100us left on the owner under the strict key, so near ties plus */
-	/* nearly done owners never bounce. The owner paces on a fresh 1ms */
-	/* quantum with no dynamic use. The shared preempt helper holds the */
-	/* margin plus tail with wrap safe order, so only a truly earlier */
-	/* arrival with work left preempts at once with one kick per wait. */
-	/* Equal or later arrivals pace at slice expiry with one skipped */
-	/* preempt. The strict key leads here, so fairness plus urgency gate */
-	/* the kick. Eligibility already passed above, so the helper checks */
-	/* lead plus tail only with slack gated just before it. */
-	if (!flow_preempt_wants(vtime, occ_deadline, now,
-	    occ_start)) {
+	/* nearly done owners never bounce. The owner paces on start plus */
+	/* inherit cur with no fresh quantum, so the tail tracks the stored */
+	/* slice. The shared preempt helper holds the */
+	/* margin plus tail with wrap safe order, so only a */
+	/* truly earlier arrival with work left preempts at once with one */
+	/* kick per wait. Equal or later arrivals pace at slice expiry with */
+	/* one skipped preempt. Other pairs fail closed with one */
+	/* skipped count. The strict key leads here, so fairness plus */
+	/* urgency gate the kick. Eligibility already passed above, so the */
+	/* helper checks lead plus tail only with slack gated */
+	/* just before it. */
+	if (!flow_preempt_ok(vtime, occ_deadline, now,
+	    occ_run_at, occ_cur, arr_lat, occ_lat)) {
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
 		flow_count_preempt_skip();

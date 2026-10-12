@@ -2,11 +2,12 @@
 /*
  * Preempt plus idle kick for the enqueue pass.
  *
- * Holds the strict one kick per wait rule with predictor slack plus
- * lead plus tail plus eligibility. A latency-critical arrival with
- * slack within one quantum leads the occupant by the margin with more
- * than the tail left on the owner, so near ties plus nearly done
- * owners never bounce while one kick per wait stays with no storm.
+ * Holds the strict one kick per wait rule with unified latency plus
+ * lead plus tail plus eligibility. Only a latency arrival against a
+ * batch occupant leads by the margin with more than the tail left on
+ * the owner, so near ties plus nearly done owners never bounce while
+ * one kick per wait stays with no storm. Lat to lat plus batch to
+ * batch plus batch to lat fail closed with one skipped count.
  * Every hold counts in preempt skipped with no missing fill. The exiting
  * plus bypass plus tier idle plus preempt paths share this gate with no
  * extra sender. Runs under the
@@ -14,35 +15,45 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* True when one arrival strictly preempts with margin plus tail. */
-/* The arrival must lead the occupant strictly with the margin also */
-/* strictly before, so near ties never bounce. The owner must have */
-/* started with remaining slice strictly past the tail, so nearly done */
-/* owners finish instead of taking a kick. The enqueue busy path calls */
+/* True when one arrival strictly preempts with margin plus tail plus latency. */
+/* The arrival key must lead the occupant key strictly with the margin also */
+/* strictly before, so near ties never bounce. The owner must hold more */
+/* than the tail past now from start plus inherit cur, so nearly done */
+/* owners finish instead of taking a kick. Equality fails closed and */
+/* floors, so a head with exactly the tail left never kicks. Only a latency arrival */
+/* against a batch occupant preempts, so lat to batch wins while lat */
+/* to lat plus batch to batch plus batch to lat fail closed with one */
+/* skipped count and no kick. The enqueue busy path calls */
 /* this helper after the eligibility gate, so eligibility stays outside */
 /* here with one minimum read per wait. Equal arrivals pace with no */
 /* extra kick by design, so no tie assert runs with no verifier cost. */
-/* No Rust mirror by design, so the kernel stays the single truth. */
-static __always_inline bool flow_preempt_wants(u64 arrival,
-	u64 occupant, u64 now, u64 occ_start)
+/* Mirrored in config.rs preempt_ok for host tests, so the kernel plus */
+/* the host agree with no drift. */
+static __always_inline bool flow_preempt_ok(u64 arr_key,
+	u64 occ_key, u64 now, u64 occ_run_at, u32 occ_cur, bool arr_lat,
+	bool occ_lat)
 {
 	u64 margin;
 	u64 occ_end;
 	u64 tail;
-	if (arrival == 0 || arrival == (u64)~0ULL)
+	u64 base;
+	if (!arr_lat || occ_lat)
 		return false;
-	if (occupant == 0)
+	if (arr_key == 0 || arr_key == (u64)~0ULL)
 		return false;
-	if (!flow_time_before(arrival, occupant))
+	if (occ_key == 0 || occ_key == (u64)~0ULL)
 		return false;
-	margin = flow_sat_add(arrival, (u64)FLOW_PREEMPT_MARGIN_NS);
+	if (!flow_time_before(arr_key, occ_key))
+		return false;
+	margin = flow_sat_add(arr_key, (u64)FLOW_PREEMPT_MARGIN_NS);
 	if (margin == (u64)~0ULL)
 		return false;
-	if (!flow_time_before(margin, occupant))
+	if (!flow_time_before(margin, occ_key))
 		return false;
-	if (occ_start == 0)
+	if (occ_run_at == 0 || occ_run_at == (u64)~0ULL)
 		return false;
-	occ_end = flow_sat_add(occ_start, (u64)FLOW_QUANTUM_NS);
+	base = (u64)flow_slice_inherit(occ_cur);
+	occ_end = flow_sat_add(occ_run_at, base);
 	if (occ_end == (u64)~0ULL)
 		return false;
 	tail = flow_sat_add(now, (u64)FLOW_PREEMPT_TAIL_NS);
