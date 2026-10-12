@@ -117,6 +117,11 @@ UEI_DEFINE(uei);
 
 /* Declared ahead of the toggle block: the probe census below reads it. */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
+const volatile u8 cake_tog_burstkey;		/* requeue key + runtime since last wake (--toggle burstkey=1) */
+
+/* The burst a requeue key may carry: a CPU hog queues behind fresh wakes by at
+ * most this much (cosmos slice_lag). */
+#define CAKE_BURST_LAG_NS	(20ULL * NSEC_PER_MSEC)
 
 /* PROBE placement census for ops.select_cpu, not for scoring: per-CPU map,
  * plain increment on this CPU's copy, no atomic, no shared line. */
@@ -1578,6 +1583,7 @@ struct cake_groove {
 	u16 pad;
 	u32 seat_pid; /* identity used at acquisition; nonleader exec changes pid */
 	u64 seat_seq; /* release only this acquisition, including after PID reuse */
+	u64 wake_sum; /* sum_exec_runtime at the last wake (burstkey) */
 };
 
 /* Seat holders by acquisition pid: ops.running reads one word before asking
@@ -2469,6 +2475,20 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		u64 vt = rlo + (rd & ~((u64)((s64)rd >> 63)));
 		struct task_struct *hc = NULL;
 
+		/* burstkey: a requeue that has not slept since its wake queues behind
+		 * fresh wakes by the runtime it burned since then, weighted, capped. */
+		if (cake_tog_burstkey && !(enq_flags & CAKE_ENQ_WAKEUP)) {
+			struct cake_groove *gr = bpf_task_storage_get(&cake_grooves, p, 0, 0);
+
+			if (gr) {
+				u64 burst = p->se.sum_exec_runtime - gr->wake_sum;
+
+				vt = cake_scale_vtime_add(vt, burst < CAKE_BURST_LAG_NS ?
+							  burst : CAKE_BURST_LAG_NS,
+							  cake_recip_index(p));
+			}
+		}
+
 		/* Anti-collision: home held by an equally well-served peer, whose whole slice
 		 * would be waited out while other CPUs sit idle. Reaching here proves p is not
 		 * turn-starved, so only the occupant is tested, on the wake arm that reads it. */
@@ -3336,6 +3356,18 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime = cake_vtime_ceil(charged, ceil);
 }
 
+/* ops.runnable: burstkey stamps the runtime at wake; the off arm is empty. */
+void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
+{
+	struct cake_groove *gr;
+
+	if (!cake_tog_burstkey)
+		return;
+	gr = bpf_task_storage_get(&cake_grooves, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (gr)
+		gr->wake_sum = p->se.sum_exec_runtime;
+}
+
 /* ops.update_idle: the pool interlock's self-kick; wide hosts also mirror
  * occupancy into words. KEEP_BUILTIN_IDLE keeps the kernel tracking picks use. */
 void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
@@ -3487,6 +3519,7 @@ void BPF_STRUCT_OPS(cake_exit, struct scx_exit_info *ei)
 SCX_OPS_DEFINE(cake_ops,
 	       .select_cpu	= (void *)cake_select_cpu,
 	       .enqueue		= (void *)cake_enqueue,
+	       .runnable	= (void *)cake_runnable,
 	       .dispatch	= (void *)cake_dispatch,
 	       .cpu_release	= (void *)cake_cpu_release,
 	       .cpu_acquire	= (void *)cake_cpu_acquire,
