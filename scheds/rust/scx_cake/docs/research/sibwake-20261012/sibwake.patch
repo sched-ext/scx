@@ -1,0 +1,87 @@
+diff --git a/scheds/rust/scx_cake/src/bpf/cake.bpf.c b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+index ef0ca8a03..355832fb9 100644
+--- a/scheds/rust/scx_cake/src/bpf/cake.bpf.c
++++ b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+@@ -117,6 +117,7 @@ UEI_DEFINE(uei);
+ 
+ /* Declared ahead of the toggle block: the probe census below reads it. */
+ const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
++const volatile u8 cake_tog_sibwake;		/* same-process wake → waker's idle SMT sibling (--toggle sibwake=1) */
+ 
+ /* PROBE placement census for ops.select_cpu, not for scoring: per-CPU map,
+  * plain increment on this CPU's copy, no atomic, no shared line. */
+@@ -238,6 +239,7 @@ enum cake_stat {
+ 	CAKE_SITE_PEND_HEAL,		/* unserved reset under a zero token: pops the serve never saw */
+ 	CAKE_SITE_RELEASE_SERVE,	/* cpu_release found own-queue work and kicked an idle CPU */
+ 	CAKE_SITE_PINNED_PREEMPT,	/* pinned wake preempted the occupant on its insert */
++	CAKE_SITE_SIB_WAKE,		/* same-process wake placed on the waker's SMT sibling */
+ 	CAKE_STAT_NR,
+ };
+ 
+@@ -2040,6 +2042,24 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
+ 		}
+ 	}
+ 
++	/* sibwake: a thread waking another of its own process shares data with it;
++	 * the waker's idle SMT sibling shares its L1/L2. Not from a handler: the
++	 * current task there is whoever the interrupt hit. */
++	if (cake_tog_sibwake) {
++		u32 wc = bpf_get_smp_processor_id() & (MAX_CPUS - 1);
++		struct task_struct *cur = bpf_get_current_task_btf();
++		s32 sib = cpu_sibling[wc];
++
++		if (sib >= 0 && sib < 64 && cur != p && cur->mm && cur->mm == p->mm &&
++		    !cake_irq_live[wc].depth && cake_allowed(p, sib) &&
++		    !cake_cpu_irq_bad(sib) && cake_taci(sib, CAKE_SITE_TACI_WARM)) {
++			cake_stat_inc(CAKE_SITE_SIB_WAKE);
++			c = sib;
++			flags = CAKE_ENQ_IMMED;
++			goto place;
++		}
++	}
++
+ 	/* One whole-core snapshot serves the home test and the warm claim's core
+ 	 * preference; the atomic claim still decides admission. */
+ 	if (cake_one_word)
+diff --git a/scheds/rust/scx_cake/src/main.rs b/scheds/rust/scx_cake/src/main.rs
+index 2b2cea0ce..1e588e60a 100644
+--- a/scheds/rust/scx_cake/src/main.rs
++++ b/scheds/rust/scx_cake/src/main.rs
+@@ -121,7 +121,10 @@ struct Opts {
+ /// Every construct toggle: name, construct, BPF default. The default is
+ /// checked against the compiled rodata at start so the two cannot drift;
+ /// --help prints this table.
+-const TOGGLES: [(&str, &str, u8); 1] = [("probe", "diagnostics", 0)];
++const TOGGLES: [(&str, &str, u8); 2] = [
++    ("probe", "diagnostics", 0),
++    ("sibwake", "same-process wake to the waker's SMT sibling", 0),
++];
+ 
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+ enum KernelSignals {
+@@ -559,7 +562,7 @@ impl<'a> Scheduler<'a> {
+ 
+         // Campaign toggles land in rodata before load so the verifier prunes the off
+         // arms; one table names every toggle, a second line prints what differs.
+-        let fields: [&mut u8; 1] = [&mut rodata.cake_tog_probe];
++        let fields: [&mut u8; 2] = [&mut rodata.cake_tog_probe, &mut rodata.cake_tog_sibwake];
+         let mut slots: Vec<(&str, &str, &mut u8)> = TOGGLES
+             .iter()
+             .zip(fields)
+@@ -1144,7 +1147,7 @@ impl<'a> Scheduler<'a> {
+             info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
+         }
+         if self.probe_on {
+-            const NAMES: [&str; 120] = [
++            const NAMES: [&str; 121] = [
+                 "select_calls",
+                 "serial",
+                 "home_warm",
+@@ -1265,6 +1268,7 @@ impl<'a> Scheduler<'a> {
+                 "pend_heal",
+                 "release_serve",
+                 "pinned_preempt",
++                "sib_wake",
+             ];
+             // The name table must match the BPF enum exactly; a drift prints
+             // zeros silently because out-of-range lookups fail quietly.
