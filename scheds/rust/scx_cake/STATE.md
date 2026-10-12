@@ -55,6 +55,28 @@ Levels follow CLAUDE.md's metric order; game frames (level 1) are owed for all.
 | IRQ-woken wakes run next (idle CPU, else head of prev with PREEMPT; never an IRQ CPU or a seated stage) | Stock | — | KovaaK's A/B under 16 nice-10 hogs paused after 5 of 8 slots (maintainer's heavy tasks); data not read | Under test |
 | Preferred-core re-read at runtime | — | — | Ranking identical on 2026-09-26 and 10-05 (cores 4=5 > 3 > 1 > 2 > 0 > 6 > 7) | Dropped: static here; the startup read is correct |
 
+## Evidence, 2026-10-12: why lean `lazy` wins (KovaaK's, 20 s per arm)
+
+Data: `scx_cake_bench/runs/lazy_study_20261012/` (probe counters, bpf_stats).
+
+| | off | on | lazy |
+|---|---|---|---|
+| `select_cpu` ns/run | 81.9 | 71.0 | 68.2 |
+| claim time (`t_taci`, rel.) | 100 % | 73 % | 65 % |
+| wakes placed on warm home (`home_warm`) | 62.4 % | 62.5 % | **69.7 %** |
+| wakes claimed elsewhere (`taci_warm`) | 25.5 % | 25.3 % | **17.3 %** |
+| steals (`steal_moved`) | 7.5 % | 10.2 % | 11.9 % |
+
+Two effects. Cost: K1/K2 cut the claim and `select_cpu` by ~11–14 ns, shared by
+`on` and `lazy`; `on` alone showed no frame gain, so cost is not the frame win.
+Placement: under K3 a claimed CPU's core keeps its whole-idle bit until that CPU
+runs, so `cake_core_busy()` no longer vetoes a home whose sibling was just
+claimed; 7.3 points of wakes return to their cache-warm home instead of a cold
+whole core. The frame win tracks this placement change.
+Kernel-free follow-up: track cake's own claimed-not-yet-running CPUs and leave
+them out of the home core-busy test; that would give the same placement on
+stock kernels. Untested.
+
 ## Evidence, 2026-10-12: flag A/Bs (KovaaK's menu, 6 × 20 s per run)
 
 Runs and tools: `scx_cake_bench/runs/flags_20261012/` (`tools/batch.sh`,
