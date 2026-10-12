@@ -119,11 +119,15 @@ fn parameters(list: TokenStream) -> usize {
 /// the debug dump the kernel takes when it ejects the scheduler, 32768
 /// bytes by default.
 ///
-/// `task_slot` names the type of the scheduler's per-task state in the
-/// arena, see scx_rustsched's `slots`: the runtime then sets the pool up in
-/// ops.init(), gives each task a slot in ops.init_task() and takes it back
-/// after ops.exit_task(). `cid_slot` names the type of its per-CID state,
-/// see `cid_table`, which the runtime allocates in ops.init().
+/// Every task has a slot in the arena, see scx_rustsched's `slots`, where the
+/// node it is queued by lives: the runtime sets the pool and the queues of
+/// `dsq` up in ops.init(), gives each task a slot in ops.init_task(),
+/// takes a queued task back in ops.dequeue() before the scheduler's own,
+/// takes the slot back after ops.exit_task(), and asks for `TID_TO_TASK`.
+/// `task_slot` names the type of the scheduler's own per-task state,
+/// which the slot then holds as well. `cid_slot` names the type of its
+/// per-CID state, see `cid_table`, which the runtime allocates in
+/// ops.init().
 ///
 /// `idle_tracking = false` leaves the idle tracking to the scheduler,
 /// which then calls `cid_idle` itself from ops.init(), ops.update_idle()
@@ -141,7 +145,10 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap_or_else(|| "::scx_rustsched::ops::TIMEOUT_MS".into());
     let dump_len = argument(&arguments, "dump_len")
         .unwrap_or_else(|| "::scx_rustsched::uei::DUMP_LEN as u32".into());
-    let slot = argument(&arguments, "task_slot");
+    // Every task has a slot, for the node it is queued by: an empty one
+    // if the scheduler names none.
+    let slot = argument(&arguments, "task_slot")
+        .unwrap_or_else(|| "::scx_rustsched::slots::NoState".into());
     let cid = argument(&arguments, "cid_slot");
     // A misspelt argument would otherwise be dropped without a word.
     const ARGUMENTS: [&str; 7] = [
@@ -229,9 +236,10 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         // the scheduler defines them or not.
         let runtime = callback == "exit"
             || (idle_tracking && matches!(callback, "init" | "update_idle" | "dispatch"))
-            || (callback == "init" && (cid.is_some() || slot.is_some()))
-            || (callback == "init_task" && slot.is_some())
-            || (matches!(callback, "enable" | "exit_task") && slot.is_some());
+            || matches!(
+                callback,
+                "init" | "init_task" | "enable" | "exit_task" | "dequeue"
+            );
         if user.is_none() && !runtime {
             continue;
         }
@@ -250,27 +258,17 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                  }}\n"
             )
         };
-        let mut before = String::new();
-        if let Some(slot) = &slot {
-            match callback {
-                "init" => {
-                    before += &fallible(format!("::scx_rustsched::sched::init_slots::<{slot}>()"))
-                }
-                "init_task" => {
-                    before += &fallible(format!(
-                        "::scx_rustsched::sched::create_slot::<{slot}>(context)"
-                    ))
-                }
-                "enable" => {
-                    before += &format!("::scx_rustsched::sched::stash_slot::<{slot}>(context);\n")
-                }
-                _ => {}
-            }
-        }
-        let after = match (&slot, callback) {
-            (Some(slot), "exit_task") => {
-                format!("::scx_rustsched::sched::release_slot::<{slot}>(context);\n")
-            }
+        let before = match callback {
+            "init" => fallible(format!("::scx_rustsched::sched::init_slots::<{slot}>()")),
+            "init_task" => fallible(format!(
+                "::scx_rustsched::sched::create_slot::<{slot}>(context)"
+            )),
+            "enable" => format!("::scx_rustsched::sched::stash_slot::<{slot}>(context);\n"),
+            "dequeue" => format!("::scx_rustsched::sched::dequeue_slot::<{slot}>(context);\n"),
+            _ => String::new(),
+        };
+        let after = match callback {
+            "exit_task" => format!("::scx_rustsched::sched::release_slot::<{slot}>(context);\n"),
             _ => String::new(),
         };
         let body = match (callback, call) {
@@ -313,7 +311,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                  0",
                 call.map(|call| format!("{call};")).unwrap_or_default()
             ),
-            ("exit_task", call) if slot.is_some() => format!(
+            ("exit_task", call) => format!(
                 "{}
                  {after}
                  0",
@@ -363,7 +361,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                  flags: {{
                      #[allow(unused_imports)]
                      use ::scx_rustsched::ops::flags::*;
-                     {flags}
+                     ({flags}) | ::scx_rustsched::ops::flags::RUNTIME
                  }},
                  timeout_ms: {timeout},
                  dump_len: {dump_len},

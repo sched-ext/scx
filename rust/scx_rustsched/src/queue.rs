@@ -27,6 +27,12 @@
 //! at it, and an enqueue that finds its node still held by an older pop
 //! dispatches directly instead of reusing it.
 //!
+//! A scheduler uses the queues as `Edq::Cid` and `Edq::User`, see
+//! dsq.rs, and the runtime does the custody for it: the node of a task is
+//! in its slot, ahead of the scheduler's own state, see slots.rs, and
+//! `#[scheduler]` takes a queued task back in ops.dequeue(). What is here
+//! is the layer under that.
+//!
 //! One bit per CID says whether its queue has anything in it, so that a CID
 //! looking for work to pull walks a word of the mask instead of reading the
 //! queue of every CID of the node. The bit is set after a task is queued and
@@ -34,12 +40,13 @@
 //! clear in case a task was queued in between. It is a hint: a bit left set
 //! is cleared by the first CID that looks and finds nothing.
 
-use crate::sched::Cid;
+use crate::sched::{Cid, Error};
 use crate::task::Task;
 use core::ptr::null_mut;
 
 use crate::kfuncs::{bpf_arena_alloc_pages, scx_bpf_dsq_insert, scx_bpf_tid_to_task};
 use crate::{
+    cid_idle::{self, Scope},
     cid_table::CidTable,
     edq::{self, Cursor, ENOENT, Memory},
     mem,
@@ -62,10 +69,45 @@ const STEAL_SCAN: u32 = 8;
 
 /// A queued task's bookkeeping, at its node: the EDQ's words, then the tid
 /// the task is found by, its custody state, and the slice and enqueue
-/// flags its dispatch uses. A scheduler's task context embeds these words
-/// in this order.
-#[derive(Clone, Copy)]
+/// flags its dispatch uses.
+///
+/// It lives in the task's slot, see slots::node_of().
+#[derive(Clone, Copy, Default)]
 pub struct Node(pub u64);
+
+/// What a queue orders a task by: the deadline the queue is sorted on,
+/// the virtual time the task is eligible from, and the request the queue's
+/// shortest-request snapshot counts it with.
+#[derive(Clone, Copy)]
+pub struct Key {
+    pub deadline: u64,
+    pub vtime: u64,
+    pub request: u64,
+}
+
+impl Key {
+    /// A plain virtual time order, for a queue that is taken from the
+    /// head: the lowest `vtime` first.
+    #[inline(always)]
+    pub fn vtime(vtime: u64, slice: u64) -> Key {
+        Key {
+            deadline: vtime,
+            vtime,
+            request: slice,
+        }
+    }
+
+    /// The order of arrival, for a queue that is taken from the head: a
+    /// queue breaks the tie of equal keys by who was queued first.
+    #[inline(always)]
+    pub fn fifo(slice: u64) -> Key {
+        Key {
+            deadline: 0,
+            vtime: 0,
+            request: slice,
+        }
+    }
+}
 
 /// Words a node takes in a task context.
 pub const NODE_WORDS: u64 = edq::TASK_WORDS + 4;
@@ -121,6 +163,18 @@ impl Node {
 // The queue table, with the address of the queued mask in its header's
 // extra word. The loader reads the header.
 crate::cid_table!(Queues, QUEUES in ".data.queues", bytes: QUEUE_BYTES, extra: 1);
+
+// The queues that belong to no CID, `Edq::User`: a table of USER_MAX.
+crate::cid_table!(UserQueues, USER_QUEUES in ".data.uqueues", bytes: QUEUE_BYTES);
+
+/// How many `Edq::User` queues there are: their ids are below this.
+pub const USER_MAX: u64 = 64;
+
+/// The queue of `Edq::User(id)`, for an id below USER_MAX.
+#[inline(always)]
+pub fn user_queue(id: u64) -> u64 {
+    UserQueues::address(Cid(id as i32), 0)
+}
 
 pub use crate::pool::Arena;
 
@@ -225,6 +279,24 @@ pub fn insert(
     vtime: u64,
     request: u64,
 ) -> bool {
+    if !insert_at(queue(cid), node, slice, enq_flags, deadline, vtime, request) {
+        return false;
+    }
+    queued_set(cid);
+    true
+}
+
+/// insert(), into the queue at `queue`.
+#[inline(always)]
+pub fn insert_at(
+    queue: u64,
+    node: u64,
+    slice: u64,
+    enq_flags: u64,
+    deadline: u64,
+    vtime: u64,
+    request: u64,
+) -> bool {
     let task = Node(node);
     if edq::held(Arena, node) {
         task.set_state(DISPATCHED);
@@ -233,7 +305,7 @@ pub fn insert(
     task.set_dispatch_args(slice, enq_flags);
     // Custody is published before another CID's pop can see the node.
     task.set_state(ENQUEUED);
-    let result = rust_queue_insert(queue(cid), node, deadline, vtime, request);
+    let result = rust_queue_insert(queue, node, deadline, vtime, request);
     if result != 0 {
         Arena.cas(task.state_address(), ENQUEUED, NONE);
         if result != edq::ECANCELED {
@@ -241,7 +313,6 @@ pub fn insert(
         }
         return false;
     }
-    queued_set(cid);
     true
 }
 
@@ -347,7 +418,18 @@ pub enum Pick {
 /// switch to a word that 64 CPUs share, and scx_eevdf measured a pinned
 /// pair of yielders per CPU five times slower than fair.c that way.
 pub fn move_first_eligible(cid: Cid, reference: u64, requeue: bool, take_head: bool) -> Pick {
-    let queue = queue(cid);
+    let pick = pop_to_local(queue(cid), cid, reference, take_head);
+    if !requeue || matches!(pick, Pick::Nothing) {
+        rust_queued_check(cid.raw());
+    }
+    pick
+}
+
+/// Move a task from the queue at `queue` to this CPU's local DSQ, for
+/// `cid`: the head with `take_head`, else the first eligible against
+/// `reference`, or the head if none is.
+#[inline(always)]
+pub fn pop_to_local(queue: u64, cid: Cid, reference: u64, take_head: bool) -> Pick {
     let mut pick = Pick::Nothing;
     Arena.repeat(MAX_POPS, || {
         let head = edq::first_deadline(Arena, queue);
@@ -373,9 +455,6 @@ pub fn move_first_eligible(cid: Cid, reference: u64, requeue: bool, take_head: b
         }
         true
     });
-    if !requeue || matches!(pick, Pick::Nothing) {
-        rust_queued_check(cid.raw());
-    }
     pick
 }
 
@@ -386,7 +465,12 @@ pub fn move_first_eligible(cid: Cid, reference: u64, requeue: bool, take_head: b
 /// preempting. Without `eligible_scan` the head is the pick, whatever its
 /// eligibility, and nothing bounds the protection.
 pub fn head_deadline(cid: Cid, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
-    let queue = queue(cid);
+    head_deadline_at(queue(cid), reference, eligible_scan)
+}
+
+/// head_deadline(), of the queue at `queue`.
+#[inline(always)]
+pub fn head_deadline_at(queue: u64, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
     if !eligible_scan {
         return (edq::first_deadline(Arena, queue), 0);
     }
@@ -574,6 +658,26 @@ pub fn queued_key(node: u64) -> (u64, u64, u64) {
 /// a DSQ or to run. Returns true when the task was taken out of a backlog
 /// here, so that the caller stops counting it there.
 pub fn dequeue(node: u64, cid: Cid, deq_flags: u64) -> bool {
+    match dequeue_node(node, deq_flags) {
+        Left::Backlog => true,
+        Left::Queue => {
+            rust_queued_check(cid.raw());
+            false
+        }
+        Left::Nothing => false,
+    }
+}
+
+/// What a dequeue took its task out of.
+enum Left {
+    Nothing,
+    Queue,
+    Backlog,
+}
+
+/// dequeue(), whatever queue the node is in.
+#[inline(always)]
+fn dequeue_node(node: u64, deq_flags: u64) -> Left {
     let state = Node(node);
     let current = state.state();
     if deq_flags & SCX_DEQ_SCHED_CHANGE != 0 {
@@ -582,18 +686,122 @@ pub fn dequeue(node: u64, cid: Cid, deq_flags: u64) -> bool {
         state.set_state(DISPATCHED);
     }
     match edq::task_fini(Arena, node) {
-        1.. if current == PARKED => return true,
-        1.. => rust_queued_check(cid.raw()),
-        0 => {}
-        _ => pool::count_error(),
+        1.. if current == PARKED => Left::Backlog,
+        1.. => Left::Queue,
+        0 => Left::Nothing,
+        _ => {
+            pool::count_error();
+            Left::Nothing
+        }
     }
-    false
 }
 
 /// Take the task whose node is `node` out of every queue for good and
 /// wait for its holders, before its context is reused.
 pub fn detach(node: u64) -> bool {
     edq::task_detach(Arena, node) == 0
+}
+
+/// Set up the queues, one per CID and the `Edq::User` ones, from
+/// ops.init().
+pub fn setup() -> Result<(), Error> {
+    // The runtime's own count of the CIDs may not be set up yet.
+    let count = crate::kfuncs::scx_bpf_nr_online_cids();
+    Error::check(init(count))?;
+    for cid in crate::loops::range(0, count) {
+        init_cid(Cid(cid as i32));
+    }
+    Error::check(unsafe { UserQueues::init(USER_MAX as u32) })?;
+    for id in crate::loops::range(0, USER_MAX as u32) {
+        edq::queue_init(Arena, user_queue(u64::from(id)));
+    }
+    Ok(())
+}
+
+/// The kernel takes back the task whose node is `node`, ops.dequeue(),
+/// from whichever queue it is in, a CID's or an `Edq::User` one. Returns
+/// true when the task was taken out of a backlog, see dequeue().
+#[inline(always)]
+pub fn dequeue_any(node: u64, deq_flags: u64) -> bool {
+    // Where the node is now, for the queued bit of a CID's queue.
+    let queue = edq::membership(Arena, node);
+    match dequeue_node(node, deq_flags) {
+        Left::Backlog => return true,
+        Left::Nothing => return false,
+        Left::Queue => {}
+    }
+    let offset = queue.wrapping_sub(Queues::address(Cid(0), 0));
+    if offset < u64::from(cid_count()) * QUEUE_BYTES {
+        rust_queued_check((offset / QUEUE_BYTES) as i32);
+    }
+    false
+}
+
+/// The CIDs of a scope that have something queued, from `queued()`.
+pub struct Queued {
+    words: crate::loops::Range,
+    base: u32,
+    end: u32,
+    /// The mask word being walked, and what is left of its bits.
+    index: u32,
+    bits: u64,
+}
+
+/// The CIDs of `scope` around `anchor` whose queue has something in it, in
+/// CID order, as the queued bits say: a word of the mask is one load for
+/// 64 CIDs, where reading each queue is a cache line per CID. The bits are
+/// a hint, so a CID it yields can have been emptied since.
+#[inline(always)]
+pub fn queued(anchor: Cid, scope: Scope) -> Queued {
+    let (base, count) = cid_idle::scope_cids(anchor, scope);
+    let end = base + count;
+    Queued {
+        words: crate::loops::range(base / 64, end.div_ceil(64)),
+        base,
+        end,
+        index: 0,
+        bits: 0,
+    }
+}
+
+impl Iterator for Queued {
+    type Item = Cid;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Cid> {
+        // The walk of a word's bits is a loop too, which the verifier
+        // has to be able to bound.
+        if !crate::loops::can_loop() {
+            return None;
+        }
+        while self.bits == 0 {
+            self.index = self.words.next()?;
+            // The bits of this word that are CIDs of the scope.
+            let first = self.index * 64;
+            let low = self.base.max(first) - first;
+            let high = self.end.min(first + 64) - first;
+            let mut bits = queued_word(self.index) >> low << low;
+            if high < 64 {
+                bits &= (1 << high) - 1;
+            }
+            self.bits = bits;
+        }
+        let bit = self.bits.trailing_zeros();
+        self.bits &= self.bits - 1;
+        Some(Cid((self.index * 64 + bit) as i32))
+    }
+}
+
+impl Node {
+    /// Bring the node to the state of a task queued nowhere and held by
+    /// nobody.
+    #[inline(always)]
+    pub fn init(self) {
+        node_init(self.0);
+        self.set_tid(0);
+        self.set_state(NONE);
+        self.set_dispatch_args(0, 0);
+    }
 }
 
 /// The CID-centred part of this module, as methods.

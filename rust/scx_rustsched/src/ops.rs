@@ -118,6 +118,9 @@ pub mod flags {
     pub const ALLOW_QUEUED_WAKEUP: u64 = super::SCX_OPS_ALLOW_QUEUED_WAKEUP;
     pub const TID_TO_TASK: u64 = super::SCX_OPS_TID_TO_TASK;
     pub const ENQ_BLOCKED: u64 = super::SCX_OPS_ENQ_BLOCKED;
+    /// What the runtime asks for itself, added to the scheduler's flags:
+    /// a CPU that takes a task from a queue in the arena finds it by tid.
+    pub const RUNTIME: u64 = TID_TO_TASK;
 }
 
 /// Was the scheduler loaded with all of the ops `flags`, as `#[scheduler]`

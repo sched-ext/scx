@@ -36,9 +36,6 @@ kfuncs! {
     fn bpf_cgroup_from_id(id: U64) -> CgroupPtr;
     fn bpf_arena_free_pages(map: VoidPtr, address: VoidPtr, count: U32);
     fn scx_bpf_dump_bstr(fmt: BytePtr, data: U64Ptr, data__sz: U32);
-    fn scx_bpf_dsq_insert_vtime(task: TaskPtr, dsq_id: U64, slice: U64, vtime: U64, enq_flags: U64);
-    #[safe] fn scx_bpf_create_dsq(dsq_id: U64, node: I32) -> I32;
-    #[safe] fn scx_bpf_dsq_move_to_local(dsq_id: U64) -> Bool;
     #[weak] #[safe] fn scx_bpf_cid_node(cid: I32) -> I32;
     #[weak] fn scx_bpf_cgroup_nr_cpus(cgroup: CgroupPtr) -> U32;
 }

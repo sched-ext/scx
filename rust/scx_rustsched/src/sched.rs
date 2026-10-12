@@ -654,7 +654,26 @@ pub fn init_cid_slots<T: crate::cid_table::CidSlot>() -> Result<(), Error> {
 /// Only from ops.init().
 #[inline(always)]
 pub fn init_slots<T: crate::slots::TaskSlot>() -> Result<(), Error> {
-    Error::check(unsafe { crate::slots::initialize_pool::<T>(config::get(config::ARENA_PAGES)) })
+    Error::check(unsafe { crate::slots::initialize_pool::<T>(config::get(config::ARENA_PAGES)) })?;
+    // The queues behind `Edq::Cid` and `Edq::User`.
+    crate::queue::setup()
+}
+
+/// The runtime's part of ops.dequeue(task, flags) for a scheduler with a
+/// slot `T` per task, before the scheduler's: the kernel takes back a task
+/// that waits on a `Edq::Cid` or `Edq::User` queue.
+///
+/// # Safety
+/// `context` must be ops.dequeue()'s.
+#[inline(always)]
+pub unsafe fn dequeue_slot<T: crate::slots::TaskSlot>(context: *const u64) {
+    if !T::OWN_DEQUEUE {
+        unsafe {
+            if let Some(node) = crate::slots::node(*context as *mut task_struct) {
+                crate::queue::dequeue_any(node, *context.add(1));
+            }
+        }
+    }
 }
 
 /// The runtime's part of ops.init_task(task, args) for a scheduler with a
@@ -668,13 +687,13 @@ pub unsafe fn create_slot<T: crate::slots::TaskSlot>(context: *const u64) -> Res
 }
 
 /// The runtime's part of ops.enable(task) for a scheduler with a slot `T`
-/// per task: keep the slot's address in the task, if `T` asks for it.
+/// per task: keep the slot's address in the task.
 ///
 /// # Safety
 /// `context` must be ops.enable()'s.
 #[inline(always)]
 pub unsafe fn stash_slot<T: crate::slots::TaskSlot>(context: *const u64) {
-    unsafe { crate::slots::stash::<T>(*context as *mut task_struct) };
+    unsafe { crate::slots::stash(*context as *mut task_struct) };
 }
 
 /// The runtime's part of ops.exit_task(task, args) for a scheduler with a

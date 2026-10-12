@@ -43,10 +43,10 @@
 //! - `edq`, `slab`, `ravg`, `clock`: the eligible deadline queue and the
 //!   free list, over any memory, running averages, and the per-CID task
 //!   clock.
-//! - `queue`: an eligible deadline queue per CID, with the custody of the
-//!   tasks in them.
+//! - `queue`: the eligible deadline queues behind `Edq::Cid` and
+//!   `Edq::User`, with the custody of the tasks in them.
 //! - `slots`: the pool of per-task slots in the arena, where a queued
-//!   task's node lives.
+//!   task's node lives, with the scheduler's own per-task state.
 //! - `uei`: the exit record.
 //!
 //! The crate is built for the BPF target by the scheduler's build script.
@@ -105,6 +105,7 @@ pub use scx_rustsched_macros::opts;
 pub mod prelude {
     pub use crate::cgroup::{Cgroup, CgroupArgs, CgroupGuard};
     pub use crate::cmask::Cmask;
+    pub use crate::dsq::Edq;
     pub use crate::dsq::{self, Dsq, SLICE_DFL};
     pub use crate::dump::DumpCtx;
     pub use crate::idle::{self, Kind, Scope};
