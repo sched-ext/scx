@@ -55,6 +55,20 @@ Levels follow CLAUDE.md's metric order; game frames (level 1) are owed for all.
 | IRQ-woken wakes run next (idle CPU, else head of prev with PREEMPT; never an IRQ CPU or a seated stage) | Stock | — | KovaaK's A/B under 16 nice-10 hogs paused after 5 of 8 slots (maintainer's heavy tasks); data not read | Under test |
 | Preferred-core re-read at runtime | — | — | Ranking identical on 2026-09-26 and 10-05 (cores 4=5 > 3 > 1 > 2 > 0 > 6 > 7) | Dropped: static here; the startup read is correct |
 
+## Evidence, 2026-10-12: flag A/Bs (KovaaK's menu, 6 × 20 s per run)
+
+Runs and tools: `scx_cake_bench/runs/flags_20261012/` (`tools/batch.sh`,
+`flag_ab.py`); one HEAD binary, each arm's loader line checked.
+
+| Arm vs default | Quiet | 16 hogs | Verdict |
+|---|---|---|---|
+| `--portable-bitops` vs native (patch 1) | two orders pooled, 12 slots/arm: 1 % low +4.4 % (29/36), 0.1 % low +13 % (31/36), stddev −21 % (31/36), avg −0.04 % | p99 −2.7 % (8/9), 1 % low +2.5 % (8/9), avg +0.2 % | Candidate, unexplained: JIT inlines native (`tzcnt`/`popcnt`), every ctz input is nonzero (no semantic gap), ns/run equal (`select_cpu` 65.5 native vs 66.9 portable, rest ±1–2 ns). Default unchanged pending the maintainer |
+| `--native-ring` vs off | mixed, all within noise | mixed | Rejected |
+
+Per-callback cost seen on the way (bpf_stats, in game): `cake_enqueue`
+667–691 ns/run and `cake_cpu_release` 355–399 ns/run dwarf the rest
+(`select_cpu` ~66, `running` ~18, `stopping` ~19).
+
 ## Evidence, 2026-10-12: cache-line contention (perf c2c, IBS)
 
 KovaaK's menu + cake (lean `lazy`), 20 s quiet and 20 s under 16 hogs.
