@@ -23,7 +23,7 @@ top; owed items move to Owed first.
   ops.running). Policy base: the 2026-09-28 pool-serving C entry (archive).
 - Test-only flags (the release is flagless): `--native-bitops`, `--portable-bitops`,
   `--native-ring`, `--native-hist`, `--kernel-signals`, `--signal-report`,
-  `--handoff-ns`, `--toggle probe=1`, `--inspect-bpf`, `--lean-idle` (uncommitted).
+  `--handoff-ns`, `--toggle probe=1`, `--inspect-bpf`, `--lean-idle` (default `lazy`; silent fallback without the kernel flag).
 - A/B binaries: `cost_c1c1e5aad80f` (base) and `cost_400e7a766333` (E1) were lost
   when `target/` was wiped on 2026-10-05 about 11:26 (not by this repo's session);
   rebuild them from those commits (`cakebench cost` builds arms by SHA).
@@ -46,7 +46,7 @@ Levels follow CLAUDE.md's metric order; game frames (level 1) are owed for all.
 | Division-free quotients | Portable, or custom MULHI/CLZ | Portable arithmetic | BPF +5.8 %, select +11 ns | Removed |
 | Per-CPU claim line | Stock | — | select +3.23, enqueue +71.31 ns | Rejected |
 | E2: whole-core word from idle word | Stock | — | select −0.01 ns | No effect |
-| K1–K4: lean idle claim (`SCX_OPS_LEAN_IDLE`, K3 as `_LAZY_SMT`) | Custom: `0001-cake-kernel-full-signals-idle-experimental-cachyos-7.2.9.patch` | Flags ignored; regular claim | Claim ≈ 60 % of select; masks 32 lines apart (10-05); boots on 7.2.9-2-cachyos-custom (10-11). KovaaK's menu, quiet host, 12×30 s ABBA (10-12): `lazy` vs `off` avg FPS +1.4 %, p99 −5.1 %, 1 % low +7.5 %, stddev −18 %, each 16/16 pairs; `on` ≈ `off` | `lazy` leads; confirm in a played scenario and under load; `cakebench cost` owed |
+| K1–K4: lean idle claim (`SCX_OPS_LEAN_IDLE`, K3 as `_LAZY_SMT`) | Custom: `0001-cake-kernel-full-signals-idle-experimental-cachyos-7.2.9.patch` | Flags ignored; regular claim | Claim ≈ 60 % of select; masks 32 lines apart (10-05); boots on 7.2.9-2-cachyos-custom (10-11). KovaaK's menu, quiet host, 12×30 s ABBA (10-12): `lazy` vs `off` avg FPS +1.4 %, p99 −5.1 %, 1 % low +7.5 %, stddev −18 %, each 16/16 pairs; `on` ≈ `off`. Under 16 nice-10 hogs (98 % busy), 12×30 s: avg +0.25 %, p99.9 −2.4 %, 0.1 % low +6.6 % (32/36), max −16 %; no metric worse | Default `lazy` since 10-12; played-scenario check and `cakebench cost` owed |
 | Spread pick: ties in the best tier go to the first CPU above the caller (rotate form B, mask form B2) | Stock | — | select +8.1 / +11.7 / +8.3 ns in three rounds; profile +130 cyc/run (+31 insns, rest stalls); retakes −42 %, evictee claims −31 % (census); total BPF equal or +2.9 %; appsim p99 equal | Rejected at levels 2–3, removed; patch kept in `docs/research/counting-classifiers-20261005/` |
 | D+F: wide-host idle count by popcount; `update_idle` pool interlock on every host | Stock (> 64 CPUs) | Global atomic counter; no interlock on wide hosts | Forced-wide on this host, two rounds: `update_idle` −1.09 / −0.64 ns, running −2.69 / −1.05 ns; 0 stalls; one-word arm neutral | Keep (uncommitted); a real > 64-CPU host owed |
 | Exit pool check, census identities, detach-first reports | Stock | — | Identities exact in 4 probe slots; pending 0 at every exit; the `-v` events row is no longer 0 0 0 | Keep (uncommitted, diagnostics only) |
@@ -99,7 +99,8 @@ objects that may share a line with others; on 2026-10-05 they sat in different l
    The maintainer builds and installs it; then a same-boot `cakebench cost` A/B
    of `--lean-idle off` vs `on` vs `lazy` (K3 hides a just-claimed sibling from
    `cake_core_busy` until that CPU runs). KovaaK's menu A/B done 10-12
-   (`scx_cake_bench/runs/kovaaks_leanidle_20261012`): `lazy` wins; `on` neutral.
+   (`scx_cake_bench/runs/kovaaks_leanidle_20261012`, quiet and loaded): `lazy` wins,
+   `on` neutral; `lazy` is the default.
 5. `irq_leave` reads 550–1,010 ns/run (09-25 profile: 946 cycles / 600 insns); cause open.
 6. Flagless release: decide or remove each test-only flag above.
 7. `cake.bpf.c` comment density 0.25, over the 0.20 ceiling (also true before 10-04).
