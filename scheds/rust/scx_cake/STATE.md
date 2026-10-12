@@ -168,6 +168,7 @@ Appsim helldivers2-mission-fitted, 20 s, `cakebench cost`, busy 30–31 %, runs 
 | 2 | ⏳ | DSQ direct A/B | reboot with `sched_ext.dsq_direct=0` |
 | 3 | ⏳ | Lean `lazy`: GPU-limited check (FPS cap or high resolution) + `cakebench cost` | CPU-limited KovaaK's A/B done 10-12 (`runs/kovaaks_leanidle_20261012`) |
 | 4 | 🔍 | `cake_enqueue` 610–710 ns, `cake_cpu_release` ~370 ns/run | 10× the other callbacks — next cost target |
+| 4b | 🔍 | Tail spikes | KovaaK's CPU-limited: worst frames hold **no** scheduler delay > 50 µs (threads blocked on game sync / GPU) — `scx_cake_bench/runs/tail_20261012/RESULT.md` · capture again where spikes are seen (GPU-limited, loaded, other games) |
 | 5 | 🔍 | `irq_leave` 550–1,010 ns/run | 09-25 profile: 946 cycles / 600 insns; cause open |
 | 6 | 🧹 | Flagless release | decide or remove each test-only flag |
 | 7 | 🧹 | `cake.bpf.c` comment density 0.25 | ceiling 0.20 |
