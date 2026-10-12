@@ -6347,6 +6347,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_rburst"
+version = "1.1.4"
+dependencies = [
+ "clap",
+ "log",
+ "scx_rustsched_build",
+ "scx_rustsched_loader",
+ "scx_stats",
+ "scx_stats_derive",
+ "serde",
+]
+
+[[package]]
 name = "scx_rlfifo"
 version = "1.1.4"
 dependencies = [

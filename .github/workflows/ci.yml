@@ -213,7 +213,7 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Unit tests
-        run: cargo nextest run --cargo-profile ci --workspace --exclude scx_rlocal --exclude scx_rvtime --locked --no-fail-fast --status-level fail --success-output never
+        run: cargo nextest run --cargo-profile ci --workspace --exclude scx_rburst --exclude scx_rlocal --exclude scx_rvtime --locked --no-fail-fast --status-level fail --success-output never
       - name: Check scx_arena package contents
         run: |
           # Package the workspace deps too. On a release PR, their bumped
@@ -433,7 +433,7 @@ jobs:
         run: |
           rustup install nightly
           rustup component add rustfmt --toolchain nightly
-          RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo +nightly doc --workspace --exclude scx_rlocal --exclude scx_rvtime --no-deps --bins --lib --examples --document-private-items
+          RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo +nightly doc --workspace --exclude scx_rburst --exclude scx_rlocal --exclude scx_rvtime --no-deps --bins --lib --examples --document-private-items
           sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
           cargo install htmlq
           git clone --single-branch -b "$SCHED_EXT_KERNEL_TAG" --depth 1 "$SCHED_EXT_KERNEL_URL" linux

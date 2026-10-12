@@ -34,6 +34,7 @@ members = [
     "scheds/experimental/scx_mavd",
     "scheds/experimental/scx_rlfifo",
     "scheds/experimental/scx_mlfq",
+    "scheds/experimental/scx_rburst",
     "scheds/experimental/scx_rlocal",
     "scheds/experimental/scx_rvtime",
     "tools/scx_characterize",
@@ -45,7 +46,7 @@ members = [
 # The Rust BPF runtime and the BPF side of each scheduler on it are built
 # for a BPF target by the scheduler's build script, each a workspace of its
 # own.
-exclude = ["rust/scx_rustsched", "rust/scx_rustsched_macros", "scheds/experimental/scx_rlocal/bpf", "scheds/experimental/scx_rvtime/bpf"]
+exclude = ["rust/scx_rustsched", "rust/scx_rustsched_macros", "scheds/experimental/scx_rburst/bpf", "scheds/experimental/scx_rlocal/bpf", "scheds/experimental/scx_rvtime/bpf"]
 resolver = "3"
 
 [profile.release]
