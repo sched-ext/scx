@@ -66,10 +66,11 @@ struct Opts {
     #[clap(long, value_name = "NEW_CSV")]
     signal_report: Option<std::path::PathBuf>,
 
-    /// Experimental lean idle claim (custom kernel): off, on, or lazy (on plus
-    /// the deferred core-word clear). Missing support falls back.
-    #[clap(long, value_enum, default_value_t = LeanIdle::Off)]
-    lean_idle: LeanIdle,
+    /// Lean idle claim (custom kernel): off, on, or lazy (on plus the deferred
+    /// core-word clear) [default: lazy]. Missing support falls back to the
+    /// regular claim; only an explicit request warns.
+    #[clap(long, value_enum)]
+    lean_idle: Option<LeanIdle>,
 
     /// Require native CTZ/POPCNT. By default, detect support at startup and fall back.
     #[clap(long)]
@@ -367,19 +368,19 @@ impl<'a> Scheduler<'a> {
         if opts.kernel_signals != KernelSignals::Off && !signal_support {
             warn!("Kernel signal v1 support absent; using existing Cake policy");
         }
+        // Lazy is the default: KovaaK's 10-12, quiet and loaded, no metric worse than off.
+        let lean_idle = opts.lean_idle.unwrap_or(LeanIdle::Lazy);
         let lean_flags = lean_idle_flags(
-            opts.lean_idle,
+            lean_idle,
             compat::read_enum("scx_ops_flags", "SCX_OPS_LEAN_IDLE").unwrap_or(0),
             compat::read_enum("scx_ops_flags", "SCX_OPS_LEAN_IDLE_LAZY_SMT").unwrap_or(0),
         );
-        if opts.lean_idle != LeanIdle::Off {
-            info!(
-                "Lean idle    requested={:?} flags={lean_flags:#x}",
-                opts.lean_idle
-            );
-            if lean_flags == 0 {
-                warn!("Lean idle claim absent from this kernel; using the regular claim");
-            }
+        let lean_asked = opts.lean_idle.is_some_and(|m| m != LeanIdle::Off);
+        if lean_flags != 0 || lean_asked {
+            info!("Lean idle    requested={lean_idle:?} flags={lean_flags:#x}");
+        }
+        if lean_flags == 0 && lean_asked {
+            warn!("Lean idle claim absent from this kernel; using the regular claim");
         }
 
         // The startup banner is cake's only telemetry, one-shot: version, machine
