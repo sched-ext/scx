@@ -3,8 +3,8 @@
 
 //! The sched_ext side of the program: the kernel types the callbacks take,
 //! the enqueue, dequeue, kick and ops flags, and the struct_ops map the
-//! scheduler registers with, declared by `scx_ops!` from the callbacks the
-//! scheduler implements.
+//! scheduler registers with, which `#[scheduler]` declares with `ops_map!`
+//! from the callbacks the scheduler implements.
 //!
 //! The struct declares only the `sched_ext_ops_cid` members the scheduler
 //! uses. libbpf maps them by name into the running kernel's structure
@@ -23,6 +23,11 @@ pub struct task_struct {
 
 #[repr(C)]
 pub struct cpumask {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
+pub struct scx_cmask {
     _opaque: [u8; 0],
 }
 
@@ -136,22 +141,33 @@ macro_rules! ops_signature {
     (tick) => { unsafe extern "C" fn(*mut $crate::ops::task_struct) };
     (running) => { unsafe extern "C" fn(*mut $crate::ops::task_struct) };
     (stopping) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, bool) };
+    (runnable) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, u64) };
     (quiescent) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, u64) };
     (r#yield) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::task_struct) -> bool };
     (core_sched_before) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::task_struct) -> bool };
-    (set_cmask) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *const core::ffi::c_void) };
+    (set_weight) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, u32) };
+    (set_cmask) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *const $crate::ops::scx_cmask) };
     (enable) => { unsafe extern "C" fn(*mut $crate::ops::task_struct) };
+    (disable) => { unsafe extern "C" fn(*mut $crate::ops::task_struct) };
+    (cid_online) => { unsafe extern "C" fn(i32) };
+    (cid_offline) => { unsafe extern "C" fn(i32) };
     (init) => { unsafe extern "C" fn() -> i32 };
     (exit) => { unsafe extern "C" fn(*mut $crate::ops::scx_exit_info) };
+    (dump) => { unsafe extern "C" fn(*mut $crate::ops::scx_dump_ctx) };
+    (dump_cid) => { unsafe extern "C" fn(*mut $crate::ops::scx_dump_ctx, i32, bool) };
     (dump_task) => { unsafe extern "C" fn(*mut $crate::ops::scx_dump_ctx, *mut $crate::ops::task_struct) };
     (cpuctl_init) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, *mut $crate::ops::scx_cgroup_init_args) -> i32 };
     (cpuctl_exit) => { unsafe extern "C" fn(*mut $crate::ops::cgroup) };
+    (cpuctl_prep_move) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::cgroup, *mut $crate::ops::cgroup) -> i32 };
+    (cpuctl_cancel_move) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::cgroup, *mut $crate::ops::cgroup) };
     (cpuctl_move) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::cgroup, *mut $crate::ops::cgroup) };
     (cpuctl_set_weight) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, u32) };
     (cpuctl_set_idle) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, bool) };
     (cpuctl_set_bandwidth) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, u64, u64, u64) };
     (cgroup_init) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, *mut $crate::ops::scx_cgroup_init_args) -> i32 };
     (cgroup_exit) => { unsafe extern "C" fn(*mut $crate::ops::cgroup) };
+    (cgroup_prep_move) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::cgroup, *mut $crate::ops::cgroup) -> i32 };
+    (cgroup_cancel_move) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::cgroup, *mut $crate::ops::cgroup) };
     (cgroup_move) => { unsafe extern "C" fn(*mut $crate::ops::task_struct, *mut $crate::ops::cgroup, *mut $crate::ops::cgroup) };
     (cgroup_set_weight) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, u32) };
     (cgroup_set_idle) => { unsafe extern "C" fn(*mut $crate::ops::cgroup, bool) };
@@ -204,37 +220,6 @@ macro_rules! ops_map {
             exit_dump_len: $dump_len,
             name: $crate::ops::name($name),
         };
-    };
-}
-
-/// The scheduler's struct_ops map, `rust_ops`, from the callbacks it
-/// implements. With a `cgroup` block, the six cgroup callbacks are declared
-/// twice: under the cpuctl_* names the running kernel gives them, in
-/// `rust_ops`, and under the cgroup_* names of a kernel from before the cid
-/// form renamed them, in `rust_ops_cgroup`, whose section is optional. The
-/// loader creates the one the kernel has.
-#[macro_export]
-macro_rules! scx_ops {
-    (name: $name:expr, flags: $flags:expr, timeout_ms: $timeout:expr, dump_len: $dump_len:expr,
-     callbacks: { $($member:ident: $function:path,)* }) => {
-        $crate::ops_map!(rust_ops: sched_ext_ops_cid in ".struct_ops.link",
-            name: $name, flags: $flags, timeout_ms: $timeout, dump_len: $dump_len,
-            { $($member: $function,)* });
-    };
-    (name: $name:expr, flags: $flags:expr, timeout_ms: $timeout:expr, dump_len: $dump_len:expr,
-     callbacks: { $($member:ident: $function:path,)* },
-     cgroup: { init: $init:path, exit: $exit:path, move: $move:path,
-               set_weight: $weight:path, set_idle: $idle:path, set_bandwidth: $bandwidth:path, }) => {
-        $crate::ops_map!(rust_ops: sched_ext_ops_cid in ".struct_ops.link",
-            name: $name, flags: $flags, timeout_ms: $timeout, dump_len: $dump_len,
-            { $($member: $function,)*
-              cpuctl_init: $init, cpuctl_exit: $exit, cpuctl_move: $move,
-              cpuctl_set_weight: $weight, cpuctl_set_idle: $idle, cpuctl_set_bandwidth: $bandwidth, });
-        $crate::ops_map!(rust_ops_cgroup: sched_ext_ops_cid___cgroup in "?.struct_ops.link",
-            name: $name, flags: $flags, timeout_ms: $timeout, dump_len: $dump_len,
-            { $($member: $function,)*
-              cgroup_init: $init, cgroup_exit: $exit, cgroup_move: $move,
-              cgroup_set_weight: $weight, cgroup_set_idle: $idle, cgroup_set_bandwidth: $bandwidth, });
     };
 }
 

@@ -18,22 +18,44 @@
 
 use proc_macro::{Delimiter, TokenStream, TokenTree};
 
-/// The callbacks an `impl` block may define: the struct_ops member, and
-/// whether the kernel lets it sleep.
-const CALLBACKS: [(&str, bool); 13] = [
-    ("select_cid", false),
-    ("enqueue", false),
-    ("dequeue", false),
-    ("dispatch", false),
-    ("tick", false),
-    ("running", false),
-    ("stopping", false),
-    ("quiescent", false),
-    ("enable", false),
-    ("update_idle", false),
-    ("init_task", true),
-    ("exit_task", false),
-    ("init", true),
+/// The callbacks an `impl` block may define: the function's name, the
+/// struct_ops member, and whether the kernel lets it sleep. ops.yield() is
+/// `yield_task`, `yield` being a keyword, and the cgroup callbacks have
+/// the cgroup_* names, whatever the running kernel calls the members.
+const CALLBACKS: [(&str, &str, bool); 33] = [
+    ("select_cid", "select_cid", false),
+    ("enqueue", "enqueue", false),
+    ("dequeue", "dequeue", false),
+    ("dispatch", "dispatch", false),
+    ("tick", "tick", false),
+    ("runnable", "runnable", false),
+    ("running", "running", false),
+    ("stopping", "stopping", false),
+    ("quiescent", "quiescent", false),
+    ("yield_task", "r#yield", false),
+    ("core_sched_before", "core_sched_before", false),
+    ("set_weight", "set_weight", false),
+    ("set_cmask", "set_cmask", false),
+    ("update_idle", "update_idle", false),
+    ("init_task", "init_task", true),
+    ("exit_task", "exit_task", false),
+    ("enable", "enable", false),
+    ("disable", "disable", false),
+    ("dump", "dump", false),
+    ("dump_cid", "dump_cid", false),
+    ("dump_task", "dump_task", false),
+    ("cgroup_init", "cpuctl_init", true),
+    ("cgroup_exit", "cpuctl_exit", false),
+    ("cgroup_prep_move", "cpuctl_prep_move", false),
+    ("cgroup_move", "cpuctl_move", false),
+    ("cgroup_cancel_move", "cpuctl_cancel_move", false),
+    ("cgroup_set_weight", "cpuctl_set_weight", false),
+    ("cgroup_set_bandwidth", "cpuctl_set_bandwidth", false),
+    ("cgroup_set_idle", "cpuctl_set_idle", false),
+    ("cid_online", "cid_online", false),
+    ("cid_offline", "cid_offline", false),
+    ("init", "init", true),
+    ("exit", "exit", false),
 ];
 
 fn error(message: &str) -> TokenStream {
@@ -93,10 +115,19 @@ fn parameters(list: TokenStream) -> usize {
 ///
 /// `name` is required. `flags` is an expression over the names of
 /// `ops::flags`, zero by default. `timeout_ms` is the watchdog timeout,
-/// scx_rustsched's `ops::TIMEOUT_MS` (5 s) by default. `task` names the type of
-/// the scheduler's per-task state, which the runtime then creates in
-/// ops.init_task(), and `cid` the type of its per-CID state, set up in
-/// ops.init(). The attribute declares the type the block implements.
+/// scx_rustsched's `ops::TIMEOUT_MS` (5 s) by default. `dump_len` is the size of
+/// the debug dump the kernel takes when it ejects the scheduler, 32768
+/// bytes by default.
+///
+/// `task` names the type of the scheduler's per-task state, which the
+/// runtime then creates in ops.init_task(), and `cid` the type of its
+/// per-CID state, set up in ops.init().
+///
+/// `idle_tracking = false` leaves the idle tracking to the scheduler,
+/// which then calls `cid_idle` itself from ops.init(), ops.update_idle()
+/// and ops.dispatch(), where it can skip the re-arm on the paths it knows
+/// leave the CID busy. The attribute declares the type the block
+/// implements.
 #[proc_macro_attribute]
 pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let arguments: Vec<TokenTree> = arguments.into_iter().collect();
@@ -106,10 +137,28 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let flags = argument(&arguments, "flags").unwrap_or_else(|| "0".into());
     let timeout = argument(&arguments, "timeout_ms")
         .unwrap_or_else(|| "::scx_rustsched::ops::TIMEOUT_MS".into());
+    let dump_len = argument(&arguments, "dump_len")
+        .unwrap_or_else(|| "::scx_rustsched::uei::DUMP_LEN as u32".into());
     let task = argument(&arguments, "task");
     let cid = argument(&arguments, "cid");
+    let idle_tracking = match argument(&arguments, "idle_tracking").as_deref() {
+        None | Some("true") => true,
+        Some("false") => false,
+        Some(_) => return error("#[scheduler]: idle_tracking is true or false"),
+    };
 
     let tokens: Vec<TokenTree> = item.clone().into_iter().collect();
+    // Past the block's own attributes, its documentation among them.
+    let mut start = 0;
+    while let (Some(TokenTree::Punct(hash)), Some(TokenTree::Group(attribute))) =
+        (tokens.get(start), tokens.get(start + 1))
+    {
+        if hash.as_char() != '#' || attribute.delimiter() != Delimiter::Bracket {
+            break;
+        }
+        start += 2;
+    }
+    let tokens = &tokens[start..];
     let (Some(TokenTree::Ident(keyword)), Some(TokenTree::Ident(ty)), Some(TokenTree::Group(body))) =
         (tokens.first(), tokens.get(1), tokens.get(2))
     else {
@@ -136,7 +185,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     for (function, _) in &functions {
-        if !CALLBACKS.iter().any(|(member, _)| member == function) {
+        if !CALLBACKS.iter().any(|(callback, ..)| callback == function) {
             return error(&format!(
                 "#[scheduler]: `{function}` is not a callback this attribute knows"
             ));
@@ -151,13 +200,17 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     if let Some(cid) = &cid {
         output += &format!("::scx_rustsched::cid_state!({cid});\n");
     }
-    let mut members = String::new();
-    for (member, sleepable) in CALLBACKS {
-        let user = defined(member);
-        // The runtime has work of its own in these three, so they exist
-        // whether the scheduler defines them or not.
-        let runtime = matches!(member, "init" | "update_idle" | "dispatch")
-            || (member == "init_task" && task.is_some());
+    // The members of the struct_ops map, and the same under the names a
+    // kernel from before the cid form gives the cgroup callbacks.
+    let (mut members, mut legacy, mut cgroups) = (String::new(), String::new(), false);
+    for (callback, member, sleepable) in CALLBACKS {
+        let user = defined(callback);
+        // The runtime has work of its own in these, so they exist whether
+        // the scheduler defines them or not.
+        let runtime = callback == "exit"
+            || (idle_tracking && matches!(callback, "init" | "update_idle" | "dispatch"))
+            || (callback == "init" && cid.is_some())
+            || (callback == "init_task" && task.is_some());
         if user.is_none() && !runtime {
             continue;
         }
@@ -166,15 +219,20 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                 .map(|index| format!("::scx_rustsched::sched::Arg::arg(context, {index})"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{ty}::{member}({arguments})")
+            format!("{ty}::{callback}({arguments})")
         });
-        let body = match (member, call) {
+        let body = match (callback, call) {
             ("init", call) => format!(
-                "if let Err(error) = ::scx_rustsched::sched::init() {{
-                     return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
-                 }}
+                "{}
                  {}
                  {}",
+                if idle_tracking {
+                    "if let Err(error) = ::scx_rustsched::sched::init() {
+                         return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
+                     }"
+                } else {
+                    ""
+                },
                 cid.as_ref()
                     .map(|cid| format!(
                         "if let Err(error) = ::scx_rustsched::sched::init_cids::<{cid}>() {{
@@ -194,15 +252,21 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                 call.map(|call| format!("::scx_rustsched::sched::Ret::ret({call})"))
                     .unwrap_or_else(|| "0".into())
             ),
-            ("update_idle", call) => format!(
+            ("update_idle", call) if idle_tracking => format!(
                 "::scx_rustsched::sched::update_idle(context);
                  {}
                  0",
                 call.map(|call| format!("{call};")).unwrap_or_default()
             ),
-            ("dispatch", call) => format!(
+            ("dispatch", call) if idle_tracking => format!(
                 "{}
                  ::scx_rustsched::sched::dispatched(context);
+                 0",
+                call.map(|call| format!("{call};")).unwrap_or_default()
+            ),
+            ("exit", call) => format!(
+                "::scx_rustsched::uei::record(context);
+                 {}
                  0",
                 call.map(|call| format!("{call};")).unwrap_or_default()
             ),
@@ -214,33 +278,50 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         } else {
             "struct_ops"
         };
+        let program = member.trim_start_matches("r#");
         output += &format!(
             "#[unsafe(no_mangle)]
-             #[unsafe(link_section = \"{section}/{member}\")]
-             pub unsafe extern \"C\" fn scx_{member}(context: *const u64) -> u64 {{
+             #[unsafe(link_section = \"{section}/{program}\")]
+             pub unsafe extern \"C\" fn scx_{callback}(context: *const u64) -> u64 {{
                  ::scx_rustsched::sched::enter();
                  #[allow(unused_unsafe)]
                  unsafe {{ {body} }}
              }}\n"
         );
-        members += &format!("{member}: scx_{member},\n");
+        members += &format!("{member}: scx_{callback},\n");
+        cgroups |= member.starts_with("cpuctl_");
+        legacy += &format!(
+            "{}: scx_{callback},\n",
+            member.replace("cpuctl_", "cgroup_")
+        );
     }
-    output += &format!(
-        "::scx_rustsched::scx_ops! {{
-             name: {name}.as_bytes(),
-             flags: {{
-                 #[allow(unused_imports)]
-                 use ::scx_rustsched::ops::flags::*;
-                 {flags}
-             }},
-             timeout_ms: {timeout},
-             dump_len: ::scx_rustsched::uei::DUMP_LEN as u32,
-             callbacks: {{
-                 {members}
-                 exit: ::scx_rustsched::uei::rust_exit,
-             }}
-         }}\n"
-    );
+    // With cgroup callbacks there are two maps, of which the loader
+    // creates the one whose member names the running kernel has.
+    let mut maps = vec![("rust_ops", "sched_ext_ops_cid", ".struct_ops.link", members)];
+    if cgroups {
+        maps.push((
+            "rust_ops_cgroup",
+            "sched_ext_ops_cid___cgroup",
+            "?.struct_ops.link",
+            legacy,
+        ));
+    }
+    for (map, map_type, section, members) in maps {
+        output += &format!(
+            "::scx_rustsched::ops_map! {{
+                 {map}: {map_type} in \"{section}\",
+                 name: {name}.as_bytes(),
+                 flags: {{
+                     #[allow(unused_imports)]
+                     use ::scx_rustsched::ops::flags::*;
+                     {flags}
+                 }},
+                 timeout_ms: {timeout},
+                 dump_len: {dump_len},
+                 {{ {members} }}
+             }}\n"
+        );
+    }
     let mut output: TokenStream = match output.parse() {
         Ok(output) => output,
         Err(_) => return error("#[scheduler]: could not generate the entry points"),

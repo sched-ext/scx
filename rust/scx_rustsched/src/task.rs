@@ -194,6 +194,18 @@ impl Task {
         unsafe { task_queued(self.as_ptr()) }
     }
 
+    /// Is the task on a CPU right now?
+    #[inline(always)]
+    pub fn running(&self) -> bool {
+        unsafe { crate::kfuncs::scx_bpf_task_running(self.as_ptr()) }
+    }
+
+    /// When the task last became runnable, in jiffies.
+    #[inline(always)]
+    pub fn runnable_at(&self) -> u64 {
+        unsafe { self.field::<u64>(config::RUNNABLE_AT) }
+    }
+
     /// What is left of the task's slice, in nanoseconds.
     #[inline(always)]
     pub fn slice(&self) -> u64 {

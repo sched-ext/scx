@@ -13,6 +13,9 @@
 //!   the verifier checks once.
 //! - `dsq`, `idle`: the kernel's dispatch queues, and the picks of an idle
 //!   CID by topology.
+//! - `cgroup`, `cmask`, `dump`: the cgroups the cgroup callbacks take, the
+//!   mask of CIDs of an affinity change, and the scheduler's lines in the
+//!   kernel's debug dump.
 //! - `var`, `state`, `param`, `time`: what the callbacks share, as `Var`
 //!   globals and a typed state per task and per CID, the tunables the
 //!   loader sets by name, and the clock.
@@ -21,8 +24,8 @@
 //! for when it needs more than the framework wraps:
 //!
 //! - `ops`: the kernel types the callbacks take, the enqueue, dequeue, kick
-//!   and ops flags, and `scx_ops!`, which declares the struct_ops map from
-//!   the callbacks the scheduler implements.
+//!   and ops flags, and `ops_map!`, with which `#[scheduler]` declares the
+//!   struct_ops map from the callbacks the scheduler implements.
 //! - `kfuncs`: the kfuncs, declared from the catalog in ../kfuncs.rs, which
 //!   the build reads too.
 //! - `helpers`, `timer`: the BPF helpers, called by number, and the timer
@@ -60,13 +63,16 @@
 #![allow(internal_features)]
 
 mod builtins;
+pub mod cgroup;
 pub mod cid_idle;
 pub mod cid_ranges;
 pub mod cid_table;
 pub mod cids;
 pub mod clock;
+pub mod cmask;
 pub mod config;
 pub mod dsq;
+pub mod dump;
 pub mod edq;
 pub mod helpers;
 pub mod idle;
@@ -96,12 +102,16 @@ pub use scx_rustsched_macros::opts;
 
 /// What a scheduler written with `#[scheduler]` uses, see `sched`.
 pub mod prelude {
+    pub use crate::cgroup::{Cgroup, CgroupArgs};
+    pub use crate::cmask::Cmask;
     pub use crate::dsq::{self, Dsq, SLICE_DFL};
+    pub use crate::dump::DumpCtx;
     pub use crate::idle::{self, Kind, Scope};
     pub use crate::params;
     pub use crate::sched::{Cid, DeqFlags, EnqFlags, Error, KickFlags, WakeFlags};
     pub use crate::task::Task;
     pub use crate::time;
+    pub use crate::uei::ExitInfo;
     pub use crate::var::Var;
 }
 

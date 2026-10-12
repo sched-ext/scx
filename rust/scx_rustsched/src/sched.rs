@@ -22,15 +22,33 @@
 //! the block defines and the struct_ops map. A callback takes the
 //! kernel's arguments in the kernel's order, each as any type that
 //! implements `Arg` for that position: `&Task` or `Option<&Task>` for a
-//! task, `Cid` for a CID, a flags type or `u64` for flags, `bool`. It may
+//! task, `Cid` for a CID, a flags type or `u64` for flags, `bool`, `u32`,
+//! `Cmask`, and `&Cgroup`, `&CgroupArgs`, `&DumpCtx` and `&ExitInfo`. It may
 //! leave trailing arguments out. It returns what `Ret` converts: nothing, a
 //! `Cid`, a `bool`, or `Result<(), Error>`.
 //!
-//! The callbacks: select_cid(task, prev, wake_flags) -> Cid,
-//! enqueue(task, enq_flags), dequeue(task, deq_flags), dispatch(cid, prev),
-//! tick(task), running(task), stopping(task, runnable),
-//! quiescent(task, deq_flags), enable(task), update_idle(cid, idle),
-//! init_task(task), exit_task(task) and init().
+//! The callbacks, by what they are about:
+//!
+//! - the scheduler: init(), exit(info), cid_online(cid), cid_offline(cid);
+//! - a task's life: init_task(task), exit_task(task), enable(task),
+//!   disable(task), set_weight(task, weight), set_cmask(task, cmask);
+//! - scheduling: select_cid(task, prev, wake_flags) -> Cid,
+//!   enqueue(task, enq_flags), dequeue(task, deq_flags),
+//!   dispatch(cid, prev), runnable(task, enq_flags), running(task),
+//!   stopping(task, runnable), quiescent(task, deq_flags), tick(task),
+//!   yield_task(from, to) -> bool, core_sched_before(a, b) -> bool,
+//!   update_idle(cid, idle);
+//! - the debug dump: dump(dump), dump_cid(dump, cid, idle),
+//!   dump_task(dump, task), see `dump`;
+//! - cgroups: cgroup_init(cgroup, args), cgroup_exit(cgroup),
+//!   cgroup_prep_move(task, from, to), cgroup_move(task, from, to),
+//!   cgroup_cancel_move(task, from, to), cgroup_set_weight(cgroup, weight),
+//!   cgroup_set_bandwidth(cgroup, period_us, quota_us, burst_us) and
+//!   cgroup_set_idle(cgroup, idle), see `cgroup`.
+//!
+//! yield_task is ops.yield(), `yield` being a keyword. A scheduler that
+//! defines cid_online or cid_offline handles CPU hotplug itself; the
+//! kernel ejects one that defines neither when a CPU comes or goes.
 //!
 //! `task = Type` in the attribute gives every task a `Type` of the
 //! scheduler's own, and `cid = Type` every CID, see `state`.
@@ -43,14 +61,23 @@
 //! mirrors each transition into it, and ops.dispatch() marks a CID idle
 //! again when it leaves with nothing to run, since the kernel reports no
 //! transition for a CPU that was woken and went back to sleep. ops.exit()
-//! records the exit for the loader. A scheduler never has to define any of
-//! those to have `idle::pick()` work.
+//! records the exit for the loader, before the scheduler's own. A scheduler
+//! never has to define any of those to have `idle::pick()` work.
+//!
+//! `idle_tracking = false` in the attribute leaves the idle tracking to
+//! the scheduler, which then calls `cid_idle` from those three callbacks
+//! itself.
 
 use crate::{
-    cid_idle, config,
+    cgroup::{Cgroup, CgroupArgs},
+    cid_idle,
+    cmask::Cmask,
+    config,
+    dump::DumpCtx,
     kfuncs::{scx_bpf_dsq_nr_queued, scx_bpf_kick_cid, scx_bpf_this_cid},
     ops::{SCX_DSQ_LOCAL, task_struct},
     task::Task,
+    uei::ExitInfo,
 };
 
 pub use scx_rustsched_macros::{global, scheduler};
@@ -154,6 +181,16 @@ impl Error {
     pub const ENOMEM: Error = Error(-12);
     pub const EBUSY: Error = Error(-16);
     pub const EINVAL: Error = Error(-22);
+
+    /// A kernel-style result as a callback returns it: 0, or a negative
+    /// errno.
+    #[inline(always)]
+    pub fn check(result: i32) -> Result<(), Error> {
+        match result {
+            0 => Ok(()),
+            errno => Err(Error(errno)),
+        }
+    }
 }
 
 macro_rules! flags {
@@ -307,9 +344,36 @@ impl Arg for Cid {
 impl Arg for bool {
     #[inline(always)]
     unsafe fn arg(context: *const u64, index: usize) -> Self {
-        unsafe { *context.add(index) != 0 }
+        // The kernel's caller sets only the low byte of a bool's slot.
+        unsafe { *context.add(index) & 0xff != 0 }
     }
 }
+
+impl Arg for Cmask {
+    #[inline(always)]
+    unsafe fn arg(context: *const u64, index: usize) -> Self {
+        unsafe { Cmask::from_raw(*context.add(index)) }
+    }
+}
+
+impl Arg for u32 {
+    #[inline(always)]
+    unsafe fn arg(context: *const u64, index: usize) -> Self {
+        unsafe { *context.add(index) as u32 }
+    }
+}
+
+macro_rules! handle_arg {
+    ($($name:ty),*) => {
+        $(impl<'handle> Arg for &'handle $name {
+            #[inline(always)]
+            unsafe fn arg(context: *const u64, index: usize) -> Self {
+                unsafe { <$name>::from_ptr(*context.add(index) as *mut _) }
+            }
+        })*
+    };
+}
+handle_arg!(Cgroup, CgroupArgs, DumpCtx, ExitInfo);
 
 impl Arg for u64 {
     #[inline(always)]

@@ -67,12 +67,49 @@ unsafe fn read_str(destination: *mut u8, size: u32, source: u64) {
     unsafe { helpers::probe_read_kernel_str(destination.cast(), size, source) };
 }
 
+/// The kernel's exit record, as ops.exit() of `#[scheduler]` takes it.
+#[repr(transparent)]
+pub struct ExitInfo(crate::ops::scx_exit_info);
+
+impl ExitInfo {
+    /// # Safety
+    /// `info` must be the record the kernel passed to ops.exit().
+    #[inline(always)]
+    pub unsafe fn from_ptr<'info>(info: *mut crate::ops::scx_exit_info) -> &'info ExitInfo {
+        unsafe { &*info.cast::<ExitInfo>() }
+    }
+
+    /// Why the scheduler exits, one of the kernel's SCX_EXIT_* values:
+    /// below 1024 it was unloaded or asked to go, from 1024 on it failed.
+    #[inline(always)]
+    pub fn kind(&self) -> i32 {
+        unsafe {
+            field(
+                (self as *const ExitInfo).cast(),
+                config::get(config::EXIT_KIND),
+            )
+        }
+    }
+
+    /// The exit code, the scheduler's own when it asked to exit.
+    #[inline(always)]
+    pub fn code(&self) -> i64 {
+        unsafe {
+            field(
+                (self as *const ExitInfo).cast(),
+                config::get(config::EXIT_CODE),
+            )
+        }
+    }
+}
+
 /// UEI_RECORD(): the exit record, with its kind stored last, so that the
 /// loader sees the rest once it sees an exit.
-#[unsafe(no_mangle)]
-#[unsafe(link_section = "struct_ops/exit")]
-pub unsafe extern "C" fn rust_exit(context: *const u64) -> u64 {
-    crate::pool::touch();
+///
+/// # Safety
+/// `context` must be ops.exit()'s.
+#[inline(always)]
+pub unsafe fn record(context: *const u64) {
     unsafe {
         let info = *context as *const u8;
         let uei = &raw mut UEI;
@@ -106,5 +143,4 @@ pub unsafe extern "C" fn rust_exit(context: *const u64) -> u64 {
             field::<i32>(info, config::get(config::EXIT_KIND)),
         );
     }
-    0
 }
