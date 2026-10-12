@@ -31,6 +31,7 @@ the toolchain need out of sight. The schedulers written in it have no
 | --- | --- |
 | [scx_rvtime](../../scheds/experimental/scx_rvtime) | Weighted vtime: a queue of its own, a global, a state per task in the arena |
 | [scx_rlocal](../../scheds/experimental/scx_rlocal) | Per-CPU queues with stealing: a state per CID, topology loops, a global function |
+| [scx_rburst](../../scheds/experimental/scx_rburst) | EEVDF-style, with virtual-time borrowing and requests sized by the CPU burst: queues ordered by deadline, eligibility, a state that follows the task |
 
 ## Writing a scheduler
 
