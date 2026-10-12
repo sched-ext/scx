@@ -17,6 +17,7 @@ requirement. This page indexes the investigations.
 | ❌ | Block stash: wake classes from one line | no frame effect in KovaaK's; reverted | [report](block-stash-20261012/README.md) |
 | ❌ | claimhome: lean `lazy` placement without the patch | placement reproduced; frame win needs the cheaper claim too | [report](claimhome-20261012/README.md) |
 | ❌ | burstkey: cosmos-style requeue key | no gain; cosmos itself loses to cake `lazy` in CPU-limited KovaaK's | [report](burstkey-20261012/README.md) |
+| ❌ | sibwake: same-process wake → waker's SMT sibling | idle cores: lows −43 %; saturated: tails +6 % (weak) | [report](sibwake-20261012/README.md) |
 
 | | Also |
 |---|---|
