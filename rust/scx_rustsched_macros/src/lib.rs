@@ -119,13 +119,11 @@ fn parameters(list: TokenStream) -> usize {
 /// the debug dump the kernel takes when it ejects the scheduler, 32768
 /// bytes by default.
 ///
-/// `task` names the type of the scheduler's per-task state, which the
-/// runtime then creates in ops.init_task(), and `cid` the type of its
-/// per-CID state, set up in ops.init().
-/// `task_slot` names the type of a per-task state in the arena instead,
-/// see scx_rustsched's `slots`: the runtime then sets the pool up in ops.init(),
-/// gives each task a slot in ops.init_task() and takes it back after
-/// ops.exit_task().
+/// `task_slot` names the type of the scheduler's per-task state in the
+/// arena, see scx_rustsched's `slots`: the runtime then sets the pool up in
+/// ops.init(), gives each task a slot in ops.init_task() and takes it back
+/// after ops.exit_task(). `cid_slot` names the type of its per-CID state,
+/// see `cid_table`, which the runtime allocates in ops.init().
 ///
 /// `idle_tracking = false` leaves the idle tracking to the scheduler,
 /// which then calls `cid_idle` itself from ops.init(), ops.update_idle()
@@ -143,9 +141,29 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap_or_else(|| "::scx_rustsched::ops::TIMEOUT_MS".into());
     let dump_len = argument(&arguments, "dump_len")
         .unwrap_or_else(|| "::scx_rustsched::uei::DUMP_LEN as u32".into());
-    let task = argument(&arguments, "task");
-    let cid = argument(&arguments, "cid");
     let slot = argument(&arguments, "task_slot");
+    let cid = argument(&arguments, "cid_slot");
+    // A misspelt argument would otherwise be dropped without a word.
+    const ARGUMENTS: [&str; 7] = [
+        "name",
+        "flags",
+        "timeout_ms",
+        "dump_len",
+        "task_slot",
+        "cid_slot",
+        "idle_tracking",
+    ];
+    for item in split(arguments.iter().cloned().collect()) {
+        match item.first() {
+            Some(TokenTree::Ident(key)) if ARGUMENTS.contains(&key.to_string().as_str()) => {}
+            Some(key) => {
+                return error(&format!(
+                    "#[scheduler]: `{key}` is not an argument this attribute knows"
+                ));
+            }
+            None => {}
+        }
+    }
     let idle_tracking = match argument(&arguments, "idle_tracking").as_deref() {
         None | Some("true") => true,
         Some("false") => false,
@@ -199,11 +217,8 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let defined = |member: &str| functions.iter().find(|(function, _)| function == member);
 
     let mut output = format!("pub struct {ty};\n");
-    if let Some(task) = &task {
-        output += &format!("::scx_rustsched::task_state!({task});\n");
-    }
     if let Some(cid) = &cid {
-        output += &format!("::scx_rustsched::cid_state!({cid});\n");
+        output += &format!("::scx_rustsched::cid_slot!({cid});\n");
     }
     // The members of the struct_ops map, and the same under the names a
     // kernel from before the cid form gives the cgroup callbacks.
@@ -215,7 +230,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         let runtime = callback == "exit"
             || (idle_tracking && matches!(callback, "init" | "update_idle" | "dispatch"))
             || (callback == "init" && (cid.is_some() || slot.is_some()))
-            || (callback == "init_task" && (task.is_some() || slot.is_some()))
+            || (callback == "init_task" && slot.is_some())
             || (matches!(callback, "enable" | "exit_task") && slot.is_some());
         if user.is_none() && !runtime {
             continue;
@@ -272,20 +287,11 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                 },
                 cid.as_ref()
                     .map(|cid| format!(
-                        "if let Err(error) = ::scx_rustsched::sched::init_cids::<{cid}>() {{
+                        "if let Err(error) = ::scx_rustsched::sched::init_cid_slots::<{cid}>() {{
                              return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
                          }}"
                     ))
                     .unwrap_or_default(),
-                call.map(|call| format!("::scx_rustsched::sched::Ret::ret({call})"))
-                    .unwrap_or_else(|| "0".into())
-            ),
-            ("init_task", call) if task.is_some() => format!(
-                "if let Err(error) = ::scx_rustsched::sched::init_task::<{}>(context) {{
-                     return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
-                 }}
-                 {}",
-                task.as_ref().unwrap(),
                 call.map(|call| format!("::scx_rustsched::sched::Ret::ret({call})"))
                     .unwrap_or_else(|| "0".into())
             ),

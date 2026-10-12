@@ -17,9 +17,9 @@
 //!   mask of CIDs of an affinity change, and the scheduler's lines in the
 //!   kernel's debug dump.
 //! - `arena`: structures in the arena with typed fields, `arena_struct!`.
-//! - `var`, `state`, `param`, `time`: what the callbacks share, as `Var`
-//!   globals and a typed state per task and per CID, the tunables the
-//!   loader sets by name, and the clock.
+//! - `var`, `param`, `time`: what the callbacks share as `Var` globals,
+//!   the tunables the loader sets by name, and the clock. The state per
+//!   task and per CID is in the arena, `task_slot` and `cid_slot`.
 //!
 //! The core is what the framework stands on, and what a scheduler reaches
 //! for when it needs more than the framework wraps:
@@ -89,7 +89,6 @@ pub mod ravg;
 pub mod sched;
 pub mod slab;
 pub mod slots;
-pub mod state;
 pub mod task;
 pub mod tiers;
 pub mod time;

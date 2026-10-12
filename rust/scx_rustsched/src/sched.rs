@@ -50,10 +50,9 @@
 //! defines cid_online or cid_offline handles CPU hotplug itself; the
 //! kernel ejects one that defines neither when a CPU comes or goes.
 //!
-//! `task = Type` in the attribute gives every task a `Type` of the
-//! scheduler's own, and `cid = Type` every CID, see `state`.
-//! `task_slot = Type` gives every task a `Type` in the arena instead, see
-//! `slots`.
+//! `task_slot = Type` in the attribute gives every task a `Type` of the
+//! scheduler's own in the arena, see `slots`, and `cid_slot = Type` every
+//! CID, see `cid_table`.
 //!
 //! `#[global]` makes a function of the scheduler's one the verifier checks
 //! once, see `scx_rustsched_macros`.
@@ -159,11 +158,12 @@ impl Cid {
         Cids(crate::loops::range(base, base + count))
     }
 
-    /// The scheduler's state of the CID, see `state`. `None` for a number
-    /// that is not a CID.
+    /// The scheduler's entry for the CID, of the type it declared with
+    /// `#[scheduler(cid_slot = T)]`. `None` for a number that is not a
+    /// CID.
     #[inline(always)]
-    pub fn state<T: crate::state::CidState>(self) -> Option<&'static T> {
-        crate::state::cid(self)
+    pub fn slot<T: crate::cid_table::CidSlot>(self) -> Option<T> {
+        crate::cid_table::slot(self)
     }
 
     /// Make the CID go through the scheduler again: wake it if it is
@@ -548,24 +548,14 @@ pub unsafe fn init() -> Result<(), Error> {
     }
 }
 
-/// The runtime's part of ops.init() for a scheduler with per-CID state
-/// `T`: set each CID's to `T::default()`.
+/// The runtime's part of ops.init() for a scheduler with an entry `T`
+/// per CID: the table, zeroed.
 ///
 /// # Safety
-/// Only from ops.init(), after init().
+/// Only from ops.init().
 #[inline(always)]
-pub unsafe fn init_cids<T: crate::state::CidState>() -> Result<(), Error> {
-    unsafe { crate::state::init_cids::<T>() }
-}
-
-/// The runtime's part of ops.init_task(task, args) for a scheduler with
-/// per-task state `T`: create it.
-///
-/// # Safety
-/// `context` must be ops.init_task()'s.
-#[inline(always)]
-pub unsafe fn init_task<T: crate::state::TaskState>(context: *const u64) -> Result<(), Error> {
-    unsafe { crate::state::create::<T>(*context as *mut task_struct) }
+pub unsafe fn init_cid_slots<T: crate::cid_table::CidSlot>() -> Result<(), Error> {
+    Error::check(unsafe { crate::cid_table::init_slots::<T>() })
 }
 
 /// The runtime's part of ops.init() for a scheduler with a slot `T` per

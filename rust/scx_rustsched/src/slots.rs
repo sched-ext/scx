@@ -7,9 +7,9 @@
 //!
 //! This is the per-task state of a scheduler that queues tasks in the
 //! arena, where an EDQ node has to live and other CPUs reach a task's
-//! state by address, and of any scheduler that wants its state there.
-//! `state` is the alternative, in task storage, which hands out
-//! references.
+//! state by address. A scheduler with a few fields per task keeps them
+//! here as well: there is one way to declare state, and a lookup costs a
+//! task storage call, or a load with `STASH`.
 //!
 //! The scheduler declares what a slot holds with `arena_struct!` and
 //! implements `TaskSlot` for it:

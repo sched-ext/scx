@@ -2,8 +2,7 @@
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 
 //! memset() and memcpy(), which the compiler calls for a value it fills
-//! or copies as a block, such as a `Default` per-task state built on the
-//! stack. BPF has no library to take them from, so they are here, as
+//! or copies as a block, such as an array built on the stack. BPF has no library to take them from, so they are here, as
 //! static functions the verifier checks at each call with the size the
 //! caller passes.
 //!

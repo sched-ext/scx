@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 
-//! A value the callbacks share: a global, or a field of the per-task or
-//! per-CID state.
+//! A value the callbacks share: a global.
 //!
 //! Callbacks run on every CPU at once, so nothing they share can be handed
 //! out as `&mut`. A `Var` is read and written whole through a shared

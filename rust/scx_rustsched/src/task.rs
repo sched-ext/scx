@@ -228,12 +228,6 @@ impl Task {
             .unwrap_or(value)
     }
 
-    /// The scheduler's state of the task, see `state`.
-    #[inline(always)]
-    pub fn state<T: crate::state::TaskState>(&self) -> Option<&T> {
-        unsafe { crate::state::get(self.as_ptr()) }
-    }
-
     /// The task's slot in the arena, of the type the scheduler declared
     /// with `#[scheduler(task_slot = T)]`. None, counted as an error, if
     /// the task has none.
