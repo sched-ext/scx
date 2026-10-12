@@ -1,0 +1,139 @@
+diff --git a/scheds/rust/scx_cake/src/bpf/cake.bpf.c b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+index ef0ca8a03..7d8d4c7ce 100644
+--- a/scheds/rust/scx_cake/src/bpf/cake.bpf.c
++++ b/scheds/rust/scx_cake/src/bpf/cake.bpf.c
+@@ -117,6 +117,12 @@ UEI_DEFINE(uei);
+ 
+ /* Declared ahead of the toggle block: the probe census below reads it. */
+ const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
++const volatile u8 cake_tog_claimhome;		/* core word: a claimed, not yet running thread is idle (--toggle claimhome=1) */
++
++/* CPUs a cake claim won that have not run since: the home test's view of a
++ * sibling the kernel already counts busy. Set by the claimer, cleared by the
++ * CPU at ops.running or when it goes idle again. */
++u64 cake_claimed_word __attribute__((aligned(STATE_SLOT_BYTES)));
+ 
+ /* PROBE placement census for ops.select_cpu, not for scoring: per-CPU map,
+  * plain increment on this CPU's copy, no atomic, no shared line. */
+@@ -238,6 +244,7 @@ enum cake_stat {
+ 	CAKE_SITE_PEND_HEAL,		/* unserved reset under a zero token: pops the serve never saw */
+ 	CAKE_SITE_RELEASE_SERVE,	/* cpu_release found own-queue work and kicked an idle CPU */
+ 	CAKE_SITE_PINNED_PREEMPT,	/* pinned wake preempted the occupant on its insert */
++	CAKE_SITE_CLAIM_HOME,		/* core word widened by a claimed, not yet running thread */
+ 	CAKE_STAT_NR,
+ };
+ 
+@@ -345,9 +352,23 @@ static __noinline bool cake_taci_probe(s32 cpu, u32 site)
+ 
+ static __always_inline bool cake_taci(s32 cpu, u32 site)
+ {
+-	if (unlikely(cake_tog_probe))
+-		return cake_taci_probe(cpu, site);
+-	return scx_bpf_test_and_clear_cpu_idle(cpu);
++	bool won = unlikely(cake_tog_probe) ? cake_taci_probe(cpu, site) :
++					      scx_bpf_test_and_clear_cpu_idle(cpu);
++
++	if (cake_tog_claimhome && won && (u32)cpu < 64)
++		__atomic_fetch_or(&cake_claimed_word, 1ULL << ((u32)cpu & 63),
++				  __ATOMIC_RELAXED);
++	return won;
++}
++
++/* The CPU ran or went idle: its claim, if any, is spent. Read first, so a CPU
++ * nobody claimed never writes the shared word. */
++static __always_inline void cake_claim_spent(u32 cpu)
++{
++	u64 bit = 1ULL << (cpu & 63);
++
++	if (cake_tog_claimhome && cpu < 64 && (READ_ONCE(cake_claimed_word) & bit))
++		__atomic_fetch_and(&cake_claimed_word, ~bit, __ATOMIC_RELAXED);
+ }
+ 
+ /* CLOCK_MONOTONIC: for deltas against kernel ktime fields (start_time,
+@@ -1180,10 +1201,23 @@ static __always_inline u64 cake_idle_word(void)
+ static __always_inline u64 cake_core_word(void)
+ {
+ 	struct cpumask *m = cake_mask_smt;
+-
+-	if (likely(m))
+-		return m->bits[0];
+-	return 0;
++	u64 cores = likely(m) ? m->bits[0] : 0;
++	u64 claimed, avail, pairs;
++
++	/* claimhome: the lazy-SMT view without the kernel patch. A core whose
++	 * threads are each idle or claimed by cake but not yet running stays a
++	 * whole core until the claimed thread runs. Shift-pair maps only. */
++	if (!cake_tog_claimhome || cake_smt_shift >= 64)
++		return cores;
++	claimed = READ_ONCE(cake_claimed_word);
++	if (!claimed)
++		return cores;
++	avail = cake_idle_word() | claimed;
++	pairs = avail & cake_smt_left & (avail >> cake_smt_shift);
++	pairs |= pairs << cake_smt_shift;
++	if (pairs & ~cores)
++		cake_stat_inc(CAKE_SITE_CLAIM_HOME);
++	return cores | pairs;
+ }
+ 
+ /* Wide-host home test: the sibling's occupant. It misses an undispatched
+@@ -3223,6 +3257,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
+ 	struct cake_run_slot *run = &cake.run[cpu & (MAX_CPUS - 1)];
+ 	u64 now = cake_running_clock(cpu);
+ 
++	cake_claim_spent(cpu);
+ 	cake_signal_running(p, cpu);
+ 
+ 	/* First: the grant below and every later reader want the untagged slice. */
+@@ -3343,6 +3378,8 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
+ 
+ 	/* The kernel sets the idle bit before this call: an insert that read the
+ 	 * old bit raised the token, seen here; kicking self runs dispatch again. */
++	if (idle)
++		cake_claim_spent((u32)cpu);
+ 	if (idle && cake_pool_unserved(cake_llc_of(cpu))) {
+ 		cake_stat_inc(CAKE_SITE_UI_KICK);
+ 		scx_bpf_kick_cpu(cpu, 0);
+diff --git a/scheds/rust/scx_cake/src/main.rs b/scheds/rust/scx_cake/src/main.rs
+index 2b2cea0ce..bddb0e9fd 100644
+--- a/scheds/rust/scx_cake/src/main.rs
++++ b/scheds/rust/scx_cake/src/main.rs
+@@ -121,7 +121,10 @@ struct Opts {
+ /// Every construct toggle: name, construct, BPF default. The default is
+ /// checked against the compiled rodata at start so the two cannot drift;
+ /// --help prints this table.
+-const TOGGLES: [(&str, &str, u8); 1] = [("probe", "diagnostics", 0)];
++const TOGGLES: [(&str, &str, u8); 2] = [
++    ("probe", "diagnostics", 0),
++    ("claimhome", "core word: claimed, not yet running thread counts idle", 0),
++];
+ 
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+ enum KernelSignals {
+@@ -559,7 +562,7 @@ impl<'a> Scheduler<'a> {
+ 
+         // Campaign toggles land in rodata before load so the verifier prunes the off
+         // arms; one table names every toggle, a second line prints what differs.
+-        let fields: [&mut u8; 1] = [&mut rodata.cake_tog_probe];
++        let fields: [&mut u8; 2] = [&mut rodata.cake_tog_probe, &mut rodata.cake_tog_claimhome];
+         let mut slots: Vec<(&str, &str, &mut u8)> = TOGGLES
+             .iter()
+             .zip(fields)
+@@ -1144,7 +1147,7 @@ impl<'a> Scheduler<'a> {
+             info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
+         }
+         if self.probe_on {
+-            const NAMES: [&str; 120] = [
++            const NAMES: [&str; 121] = [
+                 "select_calls",
+                 "serial",
+                 "home_warm",
+@@ -1265,6 +1268,7 @@ impl<'a> Scheduler<'a> {
+                 "pend_heal",
+                 "release_serve",
+                 "pinned_preempt",
++                "claim_home",
+             ];
+             // The name table must match the BPF enum exactly; a drift prints
+             // zeros silently because out-of-range lookups fail quietly.

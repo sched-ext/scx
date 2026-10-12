@@ -73,9 +73,10 @@ Placement: under K3 a claimed CPU's core keeps its whole-idle bit until that CPU
 runs, so `cake_core_busy()` no longer vetoes a home whose sibling was just
 claimed; 7.3 points of wakes return to their cache-warm home instead of a cold
 whole core. The frame win tracks this placement change.
-Kernel-free follow-up: track cake's own claimed-not-yet-running CPUs and leave
-them out of the home core-busy test; that would give the same placement on
-stock kernels. Untested.
+Kernel-free follow-up tested ([claimhome](docs/research/claimhome-20261012/README.md)):
+cake reproduces the placement on stock behaviour but not the frame win; `on` +
+claimhome nearly matches `lazy`. The win needs the cheaper claim and the
+placement together, so it stays a kernel-patch feature.
 
 ## Evidence, 2026-10-12: flag A/Bs (KovaaK's menu, 6 × 20 s per run)
 
