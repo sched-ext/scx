@@ -27,6 +27,10 @@ the struct_ops map, tracks the idle CPUs, and keeps what the verifier and
 the toolchain need out of sight. The schedulers written in it have no
 `unsafe`.
 
+| Scheduler | What it shows |
+| --- | --- |
+| [scx_rvtime](../../scheds/experimental/scx_rvtime) | Weighted vtime: a queue of its own, a global, a state per task in the arena |
+
 ## Writing a scheduler
 
 A scheduler is a directory with a loader crate, which is a member of the
@@ -41,9 +45,9 @@ scx workspace, and a BPF crate in `bpf/`, which is not:
 | `bpf/Cargo.lock` | Checked in: the BPF build runs with `--locked` |
 | `bpf/src/main.rs` | The scheduler |
 
-Add the directory to `members` and its `bpf/` to `exclude` in the root
-`Cargo.toml`. When `scx_rustsched` gains a dependency, run `cargo update
---offline -w` in `bpf/`.
+Copy scx_rvtime, rename the two packages, and add the directory to `members`
+and its `bpf/` to `exclude` in the root `Cargo.toml`. When `scx_rustsched`
+gains a dependency, run `cargo update --offline -w` in `bpf/`.
 
 Building needs Rust with `rust-src`, a `bpf-linker` built against the
 same LLVM as the Rust compiler, `llvm-objcopy` and `llvm-nm`. Without
