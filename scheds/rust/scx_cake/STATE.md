@@ -143,8 +143,9 @@ objects that may share a line with others; on 2026-10-05 they sat in different l
     priority). Slots 1–5 of the paused run are in `run1/`, likely skewed.
 
 12. Cache-line follow-ups (evidence 10-12): (a) compute the wake class in
-    `ops.stopping(!runnable)` on the task's own CPU (`nvcsw`, `sum_exec_runtime`,
-    `sched_info` are final there) and read one word at wake, 3 remote lines to 1;
+    `ops.stopping(!runnable)` on the task's own CPU and read one word at wake,
+    3 remote lines to 1. There `sum_exec_runtime` and `sched_info` are final;
+    `nvcsw` is one behind (`__schedule` bumps it after `pick_next_task`), so use +1;
     (b) skip the smt-word read when no whole-core search follows; (c) setters
     `scx_bpf_task_set_slice/dsq_vtime`. Each needs a KovaaK's A/B.
 
