@@ -61,6 +61,7 @@
 
 use crate::ops::scx_cid_topo;
 use crate::sched::{Cid, OptCid};
+use crate::task::Task;
 use core::{
     ffi::c_void,
     hint::black_box,
@@ -150,7 +151,7 @@ fn cid_node(cid: Cid) -> i32 {
     if kfunc.is_null() {
         return -1;
     }
-    unsafe { scx_bpf_cid_node(cid.raw()) }.max(-1)
+    scx_bpf_cid_node(cid.raw()).max(-1)
 }
 
 /// Bytes a shard of `nr` CIDs takes in its node's pool: a header line and
@@ -177,7 +178,7 @@ unsafe fn slot_entry(cid: u32) -> u64 {
 #[inline(always)]
 unsafe fn slot(cid: u32) -> (u64, u64) {
     let entry = unsafe { slot_entry(cid) };
-    unsafe { (mem::load(entry, 0), mem::load(entry, 8)) }
+    (mem::load(entry, 0), mem::load(entry, 8))
 }
 
 /// The address of the word holding `cid`'s idle bit, and the bit.
@@ -204,37 +205,32 @@ unsafe fn node_entry(node: u32) -> u64 {
 
 /// Is every mask word of the shard whose header is at `header` clear?
 #[inline(always)]
-unsafe fn shard_empty(header: u64) -> bool {
-    let words = unsafe { mem::load(header + HEADER_WORDS * 8, 0) }.min(64) as u32;
+fn shard_empty(header: u64) -> bool {
+    let words = mem::load(header + HEADER_WORDS * 8, 0).min(64) as u32;
     let mut empty = true;
-    unsafe {
-        for value in crate::loops::range(0, words) {
-            if mem::load(header + LINE_BYTES + u64::from(value) * 8, 0) != 0 {
-                empty = false;
-                break;
-            }
+    for value in crate::loops::range(0, words) {
+        if mem::load(header + LINE_BYTES + u64::from(value) * 8, 0) != 0 {
+            empty = false;
+            break;
         }
     }
+
     empty
 }
 
 /// Set or clear the summary bit of the shard whose header is at `header`.
 #[inline(always)]
-unsafe fn summary_update(header: u64, set: bool) {
-    unsafe {
-        let summary = mem::load(header + HEADER_SUMMARY * 8, 0);
-        let bit = mem::load(header + HEADER_BIT * 8, 0);
-        cas_update(summary, bit, set);
-    }
+fn summary_update(header: u64, set: bool) {
+    let summary = mem::load(header + HEADER_SUMMARY * 8, 0);
+    let bit = mem::load(header + HEADER_BIT * 8, 0);
+    cas_update(summary, bit, set);
 }
 
 /// Is the summary bit of the shard whose header is at `header` set?
 #[inline(always)]
-unsafe fn summary_test(header: u64) -> bool {
-    unsafe {
-        let summary = mem::load(header + HEADER_SUMMARY * 8, 0);
-        mem::load(summary, 0) & mem::load(header + HEADER_BIT * 8, 0) != 0
-    }
+fn summary_test(header: u64) -> bool {
+    let summary = mem::load(header + HEADER_SUMMARY * 8, 0);
+    mem::load(summary, 0) & mem::load(header + HEADER_BIT * 8, 0) != 0
 }
 
 /// Is no CID idle anywhere, scx_cid_idle_empty()? One look at each node's
@@ -311,16 +307,16 @@ unsafe fn hint_bit(llc: u32) -> (u64, u64) {
 #[inline(always)]
 unsafe fn hint_set(llc: u32, set: bool) {
     let (pointer, bit) = unsafe { hint_bit(llc) };
-    unsafe { cas_update(pointer, bit, set) };
+    cas_update(pointer, bit, set);
 }
 
 /// Set or clear `bit` in the arena word at `pointer`, by bounded CAS.
 #[inline(always)]
-unsafe fn cas_update(pointer: u64, bit: u64, set: bool) {
+fn cas_update(pointer: u64, bit: u64, set: bool) {
     for _ in crate::loops::range(0, CAS_TRIES) {
-        let previous = unsafe { mem::load(pointer, 0) };
+        let previous = mem::load(pointer, 0);
         let next = if set { previous | bit } else { previous & !bit };
-        if previous == next || unsafe { mem::cas(pointer, previous, next) } == previous {
+        if previous == next || mem::cas(pointer, previous, next) == previous {
             return;
         }
     }
@@ -338,7 +334,7 @@ fn llc_of(cid: Cid) -> u32 {
 fn has_idle_core(cid: Cid) -> bool {
     valid(cid) && {
         let (pointer, bit) = unsafe { hint_bit(llc_of(cid)) };
-        (unsafe { mem::load(pointer, 0) } & bit) != 0
+        (mem::load(pointer, 0) & bit) != 0
     }
 }
 
@@ -365,7 +361,7 @@ pub fn any_idle_core() -> bool {
 /// set_idle_cores(cpu, false): a scan of `cid`'s LLC for a whole idle core
 /// found none, so clear its hint until a core goes idle there.
 #[inline(always)]
-pub unsafe fn clear_idle_cores(cid: Cid) {
+pub fn clear_idle_cores(cid: Cid) {
     unsafe { hint_set(llc_of(cid), false) }
 }
 
@@ -461,7 +457,7 @@ pub fn asym_has_idle_core(cid: Cid, range: u64, shared: bool) -> bool {
 /// set_idle_cores(cpu, false) for select_idle_capacity(), over every LLC
 /// of a `shared` asymmetric domain, `range`.
 #[inline(always)]
-pub unsafe fn asym_clear_idle_cores(cid: Cid, range: u64, shared: bool) {
+pub fn asym_clear_idle_cores(cid: Cid, range: u64, shared: bool) {
     if !shared {
         if valid(cid) {
             unsafe { hint_set(llc_of(cid), false) };
@@ -523,17 +519,15 @@ unsafe fn base_word(cid: u32) -> u64 {
 #[inline(always)]
 unsafe fn write_range(cid: u32, ends: RangeEnds) {
     let pointer = unsafe { range(cid) };
-    unsafe {
-        mem::store32(pointer, 0, ends.core_base);
-        mem::store32(pointer, 4, ends.core);
-        mem::store32(pointer, 8, ends.cluster);
-        mem::store32(pointer, 12, ends.shard_base);
-        mem::store32(pointer, 16, ends.shard);
-        mem::store32(pointer, 20, ends.llc);
-        mem::store32(pointer, 24, ends.node);
-        mem::store32(pointer, 28, ends.segment_word);
-        mem::store32(pointer, 32, ends.cluster_base);
-    }
+    mem::store32(pointer, 0, ends.core_base);
+    mem::store32(pointer, 4, ends.core);
+    mem::store32(pointer, 8, ends.cluster);
+    mem::store32(pointer, 12, ends.shard_base);
+    mem::store32(pointer, 16, ends.shard);
+    mem::store32(pointer, 20, ends.llc);
+    mem::store32(pointer, 24, ends.node);
+    mem::store32(pointer, 28, ends.segment_word);
+    mem::store32(pointer, 32, ends.cluster_base);
 }
 
 /// One field of `cid`'s range entry, by its index in write_range(). An
@@ -547,18 +541,16 @@ unsafe fn range_field(cid: u32, index: usize) -> u32 {
 #[inline(always)]
 unsafe fn read_range(cid: u32) -> RangeEnds {
     let pointer = unsafe { range(cid) };
-    unsafe {
-        RangeEnds {
-            core_base: mem::load32(pointer, 0),
-            core: mem::load32(pointer, 4),
-            cluster: mem::load32(pointer, 8),
-            shard_base: mem::load32(pointer, 12),
-            shard: mem::load32(pointer, 16),
-            llc: mem::load32(pointer, 20),
-            node: mem::load32(pointer, 24),
-            segment_word: mem::load32(pointer, 28),
-            cluster_base: mem::load32(pointer, 32),
-        }
+    RangeEnds {
+        core_base: mem::load32(pointer, 0),
+        core: mem::load32(pointer, 4),
+        cluster: mem::load32(pointer, 8),
+        shard_base: mem::load32(pointer, 12),
+        shard: mem::load32(pointer, 16),
+        llc: mem::load32(pointer, 20),
+        node: mem::load32(pointer, 24),
+        segment_word: mem::load32(pointer, 28),
+        cluster_base: mem::load32(pointer, 32),
     }
 }
 
@@ -707,15 +699,14 @@ unsafe fn initialize_ranges(count: u32) -> i32 {
             let offset = cid - node;
             let header = cursor;
             let shard_words = u64::from((ends.shard - cid).div_ceil(64));
-            unsafe {
-                mem::store(
-                    header + HEADER_SUMMARY * 8,
-                    0,
-                    summary + u64::from(offset / 64) * 8,
-                );
-                mem::store(header + HEADER_BIT * 8, 0, 1_u64 << (offset % 64));
-                mem::store(header + HEADER_WORDS * 8, 0, shard_words);
-            }
+            mem::store(
+                header + HEADER_SUMMARY * 8,
+                0,
+                summary + u64::from(offset / 64) * 8,
+            );
+            mem::store(header + HEADER_BIT * 8, 0, 1_u64 << (offset % 64));
+            mem::store(header + HEADER_WORDS * 8, 0, shard_words);
+
             cursor += shard_bytes(ends.shard - cid);
         }
         let position = u64::from(cid - ends.shard_base);
@@ -739,15 +730,15 @@ unsafe fn initialize_ranges(count: u32) -> i32 {
 /// one per-CID word. The policy's periodic balance measures and sets them;
 /// they are zero until then, and read whole when the scan is unbounded.
 #[inline(always)]
-unsafe fn budget(cid: Cid, asym: bool) -> u32 {
+fn budget(cid: Cid, asym: bool) -> u32 {
     let offset = cids::BUDGETS * 8 + if asym { 4 } else { 0 };
-    unsafe { mem::load32(cids::entry(cid), offset) }
+    mem::load32(cids::entry(cid), offset)
 }
 
 #[inline(always)]
-unsafe fn set_budget(cid: Cid, asym: bool, budget: u32) {
+fn set_budget(cid: Cid, asym: bool, budget: u32) {
     let offset = cids::BUDGETS * 8 + if asym { 4 } else { 0 };
-    unsafe { mem::store32(cids::entry(cid), offset, budget) }
+    mem::store32(cids::entry(cid), offset, budget)
 }
 
 /// Is the scan bounded at all, SIS_UTIL? Set once by the policy.
@@ -756,28 +747,28 @@ pub fn scan_bounded() -> bool {
     cids::flag(cids::SCAN_BOUNDED)
 }
 
-pub unsafe fn set_scan_bounded(bounded: bool) {
-    unsafe { cids::set_flag(cids::SCAN_BOUNDED, bounded) }
+pub fn set_scan_bounded(bounded: bool) {
+    cids::set_flag(cids::SCAN_BOUNDED, bounded)
 }
 
 #[inline(always)]
-pub unsafe fn set_llc_budget(base: i32, budget: u32) {
-    unsafe { set_budget(Cid(base), false, budget) }
+pub fn set_llc_budget(base: i32, budget: u32) {
+    set_budget(Cid(base), false, budget)
 }
 
 /// The asymmetric domain's budget kept at `base`, raw: zero while unset.
 #[inline(always)]
 pub fn asym_budget(base: i32) -> u32 {
-    unsafe { budget(Cid(base), true) }
+    budget(Cid(base), true)
 }
 
 #[inline(always)]
-pub unsafe fn set_asym_budget(base: i32, budget: u32) {
-    unsafe { set_budget(Cid(base), true, budget) }
+pub fn set_asym_budget(base: i32, budget: u32) {
+    set_budget(Cid(base), true, budget)
 }
 
-pub unsafe fn init() -> i32 {
-    let count = unsafe { scx_bpf_nr_online_cids() };
+pub fn init() -> i32 {
+    let count = scx_bpf_nr_online_cids();
     if count == 0 || count > BITS_PER_PAGE {
         return -22;
     }
@@ -811,14 +802,20 @@ fn valid(cid: Cid) -> bool {
 }
 
 #[inline(always)]
-unsafe fn allowed(task: *mut task_struct, cid: Cid) -> bool {
+unsafe fn allowed(task: &Task, cid: Cid) -> bool {
     let cpu = cid.cpu();
     if cpu < 0 {
         return false;
     }
     let mask_offset = config::get(config::CPUS_PTR) as usize;
-    let mask =
-        unsafe { read_volatile(task.cast::<u8>().add(mask_offset).cast::<*const cpumask>()) };
+    let mask = unsafe {
+        read_volatile(
+            task.as_ptr()
+                .cast::<u8>()
+                .add(mask_offset)
+                .cast::<*const cpumask>(),
+        )
+    };
     unsafe { bpf_cpumask_test_cpu(cpu as u32, mask) }
 }
 
@@ -835,7 +832,7 @@ unsafe fn core_idle(cid: u32, count: u32) -> bool {
     let shift = position & 63;
     if nr < 64 && shift + nr <= 64 {
         let mask = ((1_u64 << nr) - 1) << shift;
-        return unsafe { mem::load(address, 0) } & mask == mask;
+        return mem::load(address, 0) & mask == mask;
     }
     let mut idle = true;
     for sibling in crate::loops::range(ends.core_base, ends.core) {
@@ -870,13 +867,7 @@ fn in_tier(cid: Cid, filter: u32) -> bool {
 }
 
 #[inline(always)]
-unsafe fn scan_segment(
-    task: *mut task_struct,
-    start: u32,
-    end: u32,
-    previous: Cid,
-    filter: u32,
-) -> OptCid {
+unsafe fn scan_segment(task: &Task, start: u32, end: u32, previous: Cid, filter: u32) -> OptCid {
     if start >= end {
         return OptCid::NONE;
     }
@@ -936,13 +927,7 @@ unsafe fn scan_segment(
 /// Scan the scope `base..end` for an idle CID, in CID order from its base,
 /// skipping `previous`.
 #[inline(always)]
-unsafe fn scan_scope(
-    task: *mut task_struct,
-    base: i32,
-    end: u32,
-    previous: Cid,
-    filter: u32,
-) -> OptCid {
+unsafe fn scan_scope(task: &Task, base: i32, end: u32, previous: Cid, filter: u32) -> OptCid {
     let count = unsafe { read_volatile((&raw const IDLE).cast::<u64>().add(1)) } as u32;
     if base < 0 || base as u32 >= end || end > count {
         return OptCid::NONE;
@@ -985,7 +970,7 @@ pub unsafe extern "C" fn rust_scan_window(
             } else {
                 (base, base + nr - head)
             };
-            found = scan_scope(task, from as i32, to, Cid(previous), filter).raw();
+            found = scan_scope(Task::from_ptr(task), from as i32, to, Cid(previous), filter).raw();
             if found >= 0 {
                 break;
             }
@@ -1025,7 +1010,7 @@ pub unsafe extern "C" fn rust_allowed_window(
             if cid >= base + span {
                 cid -= span;
             }
-            if allowed(task, Cid(cid as i32)) {
+            if allowed(Task::from_ptr(task), Cid(cid as i32)) {
                 if used == budget {
                     break;
                 }
@@ -1046,7 +1031,7 @@ pub const WINDOW_MASK: u64 = (1 << WINDOW_BITS) - 1;
 /// counts.
 #[inline(always)]
 unsafe fn budget_window(
-    task: *mut task_struct,
+    task: &Task,
     base: u32,
     span: u32,
     start: u32,
@@ -1063,7 +1048,7 @@ unsafe fn budget_window(
     }
     let window = unsafe {
         rust_allowed_window(
-            task,
+            task.as_ptr(),
             u64::from(span) << 32 | u64::from(base),
             start,
             *budget,
@@ -1071,6 +1056,13 @@ unsafe fn budget_window(
     };
     *budget = budget.saturating_sub((window >> 32) as u32);
     window as u32
+}
+
+/// How many CIDs of each of the three windows of `cid`'s LLC walk a scan
+/// for `task` with `budget` left would visit, see rust_llc_windows().
+#[inline(always)]
+pub fn llc_windows(task: &Task, cid: Cid, budget: u32, cluster_first: u32) -> u64 {
+    unsafe { rust_llc_windows(task.as_ptr(), cid.raw(), budget, cluster_first) }
 }
 
 /// Share `budget` out over the walk of `cid`'s LLC, budgeted_llc_scan_counts():
@@ -1106,7 +1098,7 @@ pub unsafe extern "C" fn rust_llc_windows(
     let end = end.max(base);
     let offset = config::get(config::NR_CPUS_ALLOWED) as usize;
     let allowed = unsafe { read_volatile(task.cast::<u8>().add(offset).cast::<u32>()) };
-    let restricted = allowed < cids::nr_cpu_ids();
+    let restricted = allowed < Cid::nr_cpus();
     let mut budget = if restricted && budget >= allowed {
         u32::MAX
     } else {
@@ -1115,7 +1107,7 @@ pub unsafe extern "C" fn rust_llc_windows(
     let count_allowed = restricted && budget < llc_end - llc_base;
     let first = unsafe {
         budget_window(
-            task,
+            Task::from_ptr(task),
             base,
             end - base,
             cid as u32 + 1,
@@ -1123,10 +1115,19 @@ pub unsafe extern "C" fn rust_llc_windows(
             count_allowed,
         )
     };
-    let after = unsafe { budget_window(task, end, llc_end - end, end, &mut budget, count_allowed) };
+    let after = unsafe {
+        budget_window(
+            Task::from_ptr(task),
+            end,
+            llc_end - end,
+            end,
+            &mut budget,
+            count_allowed,
+        )
+    };
     let before = unsafe {
         budget_window(
-            task,
+            Task::from_ptr(task),
             llc_base,
             base - llc_base,
             llc_base,
@@ -1169,7 +1170,7 @@ pub unsafe extern "C" fn rust_pick_pass(
         && (filter & WHOLE_CORE == 0 || unsafe { core_idle(previous as u32, count) })
         && in_tier(Cid(previous), filter)
     {
-        if filter & NO_CLAIM != 0 || unsafe { Cid(previous).claim() } {
+        if filter & NO_CLAIM != 0 || Cid(previous).claim() {
             return previous;
         }
     }
@@ -1348,10 +1349,10 @@ pub fn scope_same(anchor: Cid, a: Scope, b: Scope) -> bool {
 /// Winning the claim keeps other picks off the CID. It does not keep the
 /// CPU idle until the task arrives.
 #[inline(always)]
-pub unsafe fn pick(task: *mut task_struct, anchor: Cid, scope: Scope, kind: Kind) -> OptCid {
+pub fn pick(task: &Task, anchor: Cid, scope: Scope, kind: Kind) -> OptCid {
     unsafe {
         OptCid::from_raw(rust_idle_pick(
-            task,
+            task.as_ptr(),
             anchor.raw(),
             scope as u32,
             scan_filter(kind, ANY_TIER),
@@ -1361,16 +1362,10 @@ pub unsafe fn pick(task: *mut task_struct, anchor: Cid, scope: Scope, kind: Kind
 
 /// pick() among the CIDs of capacity tier `tier`, ANY_TIER for all.
 #[inline(always)]
-pub unsafe fn pick_in_tier(
-    task: *mut task_struct,
-    anchor: Cid,
-    scope: Scope,
-    kind: Kind,
-    tier: u32,
-) -> OptCid {
+pub fn pick_in_tier(task: &Task, anchor: Cid, scope: Scope, kind: Kind, tier: u32) -> OptCid {
     unsafe {
         OptCid::from_raw(rust_idle_pick(
-            task,
+            task.as_ptr(),
             anchor.raw(),
             scope as u32,
             scan_filter(kind, tier),
@@ -1401,10 +1396,10 @@ pub unsafe extern "C" fn rust_idle_pick(
     if anchor >= base as i32 && (anchor as u32) < base + nr {
         if scope == Scope::Core as u32 {
             if Cid(anchor).is_idle()
-                && unsafe { allowed(task, Cid(anchor)) }
+                && unsafe { allowed(Task::from_ptr(task), Cid(anchor)) }
                 && (filter & WHOLE_CORE == 0 || unsafe { core_idle(anchor as u32, count) })
                 && in_tier(Cid(anchor), filter)
-                && unsafe { Cid(anchor).claim() }
+                && Cid(anchor).claim()
             {
                 return anchor;
             }
@@ -1431,15 +1426,10 @@ pub unsafe extern "C" fn rust_idle_pick(
 /// bounded, as select_idle_core() is not. `tier` restricts it to one
 /// capacity tier, ANY_TIER for none. Returns the CID claimed, or -1.
 #[inline(always)]
-pub unsafe fn select_idle_cpu(
-    task: *mut task_struct,
-    target: Cid,
-    kind: Kind,
-    tier: u32,
-) -> OptCid {
+pub fn select_idle_cpu(task: &Task, target: Cid, kind: Kind, tier: u32) -> OptCid {
     unsafe {
         OptCid::from_raw(rust_pick_pass(
-            task,
+            task.as_ptr(),
             target.raw(),
             scan_filter(kind, tier),
             1,
@@ -1451,10 +1441,10 @@ pub unsafe fn select_idle_cpu(
 /// sibling placement prefers in its place and give `found` back. Returns
 /// the CID that is claimed now.
 #[inline(always)]
-pub unsafe fn claim_preferred(task: *mut task_struct, found: i32) -> OptCid {
+pub fn claim_preferred(task: &Task, found: i32) -> OptCid {
     if found >= 0 && smt_asym_possible() {
-        let preferred = unsafe { rust_smt_preferred(task, found) };
-        if preferred != found && unsafe { Cid(preferred).claim() } {
+        let preferred = unsafe { rust_smt_preferred(task.as_ptr(), found) };
+        if preferred != found && Cid(preferred).claim() {
             unsafe { set(Cid(found)) };
             return OptCid::from_raw(preferred);
         }
@@ -1468,8 +1458,8 @@ pub unsafe fn claim_preferred(task: *mut task_struct, found: i32) -> OptCid {
 /// any idle CID, in the order a wakeup scans, capacity tiers outermost.
 /// Packing priority plays no part: the peer only supplies an idle balancer
 /// for queued work, and packing applies when it pulls.
-pub unsafe fn idle_peer(task: *mut task_struct, cid: Cid) -> OptCid {
-    if !valid(cid) || unsafe { crate::task::pinned(task) } || idle_empty() {
+pub fn idle_peer(task: &Task, cid: Cid) -> OptCid {
+    if !valid(cid) || crate::task::pinned(task) || idle_empty() {
         return OptCid::NONE;
     }
     let tiers = if crate::tiers::asym_capacity() {
@@ -1490,7 +1480,7 @@ pub unsafe fn idle_peer(task: *mut task_struct, cid: Cid) -> OptCid {
                     0
                 };
                 let filter = tier | NO_CLAIM | PEER | if whole { WHOLE_CORE } else { 0 };
-                found = rust_pick_pass(task, cid.raw(), filter, 0);
+                found = rust_pick_pass(task.as_ptr(), cid.raw(), filter, 0);
                 if found >= 0 {
                     break;
                 }
@@ -1498,7 +1488,7 @@ pub unsafe fn idle_peer(task: *mut task_struct, cid: Cid) -> OptCid {
         }
     }
     if found >= 0 {
-        unsafe { OptCid::from_raw(rust_smt_preferred(task, found)) }
+        unsafe { OptCid::from_raw(rust_smt_preferred(task.as_ptr(), found)) }
     } else {
         OptCid::NONE
     }
@@ -1507,7 +1497,7 @@ pub unsafe fn idle_peer(task: *mut task_struct, cid: Cid) -> OptCid {
 /// select_idle_smt(): an idle sibling of `prev`, the CPU the task last ran
 /// on, if it shares `target`'s LLC, claimed or -1.
 #[inline(never)]
-pub unsafe fn select_idle_smt(task: *mut task_struct, prev: Cid, target: Cid) -> OptCid {
+pub fn select_idle_smt(task: &Task, prev: Cid, target: Cid) -> OptCid {
     if !smt() || !valid(prev) || !valid(target) || !prev.same_idle_llc(target) {
         return OptCid::NONE;
     }
@@ -1532,13 +1522,13 @@ pub unsafe fn select_idle_smt(task: *mut task_struct, prev: Cid, target: Cid) ->
 /// The first idle CID the walk of the LLC around `target` would take,
 /// in_llc() without the claim, or -1.
 #[inline(always)]
-pub unsafe fn probe(task: *mut task_struct, target: Cid) -> OptCid {
+pub fn probe(task: &Task, target: Cid) -> OptCid {
     if idle_empty() {
         return OptCid::NONE;
     }
-    let found = unsafe { rust_pick_pass(task, target.raw(), NO_CLAIM, 1) };
+    let found = unsafe { rust_pick_pass(task.as_ptr(), target.raw(), NO_CLAIM, 1) };
     if found >= 0 {
-        unsafe { OptCid::from_raw(rust_smt_preferred(task, found)) }
+        unsafe { OptCid::from_raw(rust_smt_preferred(task.as_ptr(), found)) }
     } else {
         OptCid::NONE
     }
@@ -1553,9 +1543,9 @@ pub fn smt_asym_possible() -> bool {
 
 /// The sibling of `cid` a claim takes instead, see rust_smt_preferred().
 #[inline(always)]
-pub unsafe fn smt_preferred(task: *mut task_struct, cid: Cid) -> Cid {
+pub fn smt_preferred(task: &Task, cid: Cid) -> Cid {
     if smt_asym_possible() {
-        unsafe { Cid(rust_smt_preferred(task, cid.raw())) }
+        unsafe { Cid(rust_smt_preferred(task.as_ptr(), cid.raw())) }
     } else {
         cid
     }
@@ -1577,7 +1567,7 @@ pub unsafe extern "C" fn rust_smt_preferred(task: *mut task_struct, cid: i32) ->
             let sibling = value as i32;
             if sibling != best
                 && Cid(sibling).is_idle()
-                && allowed_by_mask(task, Cid(sibling))
+                && allowed_by_mask(Task::from_ptr(task), Cid(sibling))
                 && Cid(sibling).smt_prefer(Cid(best))
             {
                 best = sibling;
@@ -1589,7 +1579,7 @@ pub unsafe extern "C" fn rust_smt_preferred(task: *mut task_struct, cid: i32) ->
 
 /// Can `task` run on `cid` by its affinity?
 #[inline(always)]
-pub unsafe fn allowed_by_mask(task: *mut task_struct, cid: Cid) -> bool {
+pub fn allowed_by_mask(task: &Task, cid: Cid) -> bool {
     valid(cid) && unsafe { allowed(task, cid) }
 }
 
@@ -1620,8 +1610,8 @@ pub fn smt() -> bool {
 #[inline(always)]
 unsafe fn summary_set(cid: u32) {
     let header = unsafe { header(cid) };
-    if !unsafe { summary_test(header) } {
-        unsafe { summary_update(header, true) };
+    if !summary_test(header) {
+        summary_update(header, true);
     }
 }
 
@@ -1629,13 +1619,13 @@ unsafe fn set(cid: Cid) {
     if valid(cid) {
         let (pointer, bit) = unsafe { word(cid.raw() as u32) };
         for _ in 0..CAS_TRIES {
-            let previous = unsafe { mem::load(pointer, 0) };
+            let previous = mem::load(pointer, 0);
             if previous & bit != 0 {
                 unsafe { summary_set(cid.raw() as u32) };
                 unsafe { note_idle_core(cid) };
                 return;
             }
-            let observed = unsafe { mem::cas(pointer, previous, previous | bit) };
+            let observed = { mem::cas(pointer, previous, previous | bit) };
             if observed == previous {
                 unsafe { summary_set(cid.raw() as u32) };
                 unsafe { note_idle_core(cid) };
@@ -1646,19 +1636,19 @@ unsafe fn set(cid: Cid) {
     }
 }
 
-pub unsafe fn update(cid: Cid, idle: bool) {
+pub fn update(cid: Cid, idle: bool) {
     if idle {
         unsafe { set(cid) };
     } else {
-        unsafe { cid.claim() };
+        cid.claim();
     }
 }
 
-pub unsafe fn rearm(cid: Cid, flags_offset: usize) {
+pub fn rearm(cid: Cid, flags_offset: usize) {
     if !valid(cid) {
         return;
     }
-    let task = unsafe { scx_bpf_cid_curr(cid.raw()) };
+    let task = scx_bpf_cid_curr(cid.raw());
     if !task.is_null() {
         let flags = unsafe { read_volatile(task.cast::<u8>().add(flags_offset).cast::<u32>()) };
         if flags & PF_IDLE != 0 {
@@ -1675,7 +1665,7 @@ impl Cid {
         let cid = self;
         valid(cid) && {
             let (pointer, bit) = unsafe { word(cid.raw() as u32) };
-            (unsafe { mem::load(pointer, 0) } & bit) != 0
+            (mem::load(pointer, 0) & bit) != 0
         }
     }
 
@@ -1733,11 +1723,17 @@ impl Cid {
         if !scan_bounded() || !valid(cid) {
             return u32::MAX;
         }
-        unsafe { budget(Cid(llc_of(cid) as i32), false) }
+        budget(Cid(llc_of(cid) as i32), false)
+    }
+
+    /// Give a claim back: `cid` is idle again for the next pick.
+    #[inline(always)]
+    pub fn unclaim(self) {
+        unsafe { set(self) }
     }
 
     #[inline(never)]
-    pub unsafe fn claim(self) -> bool {
+    pub fn claim(self) -> bool {
         let cid = self;
         if !valid(cid) {
             return false;
@@ -1747,12 +1743,12 @@ impl Cid {
         // would walk every retry at every call site.
         let mut result = None;
         for _ in crate::loops::range(0, CAS_TRIES) {
-            let previous = unsafe { mem::load(pointer, 0) };
+            let previous = mem::load(pointer, 0);
             if previous & bit == 0 {
                 result = Some(false);
                 break;
             }
-            let observed = unsafe { mem::cas(pointer, previous, previous & !bit) };
+            let observed = { mem::cas(pointer, previous, previous & !bit) };
             if observed == previous {
                 result = Some(true);
                 break;
@@ -1771,10 +1767,10 @@ impl Cid {
                 // to the summary-driven scans for a few instructions, which
                 // costs a less ideal placement at most.
                 let header = unsafe { header(cid.raw() as u32) };
-                if unsafe { shard_empty(header) } {
-                    unsafe { summary_update(header, false) };
-                    if !unsafe { shard_empty(header) } {
-                        unsafe { summary_update(header, true) };
+                if shard_empty(header) {
+                    summary_update(header, false);
+                    if !shard_empty(header) {
+                        summary_update(header, true);
                     }
                 }
                 true
@@ -1800,7 +1796,7 @@ impl Cid {
 
     /// The number of CIDs in `cid`'s node, and its first.
     #[inline(always)]
-    pub unsafe fn node_span(self) -> (u32, u32) {
+    pub fn node_span(self) -> (u32, u32) {
         let cid = self;
         if !valid(cid) {
             return (1, 0);
@@ -1814,7 +1810,7 @@ impl Cid {
 
     /// The number of CIDs in `cid`'s LLC, and its first.
     #[inline(always)]
-    pub unsafe fn llc_span(self) -> (u32, u32) {
+    pub fn llc_span(self) -> (u32, u32) {
         let cid = self;
         if !valid(cid) {
             return (1, 0);

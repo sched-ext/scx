@@ -32,6 +32,16 @@ macro_rules! kfunc_decl {
             pub fn $name($($param: $type),*) $(-> $ret)?;
         }
     };
+    (#[weak] #[safe] fn $name:ident ( $($param:ident : $type:ident),* ) $(-> $ret:ident)? ;) => {
+        unsafe extern "C" {
+            pub safe fn $name($($param: $type),*) $(-> $ret)?;
+        }
+    };
+    (#[safe] fn $name:ident ( $($param:ident : $type:ident),* ) $(-> $ret:ident)? ;) => {
+        unsafe extern "C" {
+            pub safe fn $name($($param: $type),*) $(-> $ret)?;
+        }
+    };
     (#[weak] fn $name:ident ( $($param:ident : $type:ident),* ) $(-> $ret:ident)? ;) => {
         unsafe extern "C" {
             pub fn $name($($param: $type),*) $(-> $ret)?;

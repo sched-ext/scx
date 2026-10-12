@@ -26,7 +26,7 @@ crate::cid_table!(Cids, CIDS in ".data.cids", bytes: 16, extra: 2);
 const NR_CPU_IDS: usize = 1;
 
 /// Allocate the table for `count` CIDs, from init.
-pub unsafe fn init(count: u32) -> i32 {
+pub fn init(count: u32) -> i32 {
     let result = unsafe { Cids::init(count) };
     if result == 0 {
         unsafe { Cids::set_extra(NR_CPU_IDS, u64::from(crate::kfuncs::scx_bpf_nr_cpu_ids())) };
@@ -64,7 +64,7 @@ pub fn get(cid: Cid, index: u64) -> u64 {
 }
 
 #[inline(always)]
-pub unsafe fn set(cid: Cid, index: u64, value: u64) {
+pub fn set(cid: Cid, index: u64, value: u64) {
     unsafe { Cids::set(cid, index, value) }
 }
 
@@ -74,7 +74,7 @@ pub fn flag(bit: u64) -> bool {
 }
 
 #[inline(always)]
-pub unsafe fn set_flag(bit: u64, set: bool) {
+pub fn set_flag(bit: u64, set: bool) {
     unsafe {
         let flags = Cids::header().add(2);
         let value = read_volatile(flags);

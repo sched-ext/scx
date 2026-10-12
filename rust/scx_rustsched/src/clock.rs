@@ -69,7 +69,7 @@ unsafe fn read(cid: Cid, now: u64) -> u64 {
 /// runqueue's lock, cid_clock_task_owned(); the offset is recorded for
 /// at(). With NO_TASK_CLOCK, `now`. Always records the offset for
 /// capacity pressure, which counts its growth as IRQ and steal time.
-pub unsafe fn owned(cid: Cid, now: u64) -> u64 {
+pub fn owned(cid: Cid, now: u64) -> u64 {
     if !cids::valid(cid) {
         return now;
     }

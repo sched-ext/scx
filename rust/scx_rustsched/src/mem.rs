@@ -99,7 +99,7 @@ unsafe fn load_at<const O: u64>(base: u64) -> u64 {
 
 /// The word at `offset` bytes from the arena address `base`.
 #[inline(always)]
-pub unsafe fn load(base: u64, offset: u64) -> u64 {
+pub fn load(base: u64, offset: u64) -> u64 {
     unsafe { offsets64!(offset, |O| load_at::<O>(base), load_at::<0>(base + offset)) }
 }
 
@@ -122,7 +122,7 @@ unsafe fn store_at<const O: u64>(base: u64, value: u64) {
 /// Store `value` in the word at `offset` bytes from the arena address
 /// `base`.
 #[inline(always)]
-pub unsafe fn store(base: u64, offset: u64, value: u64) {
+pub fn store(base: u64, offset: u64, value: u64) {
     unsafe {
         offsets64!(
             offset,
@@ -150,7 +150,7 @@ unsafe fn load32_at<const O: u64>(base: u64) -> u32 {
 
 /// The 32-bit word at `offset` bytes from the arena address `base`.
 #[inline(always)]
-pub unsafe fn load32(base: u64, offset: u64) -> u32 {
+pub fn load32(base: u64, offset: u64) -> u32 {
     unsafe {
         offsets32!(
             offset,
@@ -179,7 +179,7 @@ unsafe fn store32_at<const O: u64>(base: u64, value: u32) {
 /// Store `value` in the 32-bit word at `offset` bytes from the arena
 /// address `base`.
 #[inline(always)]
-pub unsafe fn store32(base: u64, offset: u64, value: u32) {
+pub fn store32(base: u64, offset: u64, value: u32) {
     unsafe {
         offsets32!(
             offset,
@@ -192,7 +192,7 @@ pub unsafe fn store32(base: u64, offset: u64, value: u32) {
 /// Store `value` in the word at `address` with a release, so that the
 /// store is ordered on weakly ordered CPUs too.
 #[inline(always)]
-pub unsafe fn release(address: u64, value: u64) {
+pub fn release(address: u64, value: u64) {
     unsafe {
         asm!(
             "{pointer} = addr_space_cast({address}, 0, 1)",
@@ -210,7 +210,7 @@ pub unsafe fn release(address: u64, value: u64) {
 /// Returns the word's previous value: the exchange happened if that is
 /// `old`.
 #[inline(always)]
-pub unsafe fn cas(address: u64, old: u64, new: u64) -> u64 {
+pub fn cas(address: u64, old: u64, new: u64) -> u64 {
     let previous: u64;
     unsafe {
         asm!(
@@ -229,7 +229,7 @@ pub unsafe fn cas(address: u64, old: u64, new: u64) -> u64 {
 
 /// Add `value` to the word at `address` and return its previous value.
 #[inline(always)]
-pub unsafe fn fetch_add(address: u64, value: u64) -> u64 {
+pub fn fetch_add(address: u64, value: u64) -> u64 {
     let previous: u64;
     unsafe {
         asm!(
@@ -247,7 +247,7 @@ pub unsafe fn fetch_add(address: u64, value: u64) -> u64 {
 
 /// Add `value` to the word at `address`.
 #[inline(always)]
-pub unsafe fn add(address: u64, value: u64) {
+pub fn add(address: u64, value: u64) {
     unsafe {
         asm!(
             "{pointer} = addr_space_cast({address}, 0, 1)",
@@ -264,7 +264,7 @@ pub unsafe fn add(address: u64, value: u64) {
 /// Set the bits of `value` in the word at `address`. The non-fetching
 /// form, the only one of the bitwise atomics the arena takes.
 #[inline(always)]
-pub unsafe fn or(address: u64, value: u64) {
+pub fn or(address: u64, value: u64) {
     unsafe {
         asm!(
             "{pointer} = addr_space_cast({address}, 0, 1)",
@@ -280,7 +280,7 @@ pub unsafe fn or(address: u64, value: u64) {
 
 /// Clear the bits not in `value` in the word at `address`, as [`or`].
 #[inline(always)]
-pub unsafe fn and(address: u64, value: u64) {
+pub fn and(address: u64, value: u64) {
     unsafe {
         asm!(
             "{pointer} = addr_space_cast({address}, 0, 1)",

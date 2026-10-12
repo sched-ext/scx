@@ -103,14 +103,14 @@ pub use scx_rustsched_macros::opts;
 
 /// What a scheduler written with `#[scheduler]` uses, see `sched`.
 pub mod prelude {
-    pub use crate::cgroup::{Cgroup, CgroupArgs};
+    pub use crate::cgroup::{Cgroup, CgroupArgs, CgroupGuard};
     pub use crate::cmask::Cmask;
     pub use crate::dsq::{self, Dsq, SLICE_DFL};
     pub use crate::dump::DumpCtx;
     pub use crate::idle::{self, Kind, Scope};
     pub use crate::params;
     pub use crate::sched::{Cid, DeqFlags, EnqFlags, Error, KickFlags, OptCid, WakeFlags};
-    pub use crate::task::Task;
+    pub use crate::task::{InitTaskArgs, Task};
     pub use crate::time;
     pub use crate::uei::ExitInfo;
     pub use crate::var::Var;

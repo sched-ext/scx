@@ -58,12 +58,12 @@ impl Value for u64 {
 
     #[inline(always)]
     fn load(base: u64, offset: u64) -> u64 {
-        unsafe { mem::load(base, offset) }
+        mem::load(base, offset)
     }
 
     #[inline(always)]
     fn store(base: u64, offset: u64, value: u64) {
-        unsafe { mem::store(base, offset, value) }
+        mem::store(base, offset, value)
     }
 }
 
@@ -244,20 +244,20 @@ impl<const OFFSET: u64> Field<u64, OFFSET> {
     /// a field several CPUs update, where `update()` would lose one.
     #[inline(always)]
     pub fn fetch_add(&self, value: u64) -> u64 {
-        unsafe { mem::fetch_add(self.address(), value) }
+        mem::fetch_add(self.address(), value)
     }
 
     /// Add `value` atomically, `fetch_add()` without the fetch.
     #[inline(always)]
     pub fn add(&self, value: u64) {
-        unsafe { mem::add(self.address(), value) }
+        mem::add(self.address(), value)
     }
 
     /// Store `new` if the field holds `old`, atomically, and return what
     /// it held: `old` if the store happened.
     #[inline(always)]
     pub fn compare_exchange(&self, old: u64, new: u64) -> u64 {
-        unsafe { mem::cas(self.address(), old, new) }
+        mem::cas(self.address(), old, new)
     }
 }
 
@@ -267,7 +267,7 @@ impl<const OFFSET: u64> Field<u64, OFFSET> {
     /// word that publishes the rest.
     #[inline(always)]
     pub fn release(&self, value: u64) {
-        unsafe { mem::release(self.address(), value) }
+        mem::release(self.address(), value)
     }
 }
 
@@ -277,12 +277,12 @@ impl<const N: usize, const OFFSET: u64> Field<[u64; N], OFFSET> {
     /// word, a bug but not a fault.
     #[inline(always)]
     pub fn get_at(&self, index: u64) -> u64 {
-        unsafe { mem::load(self.base, OFFSET + index * 8) }
+        mem::load(self.base, OFFSET + index * 8)
     }
 
     #[inline(always)]
     pub fn set_at(&self, index: u64, value: u64) {
-        unsafe { mem::store(self.base, OFFSET + index * 8, value) }
+        mem::store(self.base, OFFSET + index * 8, value)
     }
 }
 

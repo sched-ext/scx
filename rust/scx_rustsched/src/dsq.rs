@@ -58,7 +58,7 @@ pub fn create(dsq: Dsq) -> Result<(), Error> {
     let Dsq::User(id) = dsq else {
         return Err(Error::EINVAL);
     };
-    match unsafe { scx_bpf_create_dsq(id, -1) } {
+    match scx_bpf_create_dsq(id, -1) {
         0 => Ok(()),
         errno => Err(Error(errno)),
     }
@@ -85,7 +85,7 @@ pub fn insert_vtime(task: &Task, dsq: Dsq, slice: u64, vtime: u64, flags: EnqFla
 #[inline(always)]
 pub fn move_to_local(dsq: Dsq) -> bool {
     match dsq {
-        Dsq::User(id) => unsafe { scx_bpf_dsq_move_to_local(id) },
+        Dsq::User(id) => scx_bpf_dsq_move_to_local(id),
         _ => false,
     }
 }
@@ -93,5 +93,5 @@ pub fn move_to_local(dsq: Dsq) -> bool {
 /// How many tasks `dsq` holds.
 #[inline(always)]
 pub fn nr_queued(dsq: Dsq) -> u32 {
-    unsafe { scx_bpf_dsq_nr_queued(dsq.id()) }.max(0) as u32
+    scx_bpf_dsq_nr_queued(dsq.id()).max(0) as u32
 }

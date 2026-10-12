@@ -9,7 +9,7 @@ use crate::kfuncs::scx_bpf_now;
 /// which costs nothing to read.
 #[inline(always)]
 pub fn now() -> u64 {
-    unsafe { scx_bpf_now() }
+    scx_bpf_now()
 }
 
 /// Is `first` before `second`? Right for two times, or two virtual times,

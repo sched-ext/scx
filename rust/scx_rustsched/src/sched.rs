@@ -77,7 +77,7 @@ use crate::{
     dump::DumpCtx,
     kfuncs::{scx_bpf_dsq_nr_queued, scx_bpf_kick_cid, scx_bpf_this_cid},
     ops::{SCX_DSQ_LOCAL, task_struct},
-    task::Task,
+    task::{InitTaskArgs, Task},
     uei::ExitInfo,
 };
 
@@ -185,13 +185,13 @@ impl Cid {
     /// The CID the callback runs on.
     #[inline(always)]
     pub fn current() -> Cid {
-        Cid(unsafe { scx_bpf_this_cid() })
+        Cid(scx_bpf_this_cid())
     }
 
     /// The CID of a CPU, by the kernel's number for it.
     #[inline(always)]
     pub fn from_cpu(cpu: i32) -> Cid {
-        Cid(unsafe { crate::kfuncs::scx_bpf_cpu_to_cid(cpu) })
+        Cid(crate::kfuncs::scx_bpf_cpu_to_cid(cpu))
     }
 
     /// The number of CPU numbers the kernel has, nr_cpu_ids: a task allowed
@@ -204,7 +204,7 @@ impl Cid {
     /// Tell the frequency governor how busy the CID is, of 1024.
     #[inline(always)]
     pub fn set_perf(self, perf: u32) {
-        unsafe { crate::kfuncs::scx_bpf_cidperf_set(self.0, perf) };
+        crate::kfuncs::scx_bpf_cidperf_set(self.0, perf);
     }
 
     /// The number of CIDs: they are `Cid(0)` to `Cid(count - 1)`.
@@ -240,7 +240,7 @@ impl Cid {
     /// there. `KickFlags::IDLE` kicks it only if it is idle.
     #[inline(always)]
     pub fn kick(self, flags: KickFlags) {
-        unsafe { scx_bpf_kick_cid(self.0, flags.0) };
+        scx_bpf_kick_cid(self.0, flags.0);
     }
 }
 
@@ -460,7 +460,7 @@ macro_rules! handle_arg {
         })*
     };
 }
-handle_arg!(Cgroup, CgroupArgs, DumpCtx, ExitInfo);
+handle_arg!(Cgroup, CgroupArgs, DumpCtx, ExitInfo, InitTaskArgs);
 
 impl Arg for u64 {
     #[inline(always)]
@@ -597,6 +597,26 @@ impl<T> Abi for *mut T {
     }
 }
 
+/// A structure the function fills, on the caller's stack. To the verifier
+/// a global function's pointer argument may be null, so the function gets
+/// an `Option` and has to look.
+impl<'out, T> Abi for Option<&'out mut T> {
+    type Raw = *mut T;
+
+    #[inline(always)]
+    fn into_raw(self) -> *mut T {
+        match self {
+            Some(out) => out,
+            None => core::ptr::null_mut(),
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn from_raw(raw: *mut T) -> Option<&'out mut T> {
+        unsafe { raw.as_mut() }
+    }
+}
+
 /// The entry of every callback: reference the arena, which a program that
 /// reads arena memory must do once.
 #[inline(always)]
@@ -610,8 +630,8 @@ pub fn enter() {
 /// # Safety
 /// Only from ops.init().
 #[inline(always)]
-pub unsafe fn init() -> Result<(), Error> {
-    match unsafe { cid_idle::init() } {
+pub fn init() -> Result<(), Error> {
+    match cid_idle::init() {
         0 => Ok(()),
         errno => Err(Error(errno)),
     }
@@ -623,8 +643,8 @@ pub unsafe fn init() -> Result<(), Error> {
 /// # Safety
 /// Only from ops.init().
 #[inline(always)]
-pub unsafe fn init_cid_slots<T: crate::cid_table::CidSlot>() -> Result<(), Error> {
-    Error::check(unsafe { crate::cid_table::init_slots::<T>() })
+pub fn init_cid_slots<T: crate::cid_table::CidSlot>() -> Result<(), Error> {
+    Error::check(crate::cid_table::init_slots::<T>())
 }
 
 /// The runtime's part of ops.init() for a scheduler with a slot `T` per
@@ -633,7 +653,7 @@ pub unsafe fn init_cid_slots<T: crate::cid_table::CidSlot>() -> Result<(), Error
 /// # Safety
 /// Only from ops.init().
 #[inline(always)]
-pub unsafe fn init_slots<T: crate::slots::TaskSlot>() -> Result<(), Error> {
+pub fn init_slots<T: crate::slots::TaskSlot>() -> Result<(), Error> {
     Error::check(unsafe { crate::slots::initialize_pool::<T>(config::get(config::ARENA_PAGES)) })
 }
 

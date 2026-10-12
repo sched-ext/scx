@@ -18,7 +18,7 @@ pub use crate::cid_idle::{Kind, Scope};
 /// until the task arrives.
 #[inline(always)]
 pub fn pick(task: &Task, anchor: Cid, scope: Scope, kind: Kind) -> Option<Cid> {
-    let cid = unsafe { cid_idle::pick(task.as_ptr(), anchor, scope, kind).raw() };
+    let cid = cid_idle::pick(task, anchor, scope, kind).raw();
     if cid >= 0 { Some(Cid(cid)) } else { None }
 }
 

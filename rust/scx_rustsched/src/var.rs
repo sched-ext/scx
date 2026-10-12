@@ -21,7 +21,7 @@
 
 use core::{
     cell::UnsafeCell,
-    intrinsics::{AtomicOrdering, atomic_xadd},
+    intrinsics::{AtomicOrdering, atomic_cxchg, atomic_xadd},
     ptr::{read_volatile, write_volatile},
 };
 
@@ -89,5 +89,62 @@ impl Var<u64> {
     #[inline(always)]
     pub fn fetch_add(&self, value: u64) -> u64 {
         unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(self.0.get(), value) }
+    }
+
+    /// Store `new` if the value is `old`, atomically, and return what it
+    /// was: `old` if the store happened.
+    #[inline(always)]
+    pub fn compare_exchange(&self, old: u64, new: u64) -> u64 {
+        unsafe {
+            atomic_cxchg::<u64, { AtomicOrdering::SeqCst }, { AtomicOrdering::SeqCst }>(
+                self.0.get(),
+                old,
+                new,
+            )
+            .0
+        }
+    }
+}
+
+/// `N` words the callbacks share, by index: a table of a fixed size, such
+/// as one slot per registered object. An index past the end wraps, so
+/// that no access can leave the table.
+#[repr(transparent)]
+pub struct VarArray<const N: usize>(UnsafeCell<[u64; N]>);
+
+unsafe impl<const N: usize> Sync for VarArray<N> {}
+
+impl<const N: usize> VarArray<N> {
+    pub const fn new() -> Self {
+        Self(UnsafeCell::new([0; N]))
+    }
+
+    #[inline(always)]
+    fn word(&self, index: u64) -> *mut u64 {
+        unsafe { self.0.get().cast::<u64>().add((index % N as u64) as usize) }
+    }
+
+    #[inline(always)]
+    pub fn get(&self, index: u64) -> u64 {
+        unsafe { read_volatile(self.word(index)) }
+    }
+
+    #[inline(always)]
+    pub fn set(&self, index: u64, value: u64) {
+        unsafe { write_volatile(self.word(index), value) }
+    }
+
+    /// Store `new` in word `index` if it holds `old`, atomically, and
+    /// return what it held.
+    #[inline(always)]
+    pub fn compare_exchange(&self, index: u64, old: u64, new: u64) -> u64 {
+        unsafe {
+            atomic_cxchg::<u64, { AtomicOrdering::SeqCst }, { AtomicOrdering::SeqCst }>(
+                self.word(index),
+                old,
+                new,
+            )
+            .0
+        }
     }
 }

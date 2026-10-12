@@ -96,7 +96,7 @@ fn entry(cid: Cid) -> u64 {
     if base == 0 || cid < Cid(0) || cid.raw() as u32 >= crate::cids::count() {
         return 0;
     }
-    unsafe { Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES) }
+    Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES)
 }
 
 /// capacity(), as a global function: its result is unknown to the
@@ -119,7 +119,7 @@ fn mask_word(which: usize, tier: u32, index: u32) -> u64 {
     if base == 0 || u64::from(index) >= words {
         return 0;
     }
-    unsafe { Arena.load(base + (u64::from(tier) * words + u64::from(index)) * 8) }
+    Arena.load(base + (u64::from(tier) * words + u64::from(index)) * 8)
 }
 
 #[inline(always)]
@@ -138,7 +138,7 @@ fn for_each(count: u32, mut body: impl FnMut(i32)) {
 
 /// Translate the loader's per-CPU table to the `count` CIDs. A CPU the
 /// loader did not describe counts as full capacity in the last tiers.
-pub unsafe fn init(count: u32) -> i32 {
+pub fn init(count: u32) -> i32 {
     let words = u64::from(count).div_ceil(64);
     let (place_tiers, capacity_tiers) =
         (u64::from(nr_place_tiers()), u64::from(nr_capacity_tiers()));
@@ -238,7 +238,7 @@ impl Cid {
         if base == 0 || cid < Cid(0) || cid.raw() as u32 >= crate::cids::count() {
             return false;
         }
-        unsafe { Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES + 8) & 1 != 0 }
+        Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES + 8) & 1 != 0
     }
 
     /// The width of `cid`'s asymmetric capacity domain, SD_ASYM_CPUCAPACITY_FULL,
@@ -249,8 +249,6 @@ impl Cid {
         if base == 0 || cid < Cid(0) || cid.raw() as u32 >= crate::cids::count() {
             return 0;
         }
-        unsafe {
-            (Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES + 8) >> 32 & 0x3fff) as u32
-        }
+        (Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES + 8) >> 32 & 0x3fff) as u32
     }
 }

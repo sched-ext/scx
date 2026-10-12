@@ -26,20 +26,20 @@ impl Cmask {
     /// `address` must be the arena address of a struct scx_cmask the
     /// kernel passed to the running callback.
     #[inline(always)]
-    pub unsafe fn from_raw(address: u64) -> Cmask {
+    pub fn from_raw(address: u64) -> Cmask {
         Cmask(address)
     }
 
     /// The first CID the mask covers.
     #[inline(always)]
     pub fn base(&self) -> u32 {
-        unsafe { mem::load32(self.0, BASE) }
+        mem::load32(self.0, BASE)
     }
 
     /// How many CIDs the mask covers, from `base()` on.
     #[inline(always)]
     pub fn nr_cids(&self) -> u32 {
-        unsafe { mem::load32(self.0, NR_CIDS) }
+        mem::load32(self.0, NR_CIDS)
     }
 
     /// How many words of bits the covered range spans. The first holds
@@ -60,7 +60,7 @@ impl Cmask {
         if index >= self.nr_words() {
             return 0;
         }
-        unsafe { mem::load(self.0, BITS + u64::from(index) * 8) }
+        mem::load(self.0, BITS + u64::from(index) * 8)
     }
 
     /// Is `cid` in the mask?
@@ -71,7 +71,7 @@ impl Cmask {
         if cid < base || cid - base >= nr_cids {
             return false;
         }
-        let word = unsafe { mem::load(self.0, BITS + u64::from(cid / 64 - base / 64) * 8) };
+        let word = mem::load(self.0, BITS + u64::from(cid / 64 - base / 64) * 8);
         word & (1 << (cid & 63)) != 0
     }
 }

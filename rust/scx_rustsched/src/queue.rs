@@ -35,6 +35,7 @@
 //! is cleared by the first CID that looks and finds nothing.
 
 use crate::sched::Cid;
+use crate::task::Task;
 use core::ptr::null_mut;
 
 use crate::kfuncs::{bpf_arena_alloc_pages, scx_bpf_dsq_insert, scx_bpf_tid_to_task};
@@ -76,23 +77,23 @@ impl Node {
     const ENQ_FLAGS: u64 = Self::SLICE + 1;
 
     #[inline(always)]
-    pub unsafe fn tid(&self) -> u64 {
-        unsafe { mem::load(self.0, Self::TID * 8) }
+    pub fn tid(&self) -> u64 {
+        mem::load(self.0, Self::TID * 8)
     }
 
     #[inline(always)]
-    pub unsafe fn set_tid(&self, value: u64) {
-        unsafe { mem::store(self.0, Self::TID * 8, value) }
+    pub fn set_tid(&self, value: u64) {
+        mem::store(self.0, Self::TID * 8, value)
     }
 
     #[inline(always)]
-    pub unsafe fn state(&self) -> u64 {
-        unsafe { mem::load(self.0, Self::STATE * 8) }
+    pub fn state(&self) -> u64 {
+        mem::load(self.0, Self::STATE * 8)
     }
 
     #[inline(always)]
-    pub unsafe fn set_state(&self, value: u64) {
-        unsafe { mem::store(self.0, Self::STATE * 8, value) }
+    pub fn set_state(&self, value: u64) {
+        mem::store(self.0, Self::STATE * 8, value)
     }
 
     /// The address of the custody state, for compare and exchange.
@@ -103,21 +104,17 @@ impl Node {
 
     /// The slice and enqueue flags a dispatch of the queued task uses.
     #[inline(always)]
-    pub unsafe fn dispatch_args(&self) -> (u64, u64) {
-        unsafe {
-            (
-                mem::load(self.0, Self::SLICE * 8),
-                mem::load(self.0, Self::ENQ_FLAGS * 8),
-            )
-        }
+    pub fn dispatch_args(&self) -> (u64, u64) {
+        (
+            mem::load(self.0, Self::SLICE * 8),
+            mem::load(self.0, Self::ENQ_FLAGS * 8),
+        )
     }
 
     #[inline(always)]
-    pub unsafe fn set_dispatch_args(&self, slice: u64, enq_flags: u64) {
-        unsafe {
-            mem::store(self.0, Self::SLICE * 8, slice);
-            mem::store(self.0, Self::ENQ_FLAGS * 8, enq_flags);
-        }
+    pub fn set_dispatch_args(&self, slice: u64, enq_flags: u64) {
+        mem::store(self.0, Self::SLICE * 8, slice);
+        mem::store(self.0, Self::ENQ_FLAGS * 8, enq_flags);
     }
 }
 
@@ -127,7 +124,7 @@ crate::cid_table!(Queues, QUEUES in ".data.queues", bytes: QUEUE_BYTES, extra: 1
 
 pub use crate::pool::Arena;
 
-pub unsafe fn init(count: u32) -> i32 {
+pub fn init(count: u32) -> i32 {
     let result = unsafe { Queues::init(count) };
     if result != 0 {
         return result;
@@ -158,7 +155,7 @@ fn mask_word(index: u32) -> u64 {
 /// Word `index` of the queued mask, one bit per CID from `index * 64`.
 #[inline(always)]
 pub fn queued_word(index: u32) -> u64 {
-    unsafe { mem::load(mask_word(index), 0) }
+    mem::load(mask_word(index), 0)
 }
 
 /// Is `cid`'s queued bit set?
@@ -176,7 +173,7 @@ fn queued_set(cid: Cid) {
         return;
     }
     let cid = cid.raw() as u32;
-    unsafe { mem::or(mask_word(cid / 64), 1 << (cid % 64)) };
+    mem::or(mask_word(cid / 64), 1 << (cid % 64));
 }
 
 /// Clear `cid`'s queued bit if its queue is empty, and set it again if a
@@ -189,15 +186,15 @@ pub extern "C" fn rust_queued_check(cid: i32) {
         return;
     }
     let cid = cid as u32;
-    unsafe { mem::and(mask_word(cid / 64), !(1 << (cid % 64))) };
+    mem::and(mask_word(cid / 64), !(1 << (cid % 64)));
     if Cid(cid as i32).nr_queued() != 0 {
         queued_set(Cid(cid as i32));
     }
 }
 
 /// Initialize `cid`'s queue, from `init`.
-pub unsafe fn init_cid(cid: Cid) {
-    unsafe { edq::queue_init(Arena, queue(cid)) };
+pub fn init_cid(cid: Cid) {
+    edq::queue_init(Arena, queue(cid));
 }
 
 #[inline(always)]
@@ -219,7 +216,7 @@ pub fn cid_count() -> u32 {
 /// than see the one node stand for both. Always inline: with more than
 /// five arguments it cannot be a BPF function call.
 #[inline(always)]
-pub unsafe fn insert(
+pub fn insert(
     node: u64,
     cid: Cid,
     slice: u64,
@@ -228,26 +225,24 @@ pub unsafe fn insert(
     vtime: u64,
     request: u64,
 ) -> bool {
-    unsafe {
-        let task = Node(node);
-        if edq::held(Arena, node) {
-            task.set_state(DISPATCHED);
-            return false;
-        }
-        task.set_dispatch_args(slice, enq_flags);
-        // Custody is published before another CID's pop can see the node.
-        task.set_state(ENQUEUED);
-        let result = rust_queue_insert(queue(cid), node, deadline, vtime, request);
-        if result != 0 {
-            Arena.cas(task.state_address(), ENQUEUED, NONE);
-            if result != edq::ECANCELED {
-                pool::count_error();
-            }
-            return false;
-        }
-        queued_set(cid);
-        true
+    let task = Node(node);
+    if edq::held(Arena, node) {
+        task.set_state(DISPATCHED);
+        return false;
     }
+    task.set_dispatch_args(slice, enq_flags);
+    // Custody is published before another CID's pop can see the node.
+    task.set_state(ENQUEUED);
+    let result = rust_queue_insert(queue(cid), node, deadline, vtime, request);
+    if result != 0 {
+        Arena.cas(task.state_address(), ENQUEUED, NONE);
+        if result != edq::ECANCELED {
+            pool::count_error();
+        }
+        return false;
+    }
+    queued_set(cid);
+    true
 }
 
 /// Put the task whose node is `node` in a backlog at `backlog`, a queue
@@ -256,34 +251,32 @@ pub unsafe fn insert(
 /// holds, or one already queued, is not ours to move: the task runs once
 /// more and is parked at its next enqueue.
 #[inline(always)]
-pub unsafe fn park(node: u64, backlog: u64, key: u64, slice: u64) -> bool {
-    unsafe {
-        let task = Node(node);
-        if edq::held(Arena, node) || task.state() == ENQUEUED {
-            return false;
-        }
-        task.set_dispatch_args(slice, 0);
-        task.set_state(PARKED);
-        if rust_queue_insert(backlog, node, key, key, slice) != 0 {
-            Arena.cas(task.state_address(), PARKED, NONE);
-            pool::count_error();
-            return false;
-        }
-        true
+pub fn park(node: u64, backlog: u64, key: u64, slice: u64) -> bool {
+    let task = Node(node);
+    if edq::held(Arena, node) || task.state() == ENQUEUED {
+        return false;
     }
+    task.set_dispatch_args(slice, 0);
+    task.set_state(PARKED);
+    if rust_queue_insert(backlog, node, key, key, slice) != 0 {
+        Arena.cas(task.state_address(), PARKED, NONE);
+        pool::count_error();
+        return false;
+    }
+    true
 }
 
 /// End the parked state of a task the backlog has let go. False when
 /// something else ended its enqueue meanwhile.
 #[inline(always)]
-pub unsafe fn unpark(node: u64) -> bool {
-    unsafe { Arena.cas(Node(node).state_address(), PARKED, NONE) == PARKED }
+pub fn unpark(node: u64) -> bool {
+    Arena.cas(Node(node).state_address(), PARKED, NONE) == PARKED
 }
 
 /// Insert a task popped from a queue into this CPU's local DSQ, for
 /// `dst_cid`, if it is still ours to dispatch, and drop its hold.
 #[inline(always)]
-pub unsafe fn dispatch_popped(node: u64, dst_cid: Cid) -> bool {
+pub fn dispatch_popped(node: u64, dst_cid: Cid) -> bool {
     rust_dispatch_popped(node, dst_cid.raw()) != 0
 }
 
@@ -306,7 +299,7 @@ pub extern "C" fn rust_dispatch_popped(node: u64, dst_cid: i32) -> u32 {
                 pool::count_error();
                 break 'dispatch false;
             }
-            if !crate::task::task_queued(task) || state.state() != DISPATCHING {
+            if !crate::task::task_queued(Task::from_ptr(task)) || state.state() != DISPATCHING {
                 break 'dispatch false;
             }
             let (slice, enq_flags) = state.dispatch_args();
@@ -317,8 +310,8 @@ pub extern "C" fn rust_dispatch_popped(node: u64, dst_cid: i32) -> u32 {
             // out of every queue until the watchdog. If a change is in
             // flight, the kernel discards this insertion as stale and the
             // change enqueues the task again.
-            if !crate::task::allowed_on(task, Cid(dst_cid)) {
-                let cid = crate::task::task_cid(task).raw();
+            if !crate::task::allowed_on(Task::from_ptr(task), Cid(dst_cid)) {
+                let cid = crate::task::task_cid(Task::from_ptr(task)).raw();
                 scx_bpf_dsq_insert(task, SCX_DSQ_LOCAL_ON | cid as u32 as u64, slice, enq_flags);
                 break 'dispatch false;
             }
@@ -326,7 +319,7 @@ pub extern "C" fn rust_dispatch_popped(node: u64, dst_cid: i32) -> u32 {
             true
         }
     };
-    unsafe { edq::drop_task(Arena, node) };
+    edq::drop_task(Arena, node);
     u32::from(dispatched)
 }
 
@@ -353,15 +346,10 @@ pub enum Pick {
 /// Clearing the bit and setting it again then is two atomic writes per
 /// switch to a word that 64 CPUs share, and scx_eevdf measured a pinned
 /// pair of yielders per CPU five times slower than fair.c that way.
-pub unsafe fn move_first_eligible(
-    cid: Cid,
-    reference: u64,
-    requeue: bool,
-    take_head: bool,
-) -> Pick {
+pub fn move_first_eligible(cid: Cid, reference: u64, requeue: bool, take_head: bool) -> Pick {
     let queue = queue(cid);
     let mut pick = Pick::Nothing;
-    Arena.repeat(MAX_POPS, || unsafe {
+    Arena.repeat(MAX_POPS, || {
         let head = edq::first_deadline(Arena, queue);
         let node = if take_head {
             edq::pop_first(Arena, queue, true)
@@ -397,22 +385,19 @@ pub unsafe fn move_first_eligible(
 /// first deadline, which can be ineligible and so errs toward not
 /// preempting. Without `eligible_scan` the head is the pick, whatever its
 /// eligibility, and nothing bounds the protection.
-pub unsafe fn head_deadline(cid: Cid, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
-    unsafe {
-        let queue = queue(cid);
-        if !eligible_scan {
-            return (edq::first_deadline(Arena, queue), 0);
-        }
-        let (result, deadline, min_slice) =
-            edq::try_first_eligible_deadline(Arena, queue, reference);
-        match result {
-            0 => (Some(deadline), min_slice),
-            ENOENT => (None, min_slice),
-            _ => (
-                edq::first_deadline(Arena, queue),
-                edq::min_slice(Arena, queue),
-            ),
-        }
+pub fn head_deadline(cid: Cid, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
+    let queue = queue(cid);
+    if !eligible_scan {
+        return (edq::first_deadline(Arena, queue), 0);
+    }
+    let (result, deadline, min_slice) = edq::try_first_eligible_deadline(Arena, queue, reference);
+    match result {
+        0 => (Some(deadline), min_slice),
+        ENOENT => (None, min_slice),
+        _ => (
+            edq::first_deadline(Arena, queue),
+            edq::min_slice(Arena, queue),
+        ),
     }
 }
 
@@ -429,7 +414,7 @@ pub unsafe fn head_deadline(cid: Cid, reference: u64, eligible_scan: bool) -> (O
 /// checked again on every pull, and wraps to the head at the end, like
 /// scx_eevdf's detach cursor.
 #[inline(always)]
-pub unsafe fn steal_from(
+pub fn steal_from(
     dst: Cid,
     victim: Cid,
     cpu: i32,
@@ -437,7 +422,7 @@ pub unsafe fn steal_from(
     mut skip: impl FnMut(u64) -> bool,
 ) -> bool {
     let queue = queue(victim);
-    if unsafe { edq::nr_queued(Arena, queue) } == 0 {
+    if edq::nr_queued(Arena, queue) == 0 {
         rust_queued_check(victim.raw());
         return false;
     }
@@ -462,7 +447,12 @@ pub unsafe fn steal_from(
                 continue;
             }
             let task = scx_bpf_tid_to_task(state.tid());
-            if task.is_null() || !crate::task::runs_on(task, cpu) {
+            // A proxy-execution donor stays where it is, see
+            // Task::is_blocked().
+            if task.is_null()
+                || !crate::task::runs_on(Task::from_ptr(task), cpu)
+                || Task::from_ptr(task).is_blocked()
+            {
                 edq::drop_task(Arena, node);
                 continue;
             }
@@ -491,13 +481,13 @@ pub unsafe fn steal_from(
 /// Hold the next task in `cid`'s queue after `cursor`, advancing it: the
 /// node, 0 at the end, or an error when the queue is contended.
 #[inline(always)]
-pub unsafe fn peek_next(cid: Cid, cursor: &mut Cursor) -> (i32, u64) {
-    unsafe { edq::try_peek_next_hold(Arena, queue(cid), cursor) }
+pub fn peek_next(cid: Cid, cursor: &mut Cursor) -> (i32, u64) {
+    edq::try_peek_next_hold(Arena, queue(cid), cursor)
 }
 
 /// Take the exact `node` out of `cid`'s queue, if the queue is free.
 #[inline(always)]
-pub unsafe fn try_remove(cid: Cid, node: u64) -> i32 {
+pub fn try_remove(cid: Cid, node: u64) -> i32 {
     rust_queue_try_remove(queue(cid), node)
 }
 
@@ -513,7 +503,7 @@ pub extern "C" fn rust_queue_insert(
     vtime: u64,
     request: u64,
 ) -> i32 {
-    unsafe { edq::insert(Arena, queue, node, deadline, vtime, request) }
+    edq::insert(Arena, queue, node, deadline, vtime, request)
 }
 
 /// Take the exact `node` out of the queue at `queue`, as a global function:
@@ -522,26 +512,60 @@ pub extern "C" fn rust_queue_insert(
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn rust_queue_try_remove(queue: u64, node: u64) -> i32 {
-    unsafe { edq::try_remove(Arena, queue, node) }
+    edq::try_remove(Arena, queue, node)
+}
+
+/// Bring the node of a task context just handed out to the state of one
+/// queued nowhere and held by nobody.
+#[inline(always)]
+pub fn node_init(node: u64) {
+    edq::task_init(Arena, node);
+}
+
+/// Take the first task out of the backlog at `backlog`, a queue park()
+/// filled, and return its node, held, or 0 if the backlog is empty or
+/// its lock could not be had.
+#[inline(always)]
+pub fn pop_parked(backlog: u64) -> u64 {
+    edq::pop_first(Arena, backlog, true)
+}
+
+/// How many pops and peeks hold the node, for the debug dump.
+#[inline(always)]
+pub fn hold_count(node: u64) -> i64 {
+    edq::hold_count(Arena, node)
+}
+
+/// Is the node linked in `cid`'s queue, for the debug dump?
+#[inline(always)]
+pub fn linked_on(node: u64, cid: Cid) -> bool {
+    edq::membership(Arena, node) == queue(cid)
+}
+
+/// The deadline at the head of `cid`'s queue, or 0 if it is empty, for the
+/// debug dump.
+#[inline(always)]
+pub fn first_deadline(cid: Cid) -> u64 {
+    edq::first_deadline(Arena, queue(cid)).unwrap_or(0)
 }
 
 /// Drop a hold on a queued task's node.
 #[inline(always)]
-pub unsafe fn drop_held(node: u64) {
-    unsafe { edq::drop_task(Arena, node) };
+pub fn drop_held(node: u64) {
+    edq::drop_task(Arena, node);
 }
 
 /// Is the queued task whose node is `node` still waiting there, ours to
 /// move?
 #[inline(always)]
-pub unsafe fn still_queued(node: u64) -> bool {
-    unsafe { Node(node).state() == ENQUEUED }
+pub fn still_queued(node: u64) -> bool {
+    Node(node).state() == ENQUEUED
 }
 
 /// The deadline and eligibility a queued task was keyed with.
 #[inline(always)]
-pub unsafe fn queued_key(node: u64) -> (u64, u64, u64) {
-    unsafe { edq::key(Arena, node) }
+pub fn queued_key(node: u64) -> (u64, u64, u64) {
+    edq::key(Arena, node)
 }
 
 /// The task whose node is `node` leaves BPF custody, ops.dequeue(). A
@@ -549,29 +573,27 @@ pub unsafe fn queued_key(node: u64) -> (u64, u64, u64) {
 /// that a concurrent pop cannot dispatch it. Otherwise the task leaves for
 /// a DSQ or to run. Returns true when the task was taken out of a backlog
 /// here, so that the caller stops counting it there.
-pub unsafe fn dequeue(node: u64, cid: Cid, deq_flags: u64) -> bool {
-    unsafe {
-        let state = Node(node);
-        let current = state.state();
-        if deq_flags & SCX_DEQ_SCHED_CHANGE != 0 {
-            state.set_state(NONE);
-        } else if current == ENQUEUED || current == DISPATCHING {
-            state.set_state(DISPATCHED);
-        }
-        match edq::task_fini(Arena, node) {
-            1.. if current == PARKED => return true,
-            1.. => rust_queued_check(cid.raw()),
-            0 => {}
-            _ => pool::count_error(),
-        }
-        false
+pub fn dequeue(node: u64, cid: Cid, deq_flags: u64) -> bool {
+    let state = Node(node);
+    let current = state.state();
+    if deq_flags & SCX_DEQ_SCHED_CHANGE != 0 {
+        state.set_state(NONE);
+    } else if current == ENQUEUED || current == DISPATCHING {
+        state.set_state(DISPATCHED);
     }
+    match edq::task_fini(Arena, node) {
+        1.. if current == PARKED => return true,
+        1.. => rust_queued_check(cid.raw()),
+        0 => {}
+        _ => pool::count_error(),
+    }
+    false
 }
 
 /// Take the task whose node is `node` out of every queue for good and
 /// wait for its holders, before its context is reused.
-pub unsafe fn detach(node: u64) -> bool {
-    unsafe { edq::task_detach(Arena, node) == 0 }
+pub fn detach(node: u64) -> bool {
+    edq::task_detach(Arena, node) == 0
 }
 
 /// The CID-centred part of this module, as methods.
@@ -580,20 +602,20 @@ impl Cid {
     #[inline(always)]
     pub fn has_queued(self) -> bool {
         let cid = self;
-        unsafe { edq::nr_queued(Arena, queue(cid)) != 0 }
+        edq::nr_queued(Arena, queue(cid)) != 0
     }
 
     /// How many tasks `cid` has queued.
     #[inline(always)]
     pub fn nr_queued(self) -> u64 {
         let cid = self;
-        unsafe { edq::nr_queued(Arena, queue(cid)) }
+        edq::nr_queued(Arena, queue(cid))
     }
 
     /// Lockless snapshot of the shortest request queued on `cid`, 0 for none.
     #[inline(always)]
     pub fn min_slice(self) -> u64 {
         let cid = self;
-        unsafe { edq::min_slice(Arena, queue(cid)) }
+        edq::min_slice(Arena, queue(cid))
     }
 }

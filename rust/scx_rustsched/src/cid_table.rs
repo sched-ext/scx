@@ -55,7 +55,7 @@ pub trait CidSlot: Struct {
 /// # Safety
 /// Only from ops.init().
 #[inline(always)]
-pub unsafe fn init_slots<T: CidSlot>() -> i32 {
+pub fn init_slots<T: CidSlot>() -> i32 {
     unsafe {
         let count = scx_bpf_nr_online_cids();
         let pages = (u64::from(count) * T::SIZE).div_ceil(4096).max(1) as u32;
@@ -189,12 +189,12 @@ pub trait CidTable {
     /// Word `index` of `cid`'s entry. The caller checks `cid`.
     #[inline(always)]
     unsafe fn get(cid: Cid, index: u64) -> u64 {
-        unsafe { mem::load(Self::entry(cid), index * 8) }
+        mem::load(Self::entry(cid), index * 8)
     }
 
     #[inline(always)]
     unsafe fn set(cid: Cid, index: u64, value: u64) {
-        unsafe { mem::store(Self::entry(cid), index * 8, value) }
+        mem::store(Self::entry(cid), index * 8, value)
     }
 
     /// Extra header word `index`.

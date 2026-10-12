@@ -41,18 +41,9 @@ fn next_head(head: u64, offset: u64) -> u64 {
 /// Push the chain `first` to `last`, already linked through the word at
 /// `link` bytes into each slot, onto the stack whose head is at `head`.
 /// Returns false if the head stayed contended through every retry.
-///
-/// # Safety
-/// `head` and the chain must be valid for `m`, and the chain private to
-/// the caller.
-pub unsafe fn push_chain<M: Memory + Copy>(
-    m: M,
-    head: u64,
-    first: u64,
-    last: u64,
-    link: u64,
-) -> bool {
-    m.repeat(RETRIES, || unsafe {
+/// The chain must be private to the caller.
+pub fn push_chain<M: Memory + Copy>(m: M, head: u64, first: u64, last: u64, link: u64) -> bool {
+    m.repeat(RETRIES, || {
         let old = m.load(head);
         m.store(last + link, old & LOW);
         m.cas(head, old, next_head(old, first & LOW)) != old
@@ -60,11 +51,8 @@ pub unsafe fn push_chain<M: Memory + Copy>(
 }
 
 /// Push one `slot`, see [`push_chain`].
-///
-/// # Safety
-/// As [`push_chain`].
-pub unsafe fn push<M: Memory + Copy>(m: M, head: u64, slot: u64, link: u64) -> bool {
-    unsafe { push_chain(m, head, slot, slot, link) }
+pub fn push<M: Memory + Copy>(m: M, head: u64, slot: u64, link: u64) -> bool {
+    push_chain(m, head, slot, slot, link)
 }
 
 /// Pop a slot from the stack at `head`: its address, or 0 if the stack is
@@ -73,13 +61,10 @@ pub unsafe fn push<M: Memory + Copy>(m: M, head: u64, slot: u64, link: u64) -> b
 /// The successor is read from a slot another CPU may have popped in the
 /// meantime. Its page is never freed, so the read is safe, and the
 /// generation makes the compare fail if the value read was stale.
-///
-/// # Safety
-/// `head` and every slot on the stack must be valid for `m`.
-pub unsafe fn pop<M: Memory + Copy>(m: M, head: u64, link: u64) -> u64 {
+pub fn pop<M: Memory + Copy>(m: M, head: u64, link: u64) -> u64 {
     let base = head & !LOW;
     let mut popped = 0;
-    m.repeat(RETRIES, || unsafe {
+    m.repeat(RETRIES, || {
         let old = m.load(head);
         let offset = old & LOW;
         if offset == EMPTY {
@@ -100,11 +85,9 @@ pub unsafe fn pop<M: Memory + Copy>(m: M, head: u64, link: u64) -> u64 {
 /// the one after it, through the word at `link` bytes into it. A caller
 /// links all but the last, then pushes the run with [`push_chain`]. The
 /// loop over the run is the caller's, for BPF to bound it with may_goto.
-///
-/// # Safety
-/// The run must be valid for `m` and private to the caller.
+/// The run must be private to the caller.
 #[inline(always)]
-pub unsafe fn link_next<M: Memory + Copy>(m: M, first: u64, index: u64, size: u64, link: u64) {
+pub fn link_next<M: Memory + Copy>(m: M, first: u64, index: u64, size: u64, link: u64) {
     let slot = first + index * size;
-    unsafe { m.store(slot + link, (slot + size) & LOW) };
+    m.store(slot + link, (slot + size) & LOW);
 }

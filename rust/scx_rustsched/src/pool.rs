@@ -81,44 +81,73 @@ pub(crate) fn add(index: usize, value: u64) {
 #[derive(Clone, Copy)]
 pub struct Arena;
 
+/// Allocate `pages` pages of the arena, zeroed, and return their address,
+/// or 0 if there is no memory or the allocation was contended.
+#[inline(always)]
+pub fn alloc_pages(pages: u32) -> u64 {
+    unsafe {
+        crate::kfuncs::bpf_arena_alloc_pages(
+            (&raw mut arena).cast(),
+            core::ptr::null_mut(),
+            pages,
+            -1,
+            0,
+        ) as u64
+    }
+}
+
+/// Give back `pages` pages at `address`, which alloc_pages() returned.
+/// Nothing may use them afterwards: they read as zero, or as what their
+/// next owner stores.
+#[inline(always)]
+pub fn free_pages(address: u64, pages: u32) {
+    unsafe {
+        crate::kfuncs::bpf_arena_free_pages(
+            (&raw mut arena).cast(),
+            address as *mut core::ffi::c_void,
+            pages,
+        )
+    };
+}
+
 impl View for Arena {
     #[inline(always)]
-    unsafe fn load_word(&self, base: u64, word: u64) -> u64 {
-        unsafe { mem::load(base, word * 8) }
+    fn load_word(&self, base: u64, word: u64) -> u64 {
+        mem::load(base, word * 8)
     }
 
     #[inline(always)]
-    unsafe fn load(&self, address: u64) -> u64 {
-        unsafe { mem::load(address, 0) }
+    fn load(&self, address: u64) -> u64 {
+        mem::load(address, 0)
     }
 }
 
 impl Memory for Arena {
     #[inline(always)]
-    unsafe fn store_word(&self, base: u64, word: u64, value: u64) {
-        unsafe { mem::store(base, word * 8, value) }
+    fn store_word(&self, base: u64, word: u64, value: u64) {
+        mem::store(base, word * 8, value)
     }
 
     #[inline(always)]
-    unsafe fn store(&self, address: u64, value: u64) {
-        unsafe { mem::store(address, 0, value) }
+    fn store(&self, address: u64, value: u64) {
+        mem::store(address, 0, value)
     }
 
     /// An exchange, so that the store is ordered on weakly ordered CPUs too.
     #[inline(always)]
-    unsafe fn release(&self, address: u64, value: u64) {
-        unsafe { mem::release(address, value) }
+    fn release(&self, address: u64, value: u64) {
+        mem::release(address, value)
     }
 
     /// The previous value, to be compared with `old`.
     #[inline(always)]
-    unsafe fn cas(&self, address: u64, old: u64, new: u64) -> u64 {
-        unsafe { mem::cas(address, old, new) }
+    fn cas(&self, address: u64, old: u64, new: u64) -> u64 {
+        mem::cas(address, old, new)
     }
 
     #[inline(always)]
-    unsafe fn add(&self, address: u64, value: u64) {
-        unsafe { mem::add(address, value) }
+    fn add(&self, address: u64, value: u64) {
+        mem::add(address, value)
     }
 
     #[inline(always)]

@@ -30,10 +30,10 @@ pub const SCHED_IDLE: u32 = 5;
 
 /// The task's scheduling policy.
 #[inline(always)]
-pub unsafe fn task_policy(task: *mut task_struct) -> u32 {
+pub fn task_policy(task: &Task) -> u32 {
     unsafe {
         let policy_offset = config::get(config::POLICY) as usize;
-        read_volatile(task.cast::<u8>().add(policy_offset).cast::<u32>())
+        read_volatile(task.as_ptr().cast::<u8>().add(policy_offset).cast::<u32>())
     }
 }
 
@@ -41,10 +41,10 @@ const PF_EXITING: u32 = 0x4;
 
 /// Is `task` exiting?
 #[inline(always)]
-pub unsafe fn exiting(task: *mut task_struct) -> bool {
+pub fn exiting(task: &Task) -> bool {
     unsafe {
         let flags_offset = config::get(config::TASK_FLAGS) as usize;
-        read_volatile(task.cast::<u8>().add(flags_offset).cast::<u32>()) & PF_EXITING != 0
+        read_volatile(task.as_ptr().cast::<u8>().add(flags_offset).cast::<u32>()) & PF_EXITING != 0
     }
 }
 
@@ -54,13 +54,13 @@ pub const WEIGHT_IDLEPRIO: u64 = 3;
 /// The task's load weight as fair.c gives it, set_load_weight(): its nice
 /// level's, or WEIGHT_IDLEPRIO for SCHED_IDLE. NICE_0_WEIGHT is nice 0.
 #[inline(always)]
-pub unsafe fn task_weight(task: *mut task_struct) -> u64 {
+pub fn task_weight(task: &Task) -> u64 {
     unsafe {
         if task_policy(task) == SCHED_IDLE {
             return WEIGHT_IDLEPRIO;
         }
         let prio_offset = config::get(config::STATIC_PRIO) as usize;
-        let prio = read_volatile(task.cast::<u8>().add(prio_offset).cast::<i32>());
+        let prio = read_volatile(task.as_ptr().cast::<u8>().add(prio_offset).cast::<i32>());
         match PRIO_TO_WEIGHT.get(prio.wrapping_sub(MAX_RT_PRIO as i32) as u32 as usize) {
             Some(weight) => u64::from(*weight),
             None => NICE_0_WEIGHT,
@@ -70,21 +70,32 @@ pub unsafe fn task_weight(task: *mut task_struct) -> u64 {
 
 /// Is `task` still runnable, rather than going to sleep?
 #[inline(always)]
-pub unsafe fn task_queued(task: *mut task_struct) -> bool {
+pub fn task_queued(task: &Task) -> bool {
     unsafe {
         let flags_offset = config::get(config::SCX_FLAGS) as usize;
-        read_volatile(task.cast::<u8>().add(flags_offset).cast::<u32>()) & SCX_TASK_QUEUED != 0
+        read_volatile(task.as_ptr().cast::<u8>().add(flags_offset).cast::<u32>()) & SCX_TASK_QUEUED
+            != 0
     }
 }
 
 /// Can `task` run on the CPU of a CID right now?
 #[inline(always)]
-pub unsafe fn runs_on(task: *mut task_struct, cpu: i32) -> bool {
+pub fn runs_on(task: &Task, cpu: i32) -> bool {
     unsafe {
         let mask_offset = config::get(config::CPUS_PTR) as usize;
         let migration_offset = config::get(config::MIGRATION_DISABLED) as usize;
-        let mask = read_volatile(task.cast::<u8>().add(mask_offset).cast::<*const cpumask>());
-        let migration = read_volatile(task.cast::<u8>().add(migration_offset).cast::<u16>());
+        let mask = read_volatile(
+            task.as_ptr()
+                .cast::<u8>()
+                .add(mask_offset)
+                .cast::<*const cpumask>(),
+        );
+        let migration = read_volatile(
+            task.as_ptr()
+                .cast::<u8>()
+                .add(migration_offset)
+                .cast::<u16>(),
+        );
         cpu >= 0 && migration == 0 && bpf_cpumask_test_cpu(cpu as u32, mask)
     }
 }
@@ -97,38 +108,48 @@ pub unsafe fn runs_on(task: *mut task_struct, cpu: i32) -> bool {
 /// pinned. As is_migration_disabled() in scx's common.bpf.h decides, a
 /// count of 1 pins only another task.
 #[inline(always)]
-pub unsafe fn pinned(task: *mut task_struct) -> bool {
+pub fn pinned(task: &Task) -> bool {
     unsafe {
         let allowed_offset = config::get(config::NR_CPUS_ALLOWED) as usize;
         let migration_offset = config::get(config::MIGRATION_DISABLED) as usize;
-        let migration = read_volatile(task.cast::<u8>().add(migration_offset).cast::<u16>());
-        read_volatile(task.cast::<u8>().add(allowed_offset).cast::<u32>()) == 1
+        let migration = read_volatile(
+            task.as_ptr()
+                .cast::<u8>()
+                .add(migration_offset)
+                .cast::<u16>(),
+        );
+        read_volatile(task.as_ptr().cast::<u8>().add(allowed_offset).cast::<u32>()) == 1
             || migration > 1
-            || (migration == 1 && helpers::get_current_task() != task)
+            || (migration == 1 && helpers::get_current_task() != task.as_ptr())
     }
 }
 
 /// Has `task` disabled migration, counting the BPF prologue's own disable
 /// for the current task? pinned() tells the two apart.
 #[inline(always)]
-pub unsafe fn migration_disabled(task: *mut task_struct) -> bool {
+pub fn migration_disabled(task: &Task) -> bool {
     unsafe {
         let migration_offset = config::get(config::MIGRATION_DISABLED) as usize;
-        read_volatile(task.cast::<u8>().add(migration_offset).cast::<u16>()) != 0
+        read_volatile(
+            task.as_ptr()
+                .cast::<u8>()
+                .add(migration_offset)
+                .cast::<u16>(),
+        ) != 0
     }
 }
 
 /// The CID `task` is on.
 #[inline(always)]
-pub unsafe fn task_cid(task: *mut task_struct) -> crate::sched::Cid {
-    unsafe { crate::sched::Cid(scx_bpf_task_cid(task)) }
+pub fn task_cid(task: &Task) -> crate::sched::Cid {
+    unsafe { crate::sched::Cid(scx_bpf_task_cid(task.as_ptr())) }
 }
 
 /// Can `task` be dispatched on `cid`? A task always can on the CID it is
 /// on, which enqueue chose within its affinity, migration disabled or not.
 #[inline(always)]
-pub unsafe fn allowed_on(task: *mut task_struct, cid: crate::sched::Cid) -> bool {
-    unsafe { scx_bpf_task_cid(task) == cid.raw() || runs_on(task, cid.cpu()) }
+pub fn allowed_on(task: &Task, cid: crate::sched::Cid) -> bool {
+    unsafe { scx_bpf_task_cid(task.as_ptr()) == cid.raw() || runs_on(task, cid.cpu()) }
 }
 
 /// A task, as a callback of `#[scheduler]` takes it: a reference to the
@@ -153,25 +174,25 @@ impl Task {
     /// The task's weight, from its nice level: 1024 at nice 0.
     #[inline(always)]
     pub fn weight(&self) -> u64 {
-        unsafe { task_weight(self.as_ptr()) }
+        task_weight(self)
     }
 
     /// The CID the task is on, or last ran on.
     #[inline(always)]
     pub fn cid(&self) -> crate::sched::Cid {
-        crate::sched::Cid(unsafe { task_cid(self.as_ptr()).raw() })
+        crate::sched::Cid(task_cid(self).raw())
     }
 
     /// May the task run on `cid`?
     #[inline(always)]
     pub fn allowed_on(&self, cid: crate::sched::Cid) -> bool {
-        unsafe { allowed_on(self.as_ptr(), cid) }
+        allowed_on(self, cid)
     }
 
     /// Is the task exiting?
     #[inline(always)]
     pub fn exiting(&self) -> bool {
-        unsafe { exiting(self.as_ptr()) }
+        exiting(self)
     }
 
     /// The task's pid: the id of the thread.
@@ -184,14 +205,14 @@ impl Task {
     /// disabled migration?
     #[inline(always)]
     pub fn pinned(&self) -> bool {
-        unsafe { pinned(self.as_ptr()) }
+        pinned(self)
     }
 
     /// Is the task still runnable, rather than going to sleep? What
     /// ops.stopping() and ops.dispatch() ask of the task that just ran.
     #[inline(always)]
     pub fn queued(&self) -> bool {
-        unsafe { task_queued(self.as_ptr()) }
+        task_queued(self)
     }
 
     /// Is the task on a CPU right now?
@@ -204,6 +225,86 @@ impl Task {
     #[inline(always)]
     pub fn runnable_at(&self) -> u64 {
         unsafe { self.field::<u64>(config::RUNNABLE_AT) }
+    }
+
+    /// The task sched_ext knows by `tid`, see `tid()`, if it still exists.
+    /// The scheduler has to ask for this with the TID_TO_TASK flag. The
+    /// task stays valid until the callback returns, and must not be kept
+    /// past it.
+    #[inline(always)]
+    pub fn from_tid<'task>(tid: u64) -> Option<&'task Task> {
+        let task = crate::kfuncs::scx_bpf_tid_to_task(tid);
+        if task.is_null() {
+            None
+        } else {
+            Some(unsafe { Task::from_ptr(task) })
+        }
+    }
+
+    /// The task this CPU was running when the callback was called: the
+    /// waker, in ops.select_cid() and ops.enqueue() of a wakeup. Valid
+    /// until the callback returns.
+    #[inline(always)]
+    pub fn current<'task>() -> Option<&'task Task> {
+        let task = unsafe { helpers::get_current_task() };
+        if task.is_null() {
+            None
+        } else {
+            Some(unsafe { Task::from_ptr(task) })
+        }
+    }
+
+    /// The cgroup the task is in, from ops.enable() on.
+    #[inline(always)]
+    pub fn cgroup(&self) -> Option<crate::cgroup::CgroupGuard> {
+        crate::cgroup::CgroupGuard::new(unsafe {
+            crate::kfuncs::scx_bpf_task_cgroup(self.as_ptr())
+        })
+    }
+
+    /// The request the task set for itself, sched_attr.sched_runtime, in
+    /// nanoseconds, or 0 if it set none.
+    #[inline(always)]
+    pub fn custom_slice(&self) -> u64 {
+        if unsafe { self.field::<u8>(config::CUSTOM_SLICE) } == 0 {
+            return 0;
+        }
+        unsafe { self.field::<u64>(config::SE_SLICE) }
+    }
+
+    /// The task's sched_ext flags, task_struct.scx.flags.
+    #[inline(always)]
+    pub fn scx_flags(&self) -> u32 {
+        unsafe { self.field::<u32>(config::SCX_FLAGS) }
+    }
+
+    /// The id sched_ext knows the task by, which `Task::from_tid()` finds
+    /// it again with.
+    #[inline(always)]
+    pub fn tid(&self) -> u64 {
+        unsafe { self.field::<u64>(config::SCX_TID) }
+    }
+
+    /// Is the task a proxy-execution donor: blocked on a mutex and kept
+    /// runnable so that its scheduling context can run the mutex owner?
+    /// Only for a scheduler loaded with the `ENQ_BLOCKED` flag. The kernel
+    /// marks every task that blocks, and the mark means a donor only while
+    /// the task is queued, which it is only with proxy execution.
+    ///
+    /// fair.c keeps a donor where it is: it stays on its runqueue with the
+    /// vruntime and deadline it blocked with, and can_migrate_task()
+    /// refuses it. Only proxy execution moves it, to the owner's runqueue.
+    #[inline(always)]
+    pub fn is_blocked(&self) -> bool {
+        crate::ops::enabled(crate::ops::SCX_OPS_ENQ_BLOCKED)
+            && config::get(config::IS_BLOCKED) != 0
+            && unsafe { self.field::<u8>(config::IS_BLOCKED) } != 0
+    }
+
+    /// How many CPUs the task's affinity allows.
+    #[inline(always)]
+    pub fn nr_cpus_allowed(&self) -> u32 {
+        unsafe { self.field::<u32>(config::NR_CPUS_ALLOWED) }
     }
 
     /// What is left of the task's slice, in nanoseconds.
@@ -255,5 +356,27 @@ impl Task {
                     .cast::<T>(),
             )
         }
+    }
+}
+
+/// What ops.init_task() is told of the task, its second argument.
+#[repr(transparent)]
+pub struct InitTaskArgs(crate::ops::scx_init_task_args);
+
+impl InitTaskArgs {
+    /// # Safety
+    /// `args` must be the arguments the kernel passed to ops.init_task().
+    #[inline(always)]
+    pub unsafe fn from_ptr<'args>(
+        args: *mut crate::ops::scx_init_task_args,
+    ) -> &'args InitTaskArgs {
+        unsafe { &*args.cast::<InitTaskArgs>() }
+    }
+
+    /// Is the task being forked, rather than an existing one the
+    /// scheduler is taking over? The structure's first field.
+    #[inline(always)]
+    pub fn fork(&self) -> bool {
+        unsafe { read_volatile((self as *const InitTaskArgs).cast::<u8>()) != 0 }
     }
 }

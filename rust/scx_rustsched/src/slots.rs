@@ -162,13 +162,11 @@ unsafe fn grow<T: TaskSlot>(pages: u32, keep_first: bool) -> u64 {
     let skip = u32::from(keep_first);
     let first = memory as u64 + u64::from(skip) * size;
     if slots > skip {
-        unsafe {
-            for value in crate::loops::range(0, slots - skip - 1) {
-                slab::link_next(Arena, first, u64::from(value), size, LINK);
-            }
+        for value in crate::loops::range(0, slots - skip - 1) {
+            slab::link_next(Arena, first, u64::from(value), size, LINK);
         }
         let last = first + u64::from(slots - skip - 1) * size;
-        if !unsafe { slab::push_chain(Arena, head(), first, last, LINK) } {
+        if !slab::push_chain(Arena, head(), first, last, LINK) {
             // Leaked, not lost: the free list stayed contended throughout.
             pool::count(2);
         }
@@ -208,13 +206,13 @@ unsafe fn delete_storage(task: *mut task_struct) {
 }
 
 #[inline(always)]
-unsafe fn set_cookie(page: u64) {
-    unsafe { mem::store(page, 0, COOKIE) }
+fn set_cookie(page: u64) {
+    mem::store(page, 0, COOKIE)
 }
 
 #[inline(always)]
-unsafe fn cookie_of(page: u64) -> u64 {
-    unsafe { mem::load(page, 0) }
+fn cookie_of(page: u64) -> u64 {
+    mem::load(page, 0)
 }
 
 /// Give `task` a slot: taken from the free list, or from pages the pool
