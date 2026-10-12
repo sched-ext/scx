@@ -23,3 +23,4 @@ comments in their `main.rs` or `*.bpf.c` files.
 
 - [scx_flow](scx_flow/README.md)
 - [scx_rlfifo](scx_rlfifo/README.md)
+- [scx_rvtime](scx_rvtime/README.md): weighted vtime scheduler written in Rust BPF, with typed per-task state
