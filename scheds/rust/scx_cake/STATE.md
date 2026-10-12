@@ -62,7 +62,7 @@ Runs and tools: `scx_cake_bench/runs/flags_20261012/` (`tools/batch.sh`,
 
 | Arm vs default | Quiet | 16 hogs | Verdict |
 |---|---|---|---|
-| `--portable-bitops` vs native (patch 1) | two orders pooled, 12 slots/arm: 1 % low +4.4 % (29/36), 0.1 % low +13 % (31/36), stddev −21 % (31/36), avg −0.04 % | p99 −2.7 % (8/9), 1 % low +2.5 % (8/9), avg +0.2 % | Candidate, unexplained: JIT inlines native (`tzcnt`/`popcnt`), every ctz input is nonzero (no semantic gap), ns/run equal (`select_cpu` 65.5 native vs 66.9 portable, rest ±1–2 ns). Default unchanged pending the maintainer |
+| `--portable-bitops` vs native (patch 1) | two orders pooled, 12 slots/arm: 1 % low +4.4 % (29/36), 0.1 % low +13 % (31/36), stddev −21 % (31/36), avg −0.04 % | p99 −2.7 % (8/9), 1 % low +2.5 % (8/9), avg +0.2 % | Neutral; native stays default. Round 2 (05:40, order b-first) did not replicate: quiet p99 +0.4 % worse (0/9), loaded p99 +1.2 % worse (0/9); pooled loaded 17–21/36 pairs. The first round was run-to-run variance. JIT inlines native, inputs never zero, ns/run equal |
 | `--native-ring` vs off | mixed, all within noise | mixed | Rejected |
 
 Per-callback cost seen on the way (bpf_stats, in game): `cake_enqueue`
