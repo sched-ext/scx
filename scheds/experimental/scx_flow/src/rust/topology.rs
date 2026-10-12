@@ -103,7 +103,7 @@ pub fn write_llc_bitmaps() -> Vec<String> {
 }
 
 /// Short topology line for the start log.
-/// Shows cpus seeded with primary plus llcs counts, so the 4.8.11 start
+/// Shows cpus seeded with primary plus llcs counts, so the 4.8.12 start
 /// log carries primary plus llcs past the old cpus seeded line with no
 /// hot-path use.
 pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {

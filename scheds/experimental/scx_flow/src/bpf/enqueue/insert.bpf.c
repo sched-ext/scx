@@ -210,6 +210,9 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	u64 pdl;
 	u64 pvt;
 	bool pmiss = false;
+	bool pin_is_lat = false;
+	u32 pin_pre = 0;
+	bool have_pin = false;
 	if (is_reenq) {
 		ph = READ_ONCE(tctx->hint_us);
 		phint_w = READ_ONCE(tctx->hint_w);
@@ -244,36 +247,120 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	pdev = (u64)READ_ONCE(tctx->dev_ns);
 	pdl = flow_pred_deadline(now, pavg, pdev, ph);
 	__sync_lock_test_and_set(&tctx->deadline, pdl);
-	tctx->wait_at = now;
-	/* Strict slice on the pinned join with no stale reuse. A miss */
-	/* holds else floors only via the shared miss helper with the open */
-	/* path, a slice rotation inherits a zero slice, and a fresh wait */
-	/* earns the dynamic remaining clamp, so the virtual deadline */
-	/* tracks the same charge the key sorts. */
-	if (pmiss)
+	/* Latency recompute per enqueue with no stored bit, so 72B holds. */
+	/* A fresh pinned wait clamps the slice to 100us plus caps the key */
+	/* to now plus max 4ms else slice plus 100us via the strict key, */
+	/* while RED stays on the original deadline with no order change. */
+	/* Like fair.c, the cap paces service, unlike rt.c, no fixed */
+	/* priority holds. A preempted pinned head resumes via lifecycle */
+	/* only with no slice rewrite here, so the stored leftover stays. */
+	/* Sleep isolates the true gap as now minus wait minus burst, and */
+	/* in-tier keys cap at now plus one period for the starvation bound. */
+	if (pmiss) {
+		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
-	else if (!is_reenq)
-		__sync_lock_test_and_set(&tctx->slice_ns,
-		    flow_slice_for(pdl, now));
-	else
+		pvt = flow_make_fair(tctx, pdl, phint_w);
+		{
+			u64 pbound0 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+			if (pvt != 0 && pbound0 != (u64)~0ULL &&
+			    !flow_time_before(pvt, pbound0) && pvt != pbound0)
+				pvt = pbound0;
+		}
+	} else if (!is_reenq) {
+		u64 p_old_wait = READ_ONCE(tctx->wait_at);
+		u64 p_sleep = flow_sleep_ns(p_old_wait, now, pavg);
+		u32 p_task_w = READ_ONCE(tctx->weight);
+		u32 p_eff = 0;
+		bool p_is_lat;
+		u32 p_pre;
+		u32 p_slice;
+		u64 p_vt;
+		/* No stable uclamp field in this task view, so fail open to */
+		/* zero with no map plus no knob, and probation holds through */
+		/* both helpers, so newcomers stay batch. */
+		if (p_task_w == 0)
+			p_task_w = (u32)FLOW_WEIGHT_BASE;
+		p_eff = flow_task_effective_weight(p_task_w, phint_w);
+		p_is_lat = flow_is_lat(pavg, pdev, ph, p_sleep, 0, p_eff);
+		p_pre = flow_slice_for(pdl, now);
+		p_slice = flow_slice_lat_clamp(p_pre, p_is_lat);
+		pin_is_lat = p_is_lat;
+		pin_pre = p_pre;
+		have_pin = true;
+		if (enq_flags & SCX_ENQ_PREEMPT) {
+			tctx->wait_at = now;
+			pvt = flow_make_fair(tctx, pdl, phint_w);
+		} else {
+			u64 p_dl;
+			tctx->wait_at = now;
+			__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
+			p_vt = flow_make_fair(tctx, pdl, phint_w);
+			if (p_is_lat) {
+				p_dl = flow_lat_deadline(now, p_slice);
+				pvt = flow_edf_key(p_vt, p_dl);
+			} else {
+				pvt = p_vt;
+			}
+		}
+		{
+			u64 pbound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+			if (pvt != 0 && pbound != (u64)~0ULL &&
+			    !flow_time_before(pvt, pbound) && pvt != pbound)
+				pvt = pbound;
+		}
+	} else {
+		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
-	pvt = flow_make_fair(tctx, pdl, phint_w);
+		pvt = flow_make_fair(tctx, pdl, phint_w);
+		{
+			u64 pbound2 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+			if (pvt != 0 && pbound2 != (u64)~0ULL &&
+			    !flow_time_before(pvt, pbound2) && pvt != pbound2)
+				pvt = pbound2;
+		}
+	}
 	/* RED on the pinned join with the same bounded O(1) newcomer check. */
 	/* A zero exceed plus a critical exceed plus a newcomer that fails */
 	/* the victim test admits to the tier, else the newcomer rejects to */
 	/* the value ordered queue with no tier wait. Tolerance aids only */
-	/* the guarantee with no key shaping. */
+	/* the guarantee with no key shaping. Critical follows the unified */
+	/* latency and cost uses the pre-clamp slice for fresh waits. */
 	{
 		u32 psl = READ_ONCE(tctx->slice_ns);
-		bool pcrit = flow_lat_crit(pavg, pdev);
-		u64 pex = flow_red_newcomer_exceed(pdl, now, pavg, psl,
+		bool pcrit;
+		u32 pcost_sl;
+		u64 pex;
+		if (have_pin) {
+			pcrit = pin_is_lat;
+			if (!(enq_flags & SCX_ENQ_PREEMPT))
+				pcost_sl = pin_pre;
+			else
+				pcost_sl = psl;
+		} else if (pmiss) {
+			u32 ptw0 = READ_ONCE(tctx->weight);
+			u32 peff0;
+			if (ptw0 == 0)
+				ptw0 = (u32)FLOW_WEIGHT_BASE;
+			peff0 = flow_task_effective_weight(ptw0, phint_w);
+			pcrit = flow_is_lat(pavg, pdev, ph, 0, 0, peff0);
+			pcost_sl = psl;
+		} else {
+			u32 ptw0 = READ_ONCE(tctx->weight);
+			u32 peff0;
+			if (ptw0 == 0)
+				ptw0 = (u32)FLOW_WEIGHT_BASE;
+			peff0 = flow_task_effective_weight(ptw0, phint_w);
+			pcrit = flow_is_lat(pavg, pdev, ph, 0, 0, peff0);
+			pcost_sl = psl;
+		}
+		pex = flow_red_newcomer_exceed(pdl, now, pavg, pcost_sl,
 		    pcrit);
 		if (pex && !pcrit) {
 			u32 ptw = READ_ONCE(tctx->weight);
 			u32 peff = flow_task_effective_weight(ptw, phint_w);
-			u64 pcost = flow_red_cost(pavg, psl);
+			u64 pcost = flow_red_cost(pavg, pcost_sl);
 			if (!flow_red_victim_ok(pdl, pdl, pcost, pex,
 			    pcrit)) {
 				if (flow_cpu_ok(p, pc)) {
@@ -304,8 +391,12 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	}
 	{
 		u32 ptw = READ_ONCE(tctx->weight);
-		u32 peff = flow_task_effective_weight(ptw, phint_w);
-		bool pcrit = flow_lat_crit(pavg, pdev);
+		u32 peff;
+		bool pcrit;
+		if (ptw == 0)
+			ptw = (u32)FLOW_WEIGHT_BASE;
+		peff = flow_task_effective_weight(ptw, phint_w);
+		pcrit = flow_is_lat(pavg, pdev, ph, 0, 0, peff);
 		flow_gate_reject();
 		tctx->wait_at = now;
 		flow_overflow_insert(p, enq_flags,

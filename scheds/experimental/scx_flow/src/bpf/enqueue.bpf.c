@@ -33,11 +33,15 @@
  * overload counts one RED reject with no gate double count plus no
  * global queue use. The exiting plus bypass plus tier idle plus preempt
  * paths form the kick points, so every wait meets at most one kick with
- * no storm. A direct preempt
- * needs predictor slack plus an eligible arrival plus a 100us margin
+ * no storm. A direct preempt needs unified latency with probation plus
+ * an eligible lat arrival against a batch owner plus a 100us margin
  * lead with more than 100us still left on the owner, so near ties plus
  * nearly done owners never bounce while one kick per wait stays. The
- * owner paces on a fresh 1ms quantum with no dynamic use.
+ * owner paces on start plus inherit cur with no fresh quantum, so the
+ * tail tracks the stored slice. A preempted
+ * head resumes via lifecycle only with start plus cur clamped to 10us
+ * plus 100us for latency else 1ms with inherit on bad start plus tail
+ * plus history, so the same head resumes with its leftover.
  * Latency-critical slice carryover keeps the unused quantum, so short
  * bursts earn nearer keys. Strict slice writes run here before the key.
  * Fresh waits earn the dynamic remaining clamp, misses hold else floor
@@ -77,6 +81,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	s32 hoist_lag = 0;
 	u64 hoist_min = 0;
 	bool hoist_elig = false;
+	bool open_is_lat = false;
+	u32 open_pre = 0;
+	bool have_open = false;
 	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
 	/* the occupant preempt lookup, so slice rotation stays cheap. The */
 	/* stored hint plus hint weight in the task state carry the period */
@@ -122,18 +129,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		flow_gate_reject();
 		if (lctx)
 			lctx->wait_at = now;
-		/* Gate misses thread the stored share plus critical when */
-		/* state holds, else BASE-only critical top value when absent. */
+		/* Gate misses thread the stored share plus unified latency when */
+		/* state holds, else batch value when absent with probation. */
 		if (lctx) {
 			u32 gw = READ_ONCE(lctx->weight);
 			u32 ghw = READ_ONCE(lctx->hint_w);
 			u64 gavg = (u64)READ_ONCE(lctx->avg_ns);
 			u64 gdev = (u64)READ_ONCE(lctx->dev_ns);
+			u32 ghint = READ_ONCE(lctx->hint_us);
 			u32 geff = flow_task_effective_weight(gw, ghw);
-			bool gcrit = flow_lat_crit(gavg, gdev);
+			bool gcrit = flow_is_lat(gavg, gdev, ghint, 0, 0,
+			    geff);
 			gval = flow_red_value(geff, gcrit);
 		} else {
-			gval = flow_red_value((u32)FLOW_WEIGHT_BASE, true);
+			gval = flow_red_value((u32)FLOW_WEIGHT_BASE, false);
 		}
 		flow_overflow_insert(p, enq_flags, gval);
 		flow_kick_idle_allowed(p, sel);
@@ -151,8 +160,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u32 mhw = (u32)FLOW_WEIGHT_BASE;
 		u64 mdl;
 		/* No state holds no predictor, so the hint weight threads */
-		/* with BASE-only task share and critical top value when */
-		/* state is absent with no extra map. */
+		/* with BASE-only task share and batch value when state */
+		/* is absent with probation and no extra map. */
 		flow_task_hint_weight(p, &mh, &mhw);
 		mdl = flow_fallback_deadline(now, mh);
 		if (flow_cpu_ok(p, mc)) {
@@ -163,7 +172,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    (u32)FLOW_WEIGHT_BASE, mhw);
 			flow_gate_reject();
 			flow_overflow_insert(p, enq_flags,
-			    flow_red_value(meff, true));
+			    flow_red_value(meff, false));
 		}
 		flow_kick_idle_allowed(p, sel);
 		return;
@@ -206,9 +215,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (!flow_cpu_ok(p, cpu)) {
 		u32 hw = READ_ONCE(tctx->weight);
 		u32 hw_hint = READ_ONCE(tctx->hint_w);
+		u32 hhint = READ_ONCE(tctx->hint_us);
 		u32 heff = flow_task_effective_weight(hw, hw_hint);
-		bool hcrit = flow_lat_crit((u64)READ_ONCE(tctx->avg_ns),
-		    (u64)READ_ONCE(tctx->dev_ns));
+		bool hcrit = flow_is_lat((u64)READ_ONCE(tctx->avg_ns),
+		    (u64)READ_ONCE(tctx->dev_ns), hhint, 0, 0, heff);
 		flow_gate_reject();
 		tctx->wait_at = now;
 		flow_overflow_insert(p, enq_flags, flow_red_value(heff, hcrit));
@@ -270,15 +280,29 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		nvt = flow_make_fair(tctx, ndl, hint_w);
+		{
+			u64 mbound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+			if (nvt != 0 && mbound != (u64)~0ULL &&
+			    !flow_time_before(nvt, mbound) && nvt != mbound)
+				nvt = mbound;
+		}
 		/* RED on the miss rejoin with the same bounded O(1) newcomer */
 		/* check. A zero exceed plus a critical exceed plus a newcomer */
 		/* that fails the victim test admits at once, else the */
 		/* newcomer rejects to the value ordered queue. Tolerance aids */
 		/* only the guarantee with no key shaping. A full O(n) least */
 		/* value scan stays a noted alternative with no knob here, so */
-		/* the verifier keeps one pass with no walk. */
+		/* the verifier keeps one pass with no walk. Critical follows */
+		/* the unified latency, so RED and slice agree. */
 		msl = READ_ONCE(tctx->slice_ns);
-		mcrit = flow_lat_crit(avg, dev);
+		{
+			u32 mtw0 = READ_ONCE(tctx->weight);
+			u32 meff0;
+			if (mtw0 == 0)
+				mtw0 = (u32)FLOW_WEIGHT_BASE;
+			meff0 = flow_task_effective_weight(mtw0, hint_w);
+			mcrit = flow_is_lat(avg, dev, hint, 0, 0, meff0);
+		}
 		mex = flow_red_newcomer_exceed(ndl, now, avg, msl, mcrit);
 		if (mex && !mcrit) {
 			u32 mtw = READ_ONCE(tctx->weight);
@@ -304,42 +328,121 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	deadline = flow_pred_deadline(now, avg, dev, hint);
 	__sync_lock_test_and_set(&tctx->deadline, deadline);
-	tctx->wait_at = now;
-	/* Strict slice before the key with no stale reuse. A fresh wait */
-	/* earns the dynamic remaining clamp from 10us to 1ms, while a */
-	/* slice rotation holds the stored charge else inherits the quantum */
-	/* on zero, so the virtual deadline tracks the same charge the key */
-	/* sorts. The remaining time feeds the slice plus slack only with */
-	/* the sort staying the earlier of deadline plus virtual time. */
-	if (!is_reenq)
-		__sync_lock_test_and_set(&tctx->slice_ns,
-		    flow_slice_for(deadline, now));
-	else
+	/* Latency recompute per enqueue with no stored bit, so 72B holds. */
+	/* A fresh wait clamps the slice to 100us plus caps the key to now */
+	/* plus max 4ms else slice plus 100us via the strict key, while RED */
+	/* stays on the original deadline with no order change. Like fair.c, */
+	/* the cap paces service, unlike rt.c, no fixed priority holds. A */
+	/* preempted head resumes via lifecycle only with no slice rewrite */
+	/* here, so the stored leftover stays with one charge in stopping. */
+	/* Sleep isolates the true gap as now minus wait minus burst, so */
+	/* queue plus run never masquerade as sleep. Intentional: in-tier */
+	/* keys cap at now plus one period, so far keys never starve past */
+	/* the bound with no extra queue. */
+	if (!is_reenq) {
+		u64 old_wait = READ_ONCE(tctx->wait_at);
+		u64 lat_sleep = flow_sleep_ns(old_wait, now, avg);
+		u32 lat_task_w = READ_ONCE(tctx->weight);
+		u32 lat_eff = 0;
+		bool is_lat;
+		u32 pre_slice;
+		u32 lat_slice;
+		u64 lat_vt;
+		/* No stable uclamp field in this task view, so fail open to */
+		/* zero with no map plus no knob, and the ext helper keeps the */
+		/* veto for callers that thread a real clamp. Probation holds */
+		/* through both helpers, so newcomers stay batch. */
+		if (lat_task_w == 0)
+			lat_task_w = (u32)FLOW_WEIGHT_BASE;
+		lat_eff = flow_task_effective_weight(lat_task_w, hint_w);
+		is_lat = flow_is_lat(avg, dev, hint, lat_sleep, 0, lat_eff);
+		pre_slice = flow_slice_for(deadline, now);
+		lat_slice = flow_slice_lat_clamp(pre_slice, is_lat);
+		open_is_lat = is_lat;
+		open_pre = pre_slice;
+		have_open = true;
+		if (enq_flags & SCX_ENQ_PREEMPT) {
+			tctx->wait_at = now;
+			vtime = flow_make_fair(tctx, deadline, hint_w);
+		} else {
+			u64 lat_dl;
+			tctx->wait_at = now;
+			__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
+			lat_vt = flow_make_fair(tctx, deadline, hint_w);
+			if (is_lat) {
+				lat_dl = flow_lat_deadline(now, lat_slice);
+				vtime = flow_edf_key(lat_vt, lat_dl);
+			} else {
+				vtime = lat_vt;
+			}
+		}
+		{
+			u64 bound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+			if (vtime != 0 && bound != (u64)~0ULL &&
+			    !flow_time_before(vtime, bound) && vtime != bound)
+				vtime = bound;
+		}
+	} else {
+		tctx->wait_at = now;
+		/* Strict slice before the key with no stale reuse. A slice */
+		/* rotation holds the stored charge else inherits the quantum */
+		/* on zero, so the virtual deadline tracks the same charge the */
+		/* key sorts. The remaining time feeds the slice plus slack only */
+		/* with the sort staying the earlier of deadline plus virtual */
+		/* time. */
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
-	/* Strict EDF key from the virtual deadline plus the EDF deadline. */
-	/* Heavy tasks earn a near virtual time while light tasks earn a */
-	/* far one with one divide, so the earlier of the two paces order */
-	/* with latency still capped by the deadline. The effective share */
-	/* stacks task times hint over 128, so cgroup plus task weights */
-	/* shape fairness together. */
-	vtime = flow_make_fair(tctx, deadline, hint_w);
+		/* Strict EDF key from the virtual deadline plus the EDF */
+		/* deadline. Heavy tasks earn a near virtual time while light */
+		/* tasks earn a far one with one divide, so the earlier of the */
+		/* two paces order with latency still capped by the deadline. */
+		/* The effective share stacks task times hint over 128, so */
+		/* cgroup plus task weights shape fairness together. In-tier */
+		/* keys cap at now plus one period, so far keys never starve */
+		/* past the bound. */
+		vtime = flow_make_fair(tctx, deadline, hint_w);
+		{
+			u64 bound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+			if (vtime != 0 && bound != (u64)~0ULL &&
+			    !flow_time_before(vtime, bound) && vtime != bound)
+				vtime = bound;
+		}
+	}
 	/* RED admission with residual plus exceed plus tolerance used only */
 	/* here. A zero exceed plus a critical exceed plus a newcomer that */
 	/* fails the victim test admits at once, else the newcomer rejects */
 	/* to the value ordered queue outside dispatch. The deadline bounds */
-	/* the check with no vruntime shaping. A full O(n) least value scan */
-	/* stays a noted alternative with no knob here, so the verifier */
-	/* keeps one pass with no walk. */
+	/* the check with no vruntime shaping. Critical follows the unified */
+	/* latency and cost uses the pre-clamp slice for fresh waits, so */
+	/* RED and slice agree with no post-clamp underestimate. A full O(n) */
+	/* least value scan stays a noted alternative with no knob here, so */
+	/* the verifier keeps one pass with no walk. */
 	{
 		u32 csl = READ_ONCE(tctx->slice_ns);
-		bool ccrit = flow_lat_crit(avg, dev);
-		u64 cex = flow_red_newcomer_exceed(deadline, now, avg, csl,
+		bool ccrit;
+		u32 cost_sl;
+		u64 cex;
+		if (have_open) {
+			ccrit = open_is_lat;
+			if (!(enq_flags & SCX_ENQ_PREEMPT))
+				cost_sl = open_pre;
+			else
+				cost_sl = csl;
+		} else {
+			u32 ctw0 = READ_ONCE(tctx->weight);
+			u32 ceff0;
+			if (ctw0 == 0)
+				ctw0 = (u32)FLOW_WEIGHT_BASE;
+			ceff0 = flow_task_effective_weight(ctw0, hint_w);
+			ccrit = flow_is_lat(avg, dev, hint, 0, 0, ceff0);
+			cost_sl = csl;
+		}
+		cex = flow_red_newcomer_exceed(deadline, now, avg, cost_sl,
 		    ccrit);
 		if (cex && !ccrit) {
 			u32 ctw = READ_ONCE(tctx->weight);
 			u32 ceff = flow_task_effective_weight(ctw, hint_w);
-			u64 ccost = flow_red_cost(avg, csl);
+			u64 ccost = flow_red_cost(avg, cost_sl);
 			if (flow_red_victim_ok(deadline, deadline, ccost,
 			    cex, ccrit)) {
 				flow_count_red_reject();

@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow runs the earliest strict key first as the earlier of deadline plus virtual time. It adds [RED](https://web.cs.umass.edu/publication/docs/1993/UM-CS-1993-025.pdf) admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus a value ordered reject queue outside dispatch plus reclaim on global completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
+scx_flow runs the earliest strict key as the earlier of deadline plus virtual time. It adds [RED](https://web.cs.umass.edu/publication/docs/1993/UM-CS-1993-025.pdf) admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus value ordered reject queue outside dispatch plus reclaim on completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
 
 ### Why?
 
@@ -22,7 +22,7 @@ Arrivals pass a gate first, then pass RED with residual plus exceed plus toleran
 
 ### Queues
 
-Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with one move capped by slots and 8 visits plus one reclaim when empty plus aged past one period. Reject stays strictly value ordered outside dispatch still with overflow name for wire compat. See `src/bpf/intf.h`.
+Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with move capped by slots and 8 visits plus reclaim when empty plus aged past period. Reject stays value ordered outside dispatch with overflow name for wire compat. See `src/bpf/intf.h`.
 
 ### Keys
 
@@ -30,7 +30,7 @@ Each strict key sets queue rank with vruntime pacing via lag bounds. Predictor s
 
 ### Admission
 
-RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `128us` plus past exceed plus never critical, else admits. Newcomer-pays trades exact choice for bounded O(1) admission still and tiers-empty plus aged reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
+RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `128us` plus past exceed plus never critical, else admits. Newcomer-pays trades choice for bounded O(1) admission and tiers-empty plus aged reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
 
 ### Gates
 
@@ -54,7 +54,7 @@ Locality stays with per-CPU plus per-node queues. Select takes prev idle, then w
 
 ### Contention
 
-Contention stays still bounded with 8 visits per pass shared across three PRIQ tiers plus steal. Each tier moves one task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves one reject when tiers hold no work plus aged past one period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
+Contention stays bounded with 8 visits per pass across three PRIQ tiers plus steal. Each tier moves task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves reject when tiers hold no work plus aged past period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
 
 ### Inversion
 
@@ -62,7 +62,11 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `256us` on late else grow `slack>>3` capped `256us` on early. Misses stay lifetime, adapt streak stays window. Reclaim reserves credit past `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals retrain plus fold. Stop feeds average deviation plus credit. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `256us` on late else grow `slack>>3` capped `256us` on early. Misses stay lifetime, adapt window. Reclaim `128us` fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
+
+### Latency
+
+Latency caps slice at `100us` plus key at now plus max `4ms` else slice plus `100us` with RED on deadline. Sleep below `20us` vetoes toward batch with unknown open, decoupled from the `100us` cap. Arrival preempts only when lat meets batch owner else fails closed. Resume keeps start plus cur leftover clamped to `10us` plus `100us` else `1ms`. See `src/bpf/intf.h` plus `src/bpf/preempt.bpf.c` plus `src/bpf/lifecycle.bpf.c`.
 
 ## Code map
 
