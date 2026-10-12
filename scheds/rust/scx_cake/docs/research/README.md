@@ -16,6 +16,7 @@ requirement. This page indexes the investigations.
 | ✅❌ | Counting, classifiers, inclusion–exclusion | spread pick ❌ · wide-host idle count, interlock, exit/census checks ✅ (committed) · K3 premise holds | [report](counting-classifiers-20261005/README.md) |
 | ❌ | Block stash: wake classes from one line | no frame effect in KovaaK's; reverted | [report](block-stash-20261012/README.md) |
 | ❌ | claimhome: lean `lazy` placement without the patch | placement reproduced; frame win needs the cheaper claim too | [report](claimhome-20261012/README.md) |
+| ❌ | burstkey: cosmos-style requeue key | no gain; cosmos itself loses to cake `lazy` in CPU-limited KovaaK's | [report](burstkey-20261012/README.md) |
 
 | | Also |
 |---|---|
