@@ -30,6 +30,7 @@ the toolchain need out of sight. The schedulers written in it have no
 | Scheduler | What it shows |
 | --- | --- |
 | [scx_rvtime](../../scheds/experimental/scx_rvtime) | Weighted vtime: a queue of its own, a global, a state per task in the arena |
+| [scx_rlocal](../../scheds/experimental/scx_rlocal) | Per-CPU queues with stealing: a state per CID, topology loops, a global function |
 
 ## Writing a scheduler
 
