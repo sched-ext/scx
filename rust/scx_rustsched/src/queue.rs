@@ -34,6 +34,7 @@
 //! clear in case a task was queued in between. It is a hint: a bit left set
 //! is cleared by the first CID that looks and finds nothing.
 
+use crate::sched::Cid;
 use core::ptr::null_mut;
 
 use crate::kfuncs::{bpf_arena_alloc_pages, scx_bpf_dsq_insert, scx_bpf_tid_to_task};
@@ -162,19 +163,19 @@ pub fn queued_word(index: u32) -> u64 {
 
 /// Is `cid`'s queued bit set?
 #[inline(always)]
-pub fn queued_test(cid: i32) -> bool {
-    let cid = cid as u32;
+pub fn queued_test(cid: Cid) -> bool {
+    let cid = cid.raw() as u32;
     cid < cid_count() && queued_word(cid / 64) & (1 << (cid % 64)) != 0
 }
 
 /// Set `cid`'s queued bit, after a task was queued there. A bit already set
 /// is not written again: the word is shared by 64 CPUs.
 #[inline(always)]
-fn queued_set(cid: i32) {
-    if cid as u32 >= cid_count() || queued_test(cid) {
+fn queued_set(cid: Cid) {
+    if cid.raw() as u32 >= cid_count() || queued_test(cid) {
         return;
     }
-    let cid = cid as u32;
+    let cid = cid.raw() as u32;
     unsafe { mem::or(mask_word(cid / 64), 1 << (cid % 64)) };
 }
 
@@ -184,48 +185,30 @@ fn queued_set(cid: i32) {
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn rust_queued_check(cid: i32) {
-    if cid as u32 >= cid_count() || nr_queued(cid) != 0 || !queued_test(cid) {
+    if cid as u32 >= cid_count() || Cid(cid).nr_queued() != 0 || !queued_test(Cid(cid)) {
         return;
     }
     let cid = cid as u32;
     unsafe { mem::and(mask_word(cid / 64), !(1 << (cid % 64))) };
-    if nr_queued(cid as i32) != 0 {
-        queued_set(cid as i32);
+    if Cid(cid as i32).nr_queued() != 0 {
+        queued_set(Cid(cid as i32));
     }
 }
 
 /// Initialize `cid`'s queue, from `init`.
-pub unsafe fn init_cid(cid: i32) {
+pub unsafe fn init_cid(cid: Cid) {
     unsafe { edq::queue_init(Arena, queue(cid)) };
 }
 
 #[inline(always)]
-pub fn queue(cid: i32) -> u64 {
+pub fn queue(cid: Cid) -> u64 {
     Queues::address(cid, 0)
-}
-
-/// Lockless snapshot of the shortest request queued on `cid`, 0 for none.
-#[inline(always)]
-pub fn min_slice(cid: i32) -> u64 {
-    unsafe { edq::min_slice(Arena, queue(cid)) }
 }
 
 /// The number of CIDs.
 #[inline(always)]
 pub fn cid_count() -> u32 {
     Queues::count()
-}
-
-/// How many tasks `cid` has queued.
-#[inline(always)]
-pub fn nr_queued(cid: i32) -> u64 {
-    unsafe { edq::nr_queued(Arena, queue(cid)) }
-}
-
-/// Does `cid` have anything queued?
-#[inline(always)]
-pub fn has_queued(cid: i32) -> bool {
-    unsafe { edq::nr_queued(Arena, queue(cid)) != 0 }
 }
 
 /// Queue the task whose node is `node` on `cid`, keyed by `deadline` and
@@ -238,7 +221,7 @@ pub fn has_queued(cid: i32) -> bool {
 #[inline(always)]
 pub unsafe fn insert(
     node: u64,
-    cid: i32,
+    cid: Cid,
     slice: u64,
     enq_flags: u64,
     deadline: u64,
@@ -300,8 +283,8 @@ pub unsafe fn unpark(node: u64) -> bool {
 /// Insert a task popped from a queue into this CPU's local DSQ, for
 /// `dst_cid`, if it is still ours to dispatch, and drop its hold.
 #[inline(always)]
-pub unsafe fn dispatch_popped(node: u64, dst_cid: i32) -> bool {
-    rust_dispatch_popped(node, dst_cid) != 0
+pub unsafe fn dispatch_popped(node: u64, dst_cid: Cid) -> bool {
+    rust_dispatch_popped(node, dst_cid.raw()) != 0
 }
 
 /// dispatch_popped(), as a global function: ops.dispatch() reaches it from
@@ -334,8 +317,8 @@ pub extern "C" fn rust_dispatch_popped(node: u64, dst_cid: i32) -> u32 {
             // out of every queue until the watchdog. If a change is in
             // flight, the kernel discards this insertion as stale and the
             // change enqueues the task again.
-            if !crate::task::allowed_on(task, dst_cid) {
-                let cid = crate::task::task_cid(task);
+            if !crate::task::allowed_on(task, Cid(dst_cid)) {
+                let cid = crate::task::task_cid(task).raw();
                 scx_bpf_dsq_insert(task, SCX_DSQ_LOCAL_ON | cid as u32 as u64, slice, enq_flags);
                 break 'dispatch false;
             }
@@ -371,7 +354,7 @@ pub enum Pick {
 /// switch to a word that 64 CPUs share, and scx_eevdf measured a pinned
 /// pair of yielders per CPU five times slower than fair.c that way.
 pub unsafe fn move_first_eligible(
-    cid: i32,
+    cid: Cid,
     reference: u64,
     requeue: bool,
     take_head: bool,
@@ -403,7 +386,7 @@ pub unsafe fn move_first_eligible(
         true
     });
     if !requeue || matches!(pick, Pick::Nothing) {
-        rust_queued_check(cid);
+        rust_queued_check(cid.raw());
     }
     pick
 }
@@ -414,7 +397,7 @@ pub unsafe fn move_first_eligible(
 /// first deadline, which can be ineligible and so errs toward not
 /// preempting. Without `eligible_scan` the head is the pick, whatever its
 /// eligibility, and nothing bounds the protection.
-pub unsafe fn head_deadline(cid: i32, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
+pub unsafe fn head_deadline(cid: Cid, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
     unsafe {
         let queue = queue(cid);
         if !eligible_scan {
@@ -447,15 +430,15 @@ pub unsafe fn head_deadline(cid: i32, reference: u64, eligible_scan: bool) -> (O
 /// scx_eevdf's detach cursor.
 #[inline(always)]
 pub unsafe fn steal_from(
-    dst: i32,
-    victim: i32,
+    dst: Cid,
+    victim: Cid,
     cpu: i32,
     cursor: &mut Cursor,
     mut skip: impl FnMut(u64) -> bool,
 ) -> bool {
     let queue = queue(victim);
     if unsafe { edq::nr_queued(Arena, queue) } == 0 {
-        rust_queued_check(victim);
+        rust_queued_check(victim.raw());
         return false;
     }
     let mut moved = false;
@@ -500,7 +483,7 @@ pub unsafe fn steal_from(
         }
     }
     if !busy {
-        rust_queued_check(victim);
+        rust_queued_check(victim.raw());
     }
     moved
 }
@@ -508,13 +491,13 @@ pub unsafe fn steal_from(
 /// Hold the next task in `cid`'s queue after `cursor`, advancing it: the
 /// node, 0 at the end, or an error when the queue is contended.
 #[inline(always)]
-pub unsafe fn peek_next(cid: i32, cursor: &mut Cursor) -> (i32, u64) {
+pub unsafe fn peek_next(cid: Cid, cursor: &mut Cursor) -> (i32, u64) {
     unsafe { edq::try_peek_next_hold(Arena, queue(cid), cursor) }
 }
 
 /// Take the exact `node` out of `cid`'s queue, if the queue is free.
 #[inline(always)]
-pub unsafe fn try_remove(cid: i32, node: u64) -> i32 {
+pub unsafe fn try_remove(cid: Cid, node: u64) -> i32 {
     rust_queue_try_remove(queue(cid), node)
 }
 
@@ -566,7 +549,7 @@ pub unsafe fn queued_key(node: u64) -> (u64, u64, u64) {
 /// that a concurrent pop cannot dispatch it. Otherwise the task leaves for
 /// a DSQ or to run. Returns true when the task was taken out of a backlog
 /// here, so that the caller stops counting it there.
-pub unsafe fn dequeue(node: u64, cid: i32, deq_flags: u64) -> bool {
+pub unsafe fn dequeue(node: u64, cid: Cid, deq_flags: u64) -> bool {
     unsafe {
         let state = Node(node);
         let current = state.state();
@@ -577,7 +560,7 @@ pub unsafe fn dequeue(node: u64, cid: i32, deq_flags: u64) -> bool {
         }
         match edq::task_fini(Arena, node) {
             1.. if current == PARKED => return true,
-            1.. => rust_queued_check(cid),
+            1.. => rust_queued_check(cid.raw()),
             0 => {}
             _ => pool::count_error(),
         }
@@ -589,4 +572,28 @@ pub unsafe fn dequeue(node: u64, cid: i32, deq_flags: u64) -> bool {
 /// wait for its holders, before its context is reused.
 pub unsafe fn detach(node: u64) -> bool {
     unsafe { edq::task_detach(Arena, node) == 0 }
+}
+
+/// The CID-centred part of this module, as methods.
+impl Cid {
+    /// Does `cid` have anything queued?
+    #[inline(always)]
+    pub fn has_queued(self) -> bool {
+        let cid = self;
+        unsafe { edq::nr_queued(Arena, queue(cid)) != 0 }
+    }
+
+    /// How many tasks `cid` has queued.
+    #[inline(always)]
+    pub fn nr_queued(self) -> u64 {
+        let cid = self;
+        unsafe { edq::nr_queued(Arena, queue(cid)) }
+    }
+
+    /// Lockless snapshot of the shortest request queued on `cid`, 0 for none.
+    #[inline(always)]
+    pub fn min_slice(self) -> u64 {
+        let cid = self;
+        unsafe { edq::min_slice(Arena, queue(cid)) }
+    }
 }

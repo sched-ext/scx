@@ -6,6 +6,7 @@
 //! policy sets once. Two words per CID. The header also keeps the
 //! kernel's nr_cpu_ids, which does not change once loaded.
 
+use crate::sched::Cid;
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::cid_table::CidTable;
@@ -47,23 +48,23 @@ pub fn count() -> u32 {
 
 /// Is `cid` within the table?
 #[inline(always)]
-pub fn valid(cid: i32) -> bool {
+pub fn valid(cid: Cid) -> bool {
     Cids::valid(cid)
 }
 
 /// The arena address of `cid`'s entry.
 #[inline(always)]
-pub fn entry(cid: i32) -> u64 {
+pub fn entry(cid: Cid) -> u64 {
     Cids::entry(cid)
 }
 
 #[inline(always)]
-pub fn get(cid: i32, index: u64) -> u64 {
+pub fn get(cid: Cid, index: u64) -> u64 {
     unsafe { Cids::get(cid, index) }
 }
 
 #[inline(always)]
-pub unsafe fn set(cid: i32, index: u64, value: u64) {
+pub unsafe fn set(cid: Cid, index: u64, value: u64) {
     unsafe { Cids::set(cid, index, value) }
 }
 

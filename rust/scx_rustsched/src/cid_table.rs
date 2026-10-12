@@ -169,31 +169,31 @@ pub trait CidTable {
 
     /// Is `cid` within the table?
     #[inline(always)]
-    fn valid(cid: i32) -> bool {
-        cid >= 0 && (cid as u64) < unsafe { read_volatile(Self::header().add(1)) }
+    fn valid(cid: Cid) -> bool {
+        cid >= Cid(0) && ((cid).raw() as u64) < unsafe { read_volatile(Self::header().add(1)) }
     }
 
     /// The arena address of word `index` of `cid`'s entry, for the atomic
     /// accessors of `mem`.
     #[inline(always)]
-    fn address(cid: i32, index: u64) -> u64 {
-        Self::base() + cid as u32 as u64 * Self::BYTES + index * 8
+    fn address(cid: Cid, index: u64) -> u64 {
+        Self::base() + cid.raw() as u32 as u64 * Self::BYTES + index * 8
     }
 
     /// The arena address of `cid`'s entry. The caller checks `cid`.
     #[inline(always)]
-    fn entry(cid: i32) -> u64 {
-        Self::base() + cid as u32 as u64 * Self::BYTES
+    fn entry(cid: Cid) -> u64 {
+        Self::base() + cid.raw() as u32 as u64 * Self::BYTES
     }
 
     /// Word `index` of `cid`'s entry. The caller checks `cid`.
     #[inline(always)]
-    unsafe fn get(cid: i32, index: u64) -> u64 {
+    unsafe fn get(cid: Cid, index: u64) -> u64 {
         unsafe { mem::load(Self::entry(cid), index * 8) }
     }
 
     #[inline(always)]
-    unsafe fn set(cid: i32, index: u64, value: u64) {
+    unsafe fn set(cid: Cid, index: u64, value: u64) {
         unsafe { mem::store(Self::entry(cid), index * 8, value) }
     }
 

@@ -22,6 +22,7 @@
 //! The clock is rq->clock_task, read through the per-CPU runqueues ksym at
 //! the offset the loader takes from kernel BTF, so no layout is assumed.
 
+use crate::sched::Cid;
 use core::{ffi::c_void, hint::black_box, ptr::read_volatile};
 
 use crate::{cids, config, helpers};
@@ -34,7 +35,7 @@ unsafe extern "C" {
 /// The rq clock less the task clock at `cid`'s last owned read, which
 /// capacity pressure follows the growth of too.
 #[inline(always)]
-pub fn offset(cid: i32) -> u64 {
+pub fn offset(cid: Cid) -> u64 {
     cids::get(cid, cids::CLOCK_OFF)
 }
 
@@ -45,14 +46,14 @@ fn enabled() -> bool {
 
 /// rq_clock_task() of `cid`'s CPU, read in the raw, `now` if unreadable.
 #[inline(always)]
-unsafe fn read(cid: i32, now: u64) -> u64 {
+unsafe fn read(cid: Cid, now: u64) -> u64 {
     unsafe {
         let offset = config::get(config::RQ_CLOCK_TASK).min(1 << 20) as usize;
         let base = black_box(&raw const runqueues).cast::<c_void>();
         if offset == 0 || base.is_null() {
             return now;
         }
-        let runqueue: *const u8 = helpers::per_cpu_ptr(base, crate::cid_idle::cpu(cid) as u32);
+        let runqueue: *const u8 = helpers::per_cpu_ptr(base, cid.cpu() as u32);
         if runqueue.is_null() {
             return now;
         }
@@ -68,7 +69,7 @@ unsafe fn read(cid: i32, now: u64) -> u64 {
 /// runqueue's lock, cid_clock_task_owned(); the offset is recorded for
 /// at(). With NO_TASK_CLOCK, `now`. Always records the offset for
 /// capacity pressure, which counts its growth as IRQ and steal time.
-pub unsafe fn owned(cid: i32, now: u64) -> u64 {
+pub unsafe fn owned(cid: Cid, now: u64) -> u64 {
     if !cids::valid(cid) {
         return now;
     }
@@ -82,7 +83,7 @@ pub unsafe fn owned(cid: i32, now: u64) -> u64 {
 /// The task clock of `cid` at `now`, its rq clock, through the offset the
 /// last owned read recorded, cid_clock_task_at().
 #[inline(always)]
-pub fn at(cid: i32, now: u64) -> u64 {
+pub fn at(cid: Cid, now: u64) -> u64 {
     if !enabled() || !cids::valid(cid) {
         return now;
     }

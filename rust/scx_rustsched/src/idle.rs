@@ -18,7 +18,7 @@ pub use crate::cid_idle::{Kind, Scope};
 /// until the task arrives.
 #[inline(always)]
 pub fn pick(task: &Task, anchor: Cid, scope: Scope, kind: Kind) -> Option<Cid> {
-    let cid = unsafe { cid_idle::pick(task.as_ptr(), anchor.0, scope, kind) };
+    let cid = unsafe { cid_idle::pick(task.as_ptr(), anchor, scope, kind).raw() };
     if cid >= 0 { Some(Cid(cid)) } else { None }
 }
 
@@ -26,7 +26,7 @@ pub fn pick(task: &Task, anchor: Cid, scope: Scope, kind: Kind) -> Option<Cid> {
 /// can skip the second scope, which would repeat the first.
 #[inline(always)]
 pub fn scope_same(anchor: Cid, a: Scope, b: Scope) -> bool {
-    cid_idle::scope_same(anchor.0, a, b)
+    cid_idle::scope_same(anchor, a, b)
 }
 
 /// Does the machine have cores of more than one CID? Without them every
@@ -40,5 +40,5 @@ pub fn smt() -> bool {
 /// Is `cid` idle, as far as the idle tracking knows?
 #[inline(always)]
 pub fn test(cid: Cid) -> bool {
-    cid_idle::idle_test(cid.0)
+    cid.is_idle()
 }

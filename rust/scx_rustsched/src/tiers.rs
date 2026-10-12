@@ -12,11 +12,11 @@
 //! package-level packing domain. One mask of CIDs per packing tier lets a
 //! scan restrict itself to a tier.
 
+use crate::sched::Cid;
 use core::ptr::{null_mut, read_volatile};
 
 use crate::kfuncs::{bpf_arena_alloc_pages, scx_bpf_cid_to_cpu};
 use crate::{
-    cid_idle,
     edq::{Memory, View},
     pool::{Arena, arena},
 };
@@ -91,20 +91,12 @@ pub fn asym_packing() -> bool {
 }
 
 #[inline(always)]
-fn entry(cid: i32) -> u64 {
+fn entry(cid: Cid) -> u64 {
     let base = table(0);
-    if base == 0 || cid < 0 || cid as u32 >= crate::cids::count() {
+    if base == 0 || cid < Cid(0) || cid.raw() as u32 >= crate::cids::count() {
         return 0;
     }
-    unsafe { Arena.load(base + cid as u32 as u64 * ENTRY_BYTES) }
-}
-
-/// The capacity of `cid`, 1024 for the fastest.
-pub fn capacity(cid: i32) -> u64 {
-    match entry(cid) & 0xffff {
-        0 => 1024,
-        capacity => capacity,
-    }
+    unsafe { Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES) }
 }
 
 /// capacity(), as a global function: its result is unknown to the
@@ -113,39 +105,7 @@ pub fn capacity(cid: i32) -> u64 {
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn rust_cid_capacity(cid: i32) -> u64 {
-    capacity(cid)
-}
-
-pub fn capacity_tier(cid: i32) -> u32 {
-    (entry(cid) >> 16 & 0xffff) as u32
-}
-
-pub fn place_tier(cid: i32) -> u32 {
-    (entry(cid) >> 32 & 0xffff) as u32
-}
-
-/// The best packing tier of the LLC of `cid`.
-pub fn llc_place_tier(cid: i32) -> u32 {
-    (entry(cid) >> 48) as u32
-}
-
-/// The SMT domain of `cid` packs: its core's threads rank too.
-pub fn smt_asym_packing(cid: i32) -> bool {
-    let base = table(0);
-    if base == 0 || cid < 0 || cid as u32 >= crate::cids::count() {
-        return false;
-    }
-    unsafe { Arena.load(base + cid as u32 as u64 * ENTRY_BYTES + 8) & 1 != 0 }
-}
-
-/// The width of `cid`'s asymmetric capacity domain, SD_ASYM_CPUCAPACITY_FULL,
-/// in CPUs, 0 for none.
-pub fn asym_span(cid: i32) -> u32 {
-    let base = table(0);
-    if base == 0 || cid < 0 || cid as u32 >= crate::cids::count() {
-        return 0;
-    }
-    unsafe { (Arena.load(base + cid as u32 as u64 * ENTRY_BYTES + 8) >> 32 & 0x3fff) as u32 }
+    Cid(cid).capacity()
 }
 
 /// Word `index` of the mask of the CIDs in packing tier `tier`.
@@ -215,7 +175,7 @@ pub unsafe fn init(count: u32) -> i32 {
             // The second word: the SMT bit, the asymmetric capacity span from
             // bit 32 and, on an LLC's first CID until the second pass, the
             // LLC's best packing tier in bits 16 to 31.
-            let (_, llc) = cid_idle::llc_span(cid);
+            let (_, llc) = Cid(cid).llc_span();
             let first = base + u64::from(llc) * ENTRY_BYTES;
             if llc == cid as u32 {
                 Arena.store(address + 8, smt | place_tier << 16);
@@ -230,7 +190,7 @@ pub unsafe fn init(count: u32) -> i32 {
         });
         for_each(count, |cid| {
             let address = base + cid as u32 as u64 * ENTRY_BYTES;
-            let (_, llc) = cid_idle::llc_span(cid);
+            let (_, llc) = Cid(cid).llc_span();
             let best = Arena.load(base + u64::from(llc) * ENTRY_BYTES + 8) >> 16 & 0xffff;
             Arena.store(address, Arena.load(address) & 0xffff_ffff_ffff | best << 48);
         });
@@ -242,4 +202,55 @@ pub unsafe fn init(count: u32) -> i32 {
         });
     }
     0
+}
+
+/// The CID-centred part of this module, as methods.
+impl Cid {
+    /// The capacity of `cid`, 1024 for the fastest.
+    pub fn capacity(self) -> u64 {
+        let cid = self;
+        match entry(cid) & 0xffff {
+            0 => 1024,
+            capacity => capacity,
+        }
+    }
+
+    pub fn capacity_tier(self) -> u32 {
+        let cid = self;
+        (entry(cid) >> 16 & 0xffff) as u32
+    }
+
+    pub fn place_tier(self) -> u32 {
+        let cid = self;
+        (entry(cid) >> 32 & 0xffff) as u32
+    }
+
+    /// The best packing tier of the LLC of `cid`.
+    pub fn llc_place_tier(self) -> u32 {
+        let cid = self;
+        (entry(cid) >> 48) as u32
+    }
+
+    /// The SMT domain of `cid` packs: its core's threads rank too.
+    pub fn smt_asym_packing(self) -> bool {
+        let cid = self;
+        let base = table(0);
+        if base == 0 || cid < Cid(0) || cid.raw() as u32 >= crate::cids::count() {
+            return false;
+        }
+        unsafe { Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES + 8) & 1 != 0 }
+    }
+
+    /// The width of `cid`'s asymmetric capacity domain, SD_ASYM_CPUCAPACITY_FULL,
+    /// in CPUs, 0 for none.
+    pub fn asym_span(self) -> u32 {
+        let cid = self;
+        let base = table(0);
+        if base == 0 || cid < Cid(0) || cid.raw() as u32 >= crate::cids::count() {
+            return 0;
+        }
+        unsafe {
+            (Arena.load(base + cid.raw() as u32 as u64 * ENTRY_BYTES + 8) >> 32 & 0x3fff) as u32
+        }
+    }
 }

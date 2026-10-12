@@ -83,6 +83,75 @@ use crate::{
 
 pub use scx_rustsched_macros::{global, scheduler};
 
+/// A CID or none, in one register: what a search for a CID returns.
+///
+/// `Option<Cid>` is two values to the compiler, a tag and a CID, and the
+/// CID of a `None` is undefined. Where two paths meet, one with a CID and
+/// one without, the compiler may copy that undefined half, and the
+/// verifier refuses a read of a register nothing wrote. So a CID that may
+/// be none is carried as the kernel carries one, a negative number for
+/// none, and turned into an `Option` where it is used:
+///
+/// ```ignore
+/// if let Some(cid) = search(task).get() { ... }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct OptCid(i32);
+
+impl OptCid {
+    pub const NONE: OptCid = OptCid(-1);
+
+    #[inline(always)]
+    pub fn some(cid: Cid) -> OptCid {
+        OptCid(cid.0)
+    }
+
+    /// From a number as the kernel returns one where a CID is expected:
+    /// negative for none.
+    #[inline(always)]
+    pub fn from_raw(raw: i32) -> OptCid {
+        OptCid(raw)
+    }
+
+    /// The CID, or -1 or the negative number it was made from.
+    #[inline(always)]
+    pub fn raw(self) -> i32 {
+        self.0
+    }
+
+    #[inline(always)]
+    pub fn get(self) -> Option<Cid> {
+        if self.0 >= 0 { Some(Cid(self.0)) } else { None }
+    }
+
+    #[inline(always)]
+    pub fn is_some(self) -> bool {
+        self.0 >= 0
+    }
+
+    #[inline(always)]
+    pub fn is_none(self) -> bool {
+        self.0 < 0
+    }
+
+    /// The CID, or `default` for none.
+    #[inline(always)]
+    pub fn unwrap_or(self, default: Cid) -> Cid {
+        if self.0 >= 0 { Cid(self.0) } else { default }
+    }
+}
+
+impl From<Option<Cid>> for OptCid {
+    #[inline(always)]
+    fn from(cid: Option<Cid>) -> OptCid {
+        match cid {
+            Some(cid) => OptCid(cid.0),
+            None => OptCid::NONE,
+        }
+    }
+}
+
 /// A CPU as the scheduler sees it: an index into the kernel's
 /// topology-ordered CID space, where the CPUs of a core, an LLC and a node
 /// are contiguous.
@@ -154,7 +223,7 @@ impl Cid {
     /// its LLC, its node.
     #[inline(always)]
     pub fn scope(self, scope: crate::cid_idle::Scope) -> Cids {
-        let (base, count) = cid_idle::scope_cids(self.0, scope);
+        let (base, count) = cid_idle::scope_cids(self, scope);
         Cids(crate::loops::range(base, base + count))
     }
 
@@ -496,7 +565,7 @@ macro_rules! wrapped_abi {
         })*
     };
 }
-wrapped_abi!(Cid: i32, WakeFlags: u64, EnqFlags: u64, DeqFlags: u64, KickFlags: u64);
+wrapped_abi!(Cid: i32, OptCid: i32, WakeFlags: u64, EnqFlags: u64, DeqFlags: u64, KickFlags: u64);
 
 impl<'task> Abi for &'task Task {
     type Raw = *mut task_struct;
@@ -604,7 +673,7 @@ pub unsafe fn release_slot<T: crate::slots::TaskSlot>(context: *const u64) {
 /// `context` must be ops.update_idle()'s.
 #[inline(always)]
 pub unsafe fn update_idle(context: *const u64) {
-    unsafe { cid_idle::update(*context as i32, *context.add(1) != 0) };
+    unsafe { cid_idle::update(Cid(*context as i32), *context.add(1) != 0) };
 }
 
 /// The runtime's part of ops.dispatch(cid, prev), after the scheduler's: a
@@ -619,7 +688,10 @@ pub unsafe fn update_idle(context: *const u64) {
 pub unsafe fn dispatched(context: *const u64) {
     unsafe {
         if scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) == 0 {
-            cid_idle::rearm(*context as i32, config::get(config::TASK_FLAGS) as usize);
+            cid_idle::rearm(
+                Cid(*context as i32),
+                config::get(config::TASK_FLAGS) as usize,
+            );
         }
     }
 }

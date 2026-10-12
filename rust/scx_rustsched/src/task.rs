@@ -8,7 +8,7 @@
 use core::ptr::read_volatile;
 
 use crate::{
-    cid_idle, config, helpers,
+    config, helpers,
     kfuncs::{bpf_cpumask_test_cpu, scx_bpf_task_cid, scx_bpf_task_set_slice},
     ops::{SCX_TASK_QUEUED, cpumask, task_struct},
 };
@@ -120,15 +120,15 @@ pub unsafe fn migration_disabled(task: *mut task_struct) -> bool {
 
 /// The CID `task` is on.
 #[inline(always)]
-pub unsafe fn task_cid(task: *mut task_struct) -> i32 {
-    unsafe { scx_bpf_task_cid(task) }
+pub unsafe fn task_cid(task: *mut task_struct) -> crate::sched::Cid {
+    unsafe { crate::sched::Cid(scx_bpf_task_cid(task)) }
 }
 
 /// Can `task` be dispatched on `cid`? A task always can on the CID it is
 /// on, which enqueue chose within its affinity, migration disabled or not.
 #[inline(always)]
-pub unsafe fn allowed_on(task: *mut task_struct, cid: i32) -> bool {
-    unsafe { scx_bpf_task_cid(task) == cid || runs_on(task, cid_idle::cpu(cid)) }
+pub unsafe fn allowed_on(task: *mut task_struct, cid: crate::sched::Cid) -> bool {
+    unsafe { scx_bpf_task_cid(task) == cid.raw() || runs_on(task, cid.cpu()) }
 }
 
 /// A task, as a callback of `#[scheduler]` takes it: a reference to the
@@ -159,13 +159,13 @@ impl Task {
     /// The CID the task is on, or last ran on.
     #[inline(always)]
     pub fn cid(&self) -> crate::sched::Cid {
-        crate::sched::Cid(unsafe { task_cid(self.as_ptr()) })
+        crate::sched::Cid(unsafe { task_cid(self.as_ptr()).raw() })
     }
 
     /// May the task run on `cid`?
     #[inline(always)]
     pub fn allowed_on(&self, cid: crate::sched::Cid) -> bool {
-        unsafe { allowed_on(self.as_ptr(), cid.0) }
+        unsafe { allowed_on(self.as_ptr(), cid) }
     }
 
     /// Is the task exiting?
