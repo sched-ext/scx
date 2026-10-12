@@ -12,6 +12,7 @@ pattern's kernel requirement. This page indexes the investigations.
 | BPF/compiler/JIT boundary | Compiler probes and JIT inspection | [Investigation](jit-20260929/README.md) |
 | Exact reciprocal quotient | Removed 2026-10-04 (BPF +5.8 %); sources kept | [Implementation](jit-bitops-prototype/QUOTIENT_IMPLEMENTATION.md), [sources](jit-bitops-prototype/quotient/) |
 | Counting, classifiers, inclusion–exclusion | Measured 2026-10-05: spread pick rejected; wide-host idle count, interlock and exit/census checks kept (uncommitted); K3 premise holds | [Report](counting-classifiers-20261005/README.md) |
+| Block stash: wake classes from one line (cache-line follow-up) | Rejected 2026-10-12: no frame effect in KovaaK's; reverted | [Report](block-stash-20261012/README.md) |
 
 The [meeting page](../meeting/index.html) summarizes the work; the
 [cost audit](../AUDIT_OPERATION_COST_2026-09-15.md) explains evidence levels.
