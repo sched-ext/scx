@@ -52,6 +52,8 @@
 //!
 //! `task = Type` in the attribute gives every task a `Type` of the
 //! scheduler's own, and `cid = Type` every CID, see `state`.
+//! `task_slot = Type` gives every task a `Type` in the arena instead, see
+//! `slots`.
 //!
 //! `#[global]` makes a function of the scheduler's one the verifier checks
 //! once, see `scx_rustsched_macros`.
@@ -90,10 +92,26 @@ pub use scx_rustsched_macros::{global, scheduler};
 pub struct Cid(pub i32);
 
 impl Cid {
+    /// No CID: what a search that found none returns where the kernel's
+    /// convention of a negative number is kept.
+    pub const NONE: Cid = Cid(-1);
+
     /// The CID as the kfuncs take it.
     #[inline(always)]
     pub fn raw(self) -> i32 {
         self.0
+    }
+
+    /// The CID as an index into a per-CID table or a mask.
+    #[inline(always)]
+    pub fn index(self) -> u32 {
+        self.0 as u32
+    }
+
+    /// Is this a CID at all, rather than `NONE` or an error code?
+    #[inline(always)]
+    pub fn is_some(self) -> bool {
+        self.0 >= 0
     }
 
     /// The CID the callback runs on.
@@ -494,6 +512,22 @@ impl<'task> Abi for &'task Task {
     }
 }
 
+/// A pointer passes as it is: to a structure on the caller's stack that
+/// the function fills, which the verifier bounds by the structure's size.
+impl<T> Abi for *mut T {
+    type Raw = *mut T;
+
+    #[inline(always)]
+    fn into_raw(self) -> *mut T {
+        self
+    }
+
+    #[inline(always)]
+    unsafe fn from_raw(raw: *mut T) -> *mut T {
+        raw
+    }
+}
+
 /// The entry of every callback: reference the arena, which a program that
 /// reads arena memory must do once.
 #[inline(always)]
@@ -532,6 +566,46 @@ pub unsafe fn init_cids<T: crate::state::CidState>() -> Result<(), Error> {
 #[inline(always)]
 pub unsafe fn init_task<T: crate::state::TaskState>(context: *const u64) -> Result<(), Error> {
     unsafe { crate::state::create::<T>(*context as *mut task_struct) }
+}
+
+/// The runtime's part of ops.init() for a scheduler with a slot `T` per
+/// task: the pool, with the pages the loader configured.
+///
+/// # Safety
+/// Only from ops.init().
+#[inline(always)]
+pub unsafe fn init_slots<T: crate::slots::TaskSlot>() -> Result<(), Error> {
+    Error::check(unsafe { crate::slots::initialize_pool::<T>(config::get(config::ARENA_PAGES)) })
+}
+
+/// The runtime's part of ops.init_task(task, args) for a scheduler with a
+/// slot `T` per task: give the task one, reset.
+///
+/// # Safety
+/// `context` must be ops.init_task()'s.
+#[inline(always)]
+pub unsafe fn create_slot<T: crate::slots::TaskSlot>(context: *const u64) -> Result<(), Error> {
+    Error::check(unsafe { crate::slots::initialize::<T>(*context as *mut task_struct) })
+}
+
+/// The runtime's part of ops.enable(task) for a scheduler with a slot `T`
+/// per task: keep the slot's address in the task, if `T` asks for it.
+///
+/// # Safety
+/// `context` must be ops.enable()'s.
+#[inline(always)]
+pub unsafe fn stash_slot<T: crate::slots::TaskSlot>(context: *const u64) {
+    unsafe { crate::slots::stash::<T>(*context as *mut task_struct) };
+}
+
+/// The runtime's part of ops.exit_task(task, args) for a scheduler with a
+/// slot `T` per task, after the scheduler's: take the slot back.
+///
+/// # Safety
+/// `context` must be ops.exit_task()'s.
+#[inline(always)]
+pub unsafe fn release_slot<T: crate::slots::TaskSlot>(context: *const u64) {
+    unsafe { crate::slots::release::<T>(*context as *mut task_struct) };
 }
 
 /// The runtime's part of ops.update_idle(cid, idle).

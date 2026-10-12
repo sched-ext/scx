@@ -234,6 +234,21 @@ impl Task {
         unsafe { crate::state::get(self.as_ptr()) }
     }
 
+    /// The task's slot in the arena, of the type the scheduler declared
+    /// with `#[scheduler(task_slot = T)]`. None, counted as an error, if
+    /// the task has none.
+    #[inline(always)]
+    pub fn slot<T: crate::slots::TaskSlot>(&self) -> Option<T> {
+        unsafe { crate::slots::lookup::<T>(self.as_ptr()) }
+    }
+
+    /// The slot of a task that may not be the scheduler's, such as the
+    /// one that runs a wakeup: the idle task, or one of a higher class.
+    #[inline(always)]
+    pub fn slot_optional<T: crate::slots::TaskSlot>(&self) -> Option<T> {
+        unsafe { crate::slots::lookup_optional::<T>(self.as_ptr()) }
+    }
+
     /// The field of the task at the offset in entry `index` of the
     /// configuration table.
     #[inline(always)]

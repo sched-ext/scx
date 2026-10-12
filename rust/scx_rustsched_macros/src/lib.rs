@@ -122,6 +122,10 @@ fn parameters(list: TokenStream) -> usize {
 /// `task` names the type of the scheduler's per-task state, which the
 /// runtime then creates in ops.init_task(), and `cid` the type of its
 /// per-CID state, set up in ops.init().
+/// `task_slot` names the type of a per-task state in the arena instead,
+/// see scx_rustsched's `slots`: the runtime then sets the pool up in ops.init(),
+/// gives each task a slot in ops.init_task() and takes it back after
+/// ops.exit_task().
 ///
 /// `idle_tracking = false` leaves the idle tracking to the scheduler,
 /// which then calls `cid_idle` itself from ops.init(), ops.update_idle()
@@ -141,6 +145,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap_or_else(|| "::scx_rustsched::uei::DUMP_LEN as u32".into());
     let task = argument(&arguments, "task");
     let cid = argument(&arguments, "cid");
+    let slot = argument(&arguments, "task_slot");
     let idle_tracking = match argument(&arguments, "idle_tracking").as_deref() {
         None | Some("true") => true,
         Some("false") => false,
@@ -209,8 +214,9 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
         // the scheduler defines them or not.
         let runtime = callback == "exit"
             || (idle_tracking && matches!(callback, "init" | "update_idle" | "dispatch"))
-            || (callback == "init" && cid.is_some())
-            || (callback == "init_task" && task.is_some());
+            || (callback == "init" && (cid.is_some() || slot.is_some()))
+            || (callback == "init_task" && (task.is_some() || slot.is_some()))
+            || (matches!(callback, "enable" | "exit_task") && slot.is_some());
         if user.is_none() && !runtime {
             continue;
         }
@@ -221,6 +227,37 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                 .join(", ");
             format!("{ty}::{callback}({arguments})")
         });
+        // What the runtime does for the scheduler's state, before its own.
+        let fallible = |call: String| {
+            format!(
+                "if let Err(error) = {call} {{
+                     return ::scx_rustsched::sched::Ret::ret(Err::<(), _>(error));
+                 }}\n"
+            )
+        };
+        let mut before = String::new();
+        if let Some(slot) = &slot {
+            match callback {
+                "init" => {
+                    before += &fallible(format!("::scx_rustsched::sched::init_slots::<{slot}>()"))
+                }
+                "init_task" => {
+                    before += &fallible(format!(
+                        "::scx_rustsched::sched::create_slot::<{slot}>(context)"
+                    ))
+                }
+                "enable" => {
+                    before += &format!("::scx_rustsched::sched::stash_slot::<{slot}>(context);\n")
+                }
+                _ => {}
+            }
+        }
+        let after = match (&slot, callback) {
+            (Some(slot), "exit_task") => {
+                format!("::scx_rustsched::sched::release_slot::<{slot}>(context);\n")
+            }
+            _ => String::new(),
+        };
         let body = match (callback, call) {
             ("init", call) => format!(
                 "{}
@@ -270,8 +307,14 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
                  0",
                 call.map(|call| format!("{call};")).unwrap_or_default()
             ),
+            ("exit_task", call) if slot.is_some() => format!(
+                "{}
+                 {after}
+                 0",
+                call.map(|call| format!("{call};")).unwrap_or_default()
+            ),
             (_, Some(call)) => format!("::scx_rustsched::sched::Ret::ret({call})"),
-            (_, None) => unreachable!(),
+            (_, None) => "0".into(),
         };
         let section = if sleepable {
             "struct_ops.s"
@@ -285,7 +328,7 @@ pub fn scheduler(arguments: TokenStream, item: TokenStream) -> TokenStream {
              pub unsafe extern \"C\" fn scx_{callback}(context: *const u64) -> u64 {{
                  ::scx_rustsched::sched::enter();
                  #[allow(unused_unsafe)]
-                 unsafe {{ {body} }}
+                 unsafe {{ {before} {body} }}
              }}\n"
         );
         members += &format!("{member}: scx_{callback},\n");
@@ -359,6 +402,30 @@ fn split(list: TokenStream) -> Vec<Vec<TokenTree>> {
     items
 }
 
+/// `stream` with every identifier `placeholder` replaced by `with`. The
+/// generated code is written as text, which has no source positions, and
+/// the function's own tokens are put back into it this way, so that the
+/// compiler reports an error in the body where it is.
+fn substitute(stream: TokenStream, placeholder: &str, with: &TokenStream) -> TokenStream {
+    stream
+        .into_iter()
+        .flat_map(|token| match token {
+            TokenTree::Ident(ident) if ident.to_string() == placeholder => {
+                with.clone().into_iter().collect::<Vec<_>>()
+            }
+            TokenTree::Group(group) => {
+                let mut replaced = proc_macro::Group::new(
+                    group.delimiter(),
+                    substitute(group.stream(), placeholder, with),
+                );
+                replaced.set_span(group.span());
+                vec![TokenTree::Group(replaced)]
+            }
+            token => vec![token],
+        })
+        .collect()
+}
+
 fn source(tokens: &[TokenTree]) -> String {
     tokens.iter().cloned().collect::<TokenStream>().to_string()
 }
@@ -381,7 +448,8 @@ fn source(tokens: &[TokenTree]) -> String {
 ///
 /// The function is called as written. It takes up to five parameters and
 /// returns one value, of the types `sched::Abi` covers: `Cid`, `&Task`,
-/// integers, `bool` and the flags types. The verifier knows nothing of the
+/// integers, `bool`, the flags types, and the handle of an `arena_struct!`,
+/// which is passed as its address. The verifier knows nothing of the
 /// arguments but their types, so the body cannot rely on a value being in
 /// range because the caller checked it.
 #[proc_macro_attribute]
@@ -402,10 +470,11 @@ pub fn global(_arguments: TokenStream, item: TokenStream) -> TokenStream {
         return error("#[global] goes on `fn name(...) -> Type { ... }`, without generics");
     }
     let prefix = source(&tokens[..start]);
-    if prefix
-        .split_whitespace()
-        .any(|word| matches!(word, "unsafe" | "async" | "const" | "extern"))
-    {
+    // The qualifiers themselves, not a word of the documentation.
+    if tokens[..start].iter().any(|token| {
+        matches!(token, TokenTree::Ident(ident)
+            if matches!(ident.to_string().as_str(), "unsafe" | "async" | "const" | "extern"))
+    }) {
         return error("#[global] goes on a plain function");
     }
     // What follows the parameters is `-> Type`, or nothing.
@@ -455,7 +524,7 @@ pub fn global(_arguments: TokenStream, item: TokenStream) -> TokenStream {
              #[inline(never)]
              extern \"C\" fn scx_global_{name}({raw}) -> <{result} as {abi}>::Raw {{
                  #[inline(always)]
-                 fn {name}({parameters}) -> {result} {{ {body} }}
+                 fn {name}(__scx_parameters) -> {result} {{ __scx_body }}
                  #[allow(unused_unsafe)]
                  <{result} as {abi}>::into_raw(unsafe {{ {name}({unpack}) }})
              }}
@@ -463,8 +532,11 @@ pub fn global(_arguments: TokenStream, item: TokenStream) -> TokenStream {
              unsafe {{ <{result} as {abi}>::from_raw(scx_global_{name}({pack})) }}
          }}"
     );
-    match output.parse() {
-        Ok(output) => output,
+    match output.parse::<TokenStream>() {
+        Ok(output) => {
+            let output = substitute(output, "__scx_parameters", &parameters);
+            substitute(output, "__scx_body", &body)
+        }
         Err(_) => error("#[global]: could not generate the function"),
     }
 }

@@ -16,6 +16,7 @@
 //! - `cgroup`, `cmask`, `dump`: the cgroups the cgroup callbacks take, the
 //!   mask of CIDs of an affinity change, and the scheduler's lines in the
 //!   kernel's debug dump.
+//! - `arena`: structures in the arena with typed fields, `arena_struct!`.
 //! - `var`, `state`, `param`, `time`: what the callbacks share, as `Var`
 //!   globals and a typed state per task and per CID, the tunables the
 //!   loader sets by name, and the clock.
@@ -62,6 +63,7 @@
 #![feature(asm_experimental_arch)]
 #![allow(internal_features)]
 
+pub mod arena;
 mod builtins;
 pub mod cgroup;
 pub mod cid_idle;
