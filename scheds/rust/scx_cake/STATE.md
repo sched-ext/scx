@@ -39,7 +39,7 @@ Metric levels follow `CLAUDE.md` (1 = game frames … 4 = static counts).
 
 | | Pattern | Kernel | Best evidence | Next |
 |---|---|---|---|---|
-| ✅ | **Lean idle claim `lazy`** (K1–K4, `SCX_OPS_LEAN_IDLE` + `_LAZY_SMT`) | 🧩 patch 4 · else regular claim | KovaaK's quiet: avg FPS **+1.4 %**, p99 **−5.1 %**, 1 % low **+7.5 %**, stddev −18 % (16/16) · 16 hogs: 0.1 % low +6.6 %, max −16 %, nothing worse · `on` ≈ `off` · [why](#why-lazy-wins) | ⏳ played scenario, `cakebench cost` |
+| ✅ | **Lean idle claim `lazy`** (K1–K4, `SCX_OPS_LEAN_IDLE` + `_LAZY_SMT`) | 🧩 patch 4 · else regular claim | KovaaK's (CPU-limited: uncapped ~770 FPS, GPU ~39 %) quiet: avg FPS **+1.4 %**, p99 **−5.1 %**, 1 % low **+7.5 %**, stddev −18 % (16/16) · 16 hogs: 0.1 % low +6.6 %, max −16 %, nothing worse · `on` ≈ `off` · [why](#why-lazy-wins) | ⏳ GPU-limited check, `cakebench cost` |
 | ✅ | E1: `ops.running` reads cached `rq->scx.clock` | 🐧 ≥ 6.14 · else `scx_bpf_now()` | appsim 24 slots: running −3.10 ns [−4.32, −1.91], BPF −1.9 %, frames neutral | ⏳ game A/B |
 | ✅ | Native CTZ/POPCNT (auto) | 🧩 patch 1 · else portable builtins | running −2.31 ns, select −4.11 / −0.2 ns · KovaaK's: no frame difference after 2 rounds ([evidence](#evidence)) | — |
 | ✅ | D+F: wide-host idle popcount; `update_idle` pool interlock on every host | 🐧 (> 64 CPUs) | forced-wide, 2 rounds: `update_idle` −1.09 / −0.64 ns, running −2.69 / −1.05 ns, 0 stalls | ⏳ real > 64-CPU host |
@@ -164,7 +164,7 @@ Appsim helldivers2-mission-fitted, 20 s, `cakebench cost`, busy 30–31 %, runs 
 |---|---|---|---|
 | 1 | ⏳ | Game A/B for E1 | kept binaries lost → rebuild by SHA |
 | 2 | ⏳ | DSQ direct A/B | reboot with `sched_ext.dsq_direct=0` |
-| 3 | ⏳ | Lean `lazy`: played scenario + `cakebench cost` | menu A/B done 10-12 (`runs/kovaaks_leanidle_20261012`) |
+| 3 | ⏳ | Lean `lazy`: GPU-limited check (FPS cap or high resolution) + `cakebench cost` | CPU-limited KovaaK's A/B done 10-12 (`runs/kovaaks_leanidle_20261012`) |
 | 4 | 🔍 | `cake_enqueue` 610–710 ns, `cake_cpu_release` ~370 ns/run | 10× the other callbacks — next cost target |
 | 5 | 🔍 | `irq_leave` 550–1,010 ns/run | 09-25 profile: 946 cycles / 600 insns; cause open |
 | 6 | 🧹 | Flagless release | decide or remove each test-only flag |
