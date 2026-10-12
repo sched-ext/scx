@@ -149,12 +149,10 @@ objects that may share a line with others; on 2026-10-05 they sat in different l
     launch). Arms `target/cake_receipt_builds/kv-x` (base + diag) and `kv-y` (+ IRQ
     priority). Slots 1–5 of the paused run are in `run1/`, likely skewed.
 
-12. Cache-line follow-ups (evidence 10-12): (a) compute the wake class in
-    `ops.stopping(!runnable)` on the task's own CPU and read one word at wake,
-    3 remote lines to 1. There `sum_exec_runtime` and `sched_info` are final;
-    `nvcsw` is one behind (`__schedule` bumps it after `pick_next_task`), so use +1;
-    (b) skip the smt-word read when no whole-core search follows; (c) setters
-    `scx_bpf_task_set_slice/dsq_vtime`. Each needs a KovaaK's A/B.
+12. Cache-line follow-ups (evidence 10-12): (a) block stash, wake class from
+    one line: built, rejected (no frame effect; [report](docs/research/block-stash-20261012/README.md));
+    (b) idle-word read: one shared line per wake already (lean K2), nothing
+    cheap left; (c) vtime setters: rejected before (+28–36 % on stopping).
 
 ## Research index
 
