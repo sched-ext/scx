@@ -121,7 +121,10 @@ struct Opts {
 /// Every construct toggle: name, construct, BPF default. The default is
 /// checked against the compiled rodata at start so the two cannot drift;
 /// --help prints this table.
-const TOGGLES: [(&str, &str, u8); 1] = [("probe", "diagnostics", 0)];
+const TOGGLES: [(&str, &str, u8); 2] = [
+    ("probe", "diagnostics", 0),
+    ("burstkey", "requeue key + runtime since last wake", 0),
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 enum KernelSignals {
@@ -559,7 +562,7 @@ impl<'a> Scheduler<'a> {
 
         // Campaign toggles land in rodata before load so the verifier prunes the off
         // arms; one table names every toggle, a second line prints what differs.
-        let fields: [&mut u8; 1] = [&mut rodata.cake_tog_probe];
+        let fields: [&mut u8; 2] = [&mut rodata.cake_tog_probe, &mut rodata.cake_tog_burstkey];
         let mut slots: Vec<(&str, &str, &mut u8)> = TOGGLES
             .iter()
             .zip(fields)
