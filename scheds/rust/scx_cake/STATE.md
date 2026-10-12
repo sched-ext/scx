@@ -80,6 +80,13 @@ Cake's HITMs by cause:
 4. Cake's own globals: small; one queue-signal line (`dispatch_search`,
    `enqueue`) 178 cycles under load. True sharing by design.
 
+Source-line rerun (kernel symbols via the scoped `kptr_restrict=0` helper, JIT
+line info via `bpftool prog dump jited`; `srclines.py`): of cake's ~110 quiet
+HITMs, 74 (67 %) are the four classifier lines in `select_cpu` (`nvcsw`,
+`sched_info.pcount`/`run_delay`, `se.sum_exec_runtime`), 74–97 cycles each.
+The idle-word read (`m->bits[0]`) in `select_cpu` is rarer (8) but averages
+862 cycles. Kernel side: `__scx_update_idle` 44 HITMs, 94 cycles.
+
 ## Evidence, 2026-10-05
 
 `cakebench cost`, appsim 20 s slots, all slots valid. A busy host: round 2 had two
