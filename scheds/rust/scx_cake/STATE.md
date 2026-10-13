@@ -16,7 +16,7 @@
 | | |
 |---|---|
 | 🌿 Code | local `d295e8bb8` on `RitzDaCat/scx_cake-nightly` · pushed `fe076988f` · last upstream merge PR #3786 (`c410fcbd7`) |
-| 🖥️ Host | `7.2.9-2-cachyos-custom`: experimental-patches 1–4 (patch 3 without its warning fix) · `sched_ext.dsq_direct=Y` covers every cake DSQ ID · 7.2.9 sets `SCX_RQ_IN_WAKEUP` only on the core wakeup path, so pre-7.2.9 numbers are not comparable |
+| 🖥️ Host | `7.2.9-2-cachyos-custom`: bitops, lean idle, DSQ index, wake signals (old numbering 1–4; wake signals without its warning fix) · experimental-patches renumbered 10-13: 1 bitops, 2 lean idle (proven), 3 DSQ index, 4 wake signals (unproven) · `sched_ext.dsq_direct=Y` covers every cake DSQ ID · 7.2.9 sets `SCX_RQ_IN_WAKEUP` only on the core wakeup path, so pre-7.2.9 numbers are not comparable |
 | ⚙️ Defaults | native CTZ/POPCNT (auto) · E1 cached rq clock in `ops.running` · **lean idle `lazy`** (silent fallback without the kernel flag) · policy base: 2026-09-28 pool-serving C (archive) |
 | 🧪 Test-only flags | `--native-bitops` `--portable-bitops` `--native-ring` `--native-hist` `--kernel-signals` `--signal-report` `--handoff-ns` `--toggle probe=1` `--inspect-bpf` `--lean-idle` — the release is flagless |
 | 📦 10-05 arm A′ | wide-host idle popcount (D), `update_idle` pool interlock (F), exit pool check, census identities, `PEND_HEAL`: committed in `758e2e841`, pushed |
@@ -39,15 +39,15 @@ Metric levels follow `CLAUDE.md` (1 = game frames … 4 = static counts).
 
 | | Pattern | Kernel | Best evidence | Next |
 |---|---|---|---|---|
-| ✅ | **Lean idle claim `lazy`** (K1–K4, `SCX_OPS_LEAN_IDLE` + `_LAZY_SMT`) | 🧩 patch 4 · else regular claim | KovaaK's (CPU-limited: uncapped ~770 FPS, GPU ~39 %) quiet: avg FPS **+1.4 %**, p99 **−5.1 %**, 1 % low **+7.5 %**, stddev −18 % (16/16) · 16 hogs: 0.1 % low +6.6 %, max −16 %, nothing worse · `on` ≈ `off` · [why](#why-lazy-wins) | ⏳ GPU-limited check, `cakebench cost` |
+| ✅ | **Lean idle claim `lazy`** (K1–K4, `SCX_OPS_LEAN_IDLE` + `_LAZY_SMT`) | 🧩 patch 2 · else regular claim | KovaaK's (CPU-limited: uncapped ~770 FPS, GPU ~39 %) quiet: avg FPS **+1.4 %**, p99 **−5.1 %**, 1 % low **+7.5 %**, stddev −18 % (16/16) · 16 hogs: 0.1 % low +6.6 %, max −16 %, nothing worse · `on` ≈ `off` · [why](#why-lazy-wins) | ⏳ GPU-limited check, `cakebench cost` |
 | ✅ | E1: `ops.running` reads cached `rq->scx.clock` | 🐧 ≥ 6.14 · else `scx_bpf_now()` | appsim 24 slots: running −3.10 ns [−4.32, −1.91], BPF −1.9 %, frames neutral | ⏳ game A/B |
 | ✅ | Native CTZ/POPCNT (auto) | 🧩 patch 1 · else portable builtins | running −2.31 ns, select −4.11 / −0.2 ns · KovaaK's: no frame difference after 2 rounds ([evidence](#evidence)) | — |
 | ✅ | D+F: wide-host idle popcount; `update_idle` pool interlock on every host | 🐧 (> 64 CPUs) | forced-wide, 2 rounds: `update_idle` −1.09 / −0.64 ns, running −2.69 / −1.05 ns, 0 stalls | ⏳ real > 64-CPU host |
 | ✅ | Exit pool check, census identities, detach-first reports | 🐧 | identities exact in 4 probe slots; pending 0 at every exit | diagnostics only |
 | 🧪 | Wake classes by waker context (IRQ / kthread / game / other) | 🐧 | KovaaK's 90 s: `dxvk-queue` IRQ-woken 731k× (GPU completion), mean 0.6 µs, worst 1.08 ms; game↔game worst 4.8 ms | policy under test |
 | 🧪 | IRQ-woken wakes run next (idle CPU, else head of prev + PREEMPT) | 🐧 | KovaaK's under 16 hogs paused at slot 5/8; data unread | ⏳ rerun quiet |
-| ⏳ | DSQ direct index (kernel) | 🧩 patch 2 · else hash | untested on hardware | reboot A/B |
-| ➖ | Kernel wake signals (input/fence tags) | 🧩 patch 3 | KovaaK's 90 s: 0 of 8.4M wakes tagged (input via KWin socket; NVIDIA private waits) | nothing to act on here |
+| ⏳ | DSQ direct index (kernel) | 🧩 patch 3 · else hash | untested on hardware | reboot A/B |
+| ➖ | Kernel wake signals (input/fence tags) | 🧩 patch 4 | KovaaK's 90 s: 0 of 8.4M wakes tagged (input via KWin socket; NVIDIA private waits) | nothing to act on here |
 | ➖ | `bpf_fastcall` on scalar kfuncs | 🧩 | select −1.08 then +1.82 | — |
 | ➖ | Mask removal via verifier return bounds | 🧩 | enqueue −8.2 did not repeat · stock prunes native path | — |
 | ➖ | E2: whole-core word from idle word | 🐧 | select −0.01 ns | — |
@@ -192,7 +192,7 @@ Appsim helldivers2-mission-fitted, 20 s, `cakebench cost`, busy 30–31 %, runs 
 | [`counting-classifiers-20261005/`](docs/research/counting-classifiers-20261005/README.md) | spread pick ❌, D+F ✅ |
 
 <details>
-<summary><b>jit-bitops-prototype/</b> (2026-10-01 … 10-02)</summary>
+<summary><b>jit-bitops-prototype/</b> (2026-10-01 … 10-02) · moved to <a href="https://github.com/RitzDaCat/experimental-patches/tree/main/kernel/sched-ext/research/jit-bitops-prototype">experimental-patches</a></summary>
 
 | Doc | Finding |
 |---|---|
