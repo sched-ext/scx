@@ -336,6 +336,32 @@ struct cpdom_ctx {
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
 
 /*
+ * Test whether the domain has more than @req (in LAVD_SHIFT fixed point,
+ * p2s(x) == x%) of its total capacity still unused. The average wall
+ * utilization sum (per CPU in [0..1024], summed over the domain) is
+ * compared against the total capacity of all online CPUs in the domain
+ * (cap_sum_steady + cap_sum_turb, also in [0..1024] per CPU), so big/little
+ * cores and partially online domains are weighed correctly -- unlike a
+ * per-CPU average utilization check. Cross-multiplied to avoid division:
+ *
+ *   headroom fraction > req/1024
+ *     <=>  avg_util_wall_sum * 1024 < (1024 - req) * cap
+ *
+ * Returns false when capacity statistics are not available yet (cap == 0),
+ * i.e., "no headroom can be proven".
+ */
+static __always_inline bool
+cpdom_headroom_above(struct cpdom_ctx *cpdc, u32 req)
+{
+	u32 cap = cpdc->cap_sum_steady + cpdc->cap_sum_turb;
+	u64 util = cpdc->avg_util_wall_sum;
+
+	if (!cap)
+		return false;
+	return util * LAVD_SCALE < (u64)(LAVD_SCALE - req) * cap;
+}
+
+/*
  * Atomically subtract @amount from the stealee's egress budget. Concurrent
  * stealers on other CPUs may call this in parallel, so use __sync_fetch_and_sub
  * to avoid race conditions. The signed s64 field lets the counter go slightly

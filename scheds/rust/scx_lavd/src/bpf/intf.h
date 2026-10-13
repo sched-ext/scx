@@ -55,6 +55,11 @@ enum {
 						 * process has not run on it for this long */
 	LAVD_CA_UNSET_CPDOM	= 0xFF,		/* preferred_cpdom_id sentinel: not yet set */
 	LAVD_CA_MAX_CPDOMS	= 16,		/* max LLC domains tracked per process */
+
+	/* Request thresholds in LAVD_SHIFT fixed point, 1024 == 100%. */
+	LAVD_CA_PULL_REQ	= 614,		/* p2s(60): a domain must have > 60% of its
+						 * capacity unused (util < 40%) before a task
+						 * is pulled toward it as its preferred LLC */
 };
 
 /*
