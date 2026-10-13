@@ -248,6 +248,22 @@ static void ca_accumulate_domain_time(u8 cur_cpdom, u64 now, u32 delta)
 }
 
 /*
+ * invalid_llc_nr - can this domain host the whole process?
+ *
+ * Mirrors invalid_llc_nr() of the upstream sched/cache infrastructure:
+ * a domain whose total capacity (in LAVD_SCALE units) is smaller than
+ * the full-throttle demand of all threads of the process (nr_threads *
+ * LAVD_SCALE) must not become (or remain) the preferred domain, since
+ * the entire process can never fit there.
+ */
+static bool invalid_llc_nr(struct cpdom_ctx *cpdomc, u64 nr_threads)
+{
+	u32 cap = cpdomc->cap_sum_steady + cpdomc->cap_sum_turb;
+
+	return (u64)nr_threads * LAVD_SCALE > (u64)cap;
+}
+
+/*
  * update_preferred_cpdom - occupancy-ranked preferred LLC learning.
  *
  * Called from update_stat_for_stopping() with the wall-clock slice
@@ -275,6 +291,10 @@ static void ca_accumulate_domain_time(u8 cur_cpdom, u64 now, u32 delta)
  *   - LAVD_CA_AFFINITY_TIMEOUT_NS: if the process has not run on its
  *     preferred domain for 50 ms, the preference is dropped
  *     immediately rather than waiting for decay + hysteresis.
+ *   - Capacity invalidation (invalid_llc_nr): domains whose total
+ *     capacity cannot host all of the process' threads are excluded
+ *     as candidates, and an incumbent that becomes capacity-invalid
+ *     is dropped.
  *
  * The authoritative state lives in mm_ca_map (shared by all threads of
  * the process). preferred_cpdom_id is written back to task_ctx so the
@@ -287,7 +307,7 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 	struct cpdom_ctx *cpdomc;
 	u32 n, delta, r, t, best_r, best_t, pref_r, pref_t;
 	u8 cur_cpdom, best_cpdom, pref;
-	u64 mm_key, now;
+	u64 mm_key, now, nr_threads;
 
 	mm_key = (u64)BPF_CORE_READ(p, mm);
 	if (!mm_key)
@@ -299,6 +319,12 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 
 	now = bpf_ktime_get_ns();
 	delta = (u32)(run_ns >> 10);
+	/*
+	 * Read before taking the mm_ca_stat lock: BPF_CORE_READ is a
+	 * helper call, and helper calls are not allowed inside a
+	 * bpf_spin_lock critical section.
+	 */
+	nr_threads = (u64)BPF_CORE_READ(p, signal, nr_threads);
 
 	/* Domain-side denominator: decay + accumulate, outside the mm lock. */
 	ca_accumulate_domain_time(cur_cpdom, now, delta);
@@ -366,9 +392,23 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 		pref = LAVD_CA_UNSET_CPDOM;
 
 	/*
-	 * Step 4: occupancy argmax --
+	 * Step 4: capacity invalidation of the incumbent (invalid_llc_nr).
+	 * A domain that cannot host all of the process' threads -- e.g., a
+	 * small LITTLE domain for a process that grew -- must not remain
+	 * the preferred domain.
+	 */
+	if (pref != LAVD_CA_UNSET_CPDOM) {
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [pref]);
+		if (!cpdomc || !cpdomc->is_valid ||
+		    invalid_llc_nr(cpdomc, nr_threads))
+			pref = LAVD_CA_UNSET_CPDOM;
+	}
+
+	/*
+	 * Step 5: occupancy argmax --
 	 *   argmax_d  cpdom_runtime[d] / ca_total_task_time[d]
 	 * compared via cross-multiplication (r_i * t_j > r_j * t_i).
+	 * Capacity-invalid domains are excluded as candidates.
 	 */
 	best_cpdom = LAVD_CA_UNSET_CPDOM;
 	best_r = 0;
@@ -379,7 +419,8 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 			continue;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [i]);
-		if (!cpdomc || !cpdomc->is_valid)
+		if (!cpdomc || !cpdomc->is_valid ||
+		    invalid_llc_nr(cpdomc, nr_threads))
 			continue;
 
 		t = READ_ONCE(cpdomc->ca_total_task_time);
@@ -394,7 +435,7 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
-	/* Step 5: apply with 2x hysteresis on occupancy. */
+	/* Step 6: apply with 2x hysteresis on occupancy. */
 	if (pref == LAVD_CA_UNSET_CPDOM) {
 		if (best_cpdom != LAVD_CA_UNSET_CPDOM)
 			pref = best_cpdom;
