@@ -1254,6 +1254,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 			return;
 		}
+		taskc->cpdom_id = cpuc->cpdom_id;
 
 		/*
 		 * Recompute the deadline: the logical clock may have advanced
@@ -1266,6 +1267,19 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
+
+		/*
+		 * Kick an idle CPU in the domain to consume the shared
+		 * domain DSQ. is_idle is never set on this path (the
+		 * LAVD_FLAG_IDLE_CPU_PICKED flag was consumed at the
+		 * original enqueue), so without this unconditional kick
+		 * nothing would be woken up to consume the shared DSQ:
+		 * the REENQ'd task sits there until some busy CPU of the
+		 * domain happens to redispatch.
+		 */
+		kick_idle_cpu_in_cpdom(MEMBER_VPTR(cpdom_ctxs,
+						   [cpuc->cpdom_id]));
+
 		goto kick_cpu_out;
 	}
 
@@ -1393,7 +1407,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	account_queued_load(taskc, cpuc->cpdom_id);
 
-kick_cpu_out:
 	/*
 	 * The task landed on the shared domain DSQ without a claimed idle
 	 * CPU of its own. On a burst wakeup that enqueues multiple slices,
@@ -1406,8 +1419,9 @@ kick_cpu_out:
 		kick_idle_cpu_in_cpdom(MEMBER_VPTR(cpdom_ctxs,
 						   [cpuc->cpdom_id]));
 
+kick_cpu_out:
 	/*
-	 * Kick @cpu so an idle CPU picks up the task.
+	 * Kick the chosen CPU if it was picked idle, so it picks up the task.
 	 */
 	if (is_idle) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
