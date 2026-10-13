@@ -66,6 +66,8 @@ enum {
 	LAVD_CA_IMB_PCT		= 20,		/* pull toward the preferred LLC only when it
 						 * is at least 20% less loaded than the sticky
 						 * domain (cross-multiplied, no division) */
+
+	LAVD_CA_STEAL_SEARCH_DEPTH = 16,	/* max DSQ depth searched for a "wanderer" task to steal */
 };
 
 /*
