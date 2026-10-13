@@ -236,6 +236,12 @@ struct Opts {
     #[clap(long = "cache-aware", action = clap::ArgAction::SetTrue)]
     cache_aware: bool,
 
+    /// Maximum number of threads a process may have to remain eligible for
+    /// cache-aware placement.  Processes with more threads are excluded to
+    /// avoid over-aggregating load onto a single LLC domain.
+    #[clap(long = "cache-aware-max-threads", default_value = "16")]
+    cache_aware_max_threads: u32,
+
     /// Enables DSQs per CPU, this enables task queuing and dispatching
     /// from CPU specific DSQs. This generally increases L1/L2 cache
     /// locality for tasks and lowers lock contention compared to shared DSQs,
@@ -759,6 +765,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.cache_aware = opts.cache_aware;
+        rodata.cache_aware_max_threads = opts.cache_aware_max_threads;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
         // Replenishment wakes dispatch through the built-in idle tracking.

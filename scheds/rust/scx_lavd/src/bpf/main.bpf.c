@@ -210,6 +210,179 @@ struct {
 } mm_ca_map SEC(".maps");
 
 /*
+ * Advance the per-domain epoch of the ca_total_task_time denominator,
+ * decay it, and add @delta. Runs outside the mm lock from the stopping
+ * path; concurrent stopping events on the same domain are reconciled with
+ * a CAS on ca_denom_epoch_ns so the shift happens exactly once per epoch.
+ * The non-atomic read-modify-write of the shift may very rarely lose a
+ * concurrent add; the denominator is a heuristic statistic, so this is
+ * acceptable (same rationale as the racy per-CPU stat updates).
+ */
+static void ca_accumulate_domain_time(u8 cur_cpdom, u64 now, u32 delta)
+{
+	struct cpdom_ctx *cpdomc = MEMBER_VPTR(cpdom_ctxs, [cur_cpdom]);
+	u64 last, new_last, n;
+	u32 v;
+
+	if (!cpdomc)
+		return;
+
+	last = READ_ONCE(cpdomc->ca_denom_epoch_ns);
+	if (now > last) {
+		n = (now - last) / LAVD_CA_EPOCH_NS;
+		if (n > 0) {
+			new_last = last + (u64)n * LAVD_CA_EPOCH_NS;
+			if (__sync_bool_compare_and_swap(
+					&cpdomc->ca_denom_epoch_ns,
+					last, new_last)) {
+				if (n > 31)
+					n = 31;
+				v = READ_ONCE(cpdomc->ca_total_task_time);
+				WRITE_ONCE(cpdomc->ca_total_task_time, v >> n);
+			}
+		}
+	}
+
+	if (delta)
+		__sync_fetch_and_add(&cpdomc->ca_total_task_time, delta);
+}
+
+/*
+ * update_preferred_cpdom - occupancy-ranked preferred LLC learning.
+ *
+ * Called from update_stat_for_stopping() with the wall-clock slice
+ * duration. Mirrors the epoch-based binary decay of the upstream
+ * sched/cache infrastructure (Tim Chen, Peter Zijlstra):
+ *
+ *   - Every stopping event accumulates run_ns >> 10 into both the
+ *     per-mm counter mcs->cpdom_runtime[] and the per-domain denominator
+ *     cpdom_ctx.ca_total_task_time, which decays on the same 10 ms
+ *     r=0.5 schedule via its own epoch clock.
+ *   - The counters are decayed (shift capped at 31) and the preferred
+ *     domain is reselected by OCCUPANCY: my decayed runtime / the
+ *     domain's total decayed runtime, argmax via cross-multiplication
+ *     (no division). Occupancy, rather than absolute runtime, prefers
+ *     domains the process dominates over busy domains where it is a
+ *     small minority.
+ *   - 2x hysteresis: the candidate must beat the incumbent's occupancy
+ *     2:1 to switch. A zero denominator for the incumbent means its
+ *     ratio is undefined (no tracked activity in its domain anymore),
+ *     so the switch happens unconditionally in that case.
+ *
+ * The authoritative state lives in mm_ca_map (shared by all threads of
+ * the process). preferred_cpdom_id is written back to task_ctx so the
+ * placement paths can read it without a map lookup.
+ */
+static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
+				   struct cpu_ctx *cpuc, u64 run_ns)
+{
+	struct mm_ca_stat init_val, *mcs;
+	struct cpdom_ctx *cpdomc;
+	u32 n, delta, r, t, best_r, best_t, pref_r, pref_t;
+	u8 cur_cpdom, best_cpdom, pref;
+	u64 mm_key, now;
+
+	mm_key = (u64)BPF_CORE_READ(p, mm);
+	if (!mm_key)
+		return;
+
+	cur_cpdom = cpuc->cpdom_id;
+	if (cur_cpdom >= LAVD_CA_MAX_CPDOMS)
+		return;
+
+	now = bpf_ktime_get_ns();
+	delta = (u32)(run_ns >> 10);
+
+	/* Domain-side denominator: decay + accumulate, outside the mm lock. */
+	ca_accumulate_domain_time(cur_cpdom, now, delta);
+
+	mcs = bpf_map_lookup_elem(&mm_ca_map, &mm_key);
+	if (!mcs) {
+		__builtin_memset(&init_val, 0, sizeof(init_val));
+		init_val.preferred_cpdom_id = cur_cpdom;
+		init_val.last_epoch_ns      = now;
+		bpf_map_update_elem(&mm_ca_map, &mm_key, &init_val, BPF_NOEXIST);
+		taskc->preferred_cpdom_id = cur_cpdom;
+		return;
+	}
+
+	bpf_spin_lock(&mcs->lock);
+
+	/* Step 1: epoch decay of all per-LLC counters (shift capped at 31). */
+	if (now > mcs->last_epoch_ns) {
+		n = (u32)((now - mcs->last_epoch_ns) / LAVD_CA_EPOCH_NS);
+		if (n > 31)
+			n = 31;
+		if (n > 0) {
+			mcs->last_epoch_ns += (u64)n * LAVD_CA_EPOCH_NS;
+			for (u8 i = 0; i < LAVD_CA_MAX_CPDOMS; i++)
+				mcs->cpdom_runtime[i] >>= n;
+		}
+	}
+
+	/* Step 2: accumulate this slice into the current LLC's counter. */
+	mcs->cpdom_runtime[cur_cpdom] =
+		min(mcs->cpdom_runtime[cur_cpdom] + delta, (u32)U32_MAX);
+
+	/*
+	 * Step 3: occupancy argmax --
+	 *   argmax_d  cpdom_runtime[d] / ca_total_task_time[d]
+	 * compared via cross-multiplication (r_i * t_j > r_j * t_i).
+	 */
+	best_cpdom = LAVD_CA_UNSET_CPDOM;
+	best_r = 0;
+	best_t = 0;
+	for (u8 i = 0; i < LAVD_CA_MAX_CPDOMS; i++) {
+		r = mcs->cpdom_runtime[i];
+		if (!r)
+			continue;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [i]);
+		if (!cpdomc || !cpdomc->is_valid)
+			continue;
+
+		t = READ_ONCE(cpdomc->ca_total_task_time);
+		if (!t)
+			continue;
+
+		if (best_cpdom == LAVD_CA_UNSET_CPDOM ||
+		    (u64)r * best_t > (u64)best_r * t) {
+			best_cpdom = i;
+			best_r = r;
+			best_t = t;
+		}
+	}
+
+	/* Step 4: apply with 2x hysteresis on occupancy. */
+	pref = mcs->preferred_cpdom_id;
+	if (pref == LAVD_CA_UNSET_CPDOM) {
+		if (best_cpdom != LAVD_CA_UNSET_CPDOM)
+			pref = best_cpdom;
+	} else if (best_cpdom != pref && best_r) {
+		if (pref < LAVD_CA_MAX_CPDOMS) {
+			pref_r = mcs->cpdom_runtime[pref];
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [pref]);
+			pref_t = cpdomc ?
+				 READ_ONCE(cpdomc->ca_total_task_time) : 0;
+		} else {
+			pref_r = 0;
+			pref_t = 0;
+		}
+
+		if (!pref_t ||
+		    (u64)best_r * pref_t > ((u64)pref_r * best_t) << 1)
+			pref = best_cpdom;
+	}
+
+	mcs->preferred_cpdom_id = pref;
+
+	/* Sync to task_ctx cache for zero-cost reads in the placement paths. */
+	taskc->preferred_cpdom_id = mcs->preferred_cpdom_id;
+
+	bpf_spin_unlock(&mcs->lock);
+}
+
+/*
  * Logical current clock
  */
 u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
@@ -657,6 +830,15 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * for a lock holder to be boosted only once.
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
+
+	/*
+	 * Update per-process preferred LLC domain tracking.
+	 * last_slice_used_wall is already set above, use it as run_ns.
+	 * Gated by is_cache_aware_eligible() to skip kernel threads, pinned
+	 * tasks, and processes with too many threads.
+	 */
+	if (is_cache_aware_eligible(p))
+		update_preferred_cpdom(p, taskc, cpuc, taskc->last_slice_used_wall);
 }
 
 static void update_stat_for_refill(struct task_struct *p,

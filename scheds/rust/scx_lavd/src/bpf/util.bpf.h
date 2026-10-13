@@ -37,6 +37,7 @@ bool is_kernel_worker(struct task_struct *p);
 bool is_ksoftirqd(struct task_struct *p);
 bool is_permanently_pinned(const struct task_struct *p);
 bool is_effectively_pinned(task_ctx __arg_arena *taskc);
+bool is_cache_aware_eligible(struct task_struct __arg_trusted *p);
 bool use_full_cpus(void);
 void set_affinity_flags(task_ctx __arg_arena *taskc,
 			const struct cpumask *cpumask);

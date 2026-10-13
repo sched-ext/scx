@@ -611,6 +611,7 @@ extern const volatile bool	no_slice_boost;
 
 /* Cache-aware load balancing. */
 extern const volatile bool	cache_aware;
+extern const volatile u32	cache_aware_max_threads;
 extern const volatile u8	verbose;
 
 #define debugln(fmt, ...)						\
