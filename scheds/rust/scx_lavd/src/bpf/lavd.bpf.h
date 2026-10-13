@@ -597,6 +597,9 @@ struct mm_ca_stat {
 	u64	next_scan_ns;				/* earliest next preferred-LLC scan time;
 							 * check-and-set under the lock so the scan
 							 * runs at most once per epoch per process */
+	u64	last_preferred_run_ns;			/* last time the process ran on its
+							 * preferred domain; drives the
+							 * LAVD_CA_AFFINITY_TIMEOUT_NS expiry */
 };
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */

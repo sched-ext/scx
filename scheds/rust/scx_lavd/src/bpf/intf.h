@@ -51,6 +51,8 @@ enum {
  */
 enum {
 	LAVD_CA_EPOCH_NS	= 10000000,	/* 10 ms per epoch (== EPOCH_PERIOD) */
+	LAVD_CA_AFFINITY_TIMEOUT_NS = 50000000,	/* 50 ms: clear the preferred-LLC hint if the
+						 * process has not run on it for this long */
 	LAVD_CA_UNSET_CPDOM	= 0xFF,		/* preferred_cpdom_id sentinel: not yet set */
 	LAVD_CA_MAX_CPDOMS	= 16,		/* max LLC domains tracked per process */
 };

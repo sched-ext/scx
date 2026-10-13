@@ -272,6 +272,9 @@ static void ca_accumulate_domain_time(u8 cur_cpdom, u64 now, u32 delta)
  *     2:1 to switch. A zero denominator for the incumbent means its
  *     ratio is undefined (no tracked activity in its domain anymore),
  *     so the switch happens unconditionally in that case.
+ *   - LAVD_CA_AFFINITY_TIMEOUT_NS: if the process has not run on its
+ *     preferred domain for 50 ms, the preference is dropped
+ *     immediately rather than waiting for decay + hysteresis.
  *
  * The authoritative state lives in mm_ca_map (shared by all threads of
  * the process). preferred_cpdom_id is written back to task_ctx so the
@@ -306,12 +309,20 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 		init_val.preferred_cpdom_id = cur_cpdom;
 		init_val.last_epoch_ns      = now;
 		init_val.next_scan_ns       = now + LAVD_CA_EPOCH_NS;
+		init_val.last_preferred_run_ns = now;
 		bpf_map_update_elem(&mm_ca_map, &mm_key, &init_val, BPF_NOEXIST);
 		taskc->preferred_cpdom_id = cur_cpdom;
 		return;
 	}
 
 	bpf_spin_lock(&mcs->lock);
+
+	/*
+	 * Refresh the affinity-timeout stamp: the process just ran on its
+	 * preferred domain.
+	 */
+	if (mcs->preferred_cpdom_id == cur_cpdom)
+		mcs->last_preferred_run_ns = now;
 
 	/*
 	 * Off-scan stopping event: accumulate only; the next scan-time
@@ -342,8 +353,20 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 	mcs->cpdom_runtime[cur_cpdom] =
 		min(mcs->cpdom_runtime[cur_cpdom] + delta, (u32)U32_MAX);
 
+	pref = mcs->preferred_cpdom_id;
+
 	/*
-	 * Step 3: occupancy argmax --
+	 * Step 3: affinity timeout -- the preferred domain has not been
+	 * exercised by this process for LAVD_CA_AFFINITY_TIMEOUT_NS. The
+	 * process moved away or the domain became unavailable, so drop the
+	 * hint immediately rather than waiting for decay + hysteresis.
+	 */
+	if (pref != LAVD_CA_UNSET_CPDOM &&
+	    (now - mcs->last_preferred_run_ns) >= LAVD_CA_AFFINITY_TIMEOUT_NS)
+		pref = LAVD_CA_UNSET_CPDOM;
+
+	/*
+	 * Step 4: occupancy argmax --
 	 *   argmax_d  cpdom_runtime[d] / ca_total_task_time[d]
 	 * compared via cross-multiplication (r_i * t_j > r_j * t_i).
 	 */
@@ -371,8 +394,7 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
-	/* Step 4: apply with 2x hysteresis on occupancy. */
-	pref = mcs->preferred_cpdom_id;
+	/* Step 5: apply with 2x hysteresis on occupancy. */
 	if (pref == LAVD_CA_UNSET_CPDOM) {
 		if (best_cpdom != LAVD_CA_UNSET_CPDOM)
 			pref = best_cpdom;
@@ -1999,6 +2021,57 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 
 	now = scx_bpf_now();
 	account_task_runtime(p, taskc, cpuc, now, true);
+
+	/*
+	 * Cache-aware: refresh the per-task read cache of the process-wide
+	 * preferred LLC from mm_ca_map. This covers CPU-bound threads that
+	 * rarely stop (long boosted slices), which would otherwise keep a
+	 * stale copy until their next stopping event, and clears the cache
+	 * when the task is no longer eligible for tracking (e.g., the
+	 * process grew beyond cache_aware_max_threads).
+	 *
+	 * Lockless on purpose: the u8 read cannot tear and the verifier only
+	 * forbids touching the bpf_spin_lock field itself outside the
+	 * critical section, not the neighboring fields. A stale-by-one-epoch
+	 * value is harmless -- it is advisory for placement.
+	 */
+	if (cache_aware) {
+		if (is_cache_aware_eligible(p)) {
+			u64 mm_key = (u64)BPF_CORE_READ(p, mm);
+			struct mm_ca_stat *mcs = mm_key ?
+				bpf_map_lookup_elem(&mm_ca_map, &mm_key) :
+				NULL;
+
+			if (mcs) {
+				u8 pref = READ_ONCE(mcs->preferred_cpdom_id);
+
+				taskc->preferred_cpdom_id = pref;
+				/*
+				 * Refresh the affinity-timeout stamp: the
+				 * task is running on its preferred domain
+				 * right now, so the preference is exercised
+				 * even if the current slice is so long that
+				 * stopping events are rarer than
+				 * LAVD_CA_AFFINITY_TIMEOUT_NS. Unlocked
+				 * store: a racing stale timestamp only
+				 * shifts the expiry by one scan.
+				 *
+				 * Note bpf_ktime_get_ns(), not the rq-clock
+				 * based scx_bpf_now(): the stamp is written
+				 * and read with ktime in
+				 * update_preferred_cpdom(), and the two
+				 * clocks are not interchangeable.
+				 */
+				if (pref == cpuc->cpdom_id)
+					WRITE_ONCE(mcs->last_preferred_run_ns,
+						   bpf_ktime_get_ns());
+			} else {
+				taskc->preferred_cpdom_id = LAVD_CA_UNSET_CPDOM;
+			}
+		} else {
+			taskc->preferred_cpdom_id = LAVD_CA_UNSET_CPDOM;
+		}
+	}
 
 	/*
 	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
