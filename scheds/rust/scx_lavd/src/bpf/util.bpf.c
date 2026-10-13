@@ -42,6 +42,9 @@ volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
 const volatile bool	no_slice_boost;
+
+/* Cache-aware load balancing. */
+const volatile bool	cache_aware;
 const volatile bool	per_cpu_dsq;
 const volatile bool	enable_cpu_bw;
 const volatile bool	is_autopilot_on;

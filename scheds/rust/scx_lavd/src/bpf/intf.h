@@ -45,6 +45,17 @@ enum {
 };
 
 /*
+ * Cache-aware scheduling constants.
+ * Mirrors the EPOCH_PERIOD approach of the upstream sched/cache
+ * infrastructure (Tim Chen, Peter Zijlstra).
+ */
+enum {
+	LAVD_CA_EPOCH_NS	= 10000000,	/* 10 ms per epoch (== EPOCH_PERIOD) */
+	LAVD_CA_UNSET_CPDOM	= 0xFF,		/* preferred_cpdom_id sentinel: not yet set */
+	LAVD_CA_MAX_CPDOMS	= 16,		/* max LLC domains tracked per process */
+};
+
+/*
  * System-wide stats
  */
 struct sys_stat {

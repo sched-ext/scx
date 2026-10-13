@@ -250,6 +250,13 @@ struct task_ctx {
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+	/*
+	 * Per-task read cache of the process-wide preferred LLC domain.
+	 * LAVD_CA_UNSET_CPDOM when not yet determined. The authoritative
+	 * value lives in mm_ca_map keyed by p->mm, shared across all
+	 * threads of a process.
+	 */
+	u8	preferred_cpdom_id;
 
 	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
 	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
@@ -310,6 +317,17 @@ struct cpdom_ctx {
 	u32	cap_sum_turb;		    /* sum of capacity for turbulent CPUs in this cpdom */
 	u16	nr_steady_cpus;		    /* count of steady CPUs in this cpdom */
 	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
+
+	/* per-cpdom cache-aware occupancy denominator */
+	u32	ca_total_task_time;		    /* decayed runtime of all cache-aware
+						     * tracked tasks in this domain
+						     * (ns >> 10); the denominator of the
+						     * per-process occupancy ranking,
+						     * decayed every LAVD_CA_EPOCH_NS via
+						     * ca_denom_epoch_ns (same r=0.5
+						     * schedule as the per-mm
+						     * cpdom_runtime[]) */
+	u64	ca_denom_epoch_ns;		    /* last epoch advance of ca_total_task_time */
 
 	s64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
 	s64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
@@ -565,6 +583,19 @@ struct cpu_ctx {
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+/*
+ * Per-process cache-aware scheduling state, stored in mm_ca_map keyed by
+ * the mm_struct pointer.  All threads of the same process share one entry,
+ * matching the per-mm granularity of the upstream sched/cache infrastructure.
+ */
+struct mm_ca_stat {
+	struct bpf_spin_lock	lock;
+	u8	preferred_cpdom_id;			/* LLC domain with highest occupancy */
+	u8	__pad[3];
+	u32	cpdom_runtime[LAVD_CA_MAX_CPDOMS];	/* per-LLC decayed runtime (ns >> 10) */
+	u64	last_epoch_ns;				/* timestamp of the last epoch advance */
+};
+
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
 const extern volatile u32	nr_cpu_ids;
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
@@ -577,6 +608,9 @@ extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
 
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
+
+/* Cache-aware load balancing. */
+extern const volatile bool	cache_aware;
 extern const volatile u8	verbose;
 
 #define debugln(fmt, ...)						\

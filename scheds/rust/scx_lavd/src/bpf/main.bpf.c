@@ -197,6 +197,19 @@
 char _license[] SEC("license") = "GPL";
 
 /*
+ * Per-process cache-aware scheduling state.
+ * Keyed by mm_struct pointer (as u64); all threads of the same process share
+ * one entry, matching the per-mm granularity of the upstream sched/cache
+ * infrastructure (Tim Chen, Peter Zijlstra).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, u64);
+	__type(value, struct mm_ca_stat);
+} mm_ca_map SEC(".maps");
+
+/*
  * Logical current clock
  */
 u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
@@ -2219,6 +2232,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
+	/*
+	 * Always start with UNSET: a fresh task must never inherit a stale
+	 * preferred LLC from the parent task-context copy, since the child
+	 * may run under a different mm (e.g., after exec). The authoritative
+	 * process-wide state lives in mm_ca_map.
+	 */
+	taskc->preferred_cpdom_id = LAVD_CA_UNSET_CPDOM;
 
 	/* Per-CPU warmth is task+CPU private -- never inherit it. */
 	taskc->cpu_heat = 0;
@@ -2259,6 +2279,18 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	if (taskc && p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p))) {
 		unaccount_queued_load(taskc);
 		unaccount_queued_load_pcpu(taskc);
+	}
+
+	/*
+	 * Remove the mm_ca_map entry when the last thread of the process
+	 * exits. nr_threads is checked before the thread is detached, so a
+	 * value of 1 means only this thread remains.
+	 */
+	if (!is_kernel_task(p) &&
+	    BPF_CORE_READ(p, signal, nr_threads) <= 1) {
+		u64 mm_key = (u64)BPF_CORE_READ(p, mm);
+		if (mm_key)
+			bpf_map_delete_elem(&mm_ca_map, &mm_key);
 	}
 
 	/*

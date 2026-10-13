@@ -230,6 +230,12 @@ struct Opts {
     #[clap(long = "no-slice-boost", action = clap::ArgAction::SetTrue)]
     no_slice_boost: bool,
 
+    /// Enable cache-aware load balancing: bias task placement toward the LLC
+    /// domain where the process has accumulated the most recent runtime,
+    /// following the upstream sched/cache infrastructure (Tim Chen, Peter Zijlstra).
+    #[clap(long = "cache-aware", action = clap::ArgAction::SetTrue)]
+    cache_aware: bool,
+
     /// Enables DSQs per CPU, this enables task queuing and dispatching
     /// from CPU specific DSQs. This generally increases L1/L2 cache
     /// locality for tasks and lowers lock contention compared to shared DSQs,
@@ -752,6 +758,7 @@ impl<'a> Scheduler<'a> {
 
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
+        rodata.cache_aware = opts.cache_aware;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
         // Replenishment wakes dispatch through the built-in idle tracking.
