@@ -69,7 +69,7 @@ def main():
                ROOT / "scheds/rust/scx_cake/src/bpf/cake.bpf.c",
                ROOT / "scheds/rust/scx_cake/src/main.rs",
                ROOT / "scheds/rust/scx_cake/src/bpf/intf.h",
-               ROOT / "scheds/rust/scx_cake/docs/research/jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch"]
+               ROOT.parent / "experimental-patches/kernel/sched-ext/research/jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch"]
     base = ROOT / "target/cake_jit_bitops_20260929/cachyos-7.2.8-port/linux"
     sources += [base / name for name in ("kernel/bpf/verifier.c", "include/linux/btf.h", "arch/x86/net/bpf_jit_comp.c")]
     summary = {"created_utc": datetime.now(timezone.utc).isoformat(),
