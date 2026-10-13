@@ -126,6 +126,14 @@ static void collect_sys_stat(void)
 		cpdomc->cap_sum_turb = 0;
 		cpdomc->nr_steady_cpus = 0;
 		cpdomc->nr_turb_cpus = 0;
+		/*
+		 * Cache-aware overhead gate: clear the heartbeat so only
+		 * domains that received an enqueue of a task carrying a
+		 * preferred-LLC hint (via get_target_dsq_id()) within this
+		 * interval are considered "actively tracked" by the steal
+		 * path.
+		 */
+		cpdomc->ca_tracked_active = 0;
 
 		if (use_cpdom_dsq())
 			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id))

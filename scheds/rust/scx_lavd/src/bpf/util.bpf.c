@@ -494,6 +494,24 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 {
 	struct cpdom_ctx *cpdomc;
 
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+
+	/*
+	 * Cache-aware overhead-gate heartbeat: mark this domain as actively
+	 * tracked so the steal path knows its DSQs may hold tasks carrying a
+	 * preferred-LLC hint. Only tasks that actually carry a hint set the
+	 * heartbeat -- untracked ones contribute nothing to the cache-aware
+	 * steal logic (ca_head_is_home()/steal_wanderer() skip them), so
+	 * they must not keep the gate open either. Read-before-write keeps
+	 * the steady-state cost at a single shared cacheline read. Cleared
+	 * every sys_stat interval in collect_sys_stat(), so the effective
+	 * window is one interval.
+	 */
+	if (cache_aware && cpdomc &&
+	    taskc->preferred_cpdom_id != LAVD_CA_UNSET_CPDOM &&
+	    !READ_ONCE(cpdomc->ca_tracked_active))
+		WRITE_ONCE(cpdomc->ca_tracked_active, true);
+
 	/*
 	 * Route effectively pinned tasks (permanent pinning or
 	 * migrate_disable) to the per-CPU DSQ when pinned_slice_ns is
@@ -503,7 +521,6 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 	if (per_cpu_dsq || (pinned_slice_ns && is_effectively_pinned(taskc)))
 		return cpu_to_dsq(cpuc->cpu_id);
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 	if (cpdomc &&
 	    preemption_vulnerability(taskc->normalized_lat_cri,
 				    taskc->util_est) >= cpdomc->vuln_thresh)

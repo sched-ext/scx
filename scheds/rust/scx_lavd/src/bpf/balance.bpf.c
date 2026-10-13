@@ -345,6 +345,60 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 }
 
 /*
+ * ca_head_is_home - should the head task of @dsq_id be left at its home
+ * domain?
+ *
+ * Peeks only the DSQ head: if the head's preferred domain is
+ * @cpdomc_pick itself (the task is "at home") and the source domain still
+ * has more than LAVD_CA_KEEP_REQ of its capacity unused (util < 95%), the
+ * task's cache affinity wins over load balancing and the caller must not
+ * steal from this DSQ. Only once the domain is virtually saturated may
+ * its home tasks be stolen out.
+ */
+static __attribute__((noinline)) bool
+ca_head_is_home(u64 dsq_id, struct cpdom_ctx *cpdomc_pick)
+{
+	struct task_struct *p;
+	task_ctx *taskc;
+
+	if (!cache_aware)
+		return false;
+
+	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	if (!p)
+		return false;
+
+	taskc = get_task_ctx(p);
+	if (!taskc)
+		return false;
+
+	return taskc->preferred_cpdom_id != LAVD_CA_UNSET_CPDOM &&
+	       (u64)taskc->preferred_cpdom_id == cpdomc_pick->id &&
+	       cpdom_headroom_above(cpdomc_pick, LAVD_CA_KEEP_REQ);
+}
+
+/*
+ * Cache-aware noinline wrapper for the force-steal path.
+ *
+ * It is called from force_steal_flat_cb(), a bpf_loop callback verified
+ * as its own state subtree. Keeping it noinline is still essential: the
+ * force path folds a LAVD_CPDOM_MAX_DIST x LAVD_CPDOM_MAX_NR neighbor
+ * traversal into ops.dispatch(), and inlining the peek body there
+ * explodes the verifier's pending-state stack past the 8192
+ * jump-sequence limit (BPF_COMPLEXITY_LIMIT_JMP_SEQ) for the
+ * lavd_dispatch program. The wrapper stays a cheap gated branch --
+ * skipped entirely unless the source domain was recently tracked
+ * (ca_tracked_active) -- on every iteration.
+ */
+static __attribute__((noinline)) bool
+ca_force_head_is_home(u64 dsq_id, struct cpdom_ctx *cpdomc_pick)
+{
+	if (!cache_aware || !READ_ONCE(cpdomc_pick->ca_tracked_active))
+		return false;
+	return ca_head_is_home(dsq_id, cpdomc_pick);
+}
+
+/*
  * try_to_steal_task and force_to_steal_task iterate over neighbor
  * domains in distance order.
  *
@@ -453,6 +507,18 @@ static int try_steal_flat_cb(u32 idx, void *data)
 	 * consume_dsq(), which would abort the scheduler.
 	 */
 	if ((s64)dsq_id < 0)
+		return 0;
+
+	/*
+	 * Cache-aware interception, gated by the overhead door: only
+	 * domains that received an enqueue of a tracked task within the
+	 * last sys_stat interval (ca_tracked_active) can hold home tasks
+	 * worth protecting. When the head task is at home here and the
+	 * domain still has headroom, keep it there and try the next
+	 * neighbor instead.
+	 */
+	if (cache_aware && READ_ONCE(cpdomc_pick->ca_tracked_active) &&
+	    ca_head_is_home(dsq_id, cpdomc_pick))
 		return 0;
 
 	/*
@@ -578,6 +644,16 @@ static int force_steal_flat_cb(u32 idx, void *data)
 	 * check as the try_steal_flat_cb path above.
 	 */
 	if ((s64)dsq_id < 0)
+		return 0;
+
+	/*
+	 * Cache-aware interception: keep the head task at its home domain
+	 * when it belongs there and the domain still has headroom; try the
+	 * next neighbor instead. Force stealing is the last resort for
+	 * work conservation, but a virtually-unsaturated domain should
+	 * still keep its cache-warm home tasks.
+	 */
+	if (ca_force_head_is_home(dsq_id, cpdomc_pick))
 		return 0;
 
 	/*

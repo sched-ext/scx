@@ -328,6 +328,13 @@ struct cpdom_ctx {
 						     * schedule as the per-mm
 						     * cpdom_runtime[]) */
 	u64	ca_denom_epoch_ns;		    /* last epoch advance of ca_total_task_time */
+	u8	ca_tracked_active;		    /* cache-aware heartbeat: set at enqueue in
+						     * get_target_dsq_id() only by tasks carrying
+						     * a preferred-LLC hint (read-before-write),
+						     * cleared every sys_stat interval in
+						     * collect_sys_stat(); gates the cache-aware
+						     * steal-path logic so it is skipped on
+						     * untracked domains */
 
 	s64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
 	s64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
