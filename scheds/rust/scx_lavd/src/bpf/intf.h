@@ -60,6 +60,9 @@ enum {
 	LAVD_CA_PULL_REQ	= 614,		/* p2s(60): a domain must have > 60% of its
 						 * capacity unused (util < 40%) before a task
 						 * is pulled toward it as its preferred LLC */
+	LAVD_CA_IMB_PCT		= 20,		/* pull toward the preferred LLC only when it
+						 * is at least 20% less loaded than the sticky
+						 * domain (cross-multiplied, no division) */
 };
 
 /*

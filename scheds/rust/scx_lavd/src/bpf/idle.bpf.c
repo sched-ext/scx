@@ -913,6 +913,59 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	/* NOTE: There is at least one idle CPU. */
 
 	/*
+	 * Cache-aware packing-first bias.
+	 *
+	 * Before the SMT/sticky shortcuts spread the wakee across fully
+	 * idle cores, try to PACK it onto any idle CPU (partial SMT cores
+	 * included) inside its preferred LLC domain. Packing rather than
+	 * spreading is deliberate: the process' working set is already
+	 * warm in the preferred LLC, so filling its CPUs first is cheaper
+	 * than preserving whole idle cores elsewhere.
+	 *
+	 * Conditions:
+	 *   - preferred_cpdom_id is set and differs from the sticky domain
+	 *     (otherwise the normal path already heads there)
+	 *   - the task can run on the preferred domain (affinity)
+	 *   - the preferred domain has > LAVD_CA_PULL_REQ headroom
+	 *     (util < 40%), so packing does not overload it
+	 *   - the preferred domain is at least LAVD_CA_IMB_PCT% less loaded
+	 *     than the sticky domain (cross-multiplied load_invr comparison,
+	 *     no division), so the bias cannot fight load balancing
+	 *
+	 * On success, pick_idle_cpu_at_cpdom() sets cpu and *is_idle, and
+	 * sticky_cpdom is retargeted before jumping out. On failure, fall
+	 * through to the normal placement path unchanged.
+	 */
+	if (cache_aware && ctx->taskc) {
+		u8 pref = ctx->taskc->preferred_cpdom_id;
+
+		if (pref != LAVD_CA_UNSET_CPDOM &&
+		    (s64)pref != sticky_cpdom &&
+		    can_run_on_domain(ctx, (s64)pref)) {
+			struct cpdom_ctx *pref_cpdc =
+				MEMBER_VPTR(cpdom_ctxs, [pref]);
+			struct cpdom_ctx *sticky_cpdc =
+				MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]);
+
+			if (pref_cpdc && sticky_cpdc &&
+			    cpdom_headroom_above(pref_cpdc, LAVD_CA_PULL_REQ) &&
+			    (u64)pref_cpdc->load_invr * (100 + LAVD_CA_IMB_PCT) <
+			    (u64)sticky_cpdc->load_invr * 100) {
+				if (!init_idle_ato_masks(ctx, ctx->i_mask))
+					goto err_out;
+				if (!ctx->ia_empty || !ctx->io_empty) {
+					cpu = pick_idle_cpu_at_cpdom(
+						ctx, (s64)pref, 0, is_idle);
+					if (cpu >= 0) {
+						sticky_cpdom = (s64)pref;
+						goto unlock_out;
+					}
+				}
+			}
+		}
+	}
+
+	/*
 	 * If the sticky CPU is fully idle, stay on it.
 	 */
 	if (is_smt_active)
