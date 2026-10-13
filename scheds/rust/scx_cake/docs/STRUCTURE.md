@@ -32,8 +32,7 @@ scx/                                  Workspace
         ├── dated audits/reports      Costs, mechanisms and game evidence
         ├── meeting/                  HTML presentation
         ├── research/
-        │   ├── jit-20260929/         Investigation, probes and disassembly
-        │   └── jit-bitops-prototype/ Kernel/Cake patches, tests and runner
+        │   └── jit-20260929/         Investigation, probes and disassembly
         └── archive/                  Historical reviews and state ledger
 
 scx_cake_bench/                        Sibling repository
@@ -216,24 +215,6 @@ omitted. Shared symlink targets are not recursively listed as Cake-owned files.
 - `provenance.json` — new
 - `sha256.json` — new
 - `toolchain.txt` — new
-
-### docs/research/jit-bitops-prototype/
-
-- `0001-bpf-x86-inline-scalar-bitops.patch` — new
-- `0002-scx-cake-opt-in-native-bitops.patch` — new
-- `EXPERIMENT.md` — new
-- `Makefile` — new
-- `README.md` — new
-- `analyze.py` — new
-- `bitops-run.c` — new
-- `bitops.bpf.c` — new
-- `checkpatch.txt` — new
-- `run.py` — new
-- `selftest-run.c` — new
-- `test_analyze.py` — new
-- `validation.json` — new
-- `vm-check.sh` — new
-- `vm.config` — new
 
 ### src/
 

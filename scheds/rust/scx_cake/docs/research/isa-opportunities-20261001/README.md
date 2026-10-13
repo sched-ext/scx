@@ -21,7 +21,7 @@ Follow-up: [register-pressure, packed-bitfield and SWAR simulation](PACKING_SIMU
 Relevant current source:
 
 - [Cake native declarations and wrappers](../../../src/bpf/cake.bpf.c), at the beginning of the file.
-- [Combined CachyOS scalar patch](../jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch).
+- [Combined CachyOS scalar patch](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch).
 - Retained kernel `include/linux/btf.h`: `KF_FASTCALL`; `kernel/bpf/verifier.c`: `bpf_get_call_summary()` and the fastcall contract; `kernel/bpf/fixups.c`: `bpf_remove_fastcall_spills_fills()`.
 
 The Clang `bpf_fastcall` declaration attribute changes register allocation and adds recognizable compatibility saves/restores. The kernel can remove those pairs when it knows the implementation preserves the relevant registers. This is a compiler, verifier and implementation agreement. The attribute is documented in [Clang's attribute reference](https://clang.llvm.org/docs/AttributeReference.html#bpf-fastcall).

@@ -24,12 +24,12 @@ dated reference, not a revalidation of those estimates against current Cake.
 rodata-controlled branch does not guarantee removal of its volatile load or
 all weak-symbol address materializations. Four such address moves were removed
 from native-bitops select_cpu by moving validation to the loader; flag reads
-still remain. See the [assembly review](research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md).
+still remain. See the [assembly review](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md).
 
 **Instruction-model qualification:** installed LLVM 22.1.8 maps `znver5` to
 `Znver4Model` and assigns ENDBR64 a 100-uop placeholder. Do not treat its cycle
 output as calibrated 9800X3D timing. See the
-[simulation and model audit](research/jit-bitops-prototype/FASTCALL_SIMULATION_2026-10-01.md).
+[simulation and model audit](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/FASTCALL_SIMULATION_2026-10-01.md).
 
 **October 2 measured update:** [§10](#10-local-hardware-costs-and-further-instruction-passes-2026-10-02)
 adds actual 9800X3D PMU measurements, mask costs, and further release experiments.
@@ -391,7 +391,7 @@ native instructions; native dump evidence remains missing.
 
 ## 9. Experimental JIT patch and test bundle (2026-09-29)
 
-The [scalar-bitops prototype](research/jit-bitops-prototype/README.md) now
+The [scalar-bitops prototype](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/README.md) now
 contains an apply-ready kernel patch, an optional Cake `--native-bitops` patch,
 and a paired wall-clock runner. Explicit CTZ/POPCNT kfunc calls become TZCNT/
 POPCNT in the x86 JIT when the CPU supports them, retaining normal call ABI
@@ -412,7 +412,7 @@ above still apply to the running host's Cake program.
 
 These are **userspace machine-code probes on this 9800X3D**, with hardware
 `PERF_COUNT_HW_CPU_CYCLES` and retired-instruction counters. They replace no
-kernel-service or callback price in §1. The [probe source](research/jit-bitops-prototype/scalar-hardware-cost.c)
+kernel-service or callback price in §1. The [probe source](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/scalar-hardware-cost.c)
 retains every tested assembly sequence. Raw samples are in
 [`scalar-hardware-cost.jsonl`](../../../../../scx_cake_bench/runs/cake_instruction_pass_20261002T072438Z/scalar-hardware-cost.jsonl).
 
@@ -463,7 +463,7 @@ could report about two cycles when the count itself costs about one.
 
 ### 10.2 Release compiler and queue-scan experiments
 
-See the [October 2 investigation](research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md)
+See the [October 2 investigation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md)
 for exact builds, actual VM-loaded JIT, compatibility checks and host callback/frame
 measurements. Selective CTZ/POPCNT fastcall keeps the CPU-selection reduction
 without the all-unary variant's CLZ histogram growth. Outlining portable
@@ -502,14 +502,14 @@ efficiency result.
 
 The separate accounting-off frame screen has p99 −450 ns and jitter −422.8 ns,
 but mixed block effects and unequal background activity. The full
-[investigation](research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md)
+[investigation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md)
 retains all 48 slots, 1,496,976 frames, intervals, process samples and limitations.
 The current host lacks the later unary KF_FASTCALL patch, so its compiler test
 does not measure that patch's spill-removal benefit.
 
 ## 11. Verifier bounds and release specialization (2026-10-02)
 
-The [bounds/refactor investigation](research/jit-bitops-prototype/SCALAR_BOUNDS_REFACTOR_2026-10-02.md)
+The [bounds/refactor investigation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/SCALAR_BOUNDS_REFACTOR_2026-10-02.md)
 implements the return-range opportunity identified above. The kernel supplies
 0–64 for CTZ/CLZ/POPCNT and 0–63 for CTZ/CLZ only on proven nonzero inputs,
 with precision tracking. Cake's research wrappers preserve LLVM's range
@@ -542,7 +542,7 @@ remain rejected. No default changed, and the host kernel was not replaced.
 
 ## 12. DSQ comparison, register moves, and evidence audit (2026-10-02)
 
-The [deep research report](research/jit-bitops-prototype/DEEP_RESEARCH_2026-10-02.md)
+The [deep research report](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/DEEP_RESEARCH_2026-10-02.md)
 adds an attributed backport of the typed DSQ comparator accepted for Linux 7.4.
 The isolated 7.2.8 build and VM checks passed. These are code-generation facts,
 not replacements for the measured ns prices above:

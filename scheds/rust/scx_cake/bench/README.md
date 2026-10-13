@@ -57,5 +57,5 @@ artifact/paired-run route exists. Retired scripts should not be re-enabled or
 treated as evidence that the maintained route is unavailable.
 
 For the separate JIT primitive experiment, use its
-[self-contained runner](../docs/research/jit-bitops-prototype/README.md).
+[self-contained runner](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/README.md).
 It attaches no scheduler and does not replace Cake/game A/B measurements.

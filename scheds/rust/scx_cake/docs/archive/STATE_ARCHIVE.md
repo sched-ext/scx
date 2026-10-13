@@ -38,7 +38,7 @@ rule.
 
   Flags removed (uncommitted): `--division-free` (measured loss: BPF CPU +5.8 %,
   select_cpu +11 ns), `--native-ctz`, `--native-popcnt`. Quotient sources moved to
-  `docs/research/jit-bitops-prototype/quotient/`; slice/burst use plain division.
+  `kernel/sched-ext/research/jit-bitops-prototype/quotient/` in experimental-patches; slice/burst use plain division.
   Verifier load on 7.2.9 passed (18 programs); 38 unit + 3 CLI tests pass.
 
   Appsim fast set `scx_cake_bench/runs/appsim_fast_20261004T111326` (20 s slots, ABCDDCBA, all 9
@@ -94,7 +94,7 @@ rule.
   line with each other and unrelated objects; addresses unverified (kptrs read
   as 0 from userspace; default-rate perf c2c too sparse).
 
-- [GPU/input/IRQ signaling implementation](docs/research/jit-bitops-prototype/GPU_INPUT_IRQ_SIGNALING_2026-10-02.md):
+- [GPU/input/IRQ signaling implementation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/GPU_INPUT_IRQ_SIGNALING_2026-10-02.md):
   inclusive kernel patch plus Cake off/observe/on integration. Default remains
   off; native CTZ/POPCNT still auto-detect. Ordinary VM production/fallback
   checks and the 20-case signal contract passed; no hardware performance result.
@@ -103,7 +103,7 @@ rule.
   and the kernel source/patch were recovered outside Cargo's target directory.
   No host kernel installation. Builds and benchmarks deferred during game testing.
 
-- [Signal locations, freshness and clock accuracy](docs/research/jit-bitops-prototype/SIGNAL_FRESHNESS_CLOCKS_2026-10-02.md):
+- [Signal locations, freshness and clock accuracy](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/SIGNAL_FRESHNESS_CLOCKS_2026-10-02.md):
   33 signals mapped to 35 hashed source files, with update triggers, clock
   domains, staleness, access paths and invalidation rules. Live Vulkan/Wayland
   queries verify timing support and presentation clock; 16 calibration queries
@@ -114,7 +114,7 @@ rule.
   disabled optional NVIDIA vblank callback, and low-latency2 revision 2.
   No scheduler/kernel/trace-clock or release binary change.
 
-- [GPU/input handoffs and low-latency scheduling signals](docs/research/jit-bitops-prototype/GAMING_SIGNAL_PIPELINE_2026-10-02.md):
+- [GPU/input handoffs and low-latency scheduling signals](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/GAMING_SIGNAL_PIPELINE_2026-10-02.md):
   source-backed investigation of IRQs, GPU status, fences, waits, frame timing,
   compositor, mouse and keyboard. Traces a direct NVIDIA completion-to-waiter
   path and KWin's queued input handoff; specifies metadata carried through the
@@ -124,7 +124,7 @@ rule.
   Research only: no probes attached, signal patches implemented or new latency
   result. Host kernel, scheduler state and repo release unchanged.
 
-- [Single complete kernel research patch](docs/research/jit-bitops-prototype/KERNEL_FULL_BUNDLE_2026-10-02.md):
+- [Single complete kernel research patch](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/KERNEL_FULL_BUNDLE_2026-10-02.md):
   scalar instructions, unary fastcall, verifier bounds, typed DSQ comparison
   and direct DSQ index combined for fresh CachyOS 7.2.8-1 sources. Clean apply,
   zero-fuzz/offset patching and reverse checks pass; all eight affected files
@@ -132,7 +132,7 @@ rule.
   installation or performance claim. Debug gate remains open. Full native
   specialization additionally needs the separate Cake build.
 
-- [Direct DSQ index implementation and simulation](docs/research/jit-bitops-prototype/DSQ_DIRECT_INDEX_2026-10-02.md):
+- [Direct DSQ index implementation and simulation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/DSQ_DIRECT_INDEX_2026-10-02.md):
   optional kernel-owned RCU index replaces hashing for low queue IDs, with a
   hash fallback and unchanged release Cake. Six VM configurations passed
   393,216 concurrent lifecycle iterations; all 20 slots in five simulation
@@ -142,7 +142,7 @@ rule.
   report also observed on the baseline; a clean debug gate remains open.
   Patches, test sources and receipts retained. Host kernel/package unchanged.
 
-- [Caching and hot-path lookup review](docs/research/jit-bitops-prototype/CACHE_HOTPATH_REVIEW_2026-10-02.md):
+- [Caching and hot-path lookup review](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/CACHE_HOTPATH_REVIEW_2026-10-02.md):
   inventories current Cake/kernel caches and ranks a kernel-owned direct DSQ
   index first, followed by lookup reuse and shared-line traffic investigation.
   Follow-up distinguishes 100% potential Cake custom-ID coverage from unknown
@@ -151,7 +151,7 @@ rule.
   This review is source research; the subsequent implementation and simulation
   are linked above.
 
-- [Automatic native bitops for game testing](docs/research/jit-bitops-prototype/AUTO_NATIVE_BITOPS_2026-10-02.md):
+- [Automatic native bitops for game testing](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/AUTO_NATIVE_BITOPS_2026-10-02.md):
   user-requested default now detects CTZ/POPCNT support at startup and falls
   back per operation on unsupported CPUs/kernels. `--portable-bitops` forces
   the old path for comparison; explicit native research flags remain strict.
@@ -163,7 +163,7 @@ rule.
   a new performance result. Use the repo release; the user keeps the system
   CachyOS package unchanged. Older dated opt-in descriptions are historical.
 
-- [Performance findings with charts and data](docs/research/jit-bitops-prototype/PERFORMANCE_SUMMARY_2026-10-02.md):
+- [Performance findings with charts and data](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/PERFORMANCE_SUMMARY_2026-10-02.md):
   five-page chart pack, standalone HTML, CSV and source-hashed JSON consolidate
   the retained scalar experiments. Five-repeat results recomputed from all 40
   receipts: bitops enqueue −5.87 ns/call, running −0.83 ns/call; total BPF CPU
@@ -173,7 +173,7 @@ rule.
   screen results. Hardware, VM, and static code-generation evidence are separate;
   no new benchmark, kernel change, or broader performance verdict.
 
-- [Deep instruction/kernel research](docs/research/jit-bitops-prototype/DEEP_RESEARCH_2026-10-02.md):
+- [Deep instruction/kernel research](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/DEEP_RESEARCH_2026-10-02.md):
   backported the upstream-accepted typed DSQ comparator into an isolated kernel.
   Actual lookup assembly replaces bcmp with a u64 comparison, inlines hashing,
   and reduces its own stack use from 96 to 32 bytes. 26,248 differential
@@ -184,7 +184,7 @@ rule.
   attribution that had included unrelated BPF programs in the Cake denominator.
   No new hardware latency result, default change, or kernel installation.
 
-- [Scalar bounds and native release refactor](docs/research/jit-bitops-prototype/SCALAR_BOUNDS_REFACTOR_2026-10-02.md):
+- [Scalar bounds and native release refactor](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/SCALAR_BOUNDS_REFACTOR_2026-10-02.md):
   kernel return bounds and two release refactors built and VM-tested. Simply
   deleting masks grows code; preserving LLVM range knowledge and specializing
   native bitops removes 26 static select_cpu instructions / 126 bytes and 13
@@ -195,7 +195,7 @@ rule.
   Combined/incremental patches and exact release artifacts retained; ordinary
   release/source restored. Host kernel unchanged, hardware latency unmeasured.
 
-- [Further instruction passes and hardware costs](docs/research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md):
+- [Further instruction passes and hardware costs](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/INSTRUCTION_PASS_2026-10-02.md):
   selective CTZ/POPCNT fastcall avoids the CLZ histogram growth; portable
   fallback outlining increases native counts. Generic wide-ring CTZ prototype
   passed 2,487,612 order/read checks. Native PMU probes measure ~1 cycle for
@@ -206,7 +206,7 @@ rule.
   No performance verdict/default change. Ordinary release/source restored;
   host has the original scalar patch, not the later unary KF_FASTCALL patch.
 
-- [Five-block fastcall simulation](docs/research/jit-bitops-prototype/FASTCALL_SIMULATION_2026-10-01.md):
+- [Five-block fastcall simulation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/FASTCALL_SIMULATION_2026-10-01.md):
   actual patched kernel in QEMU TCG, 20/20 valid release A/B slots, 60,000
   simulated frames and 320 million fixed-work steps with identical checksums.
   Guest p99 -1,221 ns, jitter +2,481 ns, fixed-work completion +28,321 ns;
@@ -214,7 +214,7 @@ rule.
   `znver5` uses the Zen 4 timing model, so instruction-model output is only a
   coarse proxy. Hardware performance remains unmeasured; host state unchanged.
 
-- [Unary fastcall kernel patch and release audit](docs/research/jit-bitops-prototype/FASTCALL_KERNEL_REVIEW_2026-10-01.md):
+- [Unary fastcall kernel patch and release audit](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/FASTCALL_KERNEL_REVIEW_2026-10-01.md):
   new combined/incremental CachyOS patches and isolated annotated release build.
   Full kernel build, native/fallback/old-kernel VM tests, 18 positive scalar
   executions, 3 expected rejections, 18 Cake inspection loads and 5 activation
@@ -224,7 +224,7 @@ rule.
   kernel untouched. Further DSQ, kick, cpumask and compiler-pattern work is scoped
   in the report, not implemented as new scheduling policy.
 
-- [Actual release assembly and kernel-signal roadmap](docs/research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md):
+- [Actual release assembly and kernel-signal roadmap](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/ASSEMBLY_PIPELINE_REVIEW_2026-10-01.md):
   independent CTZ/POPCNT flags and load-only instruction inspection added.
   Actual current-boot JIT confirms all four scalar operations. Removed repeated
   wrapper symbol checks: select_cpu with bitops is 28 bytes / 4 instructions
@@ -234,7 +234,7 @@ rule.
   All flags remain opt-in. IRQ/capacity, GPU-fence and input-wakeup interfaces
   are proposals; no new kernel patch installed. Native scheduling restored.
 
-- [Release CTZ/CLZ rebuild and normal-mode screen](docs/research/jit-bitops-prototype/RELEASE_CTZ_CLZ_2026-10-01.md):
+- [Release CTZ/CLZ rebuild and normal-mode screen](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/RELEASE_CTZ_CLZ_2026-10-01.md):
   CTZ queue scanning and CLZ histograms are now available as opt-in flags in
   `target/release/scx_cake`; source and binary retained. 28/28 valid slots,
   873,159 simulated frames. Twelve slots had probe and BPF timing disabled:
@@ -244,7 +244,7 @@ rule.
   ns/call; CLZ diagnostic stopping -8.87 ns/call. Division-free stays off.
   Native scheduling restored, BPF stats off; new flags remain experimental.
 
-- [Scalar instruction usage audit and expansion experiments](docs/research/jit-bitops-prototype/INSTRUCTION_USAGE_REVIEW_2026-10-01.md):
+- [Scalar instruction usage audit and expansion experiments](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/INSTRUCTION_USAGE_REVIEW_2026-10-01.md):
   three prototypes, 6,922,350 offline checks and 32/32 valid live slots;
   996,188 simulated frames retained. CTZ queue scanning: dispatch -18.05
   ns/call in the non-probe screen, but worse p99.9/0.1% lows and reversal
@@ -256,7 +256,7 @@ rule.
   Quotient review: per-call reciprocal setup explains the earlier loss;
   select_cpu accounts for about 91% of its extra measured BPF CPU time.
 
-- [October 1 five-repeat scalar comparison](docs/research/jit-bitops-prototype/REPEAT_5X_2026-10-01.md):
+- [October 1 five-repeat scalar comparison](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/REPEAT_5X_2026-10-01.md):
   40/40 slots passed, 1,247,480 simulated frames, ten observations per mode.
   Total CPU busy 36.61–38.31%; estimated non-appsim busy 5.21–6.86%.
   Bitops-only: BPF CPU -0.47%, frame p99 -400 ns; enqueue -5.87 and running
@@ -265,14 +265,14 @@ rule.
   frame p99 +920 / -830 ns, neither established as a frame effect. Flags
   remain off by default. Native scheduling and BPF statistics restored.
 
-- [October 1 quick scalar comparison](docs/research/jit-bitops-prototype/QUICK_TEST_2026-10-01.md):
+- [October 1 quick scalar comparison](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/QUICK_TEST_2026-10-01.md):
   eight 15-second appsim slots, 249,495 frames, all modes loaded and exited
   cleanly. Bitops-only BPF CPU time -1.95%, frame p99 -49,250 ns; division-free
   +12.51%, +29,700 ns; both +5.65%, -25,000 ns. Unreal/Discord noise and a
   133,300 ns baseline p99 shift prevent performance acceptance. Flags remain
   off; native scheduling and BPF statistics were restored.
 
-- [October 1 combined-patch live smoke](docs/research/jit-bitops-prototype/HARDWARE_SMOKE_2026-10-01.md):
+- [October 1 combined-patch live smoke](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/HARDWARE_SMOKE_2026-10-01.md):
   booted kernel exposes all four scalar kfuncs. The unchanged September 30
   release build passed verifier loading and ran for 15 seconds with
   `--division-free --native-bitops`, reporting native CLZ/MULHI selection.
@@ -282,19 +282,19 @@ rule.
 
 - [README.md](README.md): supported use and CLI; [DESIGN.md](DESIGN.md): current policy.
 - [Documentation map](docs/README.md): folders, evidence levels and historical records.
-- [JIT experiment](docs/research/jit-bitops-prototype/README.md): kernel patches
+- [JIT experiment](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/README.md): kernel patches
   and opt-in Cake flags; September 30 patched-hardware primitive smoke passed
   17,340 differential executions and actual TZCNT/POPCNT JIT emission. Noisy
   timings are diagnostic only. Native-mode Cake loading passed on October 1;
   performance acceptance remains pending. This is not part of the default policy.
-- [Exact quotient implementation](docs/research/jit-bitops-prototype/QUOTIENT_IMPLEMENTATION.md):
+- [Exact quotient implementation](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/QUOTIENT_IMPLEMENTATION.md):
   September 30 normal-build `--division-free` integration replaces four dynamic
   division expressions. Portable/native arithmetic each passed 7,907,120 cases;
   Cake tests, Clippy and release build passed. Additional CLZ/MULHI kernel
   extension passed patch and object compile checks. October 1 native boot and
   Cake verifier/activation passed; fresh primitive JIT verification and
   performance acceptance remain pending.
-- Kernel Manager packaging: [one combined CachyOS 7.2.8 patch](docs/research/jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch)
+- Kernel Manager packaging: [one combined CachyOS 7.2.8 patch](https://github.com/RitzDaCat/experimental-patches/blob/main/kernel/sched-ext/research/jit-bitops-prototype/0001-bpf-x86-inline-all-scalar-ops-cachyos-7.2.8.patch)
   includes CTZ/POPCNT/CLZ/MULHI. Clean-source application and byte equivalence
   to the separate patches passed; affected objects recompiled successfully.
   Replace the older local kernel patch entries with this file for a fresh build.
