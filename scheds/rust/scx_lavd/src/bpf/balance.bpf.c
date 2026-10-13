@@ -344,10 +344,158 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 	return pick_dsq_id;
 }
 
+/*
+ * try_to_steal_task and force_to_steal_task iterate over neighbor
+ * domains in distance order.
+ *
+ * Both use a single flat bpf_loop over
+ * LAVD_CPDOM_MAX_DIST x LAVD_CPDOM_MAX_NR instead of the previous
+ * nested for loops.
+ *
+ * Flattening matters for the verifier, not just for style. Nested
+ * loops over the neighbor matrix inside ops.dispatch() make the
+ * verifier analyze every (i, j) combination as a separate program
+ * state, piling up the pending-state stack of the lavd_dispatch
+ * verification walk toward the 8192 jump-sequence limit
+ * (BPF_COMPLEXITY_LIMIT_JMP_SEQ). The bpf_loop callback, in contrast,
+ * is pushed as a separate state subtree and explored with its own
+ * bounded budget.
+ *
+ * Within the callback:
+ *   i = idx / LAVD_CPDOM_MAX_NR   (distance level)
+ *   j = idx % LAVD_CPDOM_MAX_NR   (neighbor index within that level)
+ *
+ * LAVD_CPDOM_MAX_NR == 128 is a power of 2, so the compiler emits
+ * shift/mask and the verifier derives i < LAVD_CPDOM_MAX_DIST,
+ * j < LAVD_CPDOM_MAX_NR from the explicit idx bound check.
+ *
+ * cpdomc is re-derived via MEMBER_VPTR inside the callback rather than
+ * stored as a pointer in ctx -- bpf_loop loses map-value type on
+ * pointer loads.
+ *
+ * The call chain from ops.dispatch() stays within the BPF 8-frame
+ * limit:
+ *
+ *   lavd_dispatch(0) → consume_task(1) → try_to_steal_task(2)
+ *   → try_steal_flat_cb(3) → dsq_peek_task_load(4)
+ *   → __get_task_ctx_slowpath(5) → scx_task_data(6)
+ *   → scx_arena_subprog_init(7)          ← 8 frames, at limit
+ */
+struct try_steal_flat_ctx {
+	u64  cpdomc_id;
+	bool stolen;
+};
+
+static int try_steal_flat_cb(u32 idx, void *data)
+{
+	struct try_steal_flat_ctx *ctx = data;
+	struct cpdom_ctx *cpdomc, *cpdomc_pick;
+	s64 cpdom_id, nr_nbr;
+	u64 dsq_id, task_load;
+	u32 i, j;
+
+	/* bpf_loop does not constrain idx in the verifier. */
+	if (idx >= LAVD_CPDOM_MAX_DIST * LAVD_CPDOM_MAX_NR)
+		return 1;
+
+	i = idx / LAVD_CPDOM_MAX_NR;   /* verifier derives: i < LAVD_CPDOM_MAX_DIST */
+	j = idx % LAVD_CPDOM_MAX_NR;   /* verifier derives: j < LAVD_CPDOM_MAX_NR   */
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [ctx->cpdomc_id]);
+	if (!cpdomc)
+		return 1;
+
+	/* i < LAVD_CPDOM_MAX_DIST so nr_neighbors[i] is in-bounds. */
+	nr_nbr = cpdomc->nr_neighbors[i];
+
+	if (j == 0) {
+		/* Mirror outer-loop break: no neighbors at this distance → stop. */
+		if (nr_nbr == 0)
+			return 1;
+
+		/*
+		 * Mirror the outer-loop hesitation gate: after exhausting
+		 * the previous distance without stealing, stop the farther
+		 * search -- the cumulative chance of reaching a given
+		 * distance decreases as the distance increases, since a
+		 * migration from a farther neighbor is more expensive
+		 * (e.g., crossing a NUMA boundary).
+		 */
+		if (i > 0 && !prob_x_out_of_y(1, LAVD_CPDOM_MIG_PROB_FT))
+			return 1;
+	}
+
+	/* Skip j values beyond the actual neighbor count for this distance. */
+	if ((s64)j >= nr_nbr)
+		return 0;
+
+	cpdom_id = get_neighbor_id(cpdomc, i, j);
+	if (cpdom_id < 0)
+		return 0;
+
+	cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	if (!cpdomc_pick) {
+		scx_bpf_error("Failed to lookup cpdom_ctx for %lld", cpdom_id);
+		return 1;
+	}
+
+	if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
+		return 0;
+
+	if (READ_ONCE(cpdomc_pick->stealee_budget_invr) <= 0)
+		return 0;
+
+	dsq_id = pick_most_loaded_dsq(cpdomc_pick);
+
+	/*
+	 * No DSQ in cpdomc_pick has any queued load. Move on to the next
+	 * neighbor rather than passing -ENOENT to dsq_peek_task_load() /
+	 * consume_dsq(), which would abort the scheduler.
+	 */
+	if ((s64)dsq_id < 0)
+		return 0;
+
+	/*
+	 * Peek at the head task to get its size for budget accounting.
+	 * Skip the peek when no_fast_lb is set since the budget path below
+	 * is bypassed and the value would be unused.
+	 *
+	 * TOCTOU: the task peeked here may not be the one actually consumed
+	 * by consume_dsq() below. To be more specific, another CPU may grab
+	 * the head first, or the task may become ineligible during the
+	 * window between the peek and the consume_dsq. The budget is just
+	 * a hint, and over-debiting will be self-corrected because the
+	 * next LB round recomputes budgets from scratch.
+	 */
+	task_load = no_fast_lb ? 0 : dsq_peek_task_load(dsq_id);
+
+	/*
+	 * On success, decrement both egress and ingress budgets. The
+	 * stealer stays active for the entire round. Budget exhaustion
+	 * clears the is_stealee/is_stealer flags via the decrement
+	 * helpers.
+	 */
+	if (consume_dsq(cpdomc_pick, dsq_id)) {
+		if (no_fast_lb) {
+			WRITE_ONCE(cpdomc_pick->is_stealee, false);
+			WRITE_ONCE(cpdomc->is_stealer, false);
+		} else {
+			decrement_stealee_budget(cpdomc_pick, task_load);
+			decrement_stealer_budget(cpdomc, task_load);
+		}
+		ctx->stolen = true;
+		return 1;
+	}
+
+	return 0;
+}
+
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
-	struct cpdom_ctx *cpdomc_pick;
-	s64 nr_nbr, cpdom_id;
+	struct try_steal_flat_ctx ctx = {
+		.cpdomc_id = cpdomc->id,
+		.stolen    = false,
+	};
 
 	/*
 	 * Only active domains steal the tasks from other domains.
@@ -359,167 +507,113 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 	    !prob_x_out_of_y(1, cpdomc->nr_active_cpus * LAVD_CPDOM_MIG_PROB_FT))
 		return false;
 
-	/*
-	 * Traverse neighbor compute domains in distance order.
-	 */
-	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
-		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+	bpf_loop(LAVD_CPDOM_MAX_DIST * LAVD_CPDOM_MAX_NR,
+		 try_steal_flat_cb, &ctx, 0);
+
+	return ctx.stolen;
+}
+
+/*
+ * force_to_steal_task() follows the same flat-callback pattern
+ * (force_steal_flat_cb): a plain nested loop inlined into
+ * ops.dispatch() piles the (i, j) loop states onto the lavd_dispatch
+ * verification walk, while the bpf_loop callback is explored as a
+ * bounded, separate state subtree.
+ */
+struct force_steal_flat_ctx {
+	u64  cpdomc_id;
+	bool stolen;
+};
+
+static int force_steal_flat_cb(u32 idx, void *data)
+{
+	struct force_steal_flat_ctx *ctx = data;
+	struct cpdom_ctx *cpdomc, *cpdomc_pick;
+	s64 cpdom_id, nr_nbr;
+	u64 dsq_id, task_load;
+	u32 i, j;
+
+	/* bpf_loop does not constrain idx in the verifier. */
+	if (idx >= LAVD_CPDOM_MAX_DIST * LAVD_CPDOM_MAX_NR)
+		return 1;
+
+	i = idx / LAVD_CPDOM_MAX_NR;   /* i < LAVD_CPDOM_MAX_DIST */
+	j = idx % LAVD_CPDOM_MAX_NR;   /* j < LAVD_CPDOM_MAX_NR   */
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [ctx->cpdomc_id]);
+	if (!cpdomc)
+		return 1;
+
+	nr_nbr = cpdomc->nr_neighbors[i];
+
+	if (j == 0) {
+		/* Mirror outer-loop break: no neighbors at this distance. */
 		if (nr_nbr == 0)
-			break;
-
-		/*
-		 * Traverse neighbors in the same distance in circular distance order.
-		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
-			u64 dsq_id;
-			if (j >= nr_nbr)
-				break;
-
-			cpdom_id = get_neighbor_id(cpdomc, i, j);
-			if (cpdom_id < 0)
-				continue;
-
-			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-			if (!cpdomc_pick) {
-				scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
-				return false;
-			}
-
-			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
-				continue;
-
-			if (READ_ONCE(cpdomc_pick->stealee_budget_invr) <= 0)
-				continue;
-
-			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
-
-			/*
-			 * No DSQ in cpdomc_pick has any queued load.
-			 * Move on to the next neighbor rather than passing
-			 * -ENOENT to dsq_peek_task_load() / consume_dsq(),
-			 * which would abort the scheduler.
-			 */
-			if ((s64)dsq_id < 0)
-				continue;
-
-			/*
-			 * Peek at the head task to get its size for budget
-			 * accounting. Skip the peek when no_fast_lb is set
-			 * since the budget path below is bypassed and the
-			 * value would be unused.
-			 *
-			 * TOCTOU: the task peeked here may not be the one
-			 * actually consumed by consume_dsq() below. To be more
-			 * specific, another CPU may grab the head first, or the
-			 * task may become ineligible during the window between
-			 * the peek and the consume_dsq. The budget is just a
-			 * hint, and over-debiting will be self-corrected
-			 * because the next LB round recomputes budgets from
-			 * scratch.
-			 */
-			u64 task_load = no_fast_lb ? 0 : dsq_peek_task_load(dsq_id);
-
-			/*
-			 * On success, decrement both egress and ingress
-			 * budgets. The stealer stays active for the
-			 * entire round. Budget exhaustion clears the
-			 * is_stealee/is_stealer flags via the decrement
-			 * helpers.
-			 */
-			if (consume_dsq(cpdomc_pick, dsq_id)) {
-				if (no_fast_lb) {
-					WRITE_ONCE(cpdomc_pick->is_stealee, false);
-					WRITE_ONCE(cpdomc->is_stealer, false);
-				} else {
-					decrement_stealee_budget(cpdomc_pick, task_load);
-					decrement_stealer_budget(cpdomc, task_load);
-				}
-				return true;
-			}
-		}
-
-		/*
-		 * Now, we need to steal a task from a farther neighbor
-		 * for load balancing. Since task migration from a farther
-		 * neighbor is more expensive (e.g., crossing a NUMA boundary),
-		 * we will do this with a lot of hesitation. The chance of
-		 * further migration will decrease exponentially as distance
-		 * increases, so, on the other hand, it increases the chance
-		 * of closer migration.
-		 */
-		if (!prob_x_out_of_y(1, LAVD_CPDOM_MIG_PROB_FT))
-			break;
+			return 1;
 	}
 
-	return false;
+	/* Skip j values beyond the actual neighbor count for this distance. */
+	if ((s64)j >= nr_nbr)
+		return 0;
+
+	cpdom_id = get_neighbor_id(cpdomc, i, j);
+	if (cpdom_id < 0)
+		return 0;
+
+	cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	if (!cpdomc_pick) {
+		scx_bpf_error("Failed to lookup cpdom_ctx for %lld", cpdom_id);
+		return 1;
+	}
+
+	if (!cpdomc_pick->is_valid)
+		return 0;
+
+	dsq_id = pick_most_loaded_dsq(cpdomc_pick);
+
+	/*
+	 * No DSQ in cpdomc_pick has any queued load. Move on to the next
+	 * neighbor rather than passing -ENOENT to dsq_peek_task_load() /
+	 * consume_dsq(), which would abort the scheduler. Same defensive
+	 * check as the try_steal_flat_cb path above.
+	 */
+	if ((s64)dsq_id < 0)
+		return 0;
+
+	/*
+	 * Peek at the head task to get its size. Skip the peek when
+	 * no_fast_lb is set since the budget accounting below is bypassed
+	 * and the value would be unused.
+	 */
+	task_load = no_fast_lb ? 0 : dsq_peek_task_load(dsq_id);
+
+	/*
+	 * Force steal is unconditional for work conservation. Decrement
+	 * budgets to keep the accounting consistent.
+	 */
+	if (consume_dsq(cpdomc_pick, dsq_id)) {
+		if (!no_fast_lb) {
+			decrement_stealee_budget(cpdomc_pick, task_load);
+			decrement_stealer_budget(cpdomc, task_load);
+		}
+		ctx->stolen = true;
+		return 1;
+	}
+
+	return 0;
 }
 
 static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
-	struct cpdom_ctx *cpdomc_pick;
-	s64 nr_nbr, cpdom_id;
+	struct force_steal_flat_ctx ctx = {
+		.cpdomc_id = cpdomc->id,
+		.stolen    = false,
+	};
 
-	/*
-	 * Traverse neighbor compute domains in distance order.
-	 */
-	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
-		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
-		if (nr_nbr == 0)
-			break;
+	bpf_loop(LAVD_CPDOM_MAX_DIST * LAVD_CPDOM_MAX_NR,
+		 force_steal_flat_cb, &ctx, 0);
 
-		/*
-		 * Traverse neighbors in the same distance in circular distance order.
-		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
-			u64 dsq_id;
-			if (j >= nr_nbr)
-				break;
-
-			cpdom_id = get_neighbor_id(cpdomc, i, j);
-			if (cpdom_id < 0)
-				continue;
-
-			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-			if (!cpdomc_pick) {
-				scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
-				return false;
-			}
-
-			if (!cpdomc_pick->is_valid)
-				continue;
-
-			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
-			/*
-			 * Same defensive check as the try_to_steal_task
-			 * path above.
-			 */
-			if ((s64)dsq_id < 0)
-				continue;
-
-			/*
-			 * Peek at the head task to get its size. Skip the
-			 * peek when no_fast_lb is set since the budget
-			 * accounting below is bypassed and the value would
-			 * be unused.
-			 */
-			u64 task_load = no_fast_lb ? 0 : dsq_peek_task_load(dsq_id);
-
-			/*
-			 * Force steal is unconditional for work
-			 * conservation. Decrement budgets to keep
-			 * the accounting consistent.
-			 */
-			if (consume_dsq(cpdomc_pick, dsq_id)) {
-				if (!no_fast_lb) {
-					decrement_stealee_budget(cpdomc_pick, task_load);
-					decrement_stealer_budget(cpdomc, task_load);
-				}
-				return true;
-			}
-		}
-	}
-
-	return false;
+	return ctx.stolen;
 }
 
 __hidden
