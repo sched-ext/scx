@@ -594,6 +594,9 @@ struct mm_ca_stat {
 	u8	__pad[3];
 	u32	cpdom_runtime[LAVD_CA_MAX_CPDOMS];	/* per-LLC decayed runtime (ns >> 10) */
 	u64	last_epoch_ns;				/* timestamp of the last epoch advance */
+	u64	next_scan_ns;				/* earliest next preferred-LLC scan time;
+							 * check-and-set under the lock so the scan
+							 * runs at most once per epoch per process */
 };
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */

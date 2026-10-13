@@ -258,6 +258,10 @@ static void ca_accumulate_domain_time(u8 cur_cpdom, u64 now, u32 delta)
  *     per-mm counter mcs->cpdom_runtime[] and the per-domain denominator
  *     cpdom_ctx.ca_total_task_time, which decays on the same 10 ms
  *     r=0.5 schedule via its own epoch clock.
+ *   - The decay/reselection scan runs at most once per epoch per mm:
+ *     a check-and-set of next_scan_ns under the lock serializes the
+ *     threads of the process so only one pays for the scan; all other
+ *     stopping events merely accumulate.
  *   - The counters are decayed (shift capped at 31) and the preferred
  *     domain is reselected by OCCUPANCY: my decayed runtime / the
  *     domain's total decayed runtime, argmax via cross-multiplication
@@ -301,12 +305,26 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 		__builtin_memset(&init_val, 0, sizeof(init_val));
 		init_val.preferred_cpdom_id = cur_cpdom;
 		init_val.last_epoch_ns      = now;
+		init_val.next_scan_ns       = now + LAVD_CA_EPOCH_NS;
 		bpf_map_update_elem(&mm_ca_map, &mm_key, &init_val, BPF_NOEXIST);
 		taskc->preferred_cpdom_id = cur_cpdom;
 		return;
 	}
 
 	bpf_spin_lock(&mcs->lock);
+
+	/*
+	 * Off-scan stopping event: accumulate only; the next scan-time
+	 * visitor performs the decay and the reselection.
+	 */
+	if (now < mcs->next_scan_ns) {
+		mcs->cpdom_runtime[cur_cpdom] =
+			min(mcs->cpdom_runtime[cur_cpdom] + delta, (u32)U32_MAX);
+		goto sync_out;
+	}
+
+	/* Check-and-set: this thread runs this epoch's scan. */
+	mcs->next_scan_ns = now + LAVD_CA_EPOCH_NS;
 
 	/* Step 1: epoch decay of all per-LLC counters (shift capped at 31). */
 	if (now > mcs->last_epoch_ns) {
@@ -376,6 +394,7 @@ static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
 
 	mcs->preferred_cpdom_id = pref;
 
+sync_out:
 	/* Sync to task_ctx cache for zero-cost reads in the placement paths. */
 	taskc->preferred_cpdom_id = mcs->preferred_cpdom_id;
 
