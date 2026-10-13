@@ -1395,6 +1395,18 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 kick_cpu_out:
 	/*
+	 * The task landed on the shared domain DSQ without a claimed idle
+	 * CPU of its own. On a burst wakeup that enqueues multiple slices,
+	 * every such enqueue kicks one more idle CPU in the domain, so the
+	 * shared DSQ is consumed promptly instead of waiting for a busy
+	 * CPU's next dispatch. When is_idle, the picked CPU is already
+	 * claimed and kicked below.
+	 */
+	if (!is_idle)
+		kick_idle_cpu_in_cpdom(MEMBER_VPTR(cpdom_ctxs,
+						   [cpuc->cpdom_id]));
+
+	/*
 	 * Kick @cpu so an idle CPU picks up the task.
 	 */
 	if (is_idle) {

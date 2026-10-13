@@ -730,6 +730,76 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	return cpu;
 }
 
+/*
+ * kick_idle_cpu_in_cpdom - kick an idle CPU in @cpdomc so it dispatches
+ * and consumes the shared domain DSQ.
+ *
+ * Motivation: on a burst wakeup that enqueues multiple slices, only the
+ * first few enqueues claim an idle CPU of their own; every later task
+ * lands on the shared domain DSQ with nothing kicked. The busy CPUs of
+ * the domain do not run ops.dispatch() again until their current task
+ * stops, so the queued slices wait even though an idle CPU (an SMT
+ * sibling, or one outside the mask snapshots taken at pick time) may be
+ * available in the same domain. Kicking one idle CPU per enqueue drains
+ * the shared DSQ promptly.
+ *
+ * Precise semantics:
+ *   - The whole mask dance runs under bpf_rcu_read_lock(); the kick is
+ *     issued outside the lock.
+ *   - cpuc_cur->temp_mask (pick_ctx's temp_mask) is used as a draft to
+ *     build domain cpumask n candidate set. It is per-CPU scratch and
+ *     dead at this point: the pick_idle_cpu() call that also uses it has
+ *     already returned.
+ *   - The active set is searched first, then the overflow set.
+ *   - scx_bpf_pick_idle_cpu() is called with flags 0: an idle SMT
+ *     sibling of a busy core is acceptable, we only need one dispatch
+ *     event. The pick claims (reserves) the CPU in the idle-tracking
+ *     mask but does not occupy it: the SCX_KICK_IDLE kick still fires
+ *     because the kernel checks rq->curr (still the idle task) rather
+ *     than the idle mask, and the kicked CPU consumes whatever is on
+ *     the shared DSQ. If it finds nothing, it returns to idle and the
+ *     kernel refreshes the idle mask without an ops.update_idle()
+ *     event -- the documented "reserved and awakened via
+ *     scx_bpf_pick_idle_cpu() + scx_bpf_kick_cpu()" pattern.
+ */
+__hidden
+void kick_idle_cpu_in_cpdom(struct cpdom_ctx *cpdomc)
+{
+	struct bpf_cpumask *cpd_mask, *draft, *active, *ovrflw;
+	struct cpu_ctx *cpuc_cur;
+	s32 cpu = -ENOENT;
+
+	if (!cpdomc || !use_cpdom_dsq())
+		return;
+
+	bpf_rcu_read_lock();
+
+	cpuc_cur = get_cpu_ctx();
+	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdomc->id]);
+	active = active_cpumask;
+	ovrflw = ovrflw_cpumask;
+	draft = cpuc_cur ? cpuc_cur->temp_mask : NULL;
+	if (!cpd_mask || !draft || !active || !ovrflw)
+		goto unlock_out;
+
+	/* First, the active set. */
+	bpf_cpumask_and(draft, cast_mask(cpd_mask), cast_mask(active));
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(draft), 0);
+
+	/* Then, the overflow set. */
+	if (cpu < 0) {
+		bpf_cpumask_and(draft, cast_mask(cpd_mask), cast_mask(ovrflw));
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(draft), 0);
+	}
+
+unlock_out:
+	bpf_rcu_read_unlock();
+
+	/* Kick outside the RCU lock. */
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 __hidden __noinline
 s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 {
