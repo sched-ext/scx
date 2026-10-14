@@ -4,31 +4,33 @@
  *
  * Holds the strict one kick per wait rule with unified latency plus
  * lead plus tail plus eligibility. Only a latency arrival against a
- * batch occupant leads by the margin with more than the tail left on
- * the owner, so near ties plus nearly done owners never bounce while
- * one kick per wait stays with no storm. Lat to lat plus batch to
- * batch plus batch to lat fail closed with one skipped count.
- * Every hold counts in preempt skipped with no missing fill. The exiting
- * plus bypass plus tier idle plus preempt paths share this gate with no
- * extra sender. Runs under the
- * caller with no lock.
+ * batch occupant with margin lead and tail left on the owner kicks,
+ * so near ties and nearly done owners never bounce while one kick per
+ * wait stays. Lat to lat, batch to batch, and batch to lat fail closed
+ * with one skipped count. Every hold counts in preempt skipped. The
+ * exiting, bypass, tier idle, and preempt paths share this gate. Runs
+ * under the caller.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* True when one arrival strictly preempts with margin plus tail plus latency. */
-/* The arrival key must lead the occupant key strictly with the margin also */
-/* strictly before, so near ties never bounce. The owner must hold more */
-/* than the tail past now from start plus inherit cur, so nearly done */
-/* owners finish instead of taking a kick. Equality fails closed and */
-/* floors, so a head with exactly the tail left never kicks. Only a latency arrival */
+/* True when one arrival preempts with margin, tail, and latency. */
+/* The arrival key must lead the occupant key by more than the margin, */
+/* so near ties never bounce. The owner must hold more than the tail */
+/* past now from start plus inherit cur, so nearly done owners finish */
+/* instead of taking a kick. Equality fails closed and floors, so a head */
+/* with exactly the tail left never kicks. Only a latency arrival */
 /* against a batch occupant preempts, so lat to batch wins while lat */
-/* to lat plus batch to batch plus batch to lat fail closed with one */
-/* skipped count and no kick. The enqueue busy path calls */
-/* this helper after the eligibility gate, so eligibility stays outside */
-/* here with one minimum read per wait. Equal arrivals pace with no */
-/* extra kick by design, so no tie assert runs with no verifier cost. */
-/* Mirrored in config.rs preempt_ok for host tests, so the kernel plus */
-/* the host agree with no drift. */
+/* to lat, batch to batch, and batch to lat fail closed with one */
+/* skipped count. The enqueue path calls this helper after the */
+/* eligibility check, so eligibility stays outside here with one minimum */
+/* read per wait. Equal arrivals pace without an extra kick, so no tie */
+/* assert runs. RED cost covers the newcomer on burst else pre-clamp */
+/* slice else quantum, while this tail covers the occupant on start */
+/* plus stored slice. The inputs differ by task on purpose with no */
+/* shared write, and both clamp to 10us plus 1ms, so admission plus */
+/* preempt agree on the same bounds. */
+/* Mirrored in config.rs preempt_ok for host tests, so the kernel and */
+/* the host agree. */
 static __always_inline bool flow_preempt_ok(u64 arr_key,
 	u64 occ_key, u64 now, u64 occ_run_at, u32 occ_cur, bool arr_lat,
 	bool occ_lat)
@@ -68,7 +70,7 @@ static __always_inline bool flow_preempt_ok(u64 arr_key,
 /* first allowed live CPU. Kicks only when the target runs nothing, with */
 /* the idle flag cleared first so the kick sticks. Never sends a preempt */
 /* kick, so tier waits stay idle only. */
-/* Factored per target probe keeps one copy with no triple growth. */
+/* Factored per target probe keeps one copy. */
 /**
  * flow_kick_one_if_idle - kick one CPU when idle plus eligible.
  * @p: task waiting for the kick.
@@ -78,7 +80,7 @@ static __always_inline bool flow_preempt_ok(u64 arr_key,
  * @has_ctx: true when @vr plus @lag hold valid state.
  *
  * Outlined with noinline to keep verifier headroom and the three probes
- * share one eligibility plus kick copy with no inline growth.
+ * share one eligibility plus kick copy.
  *
  * Returns: true when the kick took or an ineligible hold counted, so
  * the caller stops, else false to try the next candidate.

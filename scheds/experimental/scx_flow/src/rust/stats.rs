@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, and miss detail.
-/// BPF holds 17 counters, Rust adds display-only uptime for 18.
+/// BPF holds 17 counters, Rust adds display-only uptime for eighteen.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -62,7 +62,7 @@ pub struct Metrics {
     #[serde(default)]
     pub admits: u64,
     #[stat(
-        desc = "Rejects dead at zero for wire compat with no writer; real rejects count in gate_rejects"
+        desc = "Rejects dead at zero whitelisted for wire compat with no writer; real rejects count in gate_rejects"
     )]
     #[serde(default)]
     pub rejects: u64,

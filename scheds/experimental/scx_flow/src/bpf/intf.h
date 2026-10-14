@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Shared constants and helpers for the flow scheduler at 4.8.12.
+ * Shared constants and helpers for the flow scheduler at 4.8.14.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine plus one value ordered
- * reject queue. Homeless work with no live CPU plus gate misses waits
+ * reject queue. Homeless work without a live CPU and gate misses wait
  * in the reject queue by value with mask wins on drain.
  * Idle CPUs steal one task from peer locals as the fifth tier with
- * a bounded window of 4 to 8 peers proportional to remaining visits.
+ * a capped window of 4 to 8 peers proportional to remaining visits.
  * Every task earns an absolute deadline from now plus a period, and
  * each queue orders by the strict EDF key through the kernel priority
  * queue. The strict key holds the earlier of deadline plus virtual
@@ -18,18 +18,30 @@
  * millisecond. A miss holds the stored slice else floors it to 10us
  * with a fresh deadline plus a tier rejoin rederived through the same
  * escalation plus skip aging, and a zero slice inherits the 1ms
- * quantum. A global completer credit at or past 128us reclaims one
- * value ordered reject with positive laxity plus the same key or a
- * strictly after key with one bounded move, so overload drains without
- * starving the tiers. A miss counts when wall time passes the deadline, and
- * the miss rejoins a tier queue with a fresh deadline plus a direct
- * kick and no wait. Placement takes the slowest sufficient CPU among
- * the allowed set that can meet the deadline, so light work never
- * takes a fast CPU that other work needs. Hints from the flat view
- * tune the period plus the weight, and no group or pool shapes order.
- * Each stop feeds the burst predictor average plus deviation with
- * shift updates, so later deadlines track recent bursts with no table
- * walk. See select_cpu.bpf.c for placement and enqueue.bpf.c for the
+ * quantum. A global completer credit at or past the fixed 256us Emax
+ * reclaims one value ordered reject with positive laxity plus the
+ * same key or a strictly after key with a single move, so overload
+ * drains without starving the tiers. A miss counts when wall time
+ * passes the deadline, and the miss rejoins a tier queue with a fresh
+ * deadline plus a direct kick without waiting. Placement takes the
+ * slowest sufficient CPU among the allowed set that can meet the
+ * deadline, so light work never takes a fast CPU that other work
+ * needs. Hints from the flat view tune the period plus the weight,
+ * and no group or pool shapes order. Each stop feeds the burst
+ * predictor average plus deviation with up plus down shifts, so later
+ * deadlines track recent bursts without a table walk. The average
+ * rises fast with shift 3 plus falls slow with shift 4, the deviation
+ * widens fast with shift 2 plus narrows slow with shift 3, and the
+ * period adds average plus deviation plus half deviation margin, so
+ * stable bursts keep tight deadlines while ragged bursts hold margin.
+ * The fair key stays math-only with no nudge, so tier plus kick ride
+ * the strict key while placement tests the deadline plus drain and
+ * fixed RED bounds gate overload with PRIQ only for tiers. The
+ * direct plus exiting LOCAL_ON queue stays terminal FIFO outside
+ * PRIQ order with no tier rank. Hard means batch non-latency while
+ * critical means latency-critical via the unified latency test, so
+ * tolerance aids hard only. See
+ * select_cpu.bpf.c for placement and enqueue.bpf.c for the
  * deadline choice plus dispatch.bpf.c for the tier scans and
  * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
  * charge plus the miss count.
@@ -70,10 +82,41 @@ enum flow_consts {
 	/* pace tightly with no zero slice. Misses hold else floor here, */
 	/* and a zero slice inherits the ceiling. */
 	FLOW_SLICE_MIN_NS = 10000ULL,
-	/* Default period of 16ms with no knob. Holds sixteen slices, */
-	/* so a fully used task still leaves room for one wait plus */
-	/* one retry inside the period. */
-	FLOW_PERIOD_NS = 16000000ULL,
+	/* Ultra-low latency boundary of 50us with no knob. Caps the T1 tier, */
+	/* so audio plus frame pacing bursts pace tightly with no extra hold. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_ULL_NS = 50000ULL,
+	/* Low latency boundary of 100us with no knob. Caps the T2 tier, so */
+	/* compositor plus UI bursts rotate each tenth quantum with no hold. */
+	/* Matches the latency slice cap, so urgent wakeups keep one bound. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_LL_NS = 100000ULL,
+	/* Medium-low latency boundary of 500us with no knob. Caps the T3 */
+	/* tier, so IPC plus microservice bursts hold margin with no storm. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_MLL_NS = 500000ULL,
+	/* Normal latency boundary of 1ms with no knob. Caps the T4 tier at */
+	/* one quantum, so desktop plus worker bursts rotate each quantum. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_NL_NS = 1000000ULL,
+	/* Extended normal latency boundary of 5ms with no knob. Caps the T5 */
+	/* tier, so bulk I/O plus build bursts hold room with no starve. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_ENL_NS = 5000000ULL,
+	/* Dynamic slice ceiling of 20ms with no knob. Caps the T6 tier plus */
+	/* the multi-tier spectrum, so throughput bursts hold room with an */
+	/* 80ms period guarding starvation. Like fair.c, the ceiling paces */
+	/* service, unlike rt.c, no fixed priority holds. */
+	FLOW_SLICE_MAX_NS = 20000000ULL,
+	/* Default period of 80ms with no knob. Holds four 20ms slices, */
+	/* so a fully used throughput task still leaves room for waits plus */
+	/* retries inside the period with no starvation under 20ms holds. */
+	FLOW_PERIOD_NS = 80000000ULL,
 	/* Predictor bounds with no knob. Holds 1ns to 1s, so a huge */
 	/* burst clamps instead of wrapping to a short deadline. */
 	FLOW_PRED_MIN_NS = 1ULL,
@@ -82,15 +125,15 @@ enum flow_consts {
 	FLOW_WEIGHT_BASE = 128ULL,
 	FLOW_WEIGHT_MAX = 16384ULL,
 	/* CPU bound of 1024 rows with no knob. Covers the largest test */
-	/* host with wide margin while keeping array memory bounded. */
+	/* host with wide margin while keeping array memory small. */
 	FLOW_MAX_CPUS = 1024ULL,
 	/* Node bound of 16 rows with no knob. Covers the largest test */
-	/* host with wide margin while keeping the node scan bounded. */
+	/* host with wide margin while keeping the node scan small. */
 	FLOW_MAX_NODES = 16ULL,
 	/* Hint bound of 8192 rows with no knob. Keys are hierarchy ids */
-	/* with no dense use, so the table holds large hosts with room */
-	/* for churn. Full tables fail closed to the default period */
-	/* with no eviction and no stall. */
+	/* with sparse use, so the table holds large hosts with room for */
+	/* churn. Full tables fail closed to the default period without */
+	/* evicting. */
 	FLOW_HINT_MAX = 8192ULL,
 	/* Local queue region base. Holds 1024 ids, one per CPU. */
 	FLOW_LOCAL_BASE = 0x5100ULL,
@@ -108,20 +151,20 @@ enum flow_consts {
 	/* Dispatch visit cap of 8 entries per pass with no knob. Caps */
 	/* visited entries per pass shared across five tiers regardless of */
 	/* moves, so one pass never holds RCU across the whole queue on */
-	/* mask misses. Moves take at most one per tier per pass bounded */
-	/* by remaining dispatch slots, and leftover work resumes next pass, */
+	/* mask misses. Moves take at most one per tier per pass capped by */
+	/* remaining dispatch slots, and leftover work resumes next pass, */
 	/* so the pass stays work conserving across passes. The steal window */
 	/* spans 4 to 8 peers proportional to remaining visits. */
 	FLOW_DISPATCH_MAX_VISIT = 8ULL,
 	/* Steal peer window with no knob. Scans at least 4 peers and at */
-	/* most 8 peers per pass, so the steal stays bounded with no */
-	/* hotspot while large hosts still find work. */
+	/* most 8 peers per pass, so the steal stays cheap without a hotspot */
+	/* while large hosts still find work. */
 	FLOW_STEAL_MIN_PEERS = 4ULL,
 	FLOW_STEAL_MAX_PEERS = 8ULL,
 	/* BSF fallback bound of 4 peers with no knob. Scans the next four */
 	/* past the 8 peer SSF window from cursor plus 9, so select covers */
-	/* twelve unique peers per pass with no topology walk and no overlap. */
-	/* Keeps the fallback cheap while extending coverage with the same order. */
+	/* twelve unique peers per pass without walking topology. Keeps the */
+	/* fallback cheap while extending coverage with the same order. */
 	FLOW_BSF_MAX_PEERS = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
@@ -144,37 +187,71 @@ enum flow_consts {
 	/* within this distance of the CPU minimum, so sleepers gain no */
 	/* more than one extra slice of boost with no storm. */
 	FLOW_VLAG_MAX_NS = 2000000ULL,
-	/* RED bound of 128us with no knob. Caps the maximum exceeding */
+	/* RED bound of 256us with no knob. Caps the maximum exceeding */
 	/* time, so a global credit at or past this bound reclaims one */
 	/* reject, and a victim cost at or below this bound keeps the */
 	/* newcomer with no swap. A capped latency slice at 100us never */
 	/* passes, so latency never pays as victim. The bound caps */
 	/* lateness with no share shaping. */
-	FLOW_RED_EMAX_NS = 128000ULL,
+	FLOW_RED_EMAX_NS = 256000ULL,
 	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
-	/* for hard tasks only, so critical tasks keep zero tolerance */
-	/* with no late run. Tolerance aids the guarantee with no order */
-	/* shaping. */
+	/* for hard batch only scoped to non-latency, so latency-critical */
+	/* keeps zero tolerance with no late run. Tolerance aids the */
+	/* guarantee with no order shaping. Reclaim shares the same fixed */
+	/* path, so admit plus reclaim agree. */
 	FLOW_RED_TOL_NS = 64000ULL,
 	/* Adaptive grow step of 64us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
-	/* still decode with no behavior change. */
+	/* still decode with no behavior change, whitelisted with no use. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
 	FLOW_ADAPT_GROW_NS = 64000ULL,
 	/* Adaptive shrink step of 128us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
-	/* still decode with no behavior change. */
+	/* still decode with no behavior change, whitelisted with no use. */
 	/* Like fair.c, the step tracks load, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
 	FLOW_ADAPT_SHRINK_NS = 128000ULL,
-	/* Proportional adapt cap of 256us with no knob. Caps one shift */
-	/* step, so a huge exceed plus slack moves at most one quarter */
-	/* slice with no storm. Exceed shrinks, slack grows, both shift 3. */
-	FLOW_ADAPT_PROP_MAX_NS = 256000ULL,
+	/* Proportional adapt cap of 1ms with no knob. Caps one shift */
+	/* step, so a huge exceed plus slack moves at most one quantum */
+	/* with no storm. Exceed shrinks, slack grows, both shift 3. */
+	FLOW_ADAPT_PROP_MAX_NS = 1000000ULL,
 	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
 	/* slack to one eighth with shifts only, so no divide runs in BPF. */
 	FLOW_ADAPT_PROP_SHIFT = 3ULL,
+	/* Proportional deadband shift of 5 with no knob. Holds one */
+	/* thirty-second of the base as the quiet band, so timer jitter */
+	/* plus one tick never hunts the slice with shifts only. Exceed */
+	/* plus slack at or below the band hold the clamped slice. */
+	FLOW_ADAPT_DEADBAND_SHIFT = 5ULL,
+	/* Proportional deadband floor of 8us with no knob. Keeps the */
+	/* quiet band above one tick on small slices, so a 10us base still */
+	/* holds a real band with no divide. */
+	FLOW_ADAPT_DEADBAND_MIN_NS = 8000ULL,
+	/* Half-damp shift of 1 with no knob. Halves the capped step once, */
+	/* so one correction moves at most one quarter base with shifts */
+	/* only and ringing halves each stop with no divide. */
+	FLOW_ADAPT_DAMP_SHIFT = 1ULL,
+	/* Predictor rise shift of 3 with no knob. Moves the average one */
+	/* eighth toward a larger sample with shifts only, so bursts grow */
+	/* fast with no divide. */
+	FLOW_PRED_UP_SHIFT = 3ULL,
+	/* Predictor fall shift of 4 with no knob. Moves the average one */
+	/* sixteenth toward a smaller sample with shifts only, so bursts */
+	/* decay slow with no cliff. */
+	FLOW_PRED_DOWN_SHIFT = 4ULL,
+	/* Deviation widen shift of 2 with no knob. Moves the deviation one */
+	/* quarter toward a larger error with shifts only, so ragged bursts */
+	/* gain margin fast with no divide. */
+	FLOW_PRED_DEV_UP_SHIFT = 2ULL,
+	/* Deviation narrow shift of 3 with no knob. Moves the deviation one */
+	/* eighth toward a smaller error with shifts only, so stable bursts */
+	/* keep margin without a snap. */
+	FLOW_PRED_DEV_DOWN_SHIFT = 3ULL,
+	/* Deviation margin shift of 1 with no knob. Adds half deviation to */
+	/* the period with shifts only, so the deadline holds average plus */
+	/* one and a half deviation with no divide and no wrap. */
+	FLOW_PRED_DEV_MARGIN_SHIFT = 1ULL,
 	/* Latency slice cap of 100us with no knob. Caps the dynamic slice */
 	/* plus the carryover plus the adapt step for latency work, so */
 	/* urgent wakeups rotate each tenth quantum with no extra hold. */
@@ -182,8 +259,8 @@ enum flow_consts {
 	/* priority holds. Clamps with the slice floor plus ceiling. The */
 	/* cap equals the preempt tail, so a latency head at the cap never */
 	/* passes the tail gate and floors with no resume. Adapt steps cap */
-	/* at 256us then re-clamp here, so one shift never holds past the */
-	/* cap. RED Emax stays at 128us past the cap, so a capped latency */
+	/* at 1ms then re-clamp here, so one shift never holds past the */
+	/* cap. RED Emax stays at 256us past the cap, so a capped latency */
 	/* slice never pays as victim with no swap. */
 	FLOW_SLICE_LAT_NS = 100000ULL,
 	/* Latency sleep floor of 20us with no knob. Vetoes only sleeps */
@@ -198,65 +275,58 @@ enum flow_consts {
 	/* fixed priority holds. */
 	FLOW_D_LAT_NS = 4000000ULL,
 };
-/* Static dispatch tier order with no reorder. Local plus node plus */
-/* machine plus overflow plus steal drain in fair order through the */
-/* kernel priority queues with the reject value ordered. Every pass follows */
-/* this order with no load based swap, so the verifier sees one fixed */
-/* path. Dispatch calls the tier moves directly with no index switch, */
-/* so no tier index needs storage. The steal tier scans peer locals */
-/* within the bounded window with mask wins. */
+/* Static dispatch tier order. Local plus node plus machine plus overflow */
+/* plus steal drain in fair order through the kernel priority queues with */
+/* the reject value ordered. Every pass follows this order without swapping */
+/* for load, so the verifier sees one fixed path. Dispatch calls the tier */
+/* moves directly with no index switch, so no tier index needs storage. The */
+/* steal tier scans peer locals within the capped window with mask wins. */
 /* Per task state at 72B with vruntime plus deadline plus stamps plus */
 /* predictor plus lag plus weight plus slice plus hint plus hint weight */
 /* plus misses plus adapt miss plus adapt sat plus adapt delta. */
-/* Vruntime holds the scaled service in nanos with zero for no history. */
+/* Vruntime holds the scaled service in nanos, zero when no history. */
 /* A zero vruntime means no service yet, so the first virtual deadline */
-/* falls near now with no boost past the lag bound. Deadline holds the */
-/* absolute EDF deadline for queue order and the miss check. A zero */
-/* deadline means no order yet, so preempt compares skip with no kick */
-/* and the miss check skips with no count. Wait holds the last enqueue */
-/* time. A zero wait means the task never queued. Every queue join */
-/* stamps the task, so queued work always carries a stamp. Run holds */
-/* the segment start while on CPU else zero, so a claimed start pairs */
-/* the stopping charge with no BPF gauge. The on CPU gauge lives in */
-/* the snapshot with no BPF count. Running claims from zero only with */
-/* a compare and swap, so a second running without a stop keeps the */
-/* first start with no second use. Stopping versus disable or exit */
-/* claims once with atomics, so each claimed start meets exactly one */
-/* charge with no owner gate. Hint weight holds the flat hint share */
-/* clamped to range with 128 for neutral, stored alongside the task */
-/* base so requeues plus stopping plus leftover keep the heavy share */
-/* with no cache lookup and no neutral cliff. A zero means no history, */
-/* so the effective helper maps it to neutral. Avg holds */
-/* the burst average in nanos in 32 bits with zero for no history. Dev */
-/* holds the burst deviation in nanos in 32 bits with zero for no */
-/* history. Values clamp to 1ns to 1s, so a huge burst never wraps. */
-/* Vlag holds the allowed lag in nanos as a signed bound with zero for */
-/* no slack. Weight holds the task base share clamped to range with */
-/* 128 for neutral, and the effective share stacks task times hint */
-/* over 128 on the stack with no store. Slice holds the per task slice */
-/* in nanos with the dynamic remaining clamp on fresh waits. A miss */
-/* holds the stored slice else floors it to 10us, and a zero slice */
-/* inherits the 1ms quantum with strict preempt on a fresh quantum. */
-/* Hint holds the flat period */
-/* hint in micros for the deadline. A zero hint means no hint, so the */
-/* default period applies. Misses holds the count of deadline misses */
-/* for the life of the task with saturating adds, so a huge miss count */
-/* clamps instead of wrapping. Lifetime by design, so promotion latches */
-/* once 8 holds with the same one-move bound. A windowed decay stays a */
-/* noted alternative with no knob here. Adapt miss holds the consecutive */
-/* miss streak for the adaptive slice with saturation at 0xffff, so a */
-/* ragged burst widens step by step with no wrap. Adapt sat holds the */
-/* clamp streak at the slice floor plus ceiling with saturation, so a */
-/* stuck slice shows its bound with no extra map. Adapt delta holds the */
-/* last saved execution in nanos per task for debug, while the global */
-/* completer credit funds reclaim, so a completion with delta at or */
-/* past 128us reclaims one reject with no scan. */
+/* falls near now without extra boost past the lag bound. Deadline holds */
+/* the absolute EDF deadline for queue order and the miss check. A zero */
+/* deadline means no order yet, so preempt and the miss check skip. Wait */
+/* holds the last enqueue time. A zero wait means the task never queued. */
+/* Every queue join stamps the task, so queued work always carries a stamp. */
+/* Run holds the segment start while on CPU else zero, so a claimed start */
+/* pairs the stopping charge. The on CPU gauge lives in the snapshot. */
+/* Running claims from zero only with a compare and swap, so a second */
+/* running without a stop keeps the first start. Stopping versus disable */
+/* or exit claims once with atomics, so each claimed start meets exactly */
+/* one charge. Hint weight holds the flat hint share clamped to range with */
+/* 128 for neutral, stored alongside the task base so requeues, stopping, */
+/* and leftover keep the heavy share without another cache lookup. A zero */
+/* means no history, so the effective helper maps it to neutral. Avg holds */
+/* the burst average in nanos in 32 bits, zero when no history. Dev holds */
+/* the burst deviation in nanos in 32 bits, zero when no history. Values */
+/* clamp to 1ns to 1s, so a huge burst never wraps. */
+/* Vlag holds the allowed lag in nanos as a signed bound, zero when no */
+/* slack. Weight holds the task base share clamped to range with 128 for */
+/* neutral, and the effective share stacks task times hint over 128 on the */
+/* stack. Slice holds the per task slice in nanos with the dynamic */
+/* remaining clamp on fresh waits. A miss holds the stored slice else floors */
+/* it to 10us, and a zero slice inherits the 1ms quantum with strict */
+/* preempt on a fresh quantum. Hint holds the flat period hint in micros */
+/* for the deadline. A zero hint means no hint, so the default period */
+/* applies. Misses holds the count of deadline misses for the life of the */
+/* task with saturating adds, so a huge miss count clamps instead of */
+/* wrapping. Lifetime means promotion latches once 8 holds with the same */
+/* one-move cap. A windowed decay stays a noted alternative. Adapt miss */
+/* holds the consecutive miss streak for the adaptive slice with saturation */
+/* at 0xffff, so a ragged burst widens step by step. Adapt sat holds the */
+/* clamp streak at the slice floor plus ceiling with saturation, so a stuck */
+/* slice shows its bound. Adapt delta holds the last saved execution in */
+/* nanos per task for debug, while the global completer credit funds */
+/* reclaim, so a completion with delta at or past the fixed 256us Emax */
+/* reclaims one reject. */
 /* Like fair.c, vruntime paces order, unlike rt.c, no fixed priority holds. */
-/* C holds burst else slice else quantum with no knob, and V holds */
-/* weight with zero mapped to 128, so the slice adapts while virtual */
-/* time stays untouched. Stamps stay per task owned with no */
-/* atomics except the run claim, only counters use atomics. Cursor and */
-/* miss scans stay best effort with no atomic order. */
+/* C holds burst else slice else quantum, and V holds weight with zero */
+/* mapped to 128, so the slice adapts while virtual time stays untouched. */
+/* Stamps stay per task owned except the run claim uses atomics, and only */
+/* counters use atomics. Cursor and miss scans stay best effort. */
 struct flow_task_ctx {
 	u64 vruntime;
 	u64 deadline;
@@ -277,14 +347,13 @@ struct flow_task_ctx {
 /* Per CPU state at 16B with running pid plus placement cursor plus */
 /* minimum vruntime. Pid holds the task now on the CPU else zero. */
 /* Owner clears use a compare and swap, so a stale exit never clears a */
-/* new owner. Cursor is shared by select SSF plus BSF and dispatch */
-/* steal with stride two and best effort races plus no atomic order. */
-/* A success advances past the picked peer, so the next pass starts */
-/* fresh with no hotspot. Min vruntime tracks the smallest served */
-/* vruntime on the CPU with zero for no history, so newly woken tasks */
-/* clamp without gaining past the lag bound. The minimum folds forward */
-/* only and holds stale on idle with the lag bound capping the boost, */
-/* so no decay timer runs and rejoins stay bounded with no storm. */
+/* new owner. Cursor is shared by select SSF plus BSF and dispatch steal */
+/* with stride two and best effort races. A success advances past the */
+/* picked peer, so the next pass starts fresh without a hotspot. Min */
+/* vruntime tracks the smallest served vruntime on the CPU, zero when no */
+/* history, so newly woken tasks clamp without gaining past the lag bound. */
+/* The minimum folds forward only and holds stale on idle with the lag bound */
+/* capping the boost, so no decay timer runs and rejoins stay capped. */
 struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
@@ -312,18 +381,16 @@ struct flow_hint {
 	u32 weight;
 };
 /* Scheduler counters with 17 fields. Reject plus reclaim moves count */
-/* RED overload plus reclaim detail with no extra map, so stats stay at */
-/* 136B. Overflow plus steal moves count in the local bucket with no new */
-/* counter. Rejects plus on CPU stay frozen at zero in BPF snapshot-counted */
-/* for wire compat only with no BPF writer, while real rejects count in gate */
-/* plus RED rejects. Readers must use gate_rejects for drops plus red_rejects */
-/* for overload, and the snapshot counts live pids for the on CPU gauge. Miss */
-/* plus Term where Term equals completions stay counters only with no queues, */
-/* so misses plus completions record history with no extra queue. Preempt kicks */
-/* count busy preempts sent, and preempt skipped intentionally counts every */
-/* suppressed hold by margin plus tail plus eligibility with no missing fill. */
-/* Counters run with no knob and no fixed */
-/* priority. */
+/* RED overload plus reclaim detail without an extra map, so stats stay at */
+/* 136B. Overflow plus steal moves count in the local bucket. Rejects plus */
+/* on CPU stay frozen at zero whitelisted for wire compat only without a BPF writer, */
+/* while real rejects count in gate plus RED rejects. Readers must use */
+/* gate_rejects for drops plus red_rejects for overload, and the snapshot */
+/* counts live pids for the on CPU gauge. Miss plus Term where Term equals */
+/* completions stay counters only without queues, so misses plus completions */
+/* record history. Preempt kicks count busy preempts sent, and preempt */
+/* skipped counts every suppressed hold by margin, tail, and eligibility. */
+/* Counters run without a knob. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -354,14 +421,28 @@ _Static_assert(sizeof(struct flow_cpu_state) == 16,
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 17 counters in 136 bytes. */
+/* Stats hold 17 counters in 136 bytes. Rejects plus on CPU stay frozen */
+/* at zero for wire compat only with no BPF writer, whitelisted so old */
+/* readers still decode with no behavior change. */
 _Static_assert(sizeof(struct flow_sched_stats) == 136,
 	"stats stay at 136B");
 /* Queue count holds local plus node plus machine plus overflow. */
-/* Steal reuses peer locals with no new queue, so the count stays. */
+/* Steal reuses peer locals without a new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
 	"dsq count stays local plus node plus two");
+/* Period holds four max slices, so a 20ms hold never starves past one */
+/* period with no extra timer. Six latency ceilings name burst sizes, */
+/* while five dispatch tiers name queues, so the counts differ by design. */
+_Static_assert(FLOW_PERIOD_NS == 4 * FLOW_SLICE_MAX_NS,
+	"period stays four times slice max");
+_Static_assert(FLOW_SLICE_MIN_NS < FLOW_SLICE_ULL_NS &&
+	FLOW_SLICE_ULL_NS < FLOW_SLICE_LL_NS &&
+	FLOW_SLICE_LL_NS < FLOW_SLICE_MLL_NS &&
+	FLOW_SLICE_MLL_NS < FLOW_SLICE_NL_NS &&
+	FLOW_SLICE_NL_NS < FLOW_SLICE_ENL_NS &&
+	FLOW_SLICE_ENL_NS < FLOW_SLICE_MAX_NS,
+	"tier order stays 50us to 20ms plus 10us floor");
 /**
  * flow_time_before - test time order with wrap safety.
  * @a: first time in nanos.
@@ -568,20 +649,19 @@ static __always_inline u64 flow_virt_deadline(u64 ve,
 	return flow_sat_add(ve, flow_scaled_delta(request, weight));
 }
 /**
- * flow_fair_vtime - fair queue key from deadline plus virtual time.
+ * flow_edf_key - strict EDF sort key from deadline plus virtual time.
  * @deadline: absolute EDF deadline in nanos, zero for no order.
  * @vd: virtual deadline in nanos, zero for no order.
  *
  * The EDF deadline caps latency while the virtual deadline paces
  * fairness, so urgent tasks still win while hogs fall behind. A zero
  * deadline means no EDF order yet, so the virtual deadline rules. The
- * signed diff picks the earlier time with wrap safety. Kept alongside
- * flow_edf_key as the same strict key by design and this name serves fair
- * voice while the alias serves EDF voice with one shared copy.
+ * signed diff picks the earlier time with wrap safety, so the closest
+ * deadline always wins without a band jump.
  *
  * Returns: earlier of @deadline plus @vd in nanos.
  */
-static __always_inline u64 flow_fair_vtime(u64 deadline,
+static __always_inline u64 flow_edf_key(u64 deadline,
 	u64 vd)
 {
 	if (deadline == 0)
@@ -593,24 +673,6 @@ static __always_inline u64 flow_fair_vtime(u64 deadline,
 	return deadline;
 }
 /**
- * flow_edf_key - strict EDF sort key from deadline plus virtual time.
- * @deadline: absolute EDF deadline in nanos, zero for no order.
- * @vd: virtual deadline in nanos, zero for no order.
- *
- * The strict key is the earlier of the two times with wrap safety,
- * so the closest deadline always wins with no band jump. Intentional
- * alias of flow_fair_vtime kept for EDF voice with one shared copy
- * plus no extra verifier cost and sort-key callers use this name while
- * fair-time callers use the other with the same result.
- *
- * Returns: earlier of @deadline plus @vd in nanos.
- */
-static __always_inline u64 flow_edf_key(u64 deadline,
-	u64 vd)
-{
-	return flow_fair_vtime(deadline, vd);
-}
-/**
  * flow_remaining_ns - saturated time left until the deadline.
  * @deadline: absolute EDF deadline in nanos, zero for no order.
  * @now: current time in nanos.
@@ -618,7 +680,7 @@ static __always_inline u64 flow_edf_key(u64 deadline,
  * Feeds the dynamic slice plus slack display only, never the sort key,
  * so the order stays the strict earlier of deadline plus virtual time.
  * A zero deadline means no order yet, and a past deadline means no
- * time left, so both read zero with no wrap.
+ * time left, so both read zero.
  *
  * Returns: saturated remaining time in nanos.
  */
@@ -638,9 +700,9 @@ static __always_inline u64 flow_remaining_ns(u64 deadline,
  * @avg: burst average in nanos, zero for no history.
  *
  * Isolates the true gap as now minus wait minus burst, so queue plus
- * run never masquerade as sleep. A zero wait plus a wait at or after
- * now plus a burst-covered gap all read zero with wrap safety, so
- * newcomers plus requeues fail open with no stall.
+ * run never look like sleep. A zero wait, a wait at or after now, and a
+ * burst-covered gap all read zero with wrap safety, so newcomers plus
+ * requeues fail open.
  *
  * Returns: sleep time in nanos, zero when unknown.
  */
@@ -722,37 +784,43 @@ static __always_inline u32 flow_slice_miss_hold(u32 cur)
  * @avg: burst average in nanos, zero for no history.
  * @slice: stored slice in nanos, zero for no history.
  *
- * The cost bounds the guarantee with no share shaping. A burst average wins when present, else the stored slice,
- * else the 1ms quantum, so C tracks recent runs with no table walk.
+ * The cost bounds the guarantee with no share shaping. A burst average
+ * wins when present, else the stored slice, else the 1ms quantum, so C
+ * tracks recent runs with no table walk. Caps at the 20ms slice max,
+ * so a throughput burst never underestimates past the 1ms quantum
+ * with no share shaping.
  *
- * Returns: cost in nanos from 10us to 1ms.
+ * Returns: cost in nanos from 10us to 20ms.
  */
 static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
 {
 	if (avg) {
 		if (avg < (u64)FLOW_SLICE_MIN_NS)
 			return (u64)FLOW_SLICE_MIN_NS;
-		if (avg > (u64)FLOW_QUANTUM_NS)
-			return (u64)FLOW_QUANTUM_NS;
+		if (avg > (u64)FLOW_SLICE_MAX_NS)
+			return (u64)FLOW_SLICE_MAX_NS;
 		return avg;
 	}
 	if (slice) {
 		if ((u64)slice < (u64)FLOW_SLICE_MIN_NS)
 			return (u64)FLOW_SLICE_MIN_NS;
-		if ((u64)slice > (u64)FLOW_QUANTUM_NS)
-			return (u64)FLOW_QUANTUM_NS;
+		if ((u64)slice > (u64)FLOW_SLICE_MAX_NS)
+			return (u64)FLOW_SLICE_MAX_NS;
 		return (u64)slice;
 	}
 	return (u64)FLOW_QUANTUM_NS;
 }
 /**
  * flow_red_tol - guarantee tolerance for one task.
- * @is_crit: true when latency critical with no tolerance.
+ * @is_crit: true when latency-critical via the unified latency test
+ * with no tolerance, false for hard batch.
  *
- * Tolerance aids the guarantee only with no order shaping. Critical tasks keep zero, hard tasks
- * keep 64us, so the check stays strict for urgent work.
+ * Tolerance aids the guarantee only with no order shaping. Hard batch
+ * keeps 64us while latency-critical keeps zero, so the check stays
+ * strict for urgent work with no separate class past latency. Admit
+ * plus reclaim share this fixed path, so both agree.
  *
- * Returns: tolerance in nanos, zero for critical.
+ * Returns: tolerance in nanos, zero for latency-critical.
  */
 static __always_inline u64 flow_red_tol(bool is_crit)
 {
@@ -792,8 +860,9 @@ static __always_inline s64 flow_red_residual(u64 deadline, u64 now,
  * @resid: signed residual in nanos.
  * @tol: guarantee tolerance in nanos, zero for critical.
  *
- * The exceed marks lateness with no share shaping. A residual plus tolerance at or past zero means no
- * exceed, else the negated sum bounds the needed reclaim.
+ * The exceed marks lateness without shaping shares. A residual plus
+ * tolerance at or past zero means no exceed, else the negated sum bounds
+ * the needed reclaim.
  *
  * Returns: exceeding time in nanos, zero when schedulable.
  */
@@ -807,13 +876,15 @@ static __always_inline u64 flow_red_exceed(s64 resid, u64 tol)
 /**
  * flow_red_value - admission value from weight plus critical.
  * @weight: task base share, zero maps to 128.
- * @is_crit: true marks critical with maximum value.
+ * @is_crit: true marks latency-critical via the unified latency test
+ * with maximum value, false for hard batch.
  *
- * Value orders the reject queue with no vruntime shaping. Critical tasks hold the top value with no reject, hard
- * tasks hold the clamped base share, so the greatest value reclaims
- * first with no storm.
+ * Value orders the reject queue without shaping vruntime.
+ * Latency-critical holds the top value while hard batch holds the
+ * clamped base share, so the greatest value reclaims first with no
+ * separate class past latency.
  *
- * Returns: value from 1 to 16384, top for critical.
+ * Returns: value from 1 to 16384, top for latency-critical.
  */
 static __always_inline u32 flow_red_value(u32 weight, bool is_crit)
 {
@@ -909,6 +980,23 @@ static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
 	return (u32)s;
 }
 /**
+ * flow_adapt_deadband - quiet band for one base slice.
+ * @base: clamped base slice in nanos from 10us to 1ms.
+ *
+ * Takes the larger of base shifted right by DEADBAND_SHIFT plus the 8us
+ * floor, so small slices keep a real band while large slices scale with
+ * shifts only and no divide.
+ *
+ * Returns: deadband in nanos.
+ */
+static __always_inline u64 flow_adapt_deadband(u64 base)
+{
+	u64 band = base >> FLOW_ADAPT_DEADBAND_SHIFT;
+	if (band < (u64)FLOW_ADAPT_DEADBAND_MIN_NS)
+		return (u64)FLOW_ADAPT_DEADBAND_MIN_NS;
+	return band;
+}
+/**
  * flow_adapt_prop - proportional slice from exceed plus slack with clamp.
  * @cur: stored slice in nanos, zero inherits the quantum.
  * @exceed: lateness in nanos, now minus expiring deadline else zero.
@@ -916,13 +1004,17 @@ static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
  *
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
  * holds. An exceed shrinks by exceed shifted right by SHIFT, a slack
- * grows by slack shifted right by SHIFT, each capped at 256us with
- * shifts only and no divide. Clamps to 10us plus 1ms, so one step never stalls nor
- * holds the CPU. An on-time stop with both zero holds the clamped slice.
- * Exceed wins when both hold with no wrap. Virtual time stays untouched,
- * RED never writes the slice, and the caller keeps the carry gate first
- * on the same expiring deadline. Latency callers re-clamp the result to
- * 100us past the 256us step, so one shift never holds past the cap.
+ * grows by slack shifted right by SHIFT, each capped at 1ms plus half
+ * of base then halved once more by the damp shift, so one step moves
+ * at most one quarter base with shifts only. Exceed plus slack at or
+ * below the proportional deadband hold the clamped slice with no hunt,
+ * so timer jitter never rings. Clamps to 10us plus 1ms, so one step
+ * never stalls nor holds the CPU. An on-time stop with both zero holds
+ * the clamped slice. Exceed wins when both hold. Virtual time
+ * stays untouched, RED never writes the slice, and the caller keeps the
+ * carry gate first on the same expiring deadline. Latency callers re-clamp
+ * the result to 100us past the 1ms step, so one shift never holds past
+ * the cap.
  *
  * Returns: adapted slice in nanos from 10us to 1ms.
  */
@@ -930,12 +1022,23 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 	u64 slack)
 {
 	u64 base = (u64)flow_slice_inherit(cur);
+	u64 band = flow_adapt_deadband(base);
 	u64 step;
 	u64 nxt;
 	if (exceed) {
+		if (exceed <= band) {
+			if (base < (u64)FLOW_SLICE_MIN_NS)
+				return (u32)FLOW_SLICE_MIN_NS;
+			if (base > (u64)FLOW_QUANTUM_NS)
+				return (u32)FLOW_QUANTUM_NS;
+			return (u32)base;
+		}
 		step = exceed >> FLOW_ADAPT_PROP_SHIFT;
 		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
 			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
+		if (step > (base >> 1))
+			step = base >> 1;
+		step >>= FLOW_ADAPT_DAMP_SHIFT;
 		if (step == 0) {
 			if (base < (u64)FLOW_SLICE_MIN_NS)
 				return (u32)FLOW_SLICE_MIN_NS;
@@ -953,9 +1056,19 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 		return (u32)nxt;
 	}
 	if (slack) {
+		if (slack <= band) {
+			if (base < (u64)FLOW_SLICE_MIN_NS)
+				return (u32)FLOW_SLICE_MIN_NS;
+			if (base > (u64)FLOW_QUANTUM_NS)
+				return (u32)FLOW_QUANTUM_NS;
+			return (u32)base;
+		}
 		step = slack >> FLOW_ADAPT_PROP_SHIFT;
 		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
 			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
+		if (step > (base >> 1))
+			step = base >> 1;
+		step >>= FLOW_ADAPT_DAMP_SHIFT;
 		if (step == 0) {
 			if (base < (u64)FLOW_SLICE_MIN_NS)
 				return (u32)FLOW_SLICE_MIN_NS;
@@ -982,11 +1095,10 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
  *
  * Keeps the unused quantum remainder as quantum minus delta with clamp
  * to 10us plus 1ms through the adapt bounds, so a tiny remainder never
- * floors below the slice minimum with no zero slice. Uses the fixed
- * 1ms quantum, not the stored slice, so short bursts carry the true
- * unused quantum with no virtual change. Callers gate on runnable plus
- * short plus latency-critical plus no wall miss, so only short bursts
- * carry with no virtual change.
+ * floors below the slice minimum. Uses the fixed 1ms quantum, not the
+ * stored slice, so short bursts carry the true unused quantum without
+ * changing virtual time. Callers gate on runnable, short, and
+ * latency-critical without a wall miss, so only short bursts carry.
  *
  * Returns: carry slice in nanos from 10us to 1ms.
  */
@@ -1012,14 +1124,13 @@ static __always_inline u32 flow_carry_for(u64 delta)
  *
  * Keeps occ_end minus now with occ_end at start plus the stored slice,
  * clamped to 10us plus 100us for latency else 1ms, so a preempted head
- * resumes with its leftover with no extra hold. A bad start plus
- * a saturated end falls back to the inherited slice, while a past
- * end floors to the minimum, so no zero slice runs with wrap-safe order.
- * The TAIL gate lives in the caller as delta plus 100us below cur
- * with history plus no wall miss, so this helper keeps no tail check
- * and only preempt-like early yields resume with no virtual
- * change and no extra map. Equality fails closed and floors, so a
- * latency head at the 100us cap never resumes past the equal tail.
+ * resumes with its leftover. A bad start or a saturated end falls back
+ * to the inherited slice, while a past end floors to the minimum with
+ * wrap-safe order. The tail check lives in the caller as delta plus 100us
+ * below cur with history and no wall miss, so this helper keeps no tail
+ * check and only preempt-like early yields resume without changing
+ * virtual time. Equality fails closed and floors, so a latency head at
+ * the 100us cap never resumes past the equal tail.
  *
  * Returns: remaining slice else inherited slice on bad start plus end.
  */
@@ -1068,7 +1179,7 @@ static __always_inline u64 flow_deadline_at(u64 now,
  * flow_task_period - period for one task from hint else default.
  * @hint_us: flat period hint in micros, zero for no hint.
  *
- * A zero hint means no hint, so the default period of 16ms applies.
+ * A zero hint means no hint, so the default period of 80ms applies.
  * The hint converts from micros to nanos with saturation, so a huge
  * hint clamps instead of wrapping to a short period.
  *
@@ -1102,14 +1213,15 @@ static __always_inline u64 flow_pred_clamp(u64 v)
 	return v;
 }
 /**
- * flow_pred_avg - updated burst average with shift 3.
+ * flow_pred_avg - updated burst average with up plus down shifts.
  * @avg: old average in nanos, zero for no history.
  * @delta: new sample in nanos.
  *
  * A zero average means no history, so the first sample sets the
- * average at once. Later samples move one eighth toward the new
- * delta with shifts only, so the verifier keeps no divide. The
- * result clamps to 1ns to 1s, so a spike never wraps.
+ * average at once. Rises move one eighth with UP_SHIFT 3 while falls
+ * move one sixteenth with DOWN_SHIFT 4, so bursts grow fast plus decay
+ * slow with shifts only and no divide. The result clamps to 1ns to 1s,
+ * so a spike never wraps.
  *
  * Returns: updated average in nanos.
  */
@@ -1123,28 +1235,28 @@ static __always_inline u64 flow_pred_avg(u64 avg,
 	if (avg == 0)
 		return d;
 	if (d > avg) {
-		diff = (d - avg) >> 3;
+		diff = (d - avg) >> FLOW_PRED_UP_SHIFT;
 		return flow_pred_clamp(flow_sat_add(avg,
 		    diff));
 	}
-	diff = (avg - d) >> 3;
+	diff = (avg - d) >> FLOW_PRED_DOWN_SHIFT;
 	if (diff > avg)
 		return (u64)FLOW_PRED_MIN_NS;
 	return flow_pred_clamp(avg - diff);
 }
 /**
- * flow_pred_dev - updated burst deviation with shift 2.
+ * flow_pred_dev - updated burst deviation with up plus down shifts.
  * @dev: old deviation in nanos, zero for no history.
  * @avg: new average in nanos from flow_pred_avg, zero for no history.
  * @delta: new sample in nanos.
  *
  * Tracks the absolute error between delta and the new average with
- * one quarter steps, so a stable burst keeps a small margin while a
- * ragged burst widens the deadline with no jump. Callers pass the new
- * average from flow_pred_avg, so the margin tracks the fresh mean. A
- * zero deviation means no history, so the first value takes the max of
- * error and new average quarter as the floor. The result clamps the
- * same way with no divide and shifts stay at 2.
+ * widen shift 2 plus narrow shift 3, so a stable burst keeps a small
+ * margin while a ragged burst widens fast with no jump. Callers pass
+ * the new average from flow_pred_avg, so the margin tracks the fresh
+ * mean. A zero deviation means no history, so the first value takes
+ * the max of error and new average quarter as the floor. The result
+ * clamps the same way with no divide.
  *
  * Returns: updated deviation in nanos.
  */
@@ -1169,24 +1281,25 @@ static __always_inline u64 flow_pred_dev(u64 dev,
 		return err;
 	}
 	if (err > dev) {
-		diff = (err - dev) >> 2;
+		diff = (err - dev) >> FLOW_PRED_DEV_UP_SHIFT;
 		return flow_pred_clamp(flow_sat_add(dev,
 		    diff));
 	}
-	diff = (dev - err) >> 2;
+	diff = (dev - err) >> FLOW_PRED_DEV_DOWN_SHIFT;
 	if (diff > dev)
 		return (u64)FLOW_PRED_MIN_NS;
 	return flow_pred_clamp(dev - diff);
 }
 /**
- * flow_pred_period - predicted period from average plus deviation.
+ * flow_pred_period - predicted period from average plus margin dev.
  * @avg: burst average in nanos, zero for no history.
  * @dev: burst deviation in nanos.
  *
- * A zero average means no history, so the default period of 16ms
- * applies. Later periods add average plus deviation with saturation,
- * so a stable burst keeps a tight deadline while a ragged burst holds
- * margin with no wrap past 1s.
+ * A zero average means no history, so the default period of 80ms
+ * applies. Later periods add average plus deviation plus half deviation
+ * with saturation, so a stable burst keeps a tight deadline while a
+ * ragged burst holds one and a half deviation margin with no wrap past
+ * 1s and shifts only.
  *
  * Returns: predicted period in nanos.
  */
@@ -1194,9 +1307,12 @@ static __always_inline u64 flow_pred_period(u64 avg,
 	u64 dev)
 {
 	u64 sum;
+	u64 margin;
 	if (avg == 0)
 		return (u64)FLOW_PERIOD_NS;
+	margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	sum = flow_sat_add(avg, dev);
+	sum = flow_sat_add(sum, margin);
 	if (sum == (u64)~0ULL)
 		return (u64)FLOW_PRED_MAX_NS;
 	return flow_pred_clamp(sum);
@@ -1209,7 +1325,7 @@ static __always_inline u64 flow_pred_period(u64 avg,
  * @hint_us: flat period hint in micros, zero for no hint.
  *
  * A zero average means no history, so the hint period applies with
- * the default of 16ms when the hint is zero. Later wakeups add the
+ * the default of 80ms when the hint is zero. Later wakeups add the
  * predicted period with saturation, so a huge now clamps instead of
  * wrapping to the front. Fair order via kernel priority queue holds
  * the earlier of this deadline plus the virtual deadline, so the
@@ -1233,10 +1349,10 @@ static __always_inline u64 flow_pred_deadline(u64 now,
  * @dev: burst deviation in nanos.
  *
  * A zero average means no history, so the task counts as batch with
- * probation and no stall. Later tasks add average plus deviation with
- * saturation, so a short predicted burst within one quantum stays
- * critical while a long burst paces at slice expiry. Uses the quantum
- * with no new map plus no new queue plus no knob.
+ * probation. Later tasks add average plus deviation plus half deviation
+ * margin with saturation, so a short predicted burst within one quantum
+ * stays critical while a long burst paces at slice expiry. Uses the
+ * quantum without a new map.
  *
  * Returns: true when latency-critical, else false.
  */
@@ -1244,9 +1360,12 @@ static __always_inline bool flow_lat_crit(u64 avg,
 	u64 dev)
 {
 	u64 pred;
+	u64 margin;
 	if (avg == 0)
 		return false;
+	margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	pred = flow_sat_add(avg, dev);
+	pred = flow_sat_add(pred, margin);
 	if (pred == (u64)~0ULL)
 		return false;
 	return pred <= (u64)FLOW_QUANTUM_NS;
@@ -1258,8 +1377,8 @@ static __always_inline bool flow_lat_crit(u64 avg,
  *
  * Like fair.c, the cap paces service, unlike rt.c, no fixed priority
  * holds. A latency task keeps the smaller of the slice plus the 100us
- * cap with no knob, so urgent wakeups rotate each tenth quantum. A
- * non latency task keeps the slice unchanged with no extra write.
+ * cap, so urgent wakeups rotate each tenth quantum. A non latency task
+ * keeps the slice unchanged.
  *
  * Returns: capped slice for latency else @slice.
  */
@@ -1271,15 +1390,80 @@ static __always_inline u32 flow_slice_lat_clamp(u32 slice,
 	return slice;
 }
 /**
+ * flow_classify_latency_tier - tier ceiling from predicted burst.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @is_crit: true forces the ULL ceiling for critical work.
+ *
+ * Like fair.c, the tier paces service, unlike rt.c, no fixed priority
+ * holds. Adds average plus deviation plus half deviation margin with
+ * saturation, so a stable burst keeps a tight tier while a ragged burst
+ * holds margin. Critical work plus a prediction at or below 50us earns
+ * the ULL ceiling, then 100us plus 500us plus 1ms plus 5ms bound LL plus
+ * MLL plus NL plus ENL, else the 20ms ceiling holds throughput. Fresh
+ * waits cap the dynamic slice by this ceiling capped at 1ms, so audio
+ * plus UI plus IPC plus desktop pace tightly with no extra hold, while
+ * bulk still rotates each quantum. Six latency ceilings name burst
+ * sizes apart from five dispatch tiers.
+ *
+ * Returns: tier ceiling in nanos from 50us to 20ms.
+ */
+static __always_inline u32 flow_classify_latency_tier(u64 avg, u64 dev,
+	bool is_crit)
+{
+	u64 margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
+	u64 pred = flow_sat_add(avg, dev);
+	pred = flow_sat_add(pred, margin);
+	if (is_crit || pred <= (u64)FLOW_SLICE_ULL_NS)
+		return (u32)FLOW_SLICE_ULL_NS;
+	if (pred <= (u64)FLOW_SLICE_LL_NS)
+		return (u32)FLOW_SLICE_LL_NS;
+	if (pred <= (u64)FLOW_SLICE_MLL_NS)
+		return (u32)FLOW_SLICE_MLL_NS;
+	if (pred <= (u64)FLOW_SLICE_NL_NS)
+		return (u32)FLOW_SLICE_NL_NS;
+	if (pred <= (u64)FLOW_SLICE_ENL_NS)
+		return (u32)FLOW_SLICE_ENL_NS;
+	return (u32)FLOW_SLICE_MAX_NS;
+}
+/**
+ * flow_slice_tier_cap - cap one dynamic slice by the predicted tier.
+ * @pre: dynamic slice in nanos from the remaining clamp.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @is_lat: true forces the ULL ceiling for critical work.
+ *
+ * Caps the tier at the 1ms quantum, so small bursts pace tightly while
+ * bulk still rotates each quantum with no extra hold. The 5ms plus
+ * 20ms ceilings cap here too, so throughput never holds past one
+ * quantum on fresh waits.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so open plus pinned share the same tier logic with no inline
+ * growth.
+ *
+ * Returns: capped slice in nanos from 10us to 1ms.
+ */
+static __noinline u32 flow_slice_tier_cap(u32 pre, u64 avg, u64 dev,
+	bool is_lat)
+{
+	u32 tier = flow_classify_latency_tier(avg, dev, is_lat);
+	if (tier > (u32)FLOW_QUANTUM_NS)
+		tier = (u32)FLOW_QUANTUM_NS;
+	if (pre > tier)
+		pre = tier;
+	return pre;
+}
+/**
  * flow_lat_deadline - latency deadline from now plus slice plus margin.
  * @now: current time in nanos.
  * @slice: clamped slice in nanos.
  *
  * Takes the larger of the 4ms bound plus slice plus 100us with
  * saturation, then adds now with saturation, so a huge slice never
- * wraps to the front and ns accuracy holds with no micro truncation.
- * Like fair.c, the bound paces order, unlike rt.c, no fixed priority
- * holds. Uses no divide plus no map plus no knob.
+ * wraps to the front and ns accuracy holds. Like fair.c, the bound
+ * paces order, unlike rt.c, no fixed priority holds. Uses shifts without
+ * a divide.
  *
  * Returns: absolute latency deadline in nanos.
  */
@@ -1303,15 +1487,13 @@ static __always_inline u64 flow_lat_deadline(u64 now,
  *
  * Like fair.c, the test paces service, unlike rt.c, no fixed priority
  * holds. Newcomers with no history stay batch with probation, so only
- * trained bursts earn latency. Each signal vetoes only toward batch
- * with quantum-relative bounds plus shifts only plus no divide, so
- * unknown sleep plus clamp plus share fail open with no stall. A
- * predicted burst past one quantum vetoes, a hint period past one
- * quantum vetoes, a short sleep below 20us vetoes, an explicit low
- * clamp below half vetoes, and a light share below 128 vetoes. The
- * sleep floor stays decoupled from the 100us slice cap, so the veto
- * needs only a short nap with no extra hold. All
- * pass keeps latency with no order change.
+ * observed bursts earn latency. Each signal vetoes only toward batch with
+ * quantum-relative bounds using shifts only, so unknown sleep, clamp, and
+ * share fail open. A predicted burst past one quantum vetoes, a hint
+ * period past one quantum vetoes, a short sleep below 20us vetoes, an
+ * explicit low clamp below half vetoes, and a light share below 128
+ * vetoes. The sleep floor stays decoupled from the 100us slice cap, so
+ * the veto needs only a short nap. All pass keeps latency.
  *
  * Returns: true when latency holds, else false for batch.
  */
@@ -1320,10 +1502,13 @@ static __always_inline bool flow_lat_crit_ext(u64 avg,
 	u32 eff_w)
 {
 	u64 pred;
+	u64 margin;
 	u64 hint_ns;
 	if (avg == 0)
 		return false;
+	margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	pred = flow_sat_add(avg, dev);
+	pred = flow_sat_add(pred, margin);
 	if (pred == (u64)~0ULL)
 		return false;
 	if (pred > (u64)FLOW_QUANTUM_NS)
@@ -1362,8 +1547,8 @@ static __always_inline bool flow_lat_crit_ext(u64 avg,
  * Unifies the base predictor plus the extended veto, so every path
  * agrees with RED critical on the same value. Newcomers stay batch
  * with probation through both helpers, so no path needs a separate
- * fail-open case. Like fair.c, the test paces service, unlike rt.c,
- * no fixed priority holds.
+ * fail-open case. Like fair.c, the test paces service, unlike rt.c, no
+ * fixed priority holds.
  *
  * Returns: true when latency holds, else false for batch.
  */
@@ -1381,7 +1566,7 @@ static __always_inline bool flow_is_lat(u64 avg, u64 dev,
  * @hint_us: flat period hint in micros, zero for no hint.
  *
  * Tasks with no state or no history join a tier queue at once with
- * this deadline, so no path needs a tail queue with no wait.
+ * this deadline, so no path needs a tail queue.
  *
  * Returns: absolute deadline in nanos.
  */
@@ -1395,11 +1580,10 @@ static __always_inline u64 flow_fallback_deadline(u64 now,
  * @deadline: absolute deadline in nanos, zero for no order.
  * @now: current time in nanos.
  *
- * Intentional: a zero deadline means no order yet, so the check skips
- * with no count. A time that falls before or on the deadline passes,
- * so only a strictly later time counts a miss with wrap safety. Miss
- * counts stay lifetime with saturation, so promotion latches with no
- * windowed decay.
+ * A zero deadline means no order yet, so the check skips. A time that
+ * falls before or on the deadline passes, so only a strictly later time
+ * counts a miss with wrap safety. Miss counts stay lifetime with
+ * saturation, so promotion latches.
  *
  * Returns: true when missed, else false.
  */
@@ -1466,9 +1650,8 @@ static __always_inline u64 flow_overflow_dsq(void)
  *
  * Local plus node plus machine plus overflow pass, and all other ids
  * fail, so a stale id never moves work. Sparse nodes fold to machine
- * at the caller with no panic, so holes in the node view stay safe.
- * The kernel global queue never passes for wire compat with homeless
- * work in machine.
+ * at the caller, so holes in the node view stay safe. The kernel global
+ * queue never passes for wire compat with homeless work in machine.
  *
  * Returns: true when live, else false.
  */
@@ -1520,4 +1703,91 @@ static __always_inline u32 flow_wrap_idx(u64 base, u32 n)
 		return (u32)(base & ((u64)n - 1ULL));
 	return (u32)(base % (u64)n);
 }
+/* Forward task type for the enqueue tails without pulling kernel headers. */
+/* The BPF build already holds the full task view through common, while */
+/* the host bindings keep this opaque, so the dispatcher still calls with */
+/* no extra include. */
+struct task_struct;
+/**
+ * struct flow_miss_tail - miss-rejoin args for the outlined miss path.
+ * @tctx: task state with vruntime plus deadline plus predictor.
+ * @cpu: live target CPU for the tier rejoin.
+ * @sel: selected CPU hint for the idle kick.
+ * @now: current time in nanos.
+ * @enq_flags: enqueue flags threaded to the reject insert.
+ * @hint: flat period hint in micros, zero for no hint.
+ * @hint_w: hint share with base for neutral.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ *
+ * Bundles the miss state plus hint plus time plus flags, so the outlined
+ * miss path takes one pointer like the pinned plus place plus kick tails
+ * with no stack args and no order change.
+ */
+struct flow_miss_tail {
+	struct flow_task_ctx *tctx;
+	s32 cpu;
+	s32 sel;
+	u64 now;
+	u64 enq_flags;
+	u32 hint;
+	u32 hint_w;
+	u64 avg;
+	u64 dev;
+};
+/**
+ * struct flow_open_tail - open compute args for the outlined open path.
+ * @tctx: task state with vruntime plus weight plus slice.
+ * @deadline: fresh predicted deadline already stored by the caller.
+ * @now: current time in nanos.
+ * @enq_flags: enqueue flags with preempt keeping the stored slice.
+ * @hint: flat period hint in micros, zero for no hint.
+ * @hint_w: hint share with base for neutral.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @is_reenq: true reuses the stored slice with inherit else recomputes.
+ *
+ * Bundles the open state plus deadline plus time plus flags, so the
+ * outlined fresh plus requeue compute takes one pointer with no stack
+ * args and the same order.
+ */
+struct flow_open_tail {
+	struct flow_task_ctx *tctx;
+	u64 deadline;
+	u64 now;
+	u64 enq_flags;
+	u32 hint;
+	u32 hint_w;
+	u64 avg;
+	u64 dev;
+	bool is_reenq;
+};
+/**
+ * struct flow_open_out - open compute out fields for RED plus place plus kick.
+ * @vtime: strict fair time capped at now plus one period.
+ * @pre_slice: dynamic slice before the latency clamp, zero on requeue.
+ * @sleep_ns: true sleep gap read before the wait overwrite.
+ * @is_lat: unified latency for RED plus slice agreement.
+ * @is_fresh: true for fresh waits else false for requeues.
+ *
+ * Carries the fair time plus the RED cost plus the kick sleep in one
+ * struct, so the dispatcher keeps one shared RED admit plus one
+ * eligibility plus one place plus kick with no second compute.
+ */
+struct flow_open_out {
+	u64 vtime;
+	u32 pre_slice;
+	u64 sleep_ns;
+	bool is_lat;
+	bool is_fresh;
+};
+/* Outlined miss-rejoin plus open compute shared by the enqueue dispatcher. */
+/* The miss path rejoins self-contained with RED plus tier plus kick, while */
+/* the open path computes fresh plus requeue into out fields for the shared */
+/* RED plus place plus kick, so the verifier keeps one copy each with no */
+/* inline growth and the same order plus the same counts. */
+static __noinline bool flow_enqueue_miss(struct task_struct *p,
+	const struct flow_miss_tail *t);
+static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
+	struct flow_open_out *out);
 #endif

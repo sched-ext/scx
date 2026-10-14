@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core at 4.8.12.
+ * Flow scheduler BPF core at 4.8.14.
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
- * stats rows, and the perf level rows. Init creates one local queue
- * per CPU plus one shared queue per node plus one machine queue plus
- * one value ordered reject queue, and it fails loudly on over bound counts. Ops
- * split across per logic files with maps plus init plus exit plus the
- * ops table only here. Hotplug needs a restart, and the watchdog stays
- * at 20 seconds.
+ * stats rows, the perf level rows, and the reclaim credit row. Init
+ * creates one local queue per CPU plus one shared queue per node plus
+ * one machine queue plus one value ordered reject queue, and it fails
+ * loudly on over bound counts. Ops split across per logic files with
+ * maps plus init plus exit plus the ops table only here. Hotplug needs
+ * a restart, and the watchdog stays at 20 seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -88,6 +88,12 @@ struct {
 } reclaim_credit_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
+/* Includes run in dependency order with maps plus helpers before */
+/* callers, so stats plus cgroup plus vtime plus weight plus edf come */
+/* first, then placement plus timer plus preempt plus select, then */
+/* enqueue plus dispatch plus lifecycle. Enqueue splits into target plus */
+/* insert plus miss plus open plus kick before the dispatcher, so the */
+/* miss plus open tails share one copy each with no forward use. */
 #include "stats.bpf.c"
 #include "cgroup.bpf.c"
 #include "vtime.bpf.c"
@@ -104,8 +110,9 @@ volatile u64 nr_node_ids;
  * flow_init - create queues plus seed CPU state.
  *
  * Creates one local queue per CPU plus one node queue per node plus
- * one machine queue plus one value ordered reject queue. Seeds per CPU state plus
- * capacity rows, then derives the node count from the seeded view.
+ * one machine queue plus one value ordered reject queue. Seeds per CPU
+ * state plus capacity rows, then derives the node count from the seeded
+ * view.
  * Fails loudly on over bound counts with no partial attach.
  *
  * Returns: 0 on success, negative errno on failure.
@@ -158,6 +165,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (want > (u64)FLOW_MAX_NODES)
 			want = (u64)FLOW_MAX_NODES;
 		nr_node_ids = want;
+		/* Bound the queue count at init, so local plus node plus */
+		/* machine plus reject never passes 1042 with no wrap. */
+		if (n + want + 2 > (u64)FLOW_MAX_DSQS) {
+			scx_bpf_error("dsq count over bound");
+			return -E2BIG;
+		}
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		struct flow_cpu_state *st;

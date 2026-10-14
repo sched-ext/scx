@@ -374,6 +374,7 @@
           RED reclaims:</span>
           <span class="stat-value" id="red-reclaims">0</span>
         </div>
+
       </div>
     </div>
 
@@ -468,10 +469,11 @@
       }).join('');
     }
 
-    /* Summary prose built from the live gauges. */
-    /* The tldr names the running count. The explanation */
-    /* walks joins plus moves plus admission plus misses. */
-    /* Live pid count from the per CPU cards. */
+    /* Summary prose built from the live gauges plus RED plus tiers. */
+    /* The tldr names the running count with RED rejects plus reclaims. */
+    /* The explanation walks joins plus moves plus admission plus misses */
+    /* plus RED plus preempt with fixed 64us tolerance plus 256us Emax and */
+    /* six tiers 50us to 20ms plus 10us floor. Live pid count from the per CPU cards. */
     /* Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
       var n = 0;
@@ -484,7 +486,8 @@
 
     /* Clamped on CPU for display. Caps the raw gauge at the */
     /* online card count so a stale gauge never prints past */
-    /* the live cards. */
+    /* the live cards. The display uses the live card count for */
+    /* consistency with the cards, so a raced gauge never drifts. */
     function shownOnCpu(s, perCpu) {
       var raw = s.on_cpu || 0;
       if (raw < 0) raw = 0;
@@ -514,10 +517,12 @@
       if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet.';
+          'no tasks have been placed yet. RED keeps 64us tolerance ' +
+          'with 256us Emax and six tiers pace 50us to 20ms plus 10us floor.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks.';
+          ' tasks with RED rejects ' + fmt(redrej) +
+          ' and reclaims ' + fmt(redrec) + '.';
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
@@ -530,7 +535,9 @@
           ' and preempt kicks ' + fmt(pkick) +
           ' with skipped ' + fmt(pskip) +
           ' and RED rejects ' + fmt(redrej) +
-          ' with reclaims ' + fmt(redrec) + '.';
+          ' with reclaims ' + fmt(redrec) +
+          ' at fixed 64us tolerance plus 256us Emax with six tiers ' +
+          '50us to 20ms plus 10us floor.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -546,7 +553,9 @@
           ' and preempt kicks ' + fmt(pkick) +
           ' with skipped ' + fmt(pskip) +
           ' and RED rejects ' + fmt(redrej) +
-          ' with reclaims ' + fmt(redrec) + '.';
+          ' with reclaims ' + fmt(redrec) +
+          ' at fixed 64us tolerance plus 256us Emax with six tiers ' +
+          '50us to 20ms plus 10us floor.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -568,7 +577,10 @@
           disp[k] = s[k];
         }
       }
-      disp.on_cpu = shown;
+      /* Display the live card count, so the summary plus the gauge */
+      /* never drift past the cards on a raced poll. The capped gauge */
+      /* stays in the title for diagnosis with no extra read. */
+      disp.on_cpu = live;
       var summary = buildSummary(disp);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
@@ -584,9 +596,9 @@
       el('meta-line').textContent = meta ||
         'per-CPU fair queues, fixed quantum and placement';
 
-      el('on-cpu').textContent = fmt(shown);
+      el('on-cpu').textContent = fmt(live);
       el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
-        ', live cards ' + fmt(live);
+        ', live cards ' + fmt(live) + ', capped ' + fmt(shown);
       el('running-pids').textContent = fmt(live);
       el('uptime').textContent =
         fmtRuntime(s.uptime_ns || 0);

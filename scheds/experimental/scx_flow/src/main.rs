@@ -367,7 +367,7 @@ mod tests {
             crate::config::PERIOD_NS,
             crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64
         );
-        assert_eq!(crate::config::PERIOD_NS, 16_000_000);
+        assert_eq!(crate::config::PERIOD_NS, 80_000_000);
     }
 
     #[test]
@@ -391,6 +391,20 @@ mod tests {
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
             136
         );
+    }
+
+    #[test]
+    fn fixed_red_matches_header() {
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64,
+            crate::config::RED_TOL_NS
+        );
+        assert_eq!(crate::config::RED_TOL_NS, 64_000);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64,
+            crate::config::RED_EMAX_NS
+        );
+        assert_eq!(crate::config::RED_EMAX_NS, 256_000);
     }
 
     #[test]

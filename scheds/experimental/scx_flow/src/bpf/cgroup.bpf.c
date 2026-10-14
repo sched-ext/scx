@@ -148,6 +148,10 @@ static __always_inline void flow_task_hint_weight(
 	}
 }
 /* Init one flat hint row with zero period plus neutral weight. */
+/* Zero period means no hint, so the default 80ms period applies with */
+/* no extra fill and a huge hint still clamps via saturation at the */
+/* period caller. A missing row reads the same, so init plus miss */
+/* agree with no stale hint and the count never wraps. */
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	struct scx_cgroup_init_args *args)
 {
@@ -228,6 +232,10 @@ static __always_inline void flow_share_band(u32 w, u32 *period_us,
 		*weight = b;
 }
 /* Update one flat hint from the share with fixed bands. */
+/* Bands stay at 4ms plus 8ms plus 16ms plus 32ms with shares at 1024 */
+/* plus 256 plus 64 plus 32, so a huge share never fills a huge period */
+/* with no wrap. The period converts with saturation at the caller, so */
+/* a stray row still clamps with no short deadline. */
 void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 	u32 weight)
 {
