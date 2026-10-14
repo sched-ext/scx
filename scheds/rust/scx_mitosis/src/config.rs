@@ -484,6 +484,16 @@ fn collect_cgroups_inner(path: &Path, cgroups: &mut Vec<CgroupEntry>) -> Result<
         return Ok(());
     }
 
+    // Transient cgroups (oneshot services, exiting containers) can disappear
+    // between listing the parent and descending into them. Treat every
+    // NotFound along the walk as "this cgroup is gone" and skip it; the next
+    // resolve sees the tree as it is then.
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+
     cgroups.push(CgroupEntry {
         path: path.to_path_buf(),
         path_string: path.display().to_string(),
@@ -491,9 +501,15 @@ fn collect_cgroups_inner(path: &Path, cgroups: &mut Vec<CgroupEntry>) -> Result<
         cpuset: read_cpuset(path)?,
     });
 
-    for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
-        let entry =
-            entry.with_context(|| format!("reading directory entry in {}", path.display()))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading directory entry in {}", path.display()));
+            }
+        };
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
