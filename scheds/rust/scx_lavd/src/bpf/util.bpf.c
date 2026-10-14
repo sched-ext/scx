@@ -42,6 +42,10 @@ volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
 const volatile bool	no_slice_boost;
+
+/* Cache-aware load balancing. */
+const volatile bool	cache_aware;
+const volatile u32	cache_aware_max_threads = 16;
 const volatile bool	per_cpu_dsq;
 const volatile bool	enable_cpu_bw;
 const volatile bool	is_autopilot_on;
@@ -163,6 +167,33 @@ __hidden
 bool is_permanently_pinned(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1;
+}
+
+/*
+ * is_cache_aware_eligible - decide whether a task participates in cache-aware
+ * LLC domain tracking and placement.
+ *
+ * Exclusions:
+ *   - cache_aware switch is off
+ *   - kernel threads: no user mm, no data locality to exploit
+ *   - CPU-pinned tasks: no placement freedom
+ *   - processes exceeding cache_aware_max_threads: prevents over-aggregating
+ *     large thread pools onto one LLC domain
+ *
+ * Single-threaded processes are NOT excluded: unlike the upstream sched/cache
+ * which targets inter-thread sharing, scx_lavd keeps any task on its warm LLC.
+ */
+bool is_cache_aware_eligible(struct task_struct __arg_trusted *p)
+{
+	if (!cache_aware)
+		return false;
+	if (is_kernel_task(p))
+		return false;
+	if (is_permanently_pinned(p))
+		return false;
+	if (BPF_CORE_READ(p, signal, nr_threads) > (int)cache_aware_max_threads)
+		return false;
+	return true;
 }
 
 __hidden
@@ -463,6 +494,24 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 {
 	struct cpdom_ctx *cpdomc;
 
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+
+	/*
+	 * Cache-aware overhead-gate heartbeat: mark this domain as actively
+	 * tracked so the steal path knows its DSQs may hold tasks carrying a
+	 * preferred-LLC hint. Only tasks that actually carry a hint set the
+	 * heartbeat -- untracked ones contribute nothing to the cache-aware
+	 * steal logic (ca_head_is_home()/steal_wanderer() skip them), so
+	 * they must not keep the gate open either. Read-before-write keeps
+	 * the steady-state cost at a single shared cacheline read. Cleared
+	 * every sys_stat interval in collect_sys_stat(), so the effective
+	 * window is one interval.
+	 */
+	if (cache_aware && cpdomc &&
+	    taskc->preferred_cpdom_id != LAVD_CA_UNSET_CPDOM &&
+	    !READ_ONCE(cpdomc->ca_tracked_active))
+		WRITE_ONCE(cpdomc->ca_tracked_active, true);
+
 	/*
 	 * Route effectively pinned tasks (permanent pinning or
 	 * migrate_disable) to the per-CPU DSQ when pinned_slice_ns is
@@ -472,7 +521,6 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 	if (per_cpu_dsq || (pinned_slice_ns && is_effectively_pinned(taskc)))
 		return cpu_to_dsq(cpuc->cpu_id);
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 	if (cpdomc &&
 	    preemption_vulnerability(taskc->normalized_lat_cri,
 				    taskc->util_est) >= cpdomc->vuln_thresh)

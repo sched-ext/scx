@@ -250,6 +250,13 @@ struct task_ctx {
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+	/*
+	 * Per-task read cache of the process-wide preferred LLC domain.
+	 * LAVD_CA_UNSET_CPDOM when not yet determined. The authoritative
+	 * value lives in mm_ca_map keyed by p->mm, shared across all
+	 * threads of a process.
+	 */
+	u8	preferred_cpdom_id;
 
 	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
 	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
@@ -311,11 +318,55 @@ struct cpdom_ctx {
 	u16	nr_steady_cpus;		    /* count of steady CPUs in this cpdom */
 	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
 
+	/* per-cpdom cache-aware occupancy denominator */
+	u32	ca_total_task_time;		    /* decayed runtime of all cache-aware
+						     * tracked tasks in this domain
+						     * (ns >> 10); the denominator of the
+						     * per-process occupancy ranking,
+						     * decayed every LAVD_CA_EPOCH_NS via
+						     * ca_denom_epoch_ns (same r=0.5
+						     * schedule as the per-mm
+						     * cpdom_runtime[]) */
+	u64	ca_denom_epoch_ns;		    /* last epoch advance of ca_total_task_time */
+	u8	ca_tracked_active;		    /* cache-aware heartbeat: set at enqueue in
+						     * get_target_dsq_id() only by tasks carrying
+						     * a preferred-LLC hint (read-before-write),
+						     * cleared every sys_stat interval in
+						     * collect_sys_stat(); gates the cache-aware
+						     * steal-path logic so it is skipped on
+						     * untracked domains */
+
 	s64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
 	s64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
+
+/*
+ * Test whether the domain has more than @req (in LAVD_SHIFT fixed point,
+ * p2s(x) == x%) of its total capacity still unused. The average wall
+ * utilization sum (per CPU in [0..1024], summed over the domain) is
+ * compared against the total capacity of all online CPUs in the domain
+ * (cap_sum_steady + cap_sum_turb, also in [0..1024] per CPU), so big/little
+ * cores and partially online domains are weighed correctly -- unlike a
+ * per-CPU average utilization check. Cross-multiplied to avoid division:
+ *
+ *   headroom fraction > req/1024
+ *     <=>  avg_util_wall_sum * 1024 < (1024 - req) * cap
+ *
+ * Returns false when capacity statistics are not available yet (cap == 0),
+ * i.e., "no headroom can be proven".
+ */
+static __always_inline bool
+cpdom_headroom_above(struct cpdom_ctx *cpdc, u32 req)
+{
+	u32 cap = cpdc->cap_sum_steady + cpdc->cap_sum_turb;
+	u64 util = cpdc->avg_util_wall_sum;
+
+	if (!cap)
+		return false;
+	return util * LAVD_SCALE < (u64)(LAVD_SCALE - req) * cap;
+}
 
 /*
  * Atomically subtract @amount from the stealee's egress budget. Concurrent
@@ -565,6 +616,25 @@ struct cpu_ctx {
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+/*
+ * Per-process cache-aware scheduling state, stored in mm_ca_map keyed by
+ * the mm_struct pointer.  All threads of the same process share one entry,
+ * matching the per-mm granularity of the upstream sched/cache infrastructure.
+ */
+struct mm_ca_stat {
+	struct bpf_spin_lock	lock;
+	u8	preferred_cpdom_id;			/* LLC domain with highest occupancy */
+	u8	__pad[3];
+	u32	cpdom_runtime[LAVD_CA_MAX_CPDOMS];	/* per-LLC decayed runtime (ns >> 10) */
+	u64	last_epoch_ns;				/* timestamp of the last epoch advance */
+	u64	next_scan_ns;				/* earliest next preferred-LLC scan time;
+							 * check-and-set under the lock so the scan
+							 * runs at most once per epoch per process */
+	u64	last_preferred_run_ns;			/* last time the process ran on its
+							 * preferred domain; drives the
+							 * LAVD_CA_AFFINITY_TIMEOUT_NS expiry */
+};
+
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
 const extern volatile u32	nr_cpu_ids;
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
@@ -577,6 +647,10 @@ extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
 
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
+
+/* Cache-aware load balancing. */
+extern const volatile bool	cache_aware;
+extern const volatile u32	cache_aware_max_threads;
 extern const volatile u8	verbose;
 
 #define debugln(fmt, ...)						\
@@ -925,6 +999,7 @@ struct pick_ctx {
 
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
+void kick_idle_cpu_in_cpdom(struct cpdom_ctx *cpdomc);
 
 bool consume_task(u64 cpdom_id);
 

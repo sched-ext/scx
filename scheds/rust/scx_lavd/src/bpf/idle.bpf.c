@@ -661,6 +661,37 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	 * than task stealing because DSQs are mostly empty (i.e., it is hard
 	 * to steal from a DSQ).
 	 */
+
+	/*
+	 * Cache-aware fast path: if the task has a learned preferred LLC
+	 * different from the sticky domain, and that LLC is currently a
+	 * stealer with an idle CPU and enough headroom, donate the task
+	 * there before falling back to distance-order traversal. Keeps the
+	 * task on its warm LLC when the load balancer would otherwise
+	 * spread it elsewhere.
+	 */
+	if (ctx->taskc) {
+		u8 pref = ctx->taskc->preferred_cpdom_id;
+
+		if (cache_aware && pref != LAVD_CA_UNSET_CPDOM &&
+		    (u64)pref != cpdc->id) {
+			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [pref]);
+			if (mig_cpdc && READ_ONCE(mig_cpdc->is_stealer) &&
+			    cpdom_headroom_above(mig_cpdc, LAVD_CA_PULL_REQ)) {
+				cpu = pick_idle_cpu_at_cpdom(ctx, (s64)pref,
+							     scope, is_idle);
+				if (cpu >= 0) {
+					if (no_fast_lb) {
+						WRITE_ONCE(mig_cpdc->is_stealer, false);
+						WRITE_ONCE(cpdc->is_stealee, false);
+					}
+					*sticky_cpdom = (s64)pref;
+					return cpu;
+				}
+			}
+		}
+	}
+
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
@@ -697,6 +728,76 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	}
 
 	return cpu;
+}
+
+/*
+ * kick_idle_cpu_in_cpdom - kick an idle CPU in @cpdomc so it dispatches
+ * and consumes the shared domain DSQ.
+ *
+ * Motivation: on a burst wakeup that enqueues multiple slices, only the
+ * first few enqueues claim an idle CPU of their own; every later task
+ * lands on the shared domain DSQ with nothing kicked. The busy CPUs of
+ * the domain do not run ops.dispatch() again until their current task
+ * stops, so the queued slices wait even though an idle CPU (an SMT
+ * sibling, or one outside the mask snapshots taken at pick time) may be
+ * available in the same domain. Kicking one idle CPU per enqueue drains
+ * the shared DSQ promptly.
+ *
+ * Precise semantics:
+ *   - The whole mask dance runs under bpf_rcu_read_lock(); the kick is
+ *     issued outside the lock.
+ *   - cpuc_cur->temp_mask (pick_ctx's temp_mask) is used as a draft to
+ *     build domain cpumask n candidate set. It is per-CPU scratch and
+ *     dead at this point: the pick_idle_cpu() call that also uses it has
+ *     already returned.
+ *   - The active set is searched first, then the overflow set.
+ *   - scx_bpf_pick_idle_cpu() is called with flags 0: an idle SMT
+ *     sibling of a busy core is acceptable, we only need one dispatch
+ *     event. The pick claims (reserves) the CPU in the idle-tracking
+ *     mask but does not occupy it: the SCX_KICK_IDLE kick still fires
+ *     because the kernel checks rq->curr (still the idle task) rather
+ *     than the idle mask, and the kicked CPU consumes whatever is on
+ *     the shared DSQ. If it finds nothing, it returns to idle and the
+ *     kernel refreshes the idle mask without an ops.update_idle()
+ *     event -- the documented "reserved and awakened via
+ *     scx_bpf_pick_idle_cpu() + scx_bpf_kick_cpu()" pattern.
+ */
+__hidden
+void kick_idle_cpu_in_cpdom(struct cpdom_ctx *cpdomc)
+{
+	struct bpf_cpumask *cpd_mask, *draft, *active, *ovrflw;
+	struct cpu_ctx *cpuc_cur;
+	s32 cpu = -ENOENT;
+
+	if (!cpdomc || !use_cpdom_dsq())
+		return;
+
+	bpf_rcu_read_lock();
+
+	cpuc_cur = get_cpu_ctx();
+	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdomc->id]);
+	active = active_cpumask;
+	ovrflw = ovrflw_cpumask;
+	draft = cpuc_cur ? cpuc_cur->temp_mask : NULL;
+	if (!cpd_mask || !draft || !active || !ovrflw)
+		goto unlock_out;
+
+	/* First, the active set. */
+	bpf_cpumask_and(draft, cast_mask(cpd_mask), cast_mask(active));
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(draft), 0);
+
+	/* Then, the overflow set. */
+	if (cpu < 0) {
+		bpf_cpumask_and(draft, cast_mask(cpd_mask), cast_mask(ovrflw));
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(draft), 0);
+	}
+
+unlock_out:
+	bpf_rcu_read_unlock();
+
+	/* Kick outside the RCU lock. */
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 __hidden __noinline
@@ -882,6 +983,59 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	/* NOTE: There is at least one idle CPU. */
 
 	/*
+	 * Cache-aware packing-first bias.
+	 *
+	 * Before the SMT/sticky shortcuts spread the wakee across fully
+	 * idle cores, try to PACK it onto any idle CPU (partial SMT cores
+	 * included) inside its preferred LLC domain. Packing rather than
+	 * spreading is deliberate: the process' working set is already
+	 * warm in the preferred LLC, so filling its CPUs first is cheaper
+	 * than preserving whole idle cores elsewhere.
+	 *
+	 * Conditions:
+	 *   - preferred_cpdom_id is set and differs from the sticky domain
+	 *     (otherwise the normal path already heads there)
+	 *   - the task can run on the preferred domain (affinity)
+	 *   - the preferred domain has > LAVD_CA_PULL_REQ headroom
+	 *     (util < 40%), so packing does not overload it
+	 *   - the preferred domain is at least LAVD_CA_IMB_PCT% less loaded
+	 *     than the sticky domain (cross-multiplied load_invr comparison,
+	 *     no division), so the bias cannot fight load balancing
+	 *
+	 * On success, pick_idle_cpu_at_cpdom() sets cpu and *is_idle, and
+	 * sticky_cpdom is retargeted before jumping out. On failure, fall
+	 * through to the normal placement path unchanged.
+	 */
+	if (cache_aware && ctx->taskc) {
+		u8 pref = ctx->taskc->preferred_cpdom_id;
+
+		if (pref != LAVD_CA_UNSET_CPDOM &&
+		    (s64)pref != sticky_cpdom &&
+		    can_run_on_domain(ctx, (s64)pref)) {
+			struct cpdom_ctx *pref_cpdc =
+				MEMBER_VPTR(cpdom_ctxs, [pref]);
+			struct cpdom_ctx *sticky_cpdc =
+				MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]);
+
+			if (pref_cpdc && sticky_cpdc &&
+			    cpdom_headroom_above(pref_cpdc, LAVD_CA_PULL_REQ) &&
+			    (u64)pref_cpdc->load_invr * (100 + LAVD_CA_IMB_PCT) <
+			    (u64)sticky_cpdc->load_invr * 100) {
+				if (!init_idle_ato_masks(ctx, ctx->i_mask))
+					goto err_out;
+				if (!ctx->ia_empty || !ctx->io_empty) {
+					cpu = pick_idle_cpu_at_cpdom(
+						ctx, (s64)pref, 0, is_idle);
+					if (cpu >= 0) {
+						sticky_cpdom = (s64)pref;
+						goto unlock_out;
+					}
+				}
+			}
+		}
+	}
+
+	/*
 	 * If the sticky CPU is fully idle, stay on it.
 	 */
 	if (is_smt_active)
@@ -971,6 +1125,48 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU in either active or overflow set. */
+
+	/*
+	 * Cache-aware preferred domain bias.
+	 *
+	 * If the task's process has built up strong runtime affinity for an
+	 * LLC domain different from the current sticky domain, try to place
+	 * it on a fully-idle core in that preferred domain. This mirrors the
+	 * upstream sched/cache wake_affine path that pulls tasks toward the
+	 * LLC where their process is hottest.
+	 *
+	 * Conditions:
+	 *   - preferred_cpdom_id is set (not LAVD_CA_UNSET_CPDOM)
+	 *   - preferred domain differs from sticky domain (otherwise we're
+	 *     already heading there via the normal path)
+	 *   - task's cpumask allows running on that domain
+	 *   - preferred domain has > LAVD_CA_PULL_REQ headroom (util < 40%),
+	 *     weighed by per-CPU capacity rather than CPU count
+	 *
+	 * Only a fully-idle core is attempted (SCX_PICK_IDLE_CORE); if none
+	 * is available the logic falls through to the normal placement path,
+	 * so there is no regression for non-cache-aware tasks.
+	 */
+	if (cache_aware && ctx->taskc) {
+		u8 pref = ctx->taskc->preferred_cpdom_id;
+
+		if (pref != LAVD_CA_UNSET_CPDOM &&
+		    (s64)pref != sticky_cpdom &&
+		    can_run_on_domain(ctx, (s64)pref)) {
+			struct cpdom_ctx *pref_cpdc =
+				MEMBER_VPTR(cpdom_ctxs, [pref]);
+
+			if (pref_cpdc &&
+			    cpdom_headroom_above(pref_cpdc, LAVD_CA_PULL_REQ)) {
+				cpu = pick_idle_cpu_at_cpdom(ctx, (s64)pref,
+							     SCX_PICK_IDLE_CORE, is_idle);
+				if (cpu >= 0) {
+					sticky_cpdom = pref;
+					goto unlock_out;
+				}
+			}
+		}
+	}
 
 	/*
 	 * So far, it is confirmed that

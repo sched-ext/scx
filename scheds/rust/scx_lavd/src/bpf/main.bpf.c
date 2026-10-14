@@ -197,6 +197,274 @@
 char _license[] SEC("license") = "GPL";
 
 /*
+ * Per-process cache-aware scheduling state.
+ * Keyed by mm_struct pointer (as u64); all threads of the same process share
+ * one entry, matching the per-mm granularity of the upstream sched/cache
+ * infrastructure (Tim Chen, Peter Zijlstra).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, u64);
+	__type(value, struct mm_ca_stat);
+} mm_ca_map SEC(".maps");
+
+/*
+ * Advance the per-domain epoch of the ca_total_task_time denominator,
+ * decay it, and add @delta. Runs outside the mm lock from the stopping
+ * path; concurrent stopping events on the same domain are reconciled with
+ * a CAS on ca_denom_epoch_ns so the shift happens exactly once per epoch.
+ * The non-atomic read-modify-write of the shift may very rarely lose a
+ * concurrent add; the denominator is a heuristic statistic, so this is
+ * acceptable (same rationale as the racy per-CPU stat updates).
+ */
+static void ca_accumulate_domain_time(u8 cur_cpdom, u64 now, u32 delta)
+{
+	struct cpdom_ctx *cpdomc = MEMBER_VPTR(cpdom_ctxs, [cur_cpdom]);
+	u64 last, new_last, n;
+	u32 v;
+
+	if (!cpdomc)
+		return;
+
+	last = READ_ONCE(cpdomc->ca_denom_epoch_ns);
+	if (now > last) {
+		n = (now - last) / LAVD_CA_EPOCH_NS;
+		if (n > 0) {
+			new_last = last + (u64)n * LAVD_CA_EPOCH_NS;
+			if (__sync_bool_compare_and_swap(
+					&cpdomc->ca_denom_epoch_ns,
+					last, new_last)) {
+				if (n > 31)
+					n = 31;
+				v = READ_ONCE(cpdomc->ca_total_task_time);
+				WRITE_ONCE(cpdomc->ca_total_task_time, v >> n);
+			}
+		}
+	}
+
+	if (delta)
+		__sync_fetch_and_add(&cpdomc->ca_total_task_time, delta);
+}
+
+/*
+ * invalid_llc_nr - can this domain host the whole process?
+ *
+ * Mirrors invalid_llc_nr() of the upstream sched/cache infrastructure:
+ * a domain whose total capacity (in LAVD_SCALE units) is smaller than
+ * the full-throttle demand of all threads of the process (nr_threads *
+ * LAVD_SCALE) must not become (or remain) the preferred domain, since
+ * the entire process can never fit there.
+ */
+static bool invalid_llc_nr(struct cpdom_ctx *cpdomc, u64 nr_threads)
+{
+	u32 cap = cpdomc->cap_sum_steady + cpdomc->cap_sum_turb;
+
+	return (u64)nr_threads * LAVD_SCALE > (u64)cap;
+}
+
+/*
+ * update_preferred_cpdom - occupancy-ranked preferred LLC learning.
+ *
+ * Called from update_stat_for_stopping() with the wall-clock slice
+ * duration. Mirrors the epoch-based binary decay of the upstream
+ * sched/cache infrastructure (Tim Chen, Peter Zijlstra):
+ *
+ *   - Every stopping event accumulates run_ns >> 10 into both the
+ *     per-mm counter mcs->cpdom_runtime[] and the per-domain denominator
+ *     cpdom_ctx.ca_total_task_time, which decays on the same 10 ms
+ *     r=0.5 schedule via its own epoch clock.
+ *   - The decay/reselection scan runs at most once per epoch per mm:
+ *     a check-and-set of next_scan_ns under the lock serializes the
+ *     threads of the process so only one pays for the scan; all other
+ *     stopping events merely accumulate.
+ *   - The counters are decayed (shift capped at 31) and the preferred
+ *     domain is reselected by OCCUPANCY: my decayed runtime / the
+ *     domain's total decayed runtime, argmax via cross-multiplication
+ *     (no division). Occupancy, rather than absolute runtime, prefers
+ *     domains the process dominates over busy domains where it is a
+ *     small minority.
+ *   - 2x hysteresis: the candidate must beat the incumbent's occupancy
+ *     2:1 to switch. A zero denominator for the incumbent means its
+ *     ratio is undefined (no tracked activity in its domain anymore),
+ *     so the switch happens unconditionally in that case.
+ *   - LAVD_CA_AFFINITY_TIMEOUT_NS: if the process has not run on its
+ *     preferred domain for 50 ms, the preference is dropped
+ *     immediately rather than waiting for decay + hysteresis.
+ *   - Capacity invalidation (invalid_llc_nr): domains whose total
+ *     capacity cannot host all of the process' threads are excluded
+ *     as candidates, and an incumbent that becomes capacity-invalid
+ *     is dropped.
+ *
+ * The authoritative state lives in mm_ca_map (shared by all threads of
+ * the process). preferred_cpdom_id is written back to task_ctx so the
+ * placement paths can read it without a map lookup.
+ */
+static void update_preferred_cpdom(struct task_struct *p, task_ctx *taskc,
+				   struct cpu_ctx *cpuc, u64 run_ns)
+{
+	struct mm_ca_stat init_val, *mcs;
+	struct cpdom_ctx *cpdomc;
+	u32 n, delta, r, t, best_r, best_t, pref_r, pref_t;
+	u8 cur_cpdom, best_cpdom, pref;
+	u64 mm_key, now, nr_threads;
+
+	mm_key = (u64)BPF_CORE_READ(p, mm);
+	if (!mm_key)
+		return;
+
+	cur_cpdom = cpuc->cpdom_id;
+	if (cur_cpdom >= LAVD_CA_MAX_CPDOMS)
+		return;
+
+	now = bpf_ktime_get_ns();
+	delta = (u32)(run_ns >> 10);
+	/*
+	 * Read before taking the mm_ca_stat lock: BPF_CORE_READ is a
+	 * helper call, and helper calls are not allowed inside a
+	 * bpf_spin_lock critical section.
+	 */
+	nr_threads = (u64)BPF_CORE_READ(p, signal, nr_threads);
+
+	/* Domain-side denominator: decay + accumulate, outside the mm lock. */
+	ca_accumulate_domain_time(cur_cpdom, now, delta);
+
+	mcs = bpf_map_lookup_elem(&mm_ca_map, &mm_key);
+	if (!mcs) {
+		__builtin_memset(&init_val, 0, sizeof(init_val));
+		init_val.preferred_cpdom_id = cur_cpdom;
+		init_val.last_epoch_ns      = now;
+		init_val.next_scan_ns       = now + LAVD_CA_EPOCH_NS;
+		init_val.last_preferred_run_ns = now;
+		bpf_map_update_elem(&mm_ca_map, &mm_key, &init_val, BPF_NOEXIST);
+		taskc->preferred_cpdom_id = cur_cpdom;
+		return;
+	}
+
+	bpf_spin_lock(&mcs->lock);
+
+	/*
+	 * Refresh the affinity-timeout stamp: the process just ran on its
+	 * preferred domain.
+	 */
+	if (mcs->preferred_cpdom_id == cur_cpdom)
+		mcs->last_preferred_run_ns = now;
+
+	/*
+	 * Off-scan stopping event: accumulate only; the next scan-time
+	 * visitor performs the decay and the reselection.
+	 */
+	if (now < mcs->next_scan_ns) {
+		mcs->cpdom_runtime[cur_cpdom] =
+			min(mcs->cpdom_runtime[cur_cpdom] + delta, (u32)U32_MAX);
+		goto sync_out;
+	}
+
+	/* Check-and-set: this thread runs this epoch's scan. */
+	mcs->next_scan_ns = now + LAVD_CA_EPOCH_NS;
+
+	/* Step 1: epoch decay of all per-LLC counters (shift capped at 31). */
+	if (now > mcs->last_epoch_ns) {
+		n = (u32)((now - mcs->last_epoch_ns) / LAVD_CA_EPOCH_NS);
+		if (n > 31)
+			n = 31;
+		if (n > 0) {
+			mcs->last_epoch_ns += (u64)n * LAVD_CA_EPOCH_NS;
+			for (u8 i = 0; i < LAVD_CA_MAX_CPDOMS; i++)
+				mcs->cpdom_runtime[i] >>= n;
+		}
+	}
+
+	/* Step 2: accumulate this slice into the current LLC's counter. */
+	mcs->cpdom_runtime[cur_cpdom] =
+		min(mcs->cpdom_runtime[cur_cpdom] + delta, (u32)U32_MAX);
+
+	pref = mcs->preferred_cpdom_id;
+
+	/*
+	 * Step 3: affinity timeout -- the preferred domain has not been
+	 * exercised by this process for LAVD_CA_AFFINITY_TIMEOUT_NS. The
+	 * process moved away or the domain became unavailable, so drop the
+	 * hint immediately rather than waiting for decay + hysteresis.
+	 */
+	if (pref != LAVD_CA_UNSET_CPDOM &&
+	    (now - mcs->last_preferred_run_ns) >= LAVD_CA_AFFINITY_TIMEOUT_NS)
+		pref = LAVD_CA_UNSET_CPDOM;
+
+	/*
+	 * Step 4: capacity invalidation of the incumbent (invalid_llc_nr).
+	 * A domain that cannot host all of the process' threads -- e.g., a
+	 * small LITTLE domain for a process that grew -- must not remain
+	 * the preferred domain.
+	 */
+	if (pref != LAVD_CA_UNSET_CPDOM) {
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [pref]);
+		if (!cpdomc || !cpdomc->is_valid ||
+		    invalid_llc_nr(cpdomc, nr_threads))
+			pref = LAVD_CA_UNSET_CPDOM;
+	}
+
+	/*
+	 * Step 5: occupancy argmax --
+	 *   argmax_d  cpdom_runtime[d] / ca_total_task_time[d]
+	 * compared via cross-multiplication (r_i * t_j > r_j * t_i).
+	 * Capacity-invalid domains are excluded as candidates.
+	 */
+	best_cpdom = LAVD_CA_UNSET_CPDOM;
+	best_r = 0;
+	best_t = 0;
+	for (u8 i = 0; i < LAVD_CA_MAX_CPDOMS; i++) {
+		r = mcs->cpdom_runtime[i];
+		if (!r)
+			continue;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [i]);
+		if (!cpdomc || !cpdomc->is_valid ||
+		    invalid_llc_nr(cpdomc, nr_threads))
+			continue;
+
+		t = READ_ONCE(cpdomc->ca_total_task_time);
+		if (!t)
+			continue;
+
+		if (best_cpdom == LAVD_CA_UNSET_CPDOM ||
+		    (u64)r * best_t > (u64)best_r * t) {
+			best_cpdom = i;
+			best_r = r;
+			best_t = t;
+		}
+	}
+
+	/* Step 6: apply with 2x hysteresis on occupancy. */
+	if (pref == LAVD_CA_UNSET_CPDOM) {
+		if (best_cpdom != LAVD_CA_UNSET_CPDOM)
+			pref = best_cpdom;
+	} else if (best_cpdom != pref && best_r) {
+		if (pref < LAVD_CA_MAX_CPDOMS) {
+			pref_r = mcs->cpdom_runtime[pref];
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [pref]);
+			pref_t = cpdomc ?
+				 READ_ONCE(cpdomc->ca_total_task_time) : 0;
+		} else {
+			pref_r = 0;
+			pref_t = 0;
+		}
+
+		if (!pref_t ||
+		    (u64)best_r * pref_t > ((u64)pref_r * best_t) << 1)
+			pref = best_cpdom;
+	}
+
+	mcs->preferred_cpdom_id = pref;
+
+sync_out:
+	/* Sync to task_ctx cache for zero-cost reads in the placement paths. */
+	taskc->preferred_cpdom_id = mcs->preferred_cpdom_id;
+
+	bpf_spin_unlock(&mcs->lock);
+}
+
+/*
  * Logical current clock
  */
 u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
@@ -644,6 +912,15 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * for a lock holder to be boosted only once.
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
+
+	/*
+	 * Update per-process preferred LLC domain tracking.
+	 * last_slice_used_wall is already set above, use it as run_ns.
+	 * Gated by is_cache_aware_eligible() to skip kernel threads, pinned
+	 * tasks, and processes with too many threads.
+	 */
+	if (is_cache_aware_eligible(p))
+		update_preferred_cpdom(p, taskc, cpuc, taskc->last_slice_used_wall);
 }
 
 static void update_stat_for_refill(struct task_struct *p,
@@ -977,6 +1254,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 			return;
 		}
+		taskc->cpdom_id = cpuc->cpdom_id;
 
 		/*
 		 * Recompute the deadline: the logical clock may have advanced
@@ -989,6 +1267,19 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
+
+		/*
+		 * Kick an idle CPU in the domain to consume the shared
+		 * domain DSQ. is_idle is never set on this path (the
+		 * LAVD_FLAG_IDLE_CPU_PICKED flag was consumed at the
+		 * original enqueue), so without this unconditional kick
+		 * nothing would be woken up to consume the shared DSQ:
+		 * the REENQ'd task sits there until some busy CPU of the
+		 * domain happens to redispatch.
+		 */
+		kick_idle_cpu_in_cpdom(MEMBER_VPTR(cpdom_ctxs,
+						   [cpuc->cpdom_id]));
+
 		goto kick_cpu_out;
 	}
 
@@ -1116,9 +1407,21 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	account_queued_load(taskc, cpuc->cpdom_id);
 
+	/*
+	 * The task landed on the shared domain DSQ without a claimed idle
+	 * CPU of its own. On a burst wakeup that enqueues multiple slices,
+	 * every such enqueue kicks one more idle CPU in the domain, so the
+	 * shared DSQ is consumed promptly instead of waiting for a busy
+	 * CPU's next dispatch. When is_idle, the picked CPU is already
+	 * claimed and kicked below.
+	 */
+	if (!is_idle)
+		kick_idle_cpu_in_cpdom(MEMBER_VPTR(cpdom_ctxs,
+						   [cpuc->cpdom_id]));
+
 kick_cpu_out:
 	/*
-	 * Kick @cpu so an idle CPU picks up the task.
+	 * Kick the chosen CPU if it was picked idle, so it picks up the task.
 	 */
 	if (is_idle) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -1787,6 +2090,57 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	account_task_runtime(p, taskc, cpuc, now, true);
 
 	/*
+	 * Cache-aware: refresh the per-task read cache of the process-wide
+	 * preferred LLC from mm_ca_map. This covers CPU-bound threads that
+	 * rarely stop (long boosted slices), which would otherwise keep a
+	 * stale copy until their next stopping event, and clears the cache
+	 * when the task is no longer eligible for tracking (e.g., the
+	 * process grew beyond cache_aware_max_threads).
+	 *
+	 * Lockless on purpose: the u8 read cannot tear and the verifier only
+	 * forbids touching the bpf_spin_lock field itself outside the
+	 * critical section, not the neighboring fields. A stale-by-one-epoch
+	 * value is harmless -- it is advisory for placement.
+	 */
+	if (cache_aware) {
+		if (is_cache_aware_eligible(p)) {
+			u64 mm_key = (u64)BPF_CORE_READ(p, mm);
+			struct mm_ca_stat *mcs = mm_key ?
+				bpf_map_lookup_elem(&mm_ca_map, &mm_key) :
+				NULL;
+
+			if (mcs) {
+				u8 pref = READ_ONCE(mcs->preferred_cpdom_id);
+
+				taskc->preferred_cpdom_id = pref;
+				/*
+				 * Refresh the affinity-timeout stamp: the
+				 * task is running on its preferred domain
+				 * right now, so the preference is exercised
+				 * even if the current slice is so long that
+				 * stopping events are rarer than
+				 * LAVD_CA_AFFINITY_TIMEOUT_NS. Unlocked
+				 * store: a racing stale timestamp only
+				 * shifts the expiry by one scan.
+				 *
+				 * Note bpf_ktime_get_ns(), not the rq-clock
+				 * based scx_bpf_now(): the stamp is written
+				 * and read with ktime in
+				 * update_preferred_cpdom(), and the two
+				 * clocks are not interchangeable.
+				 */
+				if (pref == cpuc->cpdom_id)
+					WRITE_ONCE(mcs->last_preferred_run_ns,
+						   bpf_ktime_get_ns());
+			} else {
+				taskc->preferred_cpdom_id = LAVD_CA_UNSET_CPDOM;
+			}
+		} else {
+			taskc->preferred_cpdom_id = LAVD_CA_UNSET_CPDOM;
+		}
+	}
+
+	/*
 	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
 	 * is throttled before executing the task.
 	 */
@@ -2219,6 +2573,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
+	/*
+	 * Always start with UNSET: a fresh task must never inherit a stale
+	 * preferred LLC from the parent task-context copy, since the child
+	 * may run under a different mm (e.g., after exec). The authoritative
+	 * process-wide state lives in mm_ca_map.
+	 */
+	taskc->preferred_cpdom_id = LAVD_CA_UNSET_CPDOM;
 
 	/* Per-CPU warmth is task+CPU private -- never inherit it. */
 	taskc->cpu_heat = 0;
@@ -2259,6 +2620,18 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	if (taskc && p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p))) {
 		unaccount_queued_load(taskc);
 		unaccount_queued_load_pcpu(taskc);
+	}
+
+	/*
+	 * Remove the mm_ca_map entry when the last thread of the process
+	 * exits. nr_threads is checked before the thread is detached, so a
+	 * value of 1 means only this thread remains.
+	 */
+	if (!is_kernel_task(p) &&
+	    BPF_CORE_READ(p, signal, nr_threads) <= 1) {
+		u64 mm_key = (u64)BPF_CORE_READ(p, mm);
+		if (mm_key)
+			bpf_map_delete_elem(&mm_ca_map, &mm_key);
 	}
 
 	/*
