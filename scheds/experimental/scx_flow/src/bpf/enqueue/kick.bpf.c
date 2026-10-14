@@ -28,13 +28,15 @@
 /* Tail args for the Outlined place plus kick with one call each. */
 /* Bundles the live target plus the fair time plus the enqueue time */
 /* plus the insert flags plus the requeue pace plus the hoisted */
-/* eligibility, so each Outlined tail takes one pointer with no stack */
-/* args and the bypass plus the kick share the same single reads. */
+/* eligibility plus the arrival sleep read before the wait overwrite, */
+/* so each Outlined tail takes one pointer with no stack args and the */
+/* bypass plus the kick share the same single reads. */
 struct flow_enqueue_tail {
 	s32 cpu;
 	u64 vtime;
 	u64 now;
 	u64 enq_flags;
+	u64 arr_sleep;
 	bool is_reenq;
 	bool hoist_elig;
 };
@@ -261,7 +263,8 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	occ_run_at = READ_ONCE(octx->run_at);
 	occ_cur = READ_ONCE(octx->slice_ns);
 	/* Occupant latency uses the unified base plus ext with the same */
-	/* occupant lookup, so RED and preempt agree with probation. */
+	/* occupant lookup, so RED and preempt agree with probation. The */
+	/* occupant runs, so sleep stays unknown with fail open to zero. */
 	o_avg = (u64)READ_ONCE(octx->avg_ns);
 	o_dev = (u64)READ_ONCE(octx->dev_ns);
 	{
@@ -284,9 +287,10 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	/* expiry with one skipped preempt, so only latency-critical work */
 	/* with slack within one quantum preempts at once. Eligibility */
 	/* already passed above, so this plus lead plus tail gate the kick. */
-	/* Arrival latency uses the unified base plus ext with the same */
-	/* arrival lookup, so hint plus weight shape the gate with sleep */
-	/* plus uclamp failed open and newcomers stay batch with probation. */
+	/* Arrival latency uses the unified base plus ext with the threaded */
+	/* sleep read before the wait overwrite, so kick agrees with RED */
+	/* plus slice on the same gap with uclamp failed open and newcomers */
+	/* staying batch with probation. */
 	{
 		struct flow_task_ctx *actx = flow_lookup(p);
 		if (actx) {
@@ -299,8 +303,8 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 			if (a_tw == 0)
 				a_tw = (u32)FLOW_WEIGHT_BASE;
 			a_eff = flow_task_effective_weight(a_tw, a_hw);
-			arr_lat = flow_is_lat(a_avg, a_dev, a_hint, 0,
-			    0, a_eff);
+			arr_lat = flow_is_lat(a_avg, a_dev, a_hint,
+			    t->arr_sleep, 0, a_eff);
 			if (!arr_lat) {
 				bpf_task_release(trusted);
 				bpf_rcu_read_unlock();

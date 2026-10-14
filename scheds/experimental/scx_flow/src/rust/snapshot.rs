@@ -166,11 +166,11 @@ impl<'a> Scheduler<'a> {
     /// Counters stay raw with no deltas and the on CPU gauge counts live
     /// pids with the pid view. Costs 3N map reads for N online CPUs: N
     /// for the stats sum via get_metrics plus N for the gauge plus N for
-    /// the cards, with one alloc sized to the online count. SMT comes from the cached init
-    /// flags with no sysfs use on poll and stays display only. Offline
-    /// stays out, so per CPU count matches the cached online count.
-    /// Version plus timestamp plus topology join the counters for the
-    /// page plus the log.
+    /// the cards, with one alloc sized to the online count. SMT comes
+    /// from the cached init flags with no sysfs use on poll and stays
+    /// display only. Offline stays out, so per CPU count matches the
+    /// cached online count. Version plus timestamp plus topology join the
+    /// counters for the page plus the log.
     pub(crate) fn get_web_metrics(&self) -> stats::WebMetrics {
         let mut per_cpu = Vec::with_capacity(self.online_cpus.len());
         for (rank, &id) in self.online_cpus.iter().enumerate() {
@@ -187,8 +187,9 @@ impl<'a> Scheduler<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|v| v.as_nanos().min(u64::MAX as u128) as u64)
             .unwrap_or(0);
+        let metrics = self.get_metrics();
         stats::WebMetrics {
-            stats: self.get_metrics(),
+            stats: metrics,
             per_cpu,
             version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_ns,

@@ -49,9 +49,9 @@ fn jt(v: &Value) -> String {
 }
 
 /* Merged dashboard object for one snapshot. */
-/* Full log with version plus timestamp plus topology plus stats */
-/* plus per CPU. Same object serves stats polling plus snapshot */
-/* download on loopback with no new exposure. */
+/* Full log with version plus timestamp plus topology plus stats plus */
+/* per CPU. Same object serves stats polling plus snapshot download on */
+/* loopback with no new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
@@ -170,6 +170,8 @@ mod tests {
         assert_eq!(v.as_object().map(|o| o.len()), Some(5));
         assert!(v.get("governor").is_none());
         assert!(v.get("energy").is_none());
+        assert!(v.get("ml_accuracy").is_none());
+        assert!(v.get("ml_hits").is_none());
     }
 
     /* Old snapshots without new fields still decode. */
@@ -256,6 +258,8 @@ mod tests {
         assert!(txt.contains("preempt_skipped"));
         assert!(txt.contains("red_rejects"));
         assert!(txt.contains("red_reclaims"));
+        assert!(!txt.contains("ml_hits"));
+        assert!(!txt.contains("ml_accuracy"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("\"smt\":false"));
@@ -297,6 +301,7 @@ mod tests {
         assert_eq!(back.topology, "cpus=4 seeded");
         let v = merged(&snap);
         assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        assert!(v.get("ml_accuracy").is_none());
         assert!(v.get("governor").is_none());
         assert!(v.get("energy").is_none());
     }
@@ -323,7 +328,7 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the fifteen live counters plus uptime. */
+    /* Dashboard shows the sixteen live counters plus uptime. */
     #[test]
     fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
@@ -345,6 +350,8 @@ mod tests {
         assert!(html.contains("id=\"preempt-skipped\""));
         assert!(html.contains("id=\"red-rejects\""));
         assert!(html.contains("id=\"red-reclaims\""));
+        assert!(!html.contains("id=\"ml-hits\""));
+        assert!(!html.contains("id=\"ml-accuracy\""));
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
         assert!(html.contains("uptime_ns"));
@@ -356,6 +363,8 @@ mod tests {
         assert!(html.contains("preempt_skipped"));
         assert!(html.contains("red_rejects"));
         assert!(html.contains("red_reclaims"));
+        assert!(!html.contains("ml_hits"));
+        assert!(!html.contains("ml_accuracy"));
         assert!(!html.contains("over_moves"));
         assert!(!html.contains("over-moves"));
         assert!(!html.contains("\"parks\""));
@@ -391,6 +400,9 @@ mod tests {
         assert!(!html.contains("no-tctx"));
         assert!(!html.contains("id=\"steal\""));
         assert!(!html.contains("id=\"throttled-ns\""));
+        assert!(!html.contains("ml_hits"));
+        assert!(!html.contains("ml_accuracy"));
+        assert!(!html.contains("ml-total"));
     }
 
     /* Dashboard marks the second thread cards with SMT. */
@@ -437,5 +449,25 @@ mod tests {
         assert!(!html.contains("localStorage"));
         assert!(html.contains("/api/stats"));
         assert!(html.contains("slice_ns"));
+    }
+
+    /* Dashboard shows fixed RED bounds with no ML. */
+    #[test]
+    fn dashboard_shows_fixed_red() {
+        let html = include_str!("../../ui/index.html");
+        assert!(!html.contains("id=\"ml-accuracy\""));
+        assert!(!html.contains("ml_accuracy"));
+        assert!(html.contains("id=\"red-rejects\""));
+        assert!(html.contains("id=\"red-reclaims\""));
+        assert!(html.contains("RED rejects"));
+    }
+
+    /* Summary names RED plus tiers in the running line. */
+    #[test]
+    fn dashboard_summary_names_red() {
+        let html = include_str!("../../ui/index.html");
+        assert!(!html.contains("ML accuracy"));
+        assert!(html.contains("Flow is running"));
+        assert!(html.contains("RED rejects"));
     }
 }

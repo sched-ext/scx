@@ -34,7 +34,7 @@ static __always_inline void flow_gate_reject(void)
 		return;
 	__sync_fetch_and_add(&row->gate_rejects, 1);
 }
-/* Count one tier move batch with no lock on the local row. */
+/* Count one tier move batch with saturation on the local row. */
 static __always_inline void flow_account_local(u32 n)
 {
 	struct flow_sched_stats *row;
@@ -43,9 +43,11 @@ static __always_inline void flow_account_local(u32 n)
 	row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->local_moves) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->local_moves, (u64)n);
 }
-/* Count one node tier move batch on the local row. */
+/* Count one node tier move batch with saturation on the local row. */
 static __always_inline void flow_account_node(u32 n)
 {
 	struct flow_sched_stats *row;
@@ -54,9 +56,11 @@ static __always_inline void flow_account_node(u32 n)
 	row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->node_moves) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->node_moves, (u64)n);
 }
-/* Count one machine tier move batch on the local row. */
+/* Count one machine tier move batch with saturation on the local row. */
 static __always_inline void flow_account_machine(u32 n)
 {
 	struct flow_sched_stats *row;
@@ -65,9 +69,11 @@ static __always_inline void flow_account_machine(u32 n)
 	row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->machine_moves) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->machine_moves, (u64)n);
 }
-/* Count one deadline miss on the local row plus the task row. */
+/* Count one deadline miss with saturation on the local row plus task. */
 static __noinline void flow_count_miss(struct flow_task_ctx *tctx)
 {
 	struct flow_sched_stats *row;
@@ -80,33 +86,41 @@ static __noinline void flow_count_miss(struct flow_task_ctx *tctx)
 	row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->misses) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->misses, 1);
 }
-/* Count one admit on the local row with no shared modify. */
+/* Count one admit with saturation on the local row. */
 static __always_inline void flow_count_admit(void)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->admits) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->admits, 1);
 }
-/* Count one insert on the local row with no shared modify. */
+/* Count one insert with saturation on the local row. */
 static __always_inline void flow_count_insert(void)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->inserts) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->inserts, 1);
 }
-/* Count one kick on the local row with no shared modify. */
+/* Count one kick with saturation on the local row. */
 static __always_inline void flow_count_kick(void)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->kicks) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->kicks, 1);
 }
-/* Count one runtime delta on the local row with saturation. */
+/* Count one runtime delta with saturation on the local row. */
 static __always_inline void flow_count_runtime(u64 delta)
 {
 	struct flow_sched_stats *row;
@@ -115,44 +129,57 @@ static __always_inline void flow_count_runtime(u64 delta)
 	row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->total_runtime) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->total_runtime, delta);
 }
-/* Count one requeue or completion on the local row. */
+/* Count one requeue or completion with saturation on the local row. */
 static __always_inline void flow_count_requeue(bool runnable)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
-	if (runnable)
+	if (runnable) {
+		if (READ_ONCE(row->requeues) == (u64)~0ULL)
+			return;
 		__sync_fetch_and_add(&row->requeues, 1);
-	else
+	} else {
+		if (READ_ONCE(row->completions) == (u64)~0ULL)
+			return;
 		__sync_fetch_and_add(&row->completions, 1);
+	}
 }
-/* Count one preempt kick on the local row. */
+/* Count one preempt kick with saturation on the local row. */
 static __always_inline void flow_count_preempt_kick(void)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->preempt_kicks) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->preempt_kicks, 1);
 }
-/* Count one held preempt on the local row with no missing fill. */
+/* Count one held preempt with saturation on the local row. */
 static __always_inline void flow_count_preempt_skip(void)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->preempt_skipped) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->preempt_skipped, 1);
 }
-/* Count one RED overload reject on the local row. */
+/* Count one RED overload reject with saturation on the local row. */
 static __always_inline void flow_count_red_reject(void)
 {
 	struct flow_sched_stats *row = flow_stat_row();
 	if (!row)
 		return;
+	if (READ_ONCE(row->red_rejects) == (u64)~0ULL)
+		return;
 	__sync_fetch_and_add(&row->red_rejects, 1);
 }
-/* Count one RED reclaim move on the local row. */
+/* Count one RED reclaim move with saturation on the local row. */
 static __always_inline void flow_count_red_reclaim(u32 n)
 {
 	struct flow_sched_stats *row;
@@ -160,6 +187,8 @@ static __always_inline void flow_count_red_reclaim(u32 n)
 		return;
 	row = flow_stat_row();
 	if (!row)
+		return;
+	if (READ_ONCE(row->red_reclaims) == (u64)~0ULL)
 		return;
 	__sync_fetch_and_add(&row->red_reclaims, (u64)n);
 }
