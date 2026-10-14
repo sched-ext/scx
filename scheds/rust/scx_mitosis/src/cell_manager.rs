@@ -1184,6 +1184,20 @@ impl CellManager {
         subcells: &[CpuRecipient],
         compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
+        // A cell is floored at one CPU by the cell-level split, but it may
+        // carry more subcells than that. Rather than fail the split, let every
+        // subcell run on the whole cell until it grows again.
+        if domain.weight() < subcells.len() {
+            return Ok(subcells
+                .iter()
+                .map(|subcell| CpuAssignment {
+                    id: subcell.id,
+                    primary: domain.clone(),
+                    borrowable: compute_borrowable.then(Cpumask::new),
+                })
+                .collect());
+        }
+
         Self::compute_cpu_assignments_for(domain, subcells, compute_borrowable)
     }
 
@@ -3677,6 +3691,24 @@ mod tests {
         assert_eq!(assignments.len(), 2);
         assert_eq!(find_assignment(&assignments, 0).primary.weight(), 4);
         assert_eq!(find_assignment(&assignments, 2).primary.weight(), 4);
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_shares_cell_smaller_than_subcell_count() {
+        let domain = cpumask_from_cpulist(32, "5");
+        let recipients = vec![
+            CpuRecipient::unpinned(0, 1.0, &domain),
+            CpuRecipient::unpinned(1, 1.0, &domain),
+        ];
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, true).unwrap();
+
+        assert_eq!(assignments.len(), 2);
+        for id in [0, 1] {
+            let assignment = find_assignment(&assignments, id);
+            assert_eq!(assignment.primary, domain);
+            assert_eq!(assignment.borrowable.as_ref().map(|m| m.weight()), Some(0));
+        }
     }
 
     /// Symmetric pairwise overlaps must produce equal cell sizes regardless
