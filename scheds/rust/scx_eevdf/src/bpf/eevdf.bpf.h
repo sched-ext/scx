@@ -328,6 +328,7 @@ struct pack {
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u64 curr_vprot;		/* protected vruntime, see set_protect_slice() */
+	struct sched_ent __arena *curr_se;	/* its entity, see pack_vref_alone() */
 	s32 cid;		/* the cid whose task clock the pack runs in */
 	struct scx_edq edq;
 };

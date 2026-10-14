@@ -325,6 +325,7 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 		pk->curr_request = task_request(p);
 		weight = task_weight(p, tctx);
 		set_protect_slice(pk, weight);
+		pk->curr_se = &tctx->se;
 		/* Publish a complete current-task snapshot to remote wakeups. */
 		pk->curr_w = weight;
 		cctx->curr_idle = p->policy == SCHED_IDLE;
