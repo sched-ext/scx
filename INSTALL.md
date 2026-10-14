@@ -38,6 +38,54 @@ $ ls -d scheds/rust/scx_* | xargs -I{} cargo install --path {}
 sudo pacman -S scx-scheds
 ```
 
+#### Git Packages (Devario)
+
+[Devario](https://github.com/Seafoam-Labs/devario-custom-packagbuilds) provides
+`scx-scheds-git` and `scx-tools-git` built from `main`, in two repositories
+(enable **only one**):
+
+- `devario-scx` – upstream `main` without experimental backports.
+- `devario-scx-dev` – additionally carries scheduler backports not yet merged
+  upstream; may regress, intended for testers.
+
+Import and locally sign the signing key, with `pacman-key`:
+
+```
+sudo pacman-key --recv-keys BB62CD2725FD8E25558F900A84F94F672976872C --keyserver hkps://keyserver.ubuntu.com
+sudo pacman-key --lsign-key BB62CD2725FD8E25558F900A84F94F672976872C
+```
+
+or with [Shelly](https://github.com/Seafoam-Labs/Shelly-ALPM):
+
+```
+shelly keyring recv BB62CD2725FD8E25558F900A84F94F672976872C --keyserver hkps://keyserver.ubuntu.com
+shelly keyring lsign BB62CD2725FD8E25558F900A84F94F672976872C
+```
+
+Add **one** of the repositories to `/etc/pacman.conf`:
+
+```ini
+# Upstream-based
+[devario-scx]
+SigLevel = Required DatabaseOptional
+Server = https://mirrors.seafoam-labs.org/devario-scx/$arch
+```
+
+```ini
+# Experimental backports
+[devario-scx-dev]
+SigLevel = Required DatabaseOptional
+Server = https://mirrors.seafoam-labs.org/devario-scx-dev/$arch
+```
+
+Then install:
+
+```
+sudo pacman -Syu scx-scheds-git scx-tools-git
+```
+
+Note that `main` is a development branch, not a stable release.
+
 #### Setting Up Dev Environment
 
 In addition to the packages from the previous step, install the following.
