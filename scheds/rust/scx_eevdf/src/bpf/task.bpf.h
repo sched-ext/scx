@@ -302,9 +302,49 @@ static u64 pack_vref(pack_t *pk)
  * point, see eevdf_dispatch(), so the estimate would be running past
  * what it can know.
  */
+/* Project the running entity's vruntime to @now. */
+static u64 curr_vruntime_at(pack_t *pk, u64 now)
+{
+	u64 run_at = pk->curr_run_at;
+
+	if (time_before(now, run_at))
+		now = run_at;
+
+	return pk->curr_v + (now - run_at) * NICE_0_WEIGHT / pk->curr_w;
+}
+
+/*
+ * The reference of @pk when its only member is the entity running there:
+ * that entity's vruntime at @now, which is what avg_vruntime() returns for
+ * a lone entity. The stored reference can sit a unit below it, since every
+ * member that leaves truncates its share away, and a task woken against
+ * it would find the running one over-served by that unit and preempt it.
+ *
+ * The entity is read only once the weights say it may be alone, and it
+ * must still be a member at the pack's whole weight: one that has just
+ * blocked has left already, though it stays published until it stops.
+ */
+static bool pack_vref_alone(pack_t *pk, u64 now, u64 *vref)
+{
+	u64 sum_w = pk->vsum_w;
+	sched_ent_t *se;
+
+	if (!sum_w || pk->curr_w != sum_w)
+		return false;
+	se = pk->curr_se;
+	if (!se || se->vpack != pk || se->vjoin_w != sum_w)
+		return false;
+
+	*vref = curr_vruntime_at(pk, now);
+	return true;
+}
+
 static u64 pack_vref_at(pack_t *pk, u64 now)
 {
-	u64 w, sum_w, delta, dv;
+	u64 w, sum_w, delta, dv, vref;
+
+	if (pack_vref_alone(pk, now, &vref))
+		return vref;
 
 	w = pk->curr_w;
 	sum_w = pk->vsum_w;
@@ -347,10 +387,12 @@ static u64 pack_vref_place(pack_t *pk, u64 now)
 static u64 pack_vref_before_join(pack_t *pk, const sched_ent_t *se,
 				 u64 join_w, u64 now)
 {
-	u64 curr_w, sum_w, delta, dv, projection;
+	u64 curr_w, sum_w, delta, dv, projection, vref;
 
 	if (no_vref_update || se->vpack == pk)
 		return pack_vref_place(pk, now);
+	if (pack_vref_alone(pk, now, &vref))
+		return vref;
 
 	curr_w = pk->curr_w;
 	sum_w = pk->vsum_w;
@@ -408,17 +450,6 @@ static bool curr_owed_service(pack_t *pk, u64 now)
 	dv = delta * NICE_0_WEIGHT / w;
 
 	return !time_after(pk->curr_v + dv, pack_vref_at(pk, now));
-}
-
-/* Project the running entity's vruntime to @now. */
-static u64 curr_vruntime_at(pack_t *pk, u64 now)
-{
-	u64 run_at = pk->curr_run_at;
-
-	if (time_before(now, run_at))
-		now = run_at;
-
-	return pk->curr_v + (now - run_at) * NICE_0_WEIGHT / pk->curr_w;
 }
 
 /*
@@ -705,6 +736,7 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 	pk->curr_request = task_request(p);
 	weight = task_weight(p, tctx);
 	set_protect_slice(pk, weight);
+	pk->curr_se = &tctx->se;
 	pk->curr_w = weight;
 	cctx->curr_idle = p->policy == SCHED_IDLE;
 }
