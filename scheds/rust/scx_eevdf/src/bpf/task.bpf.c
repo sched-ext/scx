@@ -196,9 +196,11 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 		 * nothing left to add here. One that has not stopped yet is
 		 * charged now, or its lag would be taken against a reference
 		 * with its last run projected in, from a vruntime without it.
+		 * It is charged only: keep_charge() would publish it again as
+		 * the cid's running task, which ops.stopping() has withdrawn.
 		 */
 		if (scx_bpf_task_running(p) && cid == scx_bpf_task_cid(p))
-			keep_charge(p, cid, cid_clock_task_owned(cid, now));
+			charge_run(p, tctx, cid, cid_clock_task_owned(cid, now));
 		lag = task_lag_at(p, tctx, pk, now);
 		tctx->se.vlag = lag;
 	}
