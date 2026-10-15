@@ -1,13 +1,13 @@
 [package]
 name = "scx_pandemonium"
-version = "5.23.0"
+version = "5.23.1"
 edition = "2024"
 rust-version = "1.91"
 description = "An adaptive sched_ext scheduler: CoDel sojourn ordering, effective-resistance distance pricing and knobs derived each second from measured per-CPU queue behaviour"
 license = "GPL-2.0-only"
 
 [dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.1.3" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.4" }
 libbpf-rs = { version = "=0.27.2" }
 libc = "0.2"
 anyhow = "1"
@@ -17,4 +17,4 @@ flate2 = "1"
 regex = "1"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.3" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.4" }

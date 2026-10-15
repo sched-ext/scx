@@ -5835,7 +5835,7 @@ dependencies = [
 
 [[package]]
 name = "scx_arena"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "libarena-rs",
@@ -5850,7 +5850,7 @@ dependencies = [
 
 [[package]]
 name = "scx_arena_libarena_selftests"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5863,7 +5863,7 @@ dependencies = [
 
 [[package]]
 name = "scx_arena_selftests"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5875,7 +5875,7 @@ dependencies = [
 
 [[package]]
 name = "scx_beerland"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5893,7 +5893,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpf_compat"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "libbpf-rs 0.27.2",
@@ -5905,7 +5905,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpfland"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5923,7 +5923,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cake"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -5938,7 +5938,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cargo"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bindgen 0.73.2",
@@ -5959,7 +5959,7 @@ dependencies = [
 
 [[package]]
 name = "scx_chaos"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5982,7 +5982,7 @@ dependencies = [
 
 [[package]]
 name = "scx_characterize"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5998,7 +5998,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cosmos"
-version = "1.1.6"
+version = "1.1.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "scx_eevdf"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -6038,7 +6038,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flash"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -6056,7 +6056,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flow"
-version = "4.8.14"
+version = "4.8.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -6077,7 +6077,7 @@ dependencies = [
 
 [[package]]
 name = "scx_forge"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -6095,7 +6095,7 @@ dependencies = [
 
 [[package]]
 name = "scx_forge_agent"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -6111,7 +6111,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -6142,7 +6142,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -6178,7 +6178,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mavd"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -6209,7 +6209,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -6240,7 +6240,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mlfq"
-version = "1.3.11"
+version = "1.3.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -6261,7 +6261,7 @@ dependencies = [
 
 [[package]]
 name = "scx_nitosis"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -6292,7 +6292,7 @@ dependencies = [
 
 [[package]]
 name = "scx_p2dq"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6318,7 +6318,7 @@ dependencies = [
 
 [[package]]
 name = "scx_pandemonium"
-version = "5.23.0"
+version = "5.23.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -6333,7 +6333,7 @@ dependencies = [
 
 [[package]]
 name = "scx_raw_pmu"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "csv",
@@ -6348,7 +6348,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -6363,7 +6363,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -6385,7 +6385,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.4.14"
+version = "2.4.15"
 dependencies = [
  "anyhow",
  "libbpf-rs 0.27.2",
@@ -6397,7 +6397,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6421,7 +6421,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -6438,7 +6438,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6449,7 +6449,7 @@ dependencies = [
 
 [[package]]
 name = "scx_tickless"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "affinity",
  "anyhow",
@@ -6468,7 +6468,7 @@ dependencies = [
 
 [[package]]
 name = "scx_userspace_arena"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "buddy_system_allocator",
@@ -6479,7 +6479,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "bindgen 0.73.2",
@@ -6514,7 +6514,7 @@ dependencies = [
 
 [[package]]
 name = "scxtop"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "blazesym",
@@ -7892,7 +7892,7 @@ checksum = "503041e3dca68fbd5425c04e4c2ad63c57a31da5b6eb13aaafbcaaf2b9cdc74f"
 
 [[package]]
 name = "vmlinux_docify"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "clap",
  "walkdir",
@@ -8513,7 +8513,7 @@ checksum = "a67300977d3dc3f8034dae89778f502b6ba20b269527b3223ba59c0cf393bb8a"
 
 [[package]]
 name = "xtask"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.23.1",
