@@ -829,11 +829,18 @@ static __always_inline u32 scx_only_util(u32 total, u32 steal)
 	return (total > steal) ? (total - steal) : 0;
 }
 
+static __always_inline u64 get_cpufreq_rate_limit_ns(struct cpu_ctx *cpuc);
+
 __hidden
 int calc_cpuperf_target(struct cpu_ctx *cpuc)
 {
 	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
 	u32 step, cur;
+
+	/* Nothing reads the target while schedutil does not govern the CPU. */
+	if (!get_cpufreq_rate_limit_ns(cpuc)) {
+		return 0;
+	}
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
@@ -1027,16 +1034,29 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 /*
  * Read @cpuc's schedutil rate limit into cpufreq_rate_limit_ns[]. This runs
  * for every CPU at init, and for one CPU per sys_stat interval afterwards.
+ *
+ * While the rate limit is 0, the CPU's target is neither computed nor sent.
+ * When schedutil takes the CPU over, compute the target and void the last
+ * send, so the next ops.running() sends it.
  */
 __hidden
 int update_cpufreq_rate_limit(struct cpu_ctx *cpuc)
 {
 	u32 cpu = cpuc->cpu_id;
+	u64 old, new;
 
 	if (cpu >= LAVD_CPU_ID_MAX) {
 		return 0;
 	}
-	WRITE_ONCE(cpufreq_rate_limit_ns[cpu], read_schedutil_rate_limit_ns(cpu));
+
+	old = READ_ONCE(cpufreq_rate_limit_ns[cpu]);
+	new = read_schedutil_rate_limit_ns(cpu);
+	WRITE_ONCE(cpufreq_rate_limit_ns[cpu], new);
+
+	if (!old && new) {
+		calc_cpuperf_target(cpuc);
+		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
+	}
 	return 0;
 }
 
@@ -1094,6 +1114,17 @@ static __always_inline u64 get_cpufreq_rate_limit_ns(struct cpu_ctx *cpuc)
 }
 
 /*
+ * The target to send: normally the CPU's target from its utilization history,
+ * but the running task's demand if that is higher, since the CPU's utilization
+ * takes time to catch up with the task's demand.
+ */
+static __always_inline u32 effective_cpuperf_target(struct cpu_ctx *cpuc)
+{
+	return max(READ_ONCE(cpuc->cpuperf_target),
+		   READ_ONCE(cpuc->cpuperf_floor));
+}
+
+/*
  * The kernel gives no sign of whether a target was applied: schedutil drops a
  * request inside its rate limit without a trace, and nothing retries it. So
  * the target is sent at three points, each for @cpuc's own CPU:
@@ -1105,7 +1136,7 @@ static __always_inline u64 get_cpufreq_rate_limit_ns(struct cpu_ctx *cpuc)
  */
 static __always_inline void commit_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
 {
-	u32 cpuperf_target = READ_ONCE(cpuc->cpuperf_target);
+	u32 cpuperf_target = effective_cpuperf_target(cpuc);
 
 	scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
 	WRITE_ONCE(cpuc->cpuperf_cur, cpuperf_target);
@@ -1113,22 +1144,33 @@ static __always_inline void commit_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
 }
 
 /*
- * Send the target only if it differs from the last one sent. ops.running() is
- * the first point at which a CPU runs a task after its target may have moved:
- * the sys_stat timer computed a new one, or an RT/DL task took the CPU and
- * LAVD_CPUPERF_UNSET voided the last send, since the RT/DL task may have left
- * the frequency anywhere. Sending only on a change keeps the kfunc
- * off the context-switch path the rest of the time.
+ * Raise the floor to @demand, the demand of the task about to run, and send
+ * the target if it rose above the last one sent. ops.running() is the first
+ * point at which a CPU runs a task after its target may have moved: the task
+ * brought its own demand, the sys_stat timer computed a new target, or an
+ * RT/DL task took the CPU and LAVD_CPUPERF_UNSET voided the last send, since
+ * the RT/DL task may have left the frequency anywhere.
+ *
+ * Only a rise is sent from here. The floor changes at nearly every context
+ * switch, so sending every drop would put the kfunc on the context-switch
+ * path. A lower target waits for refresh_cpuperf_target(), at most one rate
+ * limit away.
  */
 __hidden
-int update_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
+int update_cpuperf_target(struct cpu_ctx *cpuc, u32 demand, u64 now)
 {
+	u32 step = LAVD_SCALE >> LAVD_CPUPERF_UP_SHIFT;
+	u32 cur;
+
 	if (!get_cpufreq_rate_limit_ns(cpuc)) {
-		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
 		return 0;
 	}
 
-	if (READ_ONCE(cpuc->cpuperf_cur) != READ_ONCE(cpuc->cpuperf_target)) {
+	WRITE_ONCE(cpuc->cpuperf_floor,
+		   min(round_up(demand, step), LAVD_SCALE));
+
+	cur = READ_ONCE(cpuc->cpuperf_cur);
+	if (cur == LAVD_CPUPERF_UNSET || effective_cpuperf_target(cpuc) > cur) {
 		commit_cpuperf_target(cpuc, now);
 	}
 	return 0;
@@ -1148,7 +1190,6 @@ int refresh_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
 	u64 rate_limit = get_cpufreq_rate_limit_ns(cpuc);
 
 	if (!rate_limit) {
-		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
 		return 0;
 	}
 
@@ -1176,7 +1217,7 @@ int decay_idle_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
 		return 0;
 	}
 
-	if (cur == LAVD_CPUPERF_UNSET || READ_ONCE(cpuc->cpuperf_target) < cur) {
+	if (cur == LAVD_CPUPERF_UNSET || effective_cpuperf_target(cpuc) < cur) {
 		commit_cpuperf_target(cpuc, now);
 	}
 	return 0;

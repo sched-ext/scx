@@ -1724,6 +1724,16 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 }
 
+/*
+ * @taskc's demand on the system-wide capacity scale: its runnable duty
+ * cycle on the invariant clock (util_est), the share of the most capable CPU
+ * at its highest frequency it needs.
+ */
+static __always_inline u32 task_cpuperf_demand(task_ctx *taskc)
+{
+	return min(READ_ONCE(taskc->util_est), LAVD_SCALE);
+}
+
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
@@ -1780,8 +1790,12 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * Send this CPU's performance target if it differs from the last one
 	 * sent: the sys_stat timer may have computed a new one, or an RT/DL
 	 * task may have run here and left the frequency anywhere.
+	 *
+	 * The target normally follows this CPU's utilization history. If @p's
+	 * duty cycle is higher, use it instead, since the CPU's utilization
+	 * takes time to catch up with @p's demand.
 	 */
-	update_cpuperf_target(cpuc, now);
+	update_cpuperf_target(cpuc, task_cpuperf_demand(taskc), now);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -1865,6 +1879,11 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	}
 
 	update_stat_for_stopping(p, taskc, cpuc, runnable);
+
+	/* @p's demand no longer holds up its CPU's target. */
+	if (READ_ONCE(cpuc->cpuperf_floor)) {
+		WRITE_ONCE(cpuc->cpuperf_floor, 0);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
