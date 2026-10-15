@@ -530,7 +530,8 @@ static void vref_leave(sched_ent_t *se)
  */
 static void vref_join(pack_t *pk, sched_ent_t *se, u64 join_w)
 {
-	u64 w;
+	sched_ent_t *curr;
+	u64 w, vref, base;
 	s64 d;
 
 	se->vjoin_w = join_w;
@@ -543,8 +544,25 @@ static void vref_join(pack_t *pk, sched_ent_t *se, u64 join_w)
 	 * reference, which is what the average of one is.
 	 */
 	w = __sync_fetch_and_add(&pk->vsum_w, join_w);
-	d = (s64)(se->vruntime - pk->vref);
-	__sync_fetch_and_add(&pk->vref, vdiv((s64)join_w * d, w + join_w));
+	vref = pk->vref;
+	/*
+	 * A pack whose only member is the entity running there has that
+	 * entity's vruntime as its average, and pack_vref_alone() places
+	 * against it. The stored reference can have drifted from it by the
+	 * truncation of every join and leave since the pack last emptied, and
+	 * a join against that would hand the drift to the joining entity as
+	 * lag. Join against the member's vruntime instead, as far as it has
+	 * been folded in, which also drops the drift.
+	 */
+	curr = pk->curr_se;
+	if (w && pk->curr_w == w && curr && curr != se && curr->vpack == pk &&
+	    curr->vjoin_w == w)
+		base = curr->vjoin_v;
+	else
+		base = vref;
+	d = (s64)(se->vruntime - base);
+	__sync_fetch_and_add(&pk->vref,
+			     (s64)(base - vref) + vdiv((s64)join_w * d, w + join_w));
 }
 
 /*
