@@ -700,6 +700,21 @@ static void vref_charge(sched_ent_t *se)
 }
 
 /*
+ * Charge the service @p has taken on @cid since it started running or was
+ * last charged, to its vruntime, its pack and its cgroup's bandwidth, the
+ * way update_curr() does.
+ */
+static void charge_run(struct task_struct *p, task_ctx_t *tctx, s32 cid, u64 now)
+{
+	u64 delta = now - tctx->last_run_at;
+
+	task_bw_charge(tctx, cid, delta);
+	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
+	tctx->last_run_at = now;
+	vref_charge(&tctx->se);
+}
+
+/*
  * Settle up with the task that is keeping @cid across the end of its
  * slice, see keep_running().
  *
@@ -717,18 +732,14 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
-	u64 delta, weight;
+	u64 weight;
 	pack_t *pk;
 
 	if (!tctx)
 		return;
 	pk = task_pack(tctx, cid);
 
-	delta = now - tctx->last_run_at;
-	task_bw_charge(tctx, cid, delta);
-	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
-	tctx->last_run_at = now;
-	vref_charge(&tctx->se);
+	charge_run(p, tctx, cid, now);
 
 	pk->curr_dl = task_dl(p, tctx);
 	pk->curr_v = tctx->se.vruntime;
