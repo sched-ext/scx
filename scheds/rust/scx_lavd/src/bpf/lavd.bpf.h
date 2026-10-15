@@ -480,6 +480,7 @@ struct cpu_ctx {
 	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
 	volatile u32	cpuperf_target;	/* performance target computed at the last sys_stat
 					   interval */
+	volatile u32	cpuperf_floor;	/* demand of the task running here, or 0 */
 	volatile u32	cpuperf_cur;	/* target last sent to the kernel, or
 					   LAVD_CPUPERF_UNSET to force the next commit */
 	volatile u64	cpuperf_commit_clk; /* when the target was last sent */
