@@ -1961,9 +1961,11 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	clear_cpu_idle_state(cpuc, cpuc->cid);
 
 	/*
-	 * Update this CPU's performance target from its utilization.
+	 * Send this CPU's performance target if it differs from the last one
+	 * sent: the sys_stat timer may have computed a new one, or an RT/DL
+	 * task may have run here and left the frequency anywhere.
 	 */
-	update_cpuperf_target(cpuc);
+	update_cpuperf_target(cpuc, now);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -1994,6 +1996,17 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	}
 
 	now = scx_bpf_now();
+
+	/*
+	 * Resend the performance target once per schedutil rate limit, even
+	 * if it did not change. schedutil silently ignores a request that
+	 * arrives inside its rate limit, and the RT/DL/IRQ utilization it
+	 * adds to the target keeps changing, so a single send is not enough.
+	 * Do it before any early return below. @cpuc is @p's CPU, whose rq
+	 * the kernel holds here.
+	 */
+	refresh_cpuperf_target(cpuc, now);
+
 	account_task_runtime(p, taskc, cpuc, now, true);
 
 	/*
@@ -2125,6 +2138,8 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cid)
 	cpuc->prev_task_clk = scx_clock_task(cpuc->kernel_cpu);
 	cpuc->prev_pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 	cpuc->avg_perf_factor = LAVD_SCALE;
+	cpuc->cpuperf_cur = LAVD_CPUPERF_UNSET;
+	cpuc->cpuperf_commit_clk = 0;
 	barrier();
 
 	cpuc->is_online = true;
@@ -2373,6 +2388,18 @@ int BPF_PROG(lavd_sched_switch, bool preempt,
 	 */
 	if (unlikely(next->prio < MAX_RT_PRIO &&
 		     prev->prio >= MAX_RT_PRIO)) {
+		struct cpu_ctx *cpuc;
+
+		/*
+		 * The RT/DL task may leave the frequency anywhere. Only
+		 * invalidate the target here, so that ops.running() sends the
+		 * actual change request when an SCX task runs here again.
+		 */
+		cpuc = get_cpu_ctx();
+		if (cpuc) {
+			WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
+		}
+
 		/* Reenqueue any SCX tasks stranded on the local DSQ. */
 		scx_bpf_reenqueue_local_from_anywhere();
 	}
@@ -2670,7 +2697,8 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->prev_task_clk = scx_clock_task(cpuc->kernel_cpu);
 		cpuc->prev_pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 		cpuc->avg_perf_factor = LAVD_SCALE;
-		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
+		cpuc->cpuperf_cur = LAVD_CPUPERF_UNSET;
+		update_cpufreq_rate_limit(cpuc);
 
 		sum_capacity += cpuc->max_capacity;
 		if (cpuc->is_online)
@@ -2868,6 +2896,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	err = init_per_cpu_ctx(now);
 	if (err)
 		return err;
+	warn_cpufreq_rate_limit_err();
 
 	/*
 	 * Initialize per-CPU DSQs.

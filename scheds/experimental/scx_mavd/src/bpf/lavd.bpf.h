@@ -510,8 +510,12 @@ struct cpu_ctx {
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
 	volatile u32	cpuperf_target;	/* performance target computed at the last sys_stat
-					   interval, committed at ops.running() */
-	u32		cpuperf_cur;	/* CPU's current performance target */
+					   interval */
+	volatile u32	cpuperf_cur;	/* target last sent to the kernel, or
+					   LAVD_CPUPERF_UNSET to force the next commit */
+	volatile u64	cpuperf_commit_clk; /* when the target was last sent */
+	volatile u64	cpufreq_rate_limit_ns; /* schedutil rate limit, see
+						  update_cpufreq_rate_limit() */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
@@ -948,6 +952,9 @@ struct dsq_entry {
 	u64 vtime;	/* head-task vtime, or U64_MAX when this CPU should
 			 * not consume this DSQ (sorts last, skipped). */
 };
+
+/* A cpuperf_cur no target can equal, so the next commit always sends. */
+#define LAVD_CPUPERF_UNSET	((u32)-1)
 
 u64 peek_dsq_vtime(u64 dsq_id);
 void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
