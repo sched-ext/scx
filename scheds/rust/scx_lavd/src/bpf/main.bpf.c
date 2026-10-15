@@ -249,6 +249,15 @@ const volatile u64	lb_low_util_wall = 0;
 const volatile u64	lb_local_dsq_util_wall = 0;
 
 /*
+ * Least completion-time gain, in ns, that justifies a cross-cpdom migration
+ * on big.LITTLE systems. When non-zero, a task whose sticky cpdom the load
+ * balancer has marked overloaded migrates to a neighbor sharing its L3 only if
+ * its estimated completion time there is shorter by more than this. 0 disables
+ * the feature.
+ */
+const volatile u64	xmig_min_gain_ns = 0;
+
+/*
  * Slice time for all tasks when pinned tasks are running on the CPU.
  * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
  * the dispatch logic compares vtimes across DSQs.
@@ -1094,10 +1103,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
-
-		debugln("cpu%d [%d] -- %s:%d -- %s:%d", cpuc->cpu_id,
-			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__,
-			__LINE__);
 	}
 
 	/*
@@ -1876,12 +1881,8 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		struct cpu_ctx *cpuc_pinned =
 			get_cpu_ctx_id(taskc->pinned_cpu_id);
 
-		if (cpuc_pinned) {
+		if (cpuc_pinned)
 			__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
-			debugln("%d [%d] -- %s:%d -- %s:%d", cpuc_pinned->cpu_id,
-				cpuc_pinned->nr_pinned_tasks, p->comm, p->pid,
-				__func__, __LINE__);
-		}
 		taskc->pinned_cpu_id = -ENOENT;
 	}
 
