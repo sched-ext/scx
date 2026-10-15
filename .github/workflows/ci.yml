@@ -216,7 +216,9 @@ jobs:
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
       - name: Check scx_arena package contents
         run: |
-          cargo package --locked --no-verify -p scx_arena
+          # Package the workspace deps too. On a release PR, their bumped
+          # versions aren't on crates.io yet.
+          cargo package --locked --no-verify -p scx_arena -p scx_cargo -p scx_stats -p scx_utils
           tar -tf target/package/scx_arena-*.crate > target/package/scx_arena-files.txt
           grep -q '/bpf/src/arena.bpf.c$' target/package/scx_arena-files.txt
           grep -q '/bpf/include/lib/arena.h$' target/package/scx_arena-files.txt
