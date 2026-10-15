@@ -153,6 +153,9 @@ static void collect_sys_stat(void)
 		c->nr_queued_task += cpdomc->nr_queued_task;
 	}
 
+	/* Refresh one CPU's schedutil rate limit per interval, in turn. */
+	update_next_cpufreq_rate_limit();
+
 	/*
 	 * Collect statistics for each CPU (phase 1).
 	 *
@@ -302,9 +305,12 @@ static void collect_sys_stat(void)
 
 		/*
 		 * Both utilization signals are now up to date, so recompute
-		 * the performance target. ops.running() only commits it.
+		 * the performance target. A busy CPU sends it itself from
+		 * ops.running() and ops.tick(). An idle CPU runs neither, so
+		 * lower its frequency from here as its target decays.
 		 */
 		calc_cpuperf_target(cpuc);
+		decay_idle_cpuperf_target(cpuc, c->now);
 
 		/*
 		 * Calculate domain-pinned task utilization. Clamp both

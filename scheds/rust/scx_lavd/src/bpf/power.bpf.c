@@ -896,22 +896,289 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc)
 	return 0;
 }
 
-__hidden
-int update_cpuperf_target(struct cpu_ctx *cpuc)
-{
-	u32 cpuperf_target = cpuc->cpuperf_target;
+/*
+ * Per-CPU schedutil rate limit, in nanoseconds, as read by
+ * update_cpufreq_rate_limit(): at least 1 under schedutil, and ops.tick()
+ * resends the performance target once per this interval. 0 means the CPU is
+ * not governed by schedutil, so nothing reads the target and lavd does not
+ * send it.
+ */
+u64 cpufreq_rate_limit_ns[LAVD_CPU_ID_MAX];
 
+/*
+ * The CPU's cpufreq policy, and the hook its governor installed for the
+ * scheduler to call on a utilization change. Neither is exported, so both are
+ * weak.
+ */
+extern struct cpufreq_policy *cpufreq_cpu_data __ksym __weak;
+extern struct update_util_data *cpufreq_update_util_data __ksym __weak;
+
+/*
+ * Assumptions below that turned out broken, reported once after init by
+ * warn_cpufreq_rate_limit_err().
+ */
+enum {
+	LAVD_CPUFREQ_ERR_KSYM	= 1 << 0, /* per-CPU cpufreq variables unresolved */
+	LAVD_CPUFREQ_ERR_CORE	= 1 << 1, /* cpufreq or schedutil field missing */
+	LAVD_CPUFREQ_ERR_HOOK	= 1 << 2, /* hook does not lead to the policy */
+};
+
+static u32 cpufreq_rate_limit_err;
+
+static __always_inline u64 cpufreq_rate_limit_broken(u32 err)
+{
+	if (!(READ_ONCE(cpufreq_rate_limit_err) & err)) {
+		__sync_fetch_and_or(&cpufreq_rate_limit_err, err);
+	}
+	return 1;
+}
+
+/*
+ * Read the CPU's schedutil rate limit, or 0 if schedutil does not govern it.
+ * This relies on kernel internals:
+ *
+ * - With schedutil built in, cpufreq_cpu_data and cpufreq_update_util_data
+ *   resolve.
+ * - The cpufreq and schedutil fields read below exist.
+ * - schedutil's hook is the update_util member of its struct sugov_cpu,
+ *   whose sg_policy is the policy's governor_data.
+ *
+ * If one breaks, the CPU resends its target at every tick, as if the rate
+ * limit were 1ns, and the broken assumption is recorded for a warning.
+ */
+static u64 read_schedutil_rate_limit_ns(s32 cpu)
+{
 	/*
-	 * Commit the target computed at the last sys_stat interval. This must
-	 * run on the target CPU itself, since schedutil ignores an update made
-	 * from a CPU outside the policy unless the cpufreq driver allows DVFS
-	 * from any CPU.
+	 * schedutil's governor, once a policy's governor has matched it by
+	 * name. There is only one, so later checks compare the pointer.
 	 */
-	if (cpuc->cpuperf_cur != cpuperf_target) {
-		scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
-		cpuc->cpuperf_cur = cpuperf_target;
+	static struct cpufreq_governor *schedutil_gov;
+	struct cpufreq_policy **policyp, *policy;
+	struct update_util_data **hookp, *hook;
+	struct cpufreq_governor *governor;
+	struct sugov_policy *sg_pol;
+	struct sugov_cpu *sg_cpu;
+	char name[sizeof("schedutil")];
+	s64 delay_ns;
+
+	/* Without schedutil, nothing reads the target. */
+	if (!bpf_core_type_exists(struct sugov_policy)) {
+		return 0;
+	}
+	if (!bpf_ksym_exists(&cpufreq_cpu_data) ||
+	    !bpf_ksym_exists(&cpufreq_update_util_data)) {
+		return cpufreq_rate_limit_broken(LAVD_CPUFREQ_ERR_KSYM);
+	}
+	if (!bpf_core_field_exists(struct cpufreq_policy, governor) ||
+	    !bpf_core_field_exists(struct cpufreq_policy, governor_data) ||
+	    !bpf_core_field_exists(struct cpufreq_governor, name) ||
+	    !bpf_core_field_exists(struct sugov_cpu, update_util) ||
+	    !bpf_core_field_exists(struct sugov_cpu, sg_policy) ||
+	    !bpf_core_field_exists(struct sugov_policy, freq_update_delay_ns)) {
+		return cpufreq_rate_limit_broken(LAVD_CPUFREQ_ERR_CORE);
 	}
 
+	/*
+	 * Whether schedutil governs the CPU is read from the policy, by
+	 * governor name, the same name sysfs shows. A driver that sets the
+	 * policy itself has no governor.
+	 */
+	policyp = bpf_per_cpu_ptr(&cpufreq_cpu_data, cpu);
+	if (!policyp) {
+		return 0;
+	}
+	policy = *policyp;
+	if (!policy) {
+		return 0;
+	}
+	governor = BPF_CORE_READ(policy, governor);
+	if (!governor) {
+		return 0;
+	}
+	if (governor != READ_ONCE(schedutil_gov)) {
+		if (bpf_core_read_str(name, sizeof(name), &governor->name) < 0 ||
+		    bpf_strncmp(name, sizeof(name), "schedutil")) {
+			return 0;
+		}
+		WRITE_ONCE(schedutil_gov, governor);
+	}
+
+	hookp = bpf_per_cpu_ptr(&cpufreq_update_util_data, cpu);
+	if (!hookp) {
+		return 1;
+	}
+	hook = *hookp;
+	if (!hook) {
+		return 0;
+	}
+	sg_cpu = (void *)hook - bpf_core_field_offset(struct sugov_cpu, update_util);
+	sg_pol = BPF_CORE_READ(sg_cpu, sg_policy);
+	if (!sg_pol || (void *)sg_pol != BPF_CORE_READ(policy, governor_data)) {
+		return cpufreq_rate_limit_broken(LAVD_CPUFREQ_ERR_HOOK);
+	}
+
+	delay_ns = BPF_CORE_READ(sg_pol, freq_update_delay_ns);
+	if (delay_ns < 1) {
+		return 1;
+	}
+	return delay_ns;
+}
+
+/*
+ * Read @cpuc's schedutil rate limit into cpufreq_rate_limit_ns[]. This runs
+ * for every CPU at init, and for one CPU per sys_stat interval afterwards.
+ */
+__hidden
+int update_cpufreq_rate_limit(struct cpu_ctx *cpuc)
+{
+	u32 cpu = cpuc->cpu_id;
+
+	if (cpu >= LAVD_CPU_ID_MAX) {
+		return 0;
+	}
+	WRITE_ONCE(cpufreq_rate_limit_ns[cpu], read_schedutil_rate_limit_ns(cpu));
+	return 0;
+}
+
+/*
+ * Refresh the rate limit of the next CPU in turn. Neither a governor switch
+ * nor a rate_limit_us write notifies anyone, so the values must be re-read.
+ * They rarely change, and the read misses on cache lines schedutil writes at
+ * every frequency update, so only one CPU is read per sys_stat interval. A
+ * change is picked up within nr_cpu_ids intervals.
+ */
+__hidden
+int update_next_cpufreq_rate_limit(void)
+{
+	static u32 cpufreq_rate_limit_next;
+	u32 cpu = cpufreq_rate_limit_next;
+	struct cpu_ctx *cpuc;
+
+	if (cpu >= nr_cpu_ids) {
+		cpu = 0;
+	}
+	cpufreq_rate_limit_next = cpu + 1;
+
+	cpuc = get_cpu_ctx_id(cpu);
+	if (cpuc) {
+		update_cpufreq_rate_limit(cpuc);
+	}
+	return 0;
+}
+
+/*
+ * Warn about the assumptions found broken while init read every CPU's rate
+ * limit, so a kernel change does not go unnoticed.
+ */
+__hidden
+int warn_cpufreq_rate_limit_err(void)
+{
+	u32 err = READ_ONCE(cpufreq_rate_limit_err);
+
+	if (err) {
+		bpf_printk("scx_lavd: WARNING: cannot read the schedutil rate limit "
+			   "(err=0x%x), resending the CPU performance target at "
+			   "every tick", err);
+	}
+	return 0;
+}
+
+static __always_inline u64 get_cpufreq_rate_limit_ns(struct cpu_ctx *cpuc)
+{
+	u32 cpu = cpuc->cpu_id;
+
+	if (cpu >= LAVD_CPU_ID_MAX) {
+		return 0;
+	}
+	return READ_ONCE(cpufreq_rate_limit_ns[cpu]);
+}
+
+/*
+ * The kernel gives no sign of whether a target was applied: schedutil drops a
+ * request inside its rate limit without a trace, and nothing retries it. So
+ * the target is sent at three points, each for @cpuc's own CPU:
+ *
+ * - update_cpuperf_target(), from ops.running(), when the target changed;
+ * - refresh_cpuperf_target(), from ops.tick(), periodically whether or not
+ *   it changed;
+ * - decay_idle_cpuperf_target(), from the sys_stat timer, for an idle CPU.
+ */
+static __always_inline void commit_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
+{
+	u32 cpuperf_target = READ_ONCE(cpuc->cpuperf_target);
+
+	scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
+	WRITE_ONCE(cpuc->cpuperf_cur, cpuperf_target);
+	WRITE_ONCE(cpuc->cpuperf_commit_clk, now);
+}
+
+/*
+ * Send the target only if it differs from the last one sent. ops.running() is
+ * the first point at which a CPU runs a task after its target may have moved:
+ * the sys_stat timer computed a new one, or an RT/DL task took the CPU and
+ * LAVD_CPUPERF_UNSET voided the last send, since the RT/DL task may have left
+ * the frequency anywhere. Sending only on a change keeps the kfunc
+ * off the context-switch path the rest of the time.
+ */
+__hidden
+int update_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
+{
+	if (!get_cpufreq_rate_limit_ns(cpuc)) {
+		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
+		return 0;
+	}
+
+	if (READ_ONCE(cpuc->cpuperf_cur) != READ_ONCE(cpuc->cpuperf_target)) {
+		commit_cpuperf_target(cpuc, now);
+	}
+	return 0;
+}
+
+/*
+ * Send the target once per schedutil rate-limit interval, whether or not it
+ * changed. A send that landed inside the rate limit was dropped silently, and
+ * the RT/DL/IRQ load schedutil adds to the target keeps moving, so for as long
+ * as the CPU is busy the target is resent from ops.tick(), much as the fair
+ * class kicks schedutil every tick. Sending more often than the rate limit
+ * would only be dropped.
+ */
+__hidden
+int refresh_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 rate_limit = get_cpufreq_rate_limit_ns(cpuc);
+
+	if (!rate_limit) {
+		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
+		return 0;
+	}
+
+	if (time_delta(now, READ_ONCE(cpuc->cpuperf_commit_clk)) >= rate_limit) {
+		commit_cpuperf_target(cpuc, now);
+	}
+	return 0;
+}
+
+/*
+ * Send an idle CPU's target as it decays. An idle CPU runs neither
+ * ops.running() nor ops.tick(), so its last target would otherwise stay in the
+ * kernel for as long as it idles, and on a cluster sharing one frequency keep
+ * the cluster up. Only an idle online CPU is touched, and only when its target
+ * fell below what was sent (or nothing valid was). If the CPU wakes in
+ * between, its own ops.running() or next tick resends within one interval.
+ */
+__hidden
+int decay_idle_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
+{
+	u32 cur = READ_ONCE(cpuc->cpuperf_cur);
+
+	if (!get_cpufreq_rate_limit_ns(cpuc) || !cpuc->is_online ||
+	    !READ_ONCE(cpuc->idle_start_clk)) {
+		return 0;
+	}
+
+	if (cur == LAVD_CPUPERF_UNSET || READ_ONCE(cpuc->cpuperf_target) < cur) {
+		commit_cpuperf_target(cpuc, now);
+	}
 	return 0;
 }
 

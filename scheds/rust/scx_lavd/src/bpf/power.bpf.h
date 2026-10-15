@@ -23,7 +23,12 @@ int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
 
 int calc_cpuperf_target(struct cpu_ctx *cpuc);
-int update_cpuperf_target(struct cpu_ctx *cpuc);
+int update_cpufreq_rate_limit(struct cpu_ctx *cpuc);
+int update_next_cpufreq_rate_limit(void);
+int warn_cpufreq_rate_limit_err(void);
+int update_cpuperf_target(struct cpu_ctx *cpuc, u64 now);
+int refresh_cpuperf_target(struct cpu_ctx *cpuc, u64 now);
+int decay_idle_cpuperf_target(struct cpu_ctx *cpuc, u64 now);
 
 const volatile u16 *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);
