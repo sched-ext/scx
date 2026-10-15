@@ -676,9 +676,12 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 	/*
 	 * An idle CPU with nothing queued cannot be congested --
 	 * queued_on_cpu() covers every DSQ that is_cpu_congested()
-	 * counts -- so no congestion check is needed on this path.
+	 * counts. The claim is a hint that can be stale (bypass mode
+	 * skips ops.update_idle()), so check the CPU is really idle
+	 * before dispatching into a local DSQ only it drains.
 	 */
-	if (is_cpu_idle && !queued_on_cpu(cpuc))
+	if (is_cpu_idle && !queued_on_cpu(cpuc) &&
+	    is_cpu_idle_now(cpuc->cpu_id))
 		return true;
 
 	/*
@@ -1118,9 +1121,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 kick_cpu_out:
 	/*
-	 * Kick @cpu so an idle CPU picks up the task.
+	 * Kick @cpu if it was claimed idle or is marked idle; a hint
+	 * missed in bypass mode is repaired by the sys_stat resync.
 	 */
-	if (is_idle) {
+	if (is_idle || is_cpu_hinted_idle(cpuc)) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
@@ -1228,11 +1232,9 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 		account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
 
 	/*
-	 * Kick the target CPU if it is idle. Test-and-clear avoids
-	 * waking a CPU that is already busy with another task and
-	 * generating a spurious reschedule IPI.
+	 * Claim @cpu and kick it if it was idle.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(cpu))
+	if (clear_cpu_idle_state(cpuc, cpu))
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	return 0;
 }
@@ -1531,7 +1533,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (!use_cpdom_dsq()) {
 		bpf_rcu_read_unlock();
-		return;
+		goto reassert_idle;
 	}
 
 	/* NOTE: We use per-domain DSQ. */
@@ -1565,7 +1567,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU should go idle, do nothing.
 	 */
 	if (!try_consume)
-		return;
+		goto reassert_idle;
 
 consume_out:
 	/*
@@ -1578,6 +1580,14 @@ consume_out:
 	 * If nothing to run, continue running the previous task.
 	 */
 	consume_prev(prev, taskc_prev, cpuc);
+
+reassert_idle:
+	/*
+	 * An idle-to-idle repick skips ops.update_idle(): restore the hint.
+	 * rq->curr is exact here since this CPU's rq lock is held.
+	 */
+	if (!prev && is_cpu_idle_now(cpu))
+		set_cpu_idle_state(cpuc, cpu);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1750,6 +1760,11 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
+	 * Repair an idle exit missed in bypass mode.
+	 */
+	clear_cpu_idle_state(cpuc, cpuc->cpu_id);
+
+	/*
 	 * Update this CPU's performance target from its utilization.
 	 */
 	update_cpuperf_target(cpuc);
@@ -1908,6 +1923,8 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id)
 	if (!cd_cpumask)
 		goto unlock_out;
 	bpf_cpumask_set_cpu(cpu_id, cd_cpumask);
+
+	set_cpu_idle_state(cpuc, cpu_id);
 unlock_out:
 	bpf_rcu_read_unlock();
 
@@ -1926,13 +1943,30 @@ unlock_out:
 
 static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id)
 {
-	struct bpf_cpumask *cd_cpumask;
+	struct bpf_cpumask *cd_cpumask, *idle_mask;
+	struct cpu_ctx *sib_cpuc;
+	u32 sib;
 
 	bpf_rcu_read_lock();
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
 	if (!cd_cpumask)
 		goto unlock_out;
 	bpf_cpumask_clear_cpu(cpu_id, cd_cpumask);
+
+	clear_cpu_idle_state(cpuc, cpu_id);
+
+	/*
+	 * Mark the surviving idle sibling as fully idle unless claimed.
+	 */
+	if (is_smt_active && cpu_id < LAVD_CPU_ID_MAX) {
+		sib = cpu_sibling[cpu_id];
+		idle_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpuc->cpdom_id]);
+		if (sib < nr_cpu_ids && idle_mask &&
+		    bpf_cpumask_test_cpu(sib, cast_mask(cd_cpumask)) &&
+		    bpf_cpumask_test_cpu(sib, cast_mask(idle_mask)) &&
+		    (sib_cpuc = get_cpu_ctx_id(sib)))
+			set_cpu_idle_state(sib_cpuc, sib);
+	}
 unlock_out:
 	bpf_rcu_read_unlock();
 
@@ -2006,9 +2040,7 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 {
 	/*
-	 * The idle duration is accumulated to calculate the CPU utilization.
-	 * Since SCX_OPS_KEEP_BUILTIN_IDLE is specified, we still rely on the
-	 * default idle core tracking and core selection algorithm.
+	 * Track idle masks and time; dispatch and resync repair missed updates.
 	 */
 
 	struct cpu_ctx *cpuc;
@@ -2033,11 +2065,30 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 		 * per-CPU preemption information should be cleared.
 		 */
 		reset_cpu_preemption_info(cpuc);
+
+		/*
+		 * A dying CPU can enter idle after ops.cpu_offline().
+		 */
+		if (READ_ONCE(cpuc->is_online)) {
+			set_cpu_idle_state(cpuc, cpu);
+
+			/*
+			 * Enqueues that saw the hint off did not kick;
+			 * re-kick if work is queued.
+			 */
+			if (queued_on_cpu(cpuc))
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		}
 	}
 	/*
 	 * The CPU is exiting from the idle state.
 	 */
 	else {
+		/*
+		 * The waker's claim may already have cleared the idle bit.
+		 */
+		clear_cpu_idle_state(cpuc, cpu);
+
 		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			/*
 			 * If idle_start_clk is zero, that means entering into
@@ -2493,22 +2544,6 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->i_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->ia_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->io_mask);
-		if (err)
-			goto unlock_out;
-
-		err = calloc_cpumask(&cpuc->iat_mask);
-		if (err)
-			goto unlock_out;
-
 		cpuc->cpu_id = cpu;
 		cpuc->idle_start_clk = 0;
 		cpuc->lat_cri = 0;
@@ -2563,12 +2598,16 @@ static s32 init_per_cpu_ctx(u64 now)
 	 * Initialize compute domain id.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		struct bpf_cpumask *cd_idle_cpumask, *cd_idle_smtmask;
+
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
-		if (!cpdomc || !cd_cpumask) {
+		cd_idle_cpumask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom_id]);
+		cd_idle_smtmask = MEMBER_VPTR(cpdom_idle_smtmask, [cpdom_id]);
+		if (!cpdomc || !cd_cpumask || !cd_idle_cpumask || !cd_idle_smtmask) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
 			err = -ESRCH;
 			goto unlock_out;
@@ -2603,6 +2642,13 @@ static s32 init_per_cpu_ctx(u64 now)
 				}
 			}
 		}
+
+		/*
+		 * Seed online CPUs as idle; the first resync corrects it.
+		 */
+		bpf_cpumask_copy(cd_idle_cpumask, cast_mask(cd_cpumask));
+		if (is_smt_active)
+			bpf_cpumask_copy(cd_idle_smtmask, cast_mask(cd_cpumask));
 	}
 
 	/*

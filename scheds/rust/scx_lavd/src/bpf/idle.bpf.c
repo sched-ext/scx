@@ -31,20 +31,232 @@ struct sticky_ctx {
 	struct cpu_ctx *cpuc_not_match[2];
 };
 
+/*
+ * Per-domain idle tracking: cpdom_idle_cpumask[] holds each domain's idle
+ * CPUs, cpdom_idle_smtmask[] its fully idle cores. Both are hints, repaired
+ * by ops.running(), ops.dispatch() and the sys_stat resync; a claim clears
+ * the idle bit atomically. Writers test a bit before the atomic RMW, since
+ * test_and_set/clear_bit() lock the cacheline unconditionally.
+ */
 static __always_inline
-bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
+void idle_mask_set(s32 cpu, struct bpf_cpumask *mask)
 {
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
-		ctx->i_mask = idle_cpumask;
-	else {
-		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->i_mask;
-		if (!_i_mask)
-			return false;
-		bpf_cpumask_and(_i_mask, ctx->p->cpus_ptr, idle_cpumask);
-		ctx->i_mask = cast_mask(_i_mask);
+	if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
+		bpf_cpumask_set_cpu(cpu, mask);
+}
+
+static __always_inline
+void idle_mask_clear(s32 cpu, struct bpf_cpumask *mask)
+{
+	if (bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
+		bpf_cpumask_clear_cpu(cpu, mask);
+}
+
+static __always_inline
+bool idle_mask_test_and_clear(s32 cpu, struct bpf_cpumask *mask)
+{
+	return bpf_cpumask_test_cpu(cpu, cast_mask(mask)) &&
+	       bpf_cpumask_test_and_clear_cpu(cpu, mask);
+}
+
+/*
+ * Mark @cpu idle, and its core fully idle if the sibling is idle too.
+ */
+__hidden
+void set_cpu_idle_state(struct cpu_ctx *cpuc, s32 cpu)
+{
+	struct bpf_cpumask *i_mask, *is_mask, *online_mask;
+	u64 cpdom_id = cpuc->cpdom_id;
+	u32 sib;
+
+	i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom_id]);
+	if (!i_mask)
+		return;
+
+	idle_mask_set(cpu, i_mask);
+
+	if (!is_smt_active)
+		return;
+
+	is_mask = MEMBER_VPTR(cpdom_idle_smtmask, [cpdom_id]);
+	online_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+	if (!is_mask || !online_mask || cpu < 0 || cpu >= LAVD_CPU_ID_MAX)
+		return;
+
+	/*
+	 * cpu_sibling[] is static, so an offline sibling is ignored and @cpu
+	 * is a core on its own. Like per-core DSQs, it pairs up to two threads.
+	 */
+	sib = cpu_sibling[cpu];
+	if (sib >= nr_cpu_ids ||
+	    !bpf_cpumask_test_cpu(sib, cast_mask(online_mask))) {
+		idle_mask_set(cpu, is_mask);
+		return;
 	}
-	ctx->i_empty = bpf_cpumask_empty(ctx->i_mask);
-	return true;
+
+	/*
+	 * Racy like the kernel's idle_smt handling: a claim in between leaves
+	 * a stale hint, which the next claim of either CPU clears again.
+	 */
+	if (bpf_cpumask_test_cpu(sib, cast_mask(i_mask))) {
+		idle_mask_set(cpu, is_mask);
+		idle_mask_set(sib, is_mask);
+	}
+}
+
+/*
+ * Drop the fully idle hints of @cpu's core, then claim @cpu by atomically
+ * clearing its idle bit. Returns true if this caller claimed it. The hints
+ * go whether or not the claim succeeds, as in the kernel's
+ * scx_idle_test_and_clear_cpu().
+ */
+__hidden
+bool clear_cpu_idle_state(struct cpu_ctx *cpuc, s32 cpu)
+{
+	struct bpf_cpumask *i_mask, *is_mask, *online_mask;
+	u64 cpdom_id = cpuc->cpdom_id;
+	u32 sib;
+
+	i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom_id]);
+	online_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+	if (!i_mask || !online_mask)
+		return false;
+
+	if (is_smt_active && cpu >= 0 && cpu < LAVD_CPU_ID_MAX &&
+	    (is_mask = MEMBER_VPTR(cpdom_idle_smtmask, [cpdom_id]))) {
+		idle_mask_clear(cpu, is_mask);
+
+		/*
+		 * The online sibling loses its hint too, unless @cpu itself
+		 * went offline: then the sibling is a core on its own.
+		 */
+		sib = cpu_sibling[cpu];
+		if (sib < nr_cpu_ids &&
+		    bpf_cpumask_test_cpu(sib, cast_mask(online_mask)) &&
+		    bpf_cpumask_test_cpu(cpu, cast_mask(online_mask)))
+			idle_mask_clear(sib, is_mask);
+	}
+
+	return idle_mask_test_and_clear(cpu, i_mask);
+}
+
+/*
+ * Try to claim @cpu from its domain's idle mask.
+ */
+__hidden
+bool claim_idle_cpu(s32 cpu)
+{
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+
+	return cpuc && clear_cpu_idle_state(cpuc, cpu);
+}
+
+/*
+ * Is @cpuc's CPU marked idle in its domain?
+ */
+__hidden
+bool is_cpu_hinted_idle(struct cpu_ctx *cpuc)
+{
+	struct bpf_cpumask *i_mask;
+
+	i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpuc->cpdom_id]);
+	return i_mask && bpf_cpumask_test_cpu(cpuc->cpu_id, cast_mask(i_mask));
+}
+
+static __always_inline
+s32 any_idle_cpu_in(const struct cpumask *idle, const struct cpumask *tier)
+{
+	if (tier)
+		return bpf_cpumask_any_and_distribute(idle, tier);
+	return bpf_cpumask_any_distribute(idle);
+}
+
+/*
+ * Pick and claim an idle CPU of @cpdom within @tier_mask (any if NULL),
+ * preferring fully idle cores like the kernel's pick_idle_cpu_in_node().
+ * Without SMT every idle CPU is a fully idle core. A lost claim is retried
+ * and clears the stale hint that caused it.
+ */
+static s32 pick_idle_cpu_in(s64 cpdom, const struct cpumask *tier_mask, u64 scope)
+{
+	struct bpf_cpumask *i_mask, *is_mask;
+	s32 cpu;
+	int i;
+
+	i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom]);
+	is_mask = MEMBER_VPTR(cpdom_idle_smtmask, [cpdom]);
+	if (!i_mask || !is_mask)
+		return -ENOENT;
+
+	bpf_for(i, 0, LAVD_MAX_RETRY) {
+		if (is_smt_active) {
+			cpu = any_idle_cpu_in(cast_mask(is_mask), tier_mask);
+			if (cpu < nr_cpu_ids)
+				goto claim;
+
+			if (scope & SCX_PICK_IDLE_CORE)
+				return -ENOENT;
+		}
+
+		cpu = any_idle_cpu_in(cast_mask(i_mask), tier_mask);
+		if (cpu >= nr_cpu_ids)
+			return -ENOENT;
+
+claim:
+		if (claim_idle_cpu(cpu))
+			return cpu;
+	}
+	return -ENOENT;
+}
+
+/*
+ * Approximate gate for the idle search within one domain. The kfunc scans
+ * only nr_cpu_ids bits, so this is a single cache line up to 512 CPUs, and
+ * it is the line the following pick reads anyway.
+ */
+static bool cpdom_has_idle_cpu(s64 cpdom)
+{
+	struct bpf_cpumask *i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom]);
+
+	return i_mask && !bpf_cpumask_empty(cast_mask(i_mask));
+}
+
+/*
+ * Pick a CPU to kick after bandwidth replenishment, preferring fully idle
+ * cores. Offline CPUs are never marked idle. No idle CPU means every CPU
+ * is busy and reaches ops.dispatch() on its own.
+ */
+static s32 pick_idle_cpu_for_bw(void)
+{
+	int nr_pass = is_smt_active ? 2 : 1;
+	u64 scope, id;
+	s32 cpu;
+	int i;
+
+	bpf_for(i, 0, nr_pass) {
+		scope = i ? 0 : SCX_PICK_IDLE_CORE;
+		bpf_for(id, 0, nr_cpdoms) {
+			if (id >= LAVD_CPDOM_MAX_NR)
+				break;
+
+			if (!cpdom_has_idle_cpu(id))
+				continue;
+
+			cpu = pick_idle_cpu_in(id, NULL, scope);
+			if (cpu >= 0)
+				return cpu;
+		}
+	}
+	return -ENOENT;
+}
+
+__hidden
+void scx_cgroup_bw_kick_idle_cb(void)
+{
+	s32 cpu = pick_idle_cpu_for_bw();
+
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 static __always_inline
@@ -62,6 +274,10 @@ bool init_ao_masks(struct pick_ctx *ctx)
 {
 	ctx->cpuc_cur = get_cpu_ctx();
 	if (!ctx->cpuc_cur)
+		return false;
+
+	ctx->temp_mask = ctx->cpuc_cur->temp_mask;
+	if (!ctx->temp_mask)
 		return false;
 
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
@@ -142,45 +358,6 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 	if (ctx->o_empty)
 		ctx->o_mask = NULL;
 
-	return true;
-}
-
-static __always_inline
-bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
-{
-	/*
-	 * temp_mask is also used by find_cpu_in() earlier in pick_idle_cpu(),
-	 * but find_cpu_in()'s caller goes straight to unlock_out, so the
-	 * scratch is free by the time we reach here.
-	 */
-	ctx->ia_mask = ctx->cpuc_cur->ia_mask;
-	ctx->io_mask = ctx->cpuc_cur->io_mask;
-	ctx->iat_mask = ctx->cpuc_cur->iat_mask;
-	ctx->temp_mask = ctx->cpuc_cur->temp_mask;
-	if (!ctx->ia_mask || !ctx->io_mask || !ctx->iat_mask || !ctx->temp_mask)
-		return false;
-
-	if (ctx->a_mask) {
-		bpf_cpumask_and(ctx->ia_mask, idle_mask, cast_mask(ctx->a_mask));
-		ctx->ia_empty = bpf_cpumask_empty(cast_mask(ctx->ia_mask));
-	}
-	else
-		ctx->ia_empty = true;
-
-	if (ctx->o_mask) {
-		bpf_cpumask_and(ctx->io_mask, idle_mask, cast_mask(ctx->o_mask));
-		ctx->io_empty = bpf_cpumask_empty(cast_mask(ctx->io_mask));
-	}
-	else
-		ctx->io_empty = true;
-
-	if (ctx->ia_empty || !have_turbo_core || !turbo_cpumask)
-		ctx->iat_empty = true;
-	else if (turbo_cpumask) {
-		bpf_cpumask_and(ctx->iat_mask, cast_mask(ctx->ia_mask),
-				cast_mask(turbo_cpumask));
-		ctx->iat_empty = bpf_cpumask_empty(cast_mask(ctx->iat_mask));
-	}
 	return true;
 }
 
@@ -284,49 +461,40 @@ static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
 }
 
 
-static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
-			   bool *is_idle)
+static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope)
 {
-	struct bpf_cpumask *cpd_mask;
 	struct cpdom_ctx *cpdc;
 	s32 cpu;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
 	cpdc = MEMBER_VPTR(cpdom_ctxs, [cpdom]);
-	if (!ctx || !cpdc || !cpd_mask || !cpdc->is_valid)
+	if (!ctx || !cpdc || !cpdc->is_valid)
+		return -ENOENT;
+
+	/*
+	 * Idle masks already restrict the search to this domain.
+	 */
+	if (!cpdom_has_idle_cpu(cpdom))
 		return -ENOENT;
 
 	/*
 	 * Search an idle CPU in a compute domain
 	 * in the order of turbo, active, and overflow.
 	 */
-	if (!ctx->iat_empty && cpdc->nr_active_cpus && cpdc->is_big) {
-		bpf_cpumask_and(ctx->temp_mask,
-				cast_mask(cpd_mask), cast_mask(ctx->iat_mask));
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
-		if (cpu >= 0) {
-			*is_idle = true;
+	if (cpdc->nr_active_cpus && cpdc->is_big &&
+	    have_turbo_core && turbo_cpumask && ctx->a_mask) {
+		bpf_cpumask_and(ctx->temp_mask, cast_mask(ctx->a_mask),
+				cast_mask(turbo_cpumask));
+		cpu = pick_idle_cpu_in(cpdom, cast_mask(ctx->temp_mask), scope);
+		if (cpu >= 0)
 			return cpu;
-		}
 	}
-	if (!ctx->ia_empty && cpdc->nr_active_cpus) {
-		bpf_cpumask_and(ctx->temp_mask,
-				cast_mask(cpd_mask), cast_mask(ctx->ia_mask));
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
-		if (cpu >= 0) {
-			*is_idle = true;
+	if (cpdc->nr_active_cpus && ctx->a_mask) {
+		cpu = pick_idle_cpu_in(cpdom, cast_mask(ctx->a_mask), scope);
+		if (cpu >= 0)
 			return cpu;
-		}
 	}
-	if (!ctx->io_empty) {
-		bpf_cpumask_and(ctx->temp_mask,
-				cast_mask(cpd_mask), cast_mask(ctx->io_mask));
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
-		if (cpu >= 0) {
-			*is_idle = true;
-			return cpu;
-		}
-	}
+	if (ctx->o_mask)
+		return pick_idle_cpu_in(cpdom, cast_mask(ctx->o_mask), scope);
 	return -ENOENT;
 }
 
@@ -644,7 +812,7 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 
 static
 s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
-			u64 scope, s64 *sticky_cpdom, bool *is_idle)
+			u64 scope)
 {
 	struct cpdom_ctx *mig_cpdc;
 	s64 mig_cpdom, nr_nbr;
@@ -660,6 +828,9 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	 * Note that when a system is under-loaded, task donation works better
 	 * than task stealing because DSQs are mostly empty (i.e., it is hard
 	 * to steal from a DSQ).
+	 *
+	 * Return the first hit, at the nearest distance. Scanning farther
+	 * distances after a hit would overwrite it and leak the claim.
 	 */
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
@@ -676,7 +847,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
 				continue;
 
-			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
+			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope);
 			if (cpu >= 0) {
 				/*
 				 * Leave both stealer and stealee flags
@@ -690,8 +861,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 					WRITE_ONCE(mig_cpdc->is_stealer, false);
 					WRITE_ONCE(cpdc->is_stealee, false);
 				}
-				*sticky_cpdom = mig_cpdom;
-				break;
+				return cpu;
 			}
 		}
 	}
@@ -702,11 +872,11 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 __hidden __noinline
 s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 {
-	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
+	struct bpf_cpumask *i_smt;
 	s32 cpu = -ENOENT, sticky_cpu;
 	s64 sticky_cpdom = -ENOENT;
 	struct cpdom_ctx *cpdc;
-	bool i_smt_empty;
+	bool sticky_has_idle;
 
 	/*
 	 * At the high level, the idle CPU selection policy considers the
@@ -777,7 +947,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 			if (is_permanently_pinned(ctx->p))
 				ovrflw_test_and_set(ctx->ovrflw, cpu);
 		}
-		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+		*is_idle = claim_idle_cpu(cpu);
 		goto unlock_out;
 	}
 	/* NOTE: Now task @p is not a per-CPU task. */
@@ -794,10 +964,9 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	if (warm_cpu_ns && ctx->prev_cpu >= 0 &&
 	    bpf_cpumask_test_cpu(ctx->prev_cpu, cast_mask(ctx->active)) &&
 	    bpf_cpumask_test_cpu(ctx->prev_cpu, ctx->p->cpus_ptr)) {
-		if (scx_bpf_test_and_clear_cpu_idle(ctx->prev_cpu)) {
+		if (claim_idle_cpu(ctx->prev_cpu)) {
 			cpu = ctx->prev_cpu;
-			*is_idle = true;
-			goto unlock_out;
+			goto idle_out;
 		}
 
 		if (ctx->taskc->lat_cri < sys_stat.thr_lat_cri &&
@@ -829,7 +998,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
 		if (cpu >= 0) {
 			ovrflw_test_and_set(ctx->ovrflw, cpu);
-			*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+			*is_idle = claim_idle_cpu(cpu);
 		}
 		goto unlock_out;
 	}
@@ -865,63 +1034,47 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	/* NOTE: There is a sticky domain. */
 
 	/*
-	 * If there is no idle CPU even partially,
-	 * stay on the sticky CPU or domain.
+	 * Check once whether the sticky domain has any idle CPU and skip the
+	 * searches within it when it does not; neighbors gate themselves.
 	 */
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	if (!init_idle_i_mask(ctx, idle_cpumask))
-		goto err_out;
-	if (ctx->i_empty) {
-		cpu = sticky_cpu;
-		if (cpu == -ENOENT) {
-			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
-						       sticky_cpdom);
+	sticky_has_idle = cpdom_has_idle_cpu(sticky_cpdom);
+	if (sticky_has_idle) {
+		/*
+		 * If the sticky CPU is fully idle, stay on it. Without SMT,
+		 * a core is a CPU, so the idle mask stands in for the fully
+		 * idle mask.
+		 */
+		if (sticky_cpu >= 0) {
+			if (is_smt_active)
+				i_smt = MEMBER_VPTR(cpdom_idle_smtmask, [sticky_cpdom]);
+			else
+				i_smt = MEMBER_VPTR(cpdom_idle_cpumask, [sticky_cpdom]);
+			if (i_smt &&
+			    bpf_cpumask_test_cpu(sticky_cpu, cast_mask(i_smt)) &&
+			    claim_idle_cpu(sticky_cpu)) {
+				cpu = sticky_cpu;
+				goto idle_out;
+			}
 		}
-		goto unlock_out;
-	}
-	/* NOTE: There is at least one idle CPU. */
 
-	/*
-	 * If the sticky CPU is fully idle, stay on it.
-	 */
-	if (is_smt_active)
-		idle_smtmask = scx_bpf_get_idle_smtmask();
-	else
-		idle_smtmask = idle_cpumask;
-	i_smt_empty = bpf_cpumask_empty(idle_smtmask);
+		/*
+		 * If there is a fully idle CPU in the sticky domain, stay on it.
+		 */
+		cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom,
+					     SCX_PICK_IDLE_CORE);
+		if (cpu >= 0)
+			goto idle_out;
+		/* NOTE: There is no fully idle CPU in the sticky domain. */
 
-	if (!i_smt_empty && sticky_cpu >= 0 &&
-	    bpf_cpumask_test_cpu(sticky_cpu, idle_smtmask) &&
-	    scx_bpf_test_and_clear_cpu_idle(sticky_cpu)) {
-		cpu = sticky_cpu;
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	/*
-	 * If there is a fully idle CPU in the sticky domain, stay on it.
-	 */
-	if (!i_smt_empty) {
-		if (!init_idle_ato_masks(ctx, idle_smtmask))
-			goto err_out;
-		if (!ctx->ia_empty || !ctx->io_empty) {
-			cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom,
-				SCX_PICK_IDLE_CORE, is_idle);
-			if (cpu >= 0)
-				goto unlock_out;
+		/*
+		 * If the sticky CPU is (partially) idle, stay on it.
+		 */
+		if (sticky_cpu >= 0 && claim_idle_cpu(sticky_cpu)) {
+			cpu = sticky_cpu;
+			goto idle_out;
 		}
+		/* NOTE: The sticky CPU is not (even partially) idle. */
 	}
-	/* NOTE: There is no fully idle CPU in the sticky domain. */
-
-	/*
-	 * If the sticky CPU is (partially) idle, stay on it.
-	 */
-	if (sticky_cpu >= 0 && scx_bpf_test_and_clear_cpu_idle(sticky_cpu)) {
-		cpu = sticky_cpu;
-		*is_idle = true;
-		goto unlock_out;
-	}
-	/* NOTE: The sticky CPU is not (even partially) idle. */
 
 	/*
 	 * If the synchronous waker CPU is idle and in the same domain with
@@ -935,63 +1088,17 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	/* NOTE: The waker CPU is not (even partially) idle if there is. */
 
 	/*
-	 * If there is no idle CPU in the active and overflow set,
-	 * stay on the sticky CPU or domain.
+	 * Consider donating the task to a neighbor: as before, only if the
+	 * sticky domain is a stealee, the neighbor a stealer, and the neighbor
+	 * has a fully idle core in the task's active/overflow set. Each
+	 * neighbor now gates itself on its own idle mask.
 	 */
-	if (!init_idle_ato_masks(ctx, ctx->i_mask))
-		goto err_out;
-	if (ctx->ia_empty && ctx->io_empty) {
-		/*
-		 * Bursty wake-up adaptation: when called from
-		 * ops.select_cpu() and the existing active+overflow set has
-		 * no idle CPU we can use, try to grow the overflow set with
-		 * a fresh LLC-anchored CPU. Claim it as idle first; only
-		 * commit the overflow extension when the claim succeeded so
-		 * we don't pollute the set with CPUs we couldn't use. The
-		 * caller wakes the CPU via the normal select_cpu return path.
-		 */
-		if (extend_ovrflw) {
-			s32 new_cpu = find_cpu_for_ovrflw_extend(ctx);
-			if (new_cpu >= 0 &&
-			    scx_bpf_test_and_clear_cpu_idle(new_cpu)) {
-				ovrflw_test_and_set(ctx->ovrflw, new_cpu);
-				debugln("migrate: ovrflw_extend %s[pid%d] prev_cpu=%d new_cpu=%d",
-					ctx->p->comm, ctx->p->pid,
-					ctx->prev_cpu, new_cpu);
-				cpu = new_cpu;
-				*is_idle = true;
-				goto unlock_out;
-			}
-		}
-		cpu = sticky_cpu;
-		if (cpu == -ENOENT) {
-			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
-						       sticky_cpdom);
-		}
-		goto unlock_out;
-	}
-	/* NOTE: There is at least one idle CPU in either active or overflow set. */
-
-	/*
-	 * So far, it is confirmed that
-	 *  1) There is no fully idle CPU in the sticky domain.
-	 *  2) The sticky CPU or waker CPU is not idle.
-	 *  3) But there is at least one idle CPU in active/overflow set.
-	 *
-	 * Now, let’s consider migrating the task to the sticky domain’s
-	 * neighbor. If there is only one domain, let’s stay at the sticky
-	 * domain.
-	 * 
-	 * If there is a fully idle core in the system (i.e., !is_smt_empty),
-	 * let's try to migrate a task to another domain.
-	 */
-	if (!i_smt_empty && (nr_cpdoms > 1) &&
+	if ((nr_cpdoms > 1) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
 	    READ_ONCE(cpdc->is_stealee)) {
-		cpu = migrate_to_neighbor(ctx, cpdc, SCX_PICK_IDLE_CORE,
-					  &sticky_cpdom, is_idle);
+		cpu = migrate_to_neighbor(ctx, cpdc, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
-			goto unlock_out;
+			goto idle_out;
 	}
 	/* NOTE: There is no fully idle CPU in the neighboring domain. */
 
@@ -999,9 +1106,11 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 * If there is an (partially) idle CPU in the sticky domain, stay on it.
 	 * In the domain, search in the order of turbo, active, and overflow.
 	 */
-	cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom, 0, is_idle);
-	if (cpu >= 0)
-		goto unlock_out;
+	if (sticky_has_idle) {
+		cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom, 0);
+		if (cpu >= 0)
+			goto idle_out;
+	}
 	/* NOTE: There is no even partially idle CPU in the sticky domain. */
 
 	/*
@@ -1013,10 +1122,35 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	    test_task_flag(ctx->taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
 	    READ_ONCE(cpdc->is_stealee)) {
-		cpu = migrate_to_neighbor(ctx, cpdc, 0, &sticky_cpdom, is_idle);
+		cpu = migrate_to_neighbor(ctx, cpdc, 0);
 		if (cpu >= 0)
-			goto unlock_out;
+			goto idle_out;
 	}
+
+	/*
+	 * Bursty wake-up adaptation (ops.select_cpu() only): no idle CPU was
+	 * claimed in the sticky domain or a stealer neighbor, so try to grow
+	 * the overflow set with a fresh LLC-anchored CPU, claimed first so
+	 * the set never gains a CPU we could not use.
+	 */
+	if (extend_ovrflw) {
+		s32 new_cpu = find_cpu_for_ovrflw_extend(ctx);
+		if (new_cpu >= 0 && claim_idle_cpu(new_cpu)) {
+			ovrflw_test_and_set(ctx->ovrflw, new_cpu);
+			debugln("migrate: ovrflw_extend %s[pid%d] prev_cpu=%d new_cpu=%d",
+				ctx->p->comm, ctx->p->pid,
+				ctx->prev_cpu, new_cpu);
+			cpu = new_cpu;
+			goto idle_out;
+		}
+	}
+
+	/*
+	 * No eligible idle CPU was claimed. Stay on the sticky CPU or domain.
+	 */
+	cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
+	if (cpu >= 0)
+		goto unlock_out;
 
 	/*
 	 * Instead of chasing a partially idle CPU in neighboring domains,
@@ -1030,12 +1164,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 		goto unlock_out;
 	}
 
-	/*
-	 * We should not reach here because there is an idle CPU in either
-	 * active or overflow sets, but we failed find it. That is impossible.
-	 */
 err_out:
 	cpu = -ENOENT;
+	goto unlock_out;
+
+idle_out:
+	*is_idle = true;
 
 unlock_out:
 	/*
@@ -1044,13 +1178,6 @@ unlock_out:
 	if (cpu < 0)
 		cpu = pick_random_cpu(ctx);
 
-	/*
-	 * Clean up.
-	 */
-	if (is_smt_active && idle_smtmask)
-		scx_bpf_put_idle_cpumask(idle_smtmask);
-	if (idle_cpumask)
-		scx_bpf_put_idle_cpumask(idle_cpumask);
 	bpf_rcu_read_unlock();
 
 	return cpu;

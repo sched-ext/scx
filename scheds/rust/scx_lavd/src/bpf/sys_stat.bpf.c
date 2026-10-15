@@ -533,6 +533,7 @@ static void collect_sys_stat(void)
 		struct bpf_cpumask *steady;
 		struct cpdom_ctx *cpu_cpdomc;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -565,6 +566,20 @@ static void collect_sys_stat(void)
 			else
 				bpf_cpumask_clear_cpu(cpu, steady);
 		}
+
+		/*
+		 * Repair idle hints: a busy CPU loses its bit (bypass mode
+		 * skips ops.update_idle()); an idle CPU without one is kicked
+		 * and re-marks itself in ops.dispatch() if it really repicks
+		 * idle, so a CPU whose claim is in flight is not re-advertised.
+		 * A force-idled CPU (core scheduling) keeps work in its local
+		 * DSQ and never reaches ops.dispatch(); leave it alone.
+		 */
+		if (!cpuc->is_online || !is_cpu_idle_now(cpu))
+			clear_cpu_idle_state(cpuc, cpu);
+		else if (!is_cpu_hinted_idle(cpuc) &&
+			 !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu))
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		bpf_rcu_read_unlock();
 
 		/*

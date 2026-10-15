@@ -350,6 +350,8 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
 
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
+extern struct bpf_cpumask	cpdom_idle_cpumask[LAVD_CPDOM_MAX_NR];
+extern struct bpf_cpumask	cpdom_idle_smtmask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
 
 typedef struct task_ctx __arena task_ctx;
@@ -547,10 +549,6 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
 	struct bpf_cpumask __kptr *o_mask;	/* scratch: task & overflow */
 	struct bpf_cpumask __kptr *temp_mask;	/* scratch: general-purpose */
-	struct bpf_cpumask __kptr *i_mask;	/* scratch: task & idle */
-	struct bpf_cpumask __kptr *ia_mask;	/* scratch: idle & active */
-	struct bpf_cpumask __kptr *io_mask;	/* scratch: idle & overflow */
-	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
@@ -898,17 +896,7 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
 	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	/*
-	 * Additional input arguments for init_idle_i_mask().
-	 */
-	const struct cpumask *i_mask;
-	/*
-	 * Additional input arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
-	 */
-	struct bpf_cpumask *ia_mask;
-	struct bpf_cpumask *iat_mask;
-	struct bpf_cpumask *io_mask;
+	/* Scratch mask for pick_idle_cpu_at_cpdom(). */
 	struct bpf_cpumask *temp_mask;
 	/*
 	 * Flags.
@@ -916,15 +904,15 @@ struct pick_ctx {
 	bool a_empty:1;
 	bool o_empty:1;
 	bool is_task_big:1;
-	bool i_empty:1;
-	bool ia_empty:1;
-	bool iat_empty:1;
-	bool io_empty:1;
 };
 
 
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
+void set_cpu_idle_state(struct cpu_ctx *cpuc, s32 cpu);
+bool clear_cpu_idle_state(struct cpu_ctx *cpuc, s32 cpu);
+bool claim_idle_cpu(s32 cpu);
+bool is_cpu_hinted_idle(struct cpu_ctx *cpuc);
 
 bool consume_task(u64 cpdom_id);
 
