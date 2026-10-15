@@ -789,9 +789,12 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 	/*
 	 * An idle CPU with nothing queued cannot be congested --
 	 * queued_on_cpu() covers every DSQ that is_cpu_congested()
-	 * counts -- so no congestion check is needed on this path.
+	 * counts. The claim is a hint that can be stale (bypass mode
+	 * skips ops.update_idle()), so check the CPU is really idle
+	 * before dispatching into a local DSQ only it drains.
 	 */
-	if (is_cpu_idle && !queued_on_cpu(cpuc))
+	if (is_cpu_idle && !queued_on_cpu(cpuc) &&
+	    is_cpu_idle_now(cpuc->cid))
 		return true;
 
 	/*
@@ -1234,9 +1237,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 kick_cpu_out:
 	/*
-	 * Kick @cpu so an idle CPU picks up the task.
+	 * Kick @cpu if it was claimed idle or is marked idle; a hint
+	 * missed in bypass mode is repaired by the sys_stat resync.
 	 */
-	if (is_idle) {
+	if (is_idle || is_cpu_hinted_idle(cpuc)) {
 		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 		return;
 	}
@@ -1343,11 +1347,9 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 		account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
 
 	/*
-	 * Kick the target CPU if it is idle. Test-and-clear avoids
-	 * waking a CPU that is already busy with another task and
-	 * generating a spurious reschedule IPI.
+	 * Claim @cpu and kick it if it was idle.
 	 */
-	if (claim_idle_cid(cpu) > 0)
+	if (clear_cpu_idle_state(cpuc, cpu))
 		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 	return 0;
 }
@@ -1778,12 +1780,11 @@ consume_out:
 	consume_prev(prev, taskc_prev, cpuc);
 idle:
 	/*
-	 * No task and no @prev means the CPU is going idle. A cid claimed by an
-	 * idle pick and kicked but never dispatched to gets no idle
-	 * notification, so restore the claim here.
+	 * An idle-to-idle repick skips ops.update_idle(): restore the hint.
+	 * The cid's curr is exact here since its rq lock is held.
 	 */
-	if (!prev)
-		update_idle_cid(cpu, true);
+	if (!prev && is_cpu_idle_now(cpu))
+		set_cpu_idle_state(cpuc, cpu);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1955,6 +1956,11 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
+	 * Repair an idle exit missed in bypass mode.
+	 */
+	clear_cpu_idle_state(cpuc, cpuc->cid);
+
+	/*
 	 * Update this CPU's performance target from its utilization.
 	 */
 	update_cpuperf_target(cpuc);
@@ -2100,6 +2106,17 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cid)
 	cmask_set(cid, get_cpdom_mask(cpuc->cpdom_id));
 	cmask_set(cid, online_cmask);
 
+	/*
+	 * A sub-scheduler's grant can land while a task that is not mavd's runs
+	 * on the cid, and nothing of mavd's would clear a hint set then. The
+	 * grant holds the cid's rq lock, so curr is exact there. On hotplug a
+	 * wrong answer is repaired like any other hint.
+	 */
+	if (is_cpu_idle_now(cid))
+		set_cpu_idle_state(cpuc, cid);
+	else
+		clear_cpu_idle_state(cpuc, cid);
+
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
@@ -2117,7 +2134,11 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cid)
 {
 	cmask_clear(cid, get_cpdom_mask(cpuc->cpdom_id));
 	cmask_clear(cid, online_cmask);
-	update_idle_cid(cid, false);
+	clear_cpu_idle_state(cpuc, cid);
+
+	/* on hotplug the surviving siblings may now make a fully idle core */
+	if (!sub_mode)
+		update_core_idle_state(cpuc);
 
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
@@ -2242,7 +2263,9 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 	u64 now;
 
-	update_idle_cid(cpu, idle);
+	/*
+	 * Track idle masks and time; dispatch and resync repair missed updates.
+	 */
 	now = scx_bpf_now();
 
 	/*
@@ -2256,11 +2279,31 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 		 * per-CPU preemption information should be cleared.
 		 */
 		reset_cpu_preemption_info(cpuc);
+
+		/*
+		 * A dying CPU can enter idle after ops.cid_offline(), and in
+		 * sub mode a cid the parent has not granted is not ours.
+		 */
+		if (READ_ONCE(cpuc->is_online)) {
+			set_cpu_idle_state(cpuc, cpu);
+
+			/*
+			 * Enqueues that saw the hint off did not kick;
+			 * re-kick if work is queued.
+			 */
+			if (queued_on_cpu(cpuc))
+				scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
+		}
 	}
 	/*
 	 * The CPU is exiting from the idle state.
 	 */
 	else {
+		/*
+		 * The waker's claim may already have cleared the idle bit.
+		 */
+		clear_cpu_idle_state(cpuc, cpu);
+
 		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			/*
 			 * If idle_start_clk is zero, that means entering into
@@ -2671,6 +2714,10 @@ static s32 init_per_cpu_ctx(u64 now)
 
 			if (cmask_test(cpu, online)) {
 				cmask_set(cpu, get_cpdom_mask(cpdom_id));
+				/* seed as idle, the first resync corrects it */
+				cmask_set(cpu, &cpdomc->idle);
+				if (is_smt_active)
+					cmask_set(cpu, &cpdomc->idle_smt);
 				cpdomc->nr_active_cpus++;
 				cpdomc->cap_sum_active_cpus += cpuc->effective_capacity;
 			}

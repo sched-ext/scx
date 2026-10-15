@@ -337,6 +337,17 @@ struct cpdom_ctx {
 			 u64 cpus_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
 	TRAILING_OVERLAP(struct scx_cmask, online, bits,
 			 u64 online_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
+
+	/*
+	 * Idle hints: the domain's idle cids and its fully idle cores,
+	 * maintained in idle.bpf.c, each on a cacheline of its own.
+	 */
+	__TRAILING_OVERLAP(struct scx_cmask, idle, bits,
+			   __attribute__((aligned(CACHELINE_SIZE))),
+			   u64 idle_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
+	__TRAILING_OVERLAP(struct scx_cmask, idle_smt, bits,
+			   __attribute__((aligned(CACHELINE_SIZE))),
+			   u64 idle_smt_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
@@ -384,14 +395,9 @@ typedef struct task_ctx task_ctx;
 
 extern u32 nr_cids;
 extern struct scx_cmask *online_cmask;
-extern struct scx_cmask *idle_cmask;
-extern struct scx_cmask *idle_smt_cmask;
 extern struct scx_cmask *sweep_cmask;
 
 int init_cid_masks(void);
-s32 claim_idle_cid(s32 cid);
-s32 pick_idle_cid(const struct scx_cmask __arg_arena *allowed, u64 flags);
-void update_idle_cid(s32 cid, bool idle);
 
 extern struct cpu_ctx *cpu_ctxs;
 
@@ -590,10 +596,6 @@ struct cpu_ctx {
 	struct scx_cmask *a_mask;	/* scratch: task & active */
 	struct scx_cmask *o_mask;	/* scratch: task & overflow */
 	struct scx_cmask *temp_mask;	/* scratch: general-purpose */
-	struct scx_cmask *i_mask;	/* scratch: task & idle */
-	struct scx_cmask *ia_mask;	/* scratch: idle & active */
-	struct scx_cmask *io_mask;	/* scratch: idle & overflow */
-	struct scx_cmask *iat_mask;	/* scratch: idle & active & turbo */
 
 	u16 core_cid;		/* first cid of this cid's core, which names the core's DSQ */
 	u16 core_nr_cids;	/* cids in the core */
@@ -1084,17 +1086,7 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct scx_cmask *a_mask; /* task's active mask */
 	struct scx_cmask *o_mask; /* task's overflow mask */
-	/*
-	 * Additional input arguments for init_idle_i_mask().
-	 */
-	const struct scx_cmask *i_mask;
-	/*
-	 * Additional input arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
-	 */
-	struct scx_cmask *ia_mask;
-	struct scx_cmask *iat_mask;
-	struct scx_cmask *io_mask;
+	/* Scratch mask for pick_idle_cpu_at_cpdom(). */
 	struct scx_cmask *temp_mask;
 	/*
 	 * Flags.
@@ -1102,10 +1094,6 @@ struct pick_ctx {
 	bool a_empty:1;
 	bool o_empty:1;
 	bool is_task_big:1;
-	bool i_empty:1;
-	bool ia_empty:1;
-	bool iat_empty:1;
-	bool io_empty:1;
 };
 
 
@@ -1113,6 +1101,11 @@ s32 find_cpu_in(const struct scx_cmask __arg_arena *src_mask,
 		struct cpu_ctx __arg_arena *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrflw,
 		   bool *is_idle);
+void set_cpu_idle_state(struct cpu_ctx __arg_arena *cpuc, s32 cpu);
+void update_core_idle_state(struct cpu_ctx __arg_arena *cpuc);
+bool clear_cpu_idle_state(struct cpu_ctx __arg_arena *cpuc, s32 cpu);
+bool claim_idle_cpu(s32 cpu);
+bool is_cpu_hinted_idle(struct cpu_ctx __arg_arena *cpuc);
 
 bool consume_task(u64 cpdom_id);
 
