@@ -190,12 +190,12 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 			pk = task_pack(tctx, cid);
 		/*
 		 * update_curr() first: dequeue_entity() charges the service
-		 * the task has taken before it measures the lag, and this op
-		 * runs before ops.stopping() does the charging here. Without
-		 * it the lag is taken against a reference that has the last
-		 * run projected in, from a vruntime that has not, and comes
-		 * out too generous by that run. The charge is real and once;
-		 * ops.stopping() finds nothing left to add.
+		 * the task has taken before it measures the lag. A task that
+		 * blocks while running has been charged by ops.stopping()
+		 * already, which the kernel calls before this op, and finds
+		 * nothing left to add here. One that has not stopped yet is
+		 * charged now, or its lag would be taken against a reference
+		 * with its last run projected in, from a vruntime without it.
 		 */
 		if (scx_bpf_task_running(p) && cid == scx_bpf_task_cid(p))
 			keep_charge(p, cid, cid_clock_task_owned(cid, now));
@@ -402,6 +402,12 @@ void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 	 */
 	tctx->se.vruntime += calc_delta_fair(p, tctx, slice);
 	vref_charge(&tctx->se);
+	/*
+	 * The next charge starts from here, as update_se() moves exec_start:
+	 * ops.quiescent() follows for a task that blocks, and must find
+	 * nothing left to charge.
+	 */
+	tctx->last_run_at = tnow;
 
 	/* The same service against the bandwidth of the task's cgroup. */
 	task_bw_charge(tctx, cid, slice);
