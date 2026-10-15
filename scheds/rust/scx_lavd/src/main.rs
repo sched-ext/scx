@@ -44,7 +44,7 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libc::c_char;
 use plain::Plain;
-use scx_arena::ArenaLib;
+use scx_arena::ScxLibArena;
 use scx_stats::prelude::*;
 use scx_utils::EnergyModel;
 use scx_utils::NR_CPU_IDS;
@@ -481,7 +481,7 @@ impl introspec {
 }
 
 struct Scheduler<'a> {
-    _arenalib: ArenaLib,
+    _arenalib: ScxLibArena,
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     intrspc: introspec,
@@ -558,7 +558,7 @@ impl<'a> Scheduler<'a> {
         // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let task_size = std::mem::size_of::<types::task_ctx>();
-        let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
+        let arenalib = ScxLibArena::setup(skel.object(), task_size, 0, *NR_CPU_IDS)?;
 
         // Attach.
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);

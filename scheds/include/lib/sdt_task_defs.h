@@ -6,10 +6,6 @@
  */
 #pragma once
 
-#ifndef round_up
-#define round_up(a, b) (div_round_up((a), (b)) * (b))
-#endif
-
 typedef struct sdt_desc __arena sdt_desc_t;
 
 enum sdt_consts {

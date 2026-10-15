@@ -11,10 +11,6 @@
 #include <lib/cgroup.h>
 #include <lib/atq.h>
 
-#ifndef round_up
-#define round_up(a, b) ((((a) + (b) - 1) / (b)) * (b))
-#endif
-
 #ifndef U64_MAX
 #define U64_MAX		((u64)~0ULL)
 #endif
