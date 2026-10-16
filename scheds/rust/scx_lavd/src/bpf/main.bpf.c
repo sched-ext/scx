@@ -1932,8 +1932,6 @@ unlock_out:
 	cpuc->lat_cri = 0;
 	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
-	cpuc->prev_task_clk = scx_clock_task(cpu_id);
-	cpuc->prev_pelt_clk = scx_clock_pelt(cpu_id);
 	cpuc->avg_perf_factor = LAVD_SCALE;
 	barrier();
 
@@ -2540,17 +2538,6 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->max_freq = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
-		/*
-		 * Sample initial clock baselines. This runs at scheduler
-		 * load time (lavd_init), not from a scheduling callback, so
-		 * the rq lock for @cpu is not held. Accessing rq->clock_task
-		 * and rq->clock_pelt without the lock is a benign data race:
-		 * the values are only used as baselines for the first
-		 * collect_sys_stat() interval, and any slight staleness is
-		 * harmless.
-		 */
-		cpuc->prev_task_clk = scx_clock_task(cpu);
-		cpuc->prev_pelt_clk = scx_clock_pelt(cpu);
 		cpuc->avg_perf_factor = LAVD_SCALE;
 		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
 
