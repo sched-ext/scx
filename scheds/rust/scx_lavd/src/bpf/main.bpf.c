@@ -1008,7 +1008,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * deadline would over-prioritize it. Re-anchor to the current
 		 * clock.
 		 */
-		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+		scx_bpf_task_set_dsq_vtime(p, calc_when_to_run(p, taskc));
 
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
