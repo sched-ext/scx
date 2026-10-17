@@ -1,0 +1,13 @@
+[package]
+name = "scx_rustsched_abi"
+version = "1.1.4"
+edition = "2024"
+rust-version = "1.91"
+description = "What a Rust BPF sched_ext scheduler and its loader agree on: the configuration table's layout"
+license = "GPL-2.0-only"
+authors = ["Andrea Righi <arighi@nvidia.com>"]
+repository = "https://github.com/sched-ext/scx"
+homepage = "https://github.com/sched-ext/scx"
+publish = false
+
+[dependencies]

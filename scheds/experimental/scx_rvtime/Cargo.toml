@@ -1,0 +1,19 @@
+[package]
+name = "scx_rvtime"
+version = "1.1.4"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "A weighted vtime sched_ext scheduler written in Rust BPF on scx_rustsched"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+scx_rustsched_loader = { path = "../../../rust/scx_rustsched_loader", version = "1.1.4" }
+
+[build-dependencies]
+scx_rustsched_build = { path = "../../../rust/scx_rustsched_build", version = "1.1.4" }
+
+# CI has no Rust BPF toolchain, and builds scx_rvtime without its BPF
+# objects.
+[package.metadata.veristat]
+disable = true

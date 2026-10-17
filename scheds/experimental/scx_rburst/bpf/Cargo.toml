@@ -1,0 +1,21 @@
+[package]
+name = "scx_rburst_kernel"
+version = "1.1.4"
+edition = "2024"
+license = "GPL-2.0-only"
+publish = false
+
+[workspace]
+
+[features]
+# scx_bpf_cid_topo() takes the structure's size.
+topo_size = ["scx_rustsched/topo_size"]
+
+[dependencies]
+scx_rustsched = { path = "../../../../rust/scx_rustsched", version = "1.1.4" }
+
+[profile.release]
+debug = 2
+lto = true
+codegen-units = 1
+panic = "abort"

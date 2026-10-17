@@ -3,6 +3,9 @@ members = [
     "rust/scx_arena/scx_arena",
     "rust/scx_arena/libarena_selftests",
     "rust/scx_arena/selftests",
+    "rust/scx_rustsched_abi",
+    "rust/scx_rustsched_build",
+    "rust/scx_rustsched_loader",
     "rust/scx_cargo",
     "rust/scx_raw_pmu",
     "rust/scx_rustland_core",
@@ -31,12 +34,19 @@ members = [
     "scheds/experimental/scx_mavd",
     "scheds/experimental/scx_rlfifo",
     "scheds/experimental/scx_mlfq",
+    "scheds/experimental/scx_rburst",
+    "scheds/experimental/scx_rlocal",
+    "scheds/experimental/scx_rvtime",
     "tools/scx_characterize",
     "tools/scxtop",
     "tools/scx_forge_agent",
     "tools/vmlinux_docify",
     "tools/xtask",
 ]
+# The Rust BPF runtime and the BPF side of each scheduler on it are built
+# for a BPF target by the scheduler's build script, each a workspace of its
+# own.
+exclude = ["rust/scx_rustsched", "rust/scx_rustsched_macros", "scheds/experimental/scx_rburst/bpf", "scheds/experimental/scx_rlocal/bpf", "scheds/experimental/scx_rvtime/bpf"]
 resolver = "3"
 
 [profile.release]
