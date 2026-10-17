@@ -44,6 +44,7 @@ use scx_utils::{UserExitInfo, libbpf_clap_opts::LibbpfOpts};
 /// from: the loader reads the queues in the arena through the same code.
 #[path = "../../scx_rustsched/src/edq.rs"]
 pub mod edq;
+mod kfunc_protos;
 mod queues;
 pub mod tiers;
 
@@ -188,7 +189,10 @@ pub fn sized_topology() -> Result<bool> {
         .context("find scx_cid_topo")?;
     match prototype.len() {
         2 => {
-            ensure!(topology.size() == 32, "unexpected legacy CID topology size");
+            ensure!(
+                matches!(topology.size(), 24 | 32),
+                "unexpected legacy CID topology size"
+            );
             Ok(false)
         }
         3 => {
@@ -538,6 +542,11 @@ pub fn open(name: &str, object: &[u8], libbpf: &LibbpfOpts, verbose: bool) -> Re
         "built without the Rust BPF toolchain (rust-src, bpf-linker and \
          llvm-objcopy): install it and rebuild {name}"
     );
+    let (object, adapted) = kfunc_protos::adapt(object).context("match kfunc prototypes")?;
+    let object = object.as_slice();
+    for kfunc in adapted {
+        info!("{kfunc}() returns differently on this kernel: prototype matched");
+    }
     let mut builder = ObjectBuilder::default();
     builder.name(name)?;
     builder.debug(verbose);
