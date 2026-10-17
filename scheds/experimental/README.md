@@ -22,4 +22,5 @@ comments in their `main.rs` or `*.bpf.c` files.
 # Schedulers
 
 - [scx_flow](scx_flow/README.md)
+- [scx_intent](scx_intent/README.md)
 - [scx_rlfifo](scx_rlfifo/README.md)
