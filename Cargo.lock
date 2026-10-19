@@ -6567,6 +6567,7 @@ dependencies = [
  "shell-words",
  "tempfile",
  "toml",
+ "xattr",
 ]
 
 [[package]]

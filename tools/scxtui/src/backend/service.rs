@@ -117,6 +117,20 @@ impl ServiceBackend {
         })
     }
 
+    /// The shipped unit has StartLimitBurst=2 within 30 s, which is
+    /// meant to stop a crashing scheduler from being restarted in a loop.
+    /// A person switching profiles twice in a row hits the same limit
+    /// and the unit then refuses every start until it is reset. Clear
+    /// the counter before an explicit, user-requested start or restart;
+    /// automatic restarts (Restart=on-failure) stay limited. A failed
+    /// reset is not an error here: the start that follows reports the
+    /// real problem, with the unit's own wording.
+    fn reset_failed() {
+        let _ = Command::new("systemctl")
+            .args(["reset-failed", UNIT])
+            .output();
+    }
+
     fn systemctl(verb: &str) -> Result<()> {
         let out = Command::new("systemctl")
             .args([verb, UNIT])
@@ -226,9 +240,10 @@ run scxtui as root to control {UNIT}",
             .and_then(|()| tmp.as_file().sync_all())
             .with_context(|| format!("cannot write {}", tmp.path().display()))?;
         // The temp file is created 0600 and owned by this process; carry
-        // the original's mode and owner over so the rename neither widens
-        // nor tightens access to a file the admin set up. ACLs and xattrs
-        // are not carried over. A missing config keeps the defaults.
+        // the original's mode, owner and POSIX access ACL over so the
+        // rename neither widens nor tightens access to a file the admin
+        // set up. Other xattrs are not carried over. A missing config
+        // keeps the defaults.
         match fs::metadata(&path) {
             Ok(meta) => {
                 fs::set_permissions(tmp.path(), meta.permissions()).with_context(|| {
@@ -236,6 +251,7 @@ run scxtui as root to control {UNIT}",
                 })?;
                 std::os::unix::fs::chown(tmp.path(), Some(meta.uid()), Some(meta.gid()))
                     .with_context(|| format!("cannot preserve ownership of {}", path.display()))?;
+                copy_access_acl(&path, tmp.path())?;
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
@@ -634,15 +650,19 @@ fn render_config(content: &str, sched: &str, flags: &[String]) -> String {
     let mut lines: Vec<String> = content
         .lines()
         .map(|line| {
-            let key = line.trim_start();
-            if key.starts_with("SCX_SCHEDULER=") {
-                saw_sched = true;
-                sched_line.clone()
-            } else if key.starts_with("SCX_FLAGS=") {
-                saw_flags = true;
-                flags_line.clone()
-            } else {
-                line.to_owned()
+            // Match on the parsed key, the way the reader does, so a line
+            // written as `SCX_SCHEDULER = x` is replaced rather than kept
+            // next to the new one.
+            match line.split_once('=').map(|(key, _)| key.trim()) {
+                Some("SCX_SCHEDULER") => {
+                    saw_sched = true;
+                    sched_line.clone()
+                }
+                Some("SCX_FLAGS") => {
+                    saw_flags = true;
+                    flags_line.clone()
+                }
+                _ => line.to_owned(),
             }
         })
         .collect();
@@ -694,6 +714,79 @@ fn scan_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
     found.into_iter().collect()
 }
 
+/// The extended attribute a POSIX access ACL lives in.
+const ACCESS_ACL: &str = "system.posix_acl_access";
+
+/// Carries the original file's POSIX access ACL over to the replacement,
+/// or strips one the replacement inherited from the directory's default
+/// ACL when the original had none. Mode and owner alone would leave an
+/// admin's `setfacl` grants behind on every rewrite. A filesystem that
+/// does not support extended attributes has no ACLs to preserve, so
+/// ENOTSUP is not a failure.
+fn copy_access_acl(from: &Path, to: &Path) -> Result<()> {
+    let not_supported = |err: &std::io::Error| err.raw_os_error() == Some(libc_enotsup());
+    let acl = match xattr::get(from, ACCESS_ACL) {
+        Ok(acl) => acl,
+        Err(err) if not_supported(&err) => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("cannot read the ACL of {}", from.display()));
+        }
+    };
+    match acl {
+        Some(acl) => xattr::set(to, ACCESS_ACL, &acl)
+            .with_context(|| format!("cannot preserve the ACL of {}", from.display())),
+        None => match xattr::get(to, ACCESS_ACL) {
+            Ok(Some(_)) => xattr::remove(to, ACCESS_ACL)
+                .with_context(|| format!("cannot drop the inherited ACL of {}", to.display())),
+            Ok(None) => Ok(()),
+            Err(err) if not_supported(&err) => Ok(()),
+            Err(err) => {
+                Err(err).with_context(|| format!("cannot inspect the ACL of {}", to.display()))
+            }
+        },
+    }
+}
+
+/// `ENOTSUP` without pulling in libc: the value is the same on every
+/// Linux architecture.
+const fn libc_enotsup() -> i32 {
+    95
+}
+
+/// The absolute path `SCX_SCHEDULER` is written with. The scheduler list
+/// comes from scxtui's PATH, but the unit runs under systemd's, which
+/// need not contain the same directories or the same binaries; a bare
+/// name could resolve to another build there, or to nothing. Writing
+/// the path scxtui found pins the unit to the binary the user picked.
+/// The first PATH entry that holds an executable of that name wins, as
+/// the shell's lookup would. The found path is kept as is, symlink and
+/// all, since packaging may rely on the link.
+fn resolve_executable(sched: &str) -> Result<String> {
+    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    resolve_in(sched, &dirs)
+}
+
+fn resolve_in(sched: &str, dirs: &[PathBuf]) -> Result<String> {
+    dirs.iter()
+        .map(|dir| dir.join(sched))
+        .find(|candidate| candidate.is_absolute() && is_executable_file(candidate))
+        .map(|path| path.to_string_lossy().into_owned())
+        .with_context(|| format!("{sched} is not an executable in any absolute PATH directory"))
+}
+
+/// The scheduler name behind a value of `SCX_SCHEDULER` or its override:
+/// the file may hold a bare name or, since scxtui writes one, an absolute
+/// path. Comparisons with the running process (whose `argv[0]` is
+/// reduced the same way) and the panel both want the name.
+fn sched_name(value: &str) -> String {
+    Path::new(value).file_name().map_or_else(
+        || value.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 /// A regular file (through symlinks) with any execute bit set — what the
 /// shell would actually run for a bare name.
 fn is_executable_file(path: &Path) -> bool {
@@ -703,8 +796,8 @@ fn is_executable_file(path: &Path) -> bool {
 /// Pure core of [`SchedulerBackend::status`] for this backend, so the
 /// resolution can be tested against assembled inputs.
 fn build_status(info: &UnitInfo, env: &UnitEnvironment, process: Option<Process>) -> Status {
-    let configured = env.non_empty("SCX_SCHEDULER").map(str::to_owned);
-    let override_sched = env.non_empty("SCX_SCHEDULER_OVERRIDE").map(str::to_owned);
+    let configured = env.non_empty("SCX_SCHEDULER").map(sched_name);
+    let override_sched = env.non_empty("SCX_SCHEDULER_OVERRIDE").map(sched_name);
     let override_flags = env.non_empty("SCX_FLAGS_OVERRIDE").map(split_flags);
     Status {
         active: info.active,
@@ -754,12 +847,16 @@ impl SchedulerBackend for ServiceBackend {
     }
 
     fn start(&self, sched: &str, flags: &[String]) -> Result<()> {
-        self.write_config(sched, flags)?;
+        let exe = resolve_executable(sched)?;
+        self.write_config(&exe, flags)?;
+        Self::reset_failed();
         Self::systemctl("start")
     }
 
     fn switch(&self, sched: &str, flags: &[String]) -> Result<()> {
-        self.write_config(sched, flags)?;
+        let exe = resolve_executable(sched)?;
+        self.write_config(&exe, flags)?;
+        Self::reset_failed();
         Self::systemctl("restart")
     }
 
@@ -768,6 +865,7 @@ impl SchedulerBackend for ServiceBackend {
     }
 
     fn restart(&self) -> Result<()> {
+        Self::reset_failed();
         Self::systemctl("restart")
     }
 }
@@ -949,7 +1047,7 @@ mod tests {
         let file = dir.join("scx");
         fs::write(
             &file,
-            "SCX_SCHEDULER=scx_lavd\nSCX_SCHEDULER_OVERRIDE=scx_rusty\nSCX_FLAGS=\"-v\"\n",
+            "SCX_SCHEDULER=/usr/bin/scx_lavd\nSCX_SCHEDULER_OVERRIDE=scx_rusty\nSCX_FLAGS=\"-v\"\n",
         )
         .unwrap();
         let info = active_info(vec![required(&file)]);
@@ -1136,6 +1234,22 @@ mod tests {
     }
 
     #[test]
+    fn render_config_matches_keys_with_spaces_around_the_equals_sign() {
+        // systemd reads `KEY = value` as KEY; so must the rewrite, or the
+        // old line survives and, coming later, wins.
+        let before = "SCX_SCHEDULER = scx_rusty\n  SCX_FLAGS =\"-v\"\n";
+        assert_eq!(
+            render_config(before, "scx_lavd", &[]),
+            "SCX_SCHEDULER=scx_lavd\nSCX_FLAGS=\"\"\n"
+        );
+        // A commented-out key is not a key.
+        assert_eq!(
+            render_config("#SCX_SCHEDULER=scx_rusty\n", "scx_lavd", &[]),
+            "#SCX_SCHEDULER=scx_rusty\nSCX_SCHEDULER=scx_lavd\nSCX_FLAGS=\"\"\n"
+        );
+    }
+
+    #[test]
     fn render_config_appends_missing_keys_and_clears_flags() {
         // The upstream default file has SCX_FLAGS only as a comment: the
         // comment stays, a real key is appended, and empty flags are
@@ -1212,6 +1326,61 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A minimal extended POSIX ACL in the kernel's xattr encoding:
+    /// version 2, then (tag, perm, id) entries. USER_OBJ rw, a named
+    /// user (uid 0) r, GROUP_OBJ r, MASK r, OTHER none. The named entry
+    /// and the mask are what make it an extended ACL that the kernel
+    /// keeps as an xattr rather than folding into the mode.
+    fn sample_acl() -> Vec<u8> {
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (0x01u16, 6u16, u32::MAX),
+            (0x02, 4, 0),
+            (0x04, 4, u32::MAX),
+            (0x10, 4, u32::MAX),
+            (0x20, 0, u32::MAX),
+        ] {
+            acl.extend_from_slice(&tag.to_le_bytes());
+            acl.extend_from_slice(&perm.to_le_bytes());
+            acl.extend_from_slice(&id.to_le_bytes());
+        }
+        acl
+    }
+
+    #[test]
+    fn write_config_keeps_the_posix_acl() {
+        let dir = scratch_dir("acl");
+        let path = dir.join("scx");
+        fs::write(&path, "SCX_SCHEDULER=scx_lavd\n").unwrap();
+        // Not every test filesystem has ACLs enabled; without them there
+        // is nothing to check here, and the no-ACL path is covered by the
+        // other write tests.
+        if xattr::set(&path, ACCESS_ACL, &sample_acl()).is_err() {
+            eprintln!("skipping: no POSIX ACL support on {}", dir.display());
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        let before = xattr::get(&path, ACCESS_ACL).unwrap().expect("acl set");
+
+        write_env_file(&path, "scx_rusty", &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "SCX_SCHEDULER=scx_rusty\nSCX_FLAGS=\"\"\n"
+        );
+        assert_eq!(
+            xattr::get(&path, ACCESS_ACL).unwrap().as_deref(),
+            Some(before.as_slice()),
+            "the rewrite kept the ACL"
+        );
+
+        // An original without an ACL must not pick one up from the
+        // scratch file: strip it and the result has none either.
+        xattr::remove(&path, ACCESS_ACL).unwrap();
+        write_env_file(&path, "scx_lavd", &[]).unwrap();
+        assert_eq!(xattr::get(&path, ACCESS_ACL).unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_config_edits_the_target_of_a_symlink() {
         let dir = scratch_dir("symlink");
@@ -1241,6 +1410,44 @@ mod tests {
             exe.file_name().unwrap().to_string_lossy().as_ref()
         );
         assert_eq!(read_process(0), None);
+    }
+
+    #[test]
+    fn selected_scheduler_is_written_as_the_path_scxtui_found() {
+        let dir = scratch_dir("resolve");
+        let bin = dir.join("bin");
+        let other = dir.join("other");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        for d in [&bin, &other] {
+            fs::File::create(d.join("scx_lavd")).unwrap();
+            fs::set_permissions(d.join("scx_lavd"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Present in the second directory only, and not executable in
+        // the first: PATH order and the execute bit both apply.
+        fs::File::create(bin.join("scx_cake")).unwrap();
+        fs::File::create(other.join("scx_cake")).unwrap();
+        fs::set_permissions(other.join("scx_cake"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let dirs = vec![bin.clone(), other.clone()];
+        assert_eq!(
+            resolve_in("scx_lavd", &dirs).unwrap(),
+            bin.join("scx_lavd").to_string_lossy()
+        );
+        assert_eq!(
+            resolve_in("scx_cake", &dirs).unwrap(),
+            other.join("scx_cake").to_string_lossy()
+        );
+        assert!(resolve_in("scx_nope", &dirs).is_err());
+        // A relative PATH entry would write a path that means something
+        // else under the unit's working directory; it does not count.
+        assert!(resolve_in("scx_lavd", &[PathBuf::from("bin")]).is_err());
+
+        // The status reduces a written path back to the name, so it
+        // compares with the process and reads well in the panel.
+        assert_eq!(sched_name("/usr/bin/scx_lavd"), "scx_lavd");
+        assert_eq!(sched_name("scx_lavd"), "scx_lavd");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

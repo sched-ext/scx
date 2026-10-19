@@ -36,3 +36,5 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 # Unique scratch file next to the environment file for the atomic rewrite.
 tempfile = "3"
+# Carries the environment file's POSIX access ACL over the rewrite.
+xattr = "1"

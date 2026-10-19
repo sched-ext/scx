@@ -245,9 +245,12 @@ is not inactive, and `systemctl start` on an already running unit would
 leave the old scheduler running under a file that names the new one.
 
 A profile is a flag list. Starting or switching writes the selected
-scheduler to `SCX_SCHEDULER=` and the profile's flags to `SCX_FLAGS=` (write
+scheduler to `SCX_SCHEDULER=`, as the absolute path scxtui found it under
+in its own `PATH` (the unit runs under systemd's `PATH`, which need not
+hold the same binaries), and the profile's flags to `SCX_FLAGS=` (write
 to a unique temporary file in the same directory, carry the original
-mode and owner over, re-check that the file did not change meanwhile,
+mode, owner and POSIX access ACL over, re-check that the file did not
+change meanwhile,
 rename into place, through a symlink to its target) and starts or restarts
 the unit. Nothing records which profile
 was started: the running profile is recognised by comparing the process'
@@ -272,7 +275,8 @@ in-memory stub.
 - A file edited by hand between scxtui's read and its rename is detected
   and the write refused, but there is no lock: two editors racing inside
   that window can still interleave.
-- The rewrite carries the file's mode and owner over, not ACLs or xattrs.
+- The rewrite carries the file's mode, owner and POSIX access ACL over,
+  not other extended attributes.
 - Environment file parsing covers `KEY=VALUE` lines with simple quoting;
   systemd's line continuations and in-quote escapes are not interpreted.
 - The log viewer loads the selected boot into memory rather than following
