@@ -381,7 +381,7 @@ CONFIG_EXT_SUB_SCHED=y, the setter checks that the task belongs to the
 resolved scheduler. With that option disabled, the ownership check is a
 stub.
 
-The scheduler requires a CID-capable kernel. The old CPU-release callback is
+The scheduler requires a v7.4 or later kernel. The old CPU-release callback is
 replaced by the existing sched_switch reenqueue hook. These are interface
 requirements, not intentional policy changes.
 
@@ -737,14 +737,9 @@ The stats server lives under sub/ plus the cgroup's path below
 too long for a socket, and `--monitor` with the same `--cgroup` reaches it.
 Cgroup bandwidth control is rooted at the cgroup.
 
-Requirements: a kernel with ops.sub_ecaps_updated() (sched_ext v7.3), which
-is checked at start, and bpf_call_rcu() (bpf-next), which is assumed, a
-parent that leaves rescue enabled, which is the default, and a cgroup v2
-path below the root. Without the attach-time ecaps report posted for
-sched_ext for-7.4, every task that wakes before the first grants is rescued.
-mavd exits when its parent exits and does not restart on its own. A parent
-with hotplug ops would leave an unplugged cid in mavd's online view, since
-the kernel zeroes its caps without a notification.
+Requirements: a v7.4 or later kernel, a parent that leaves rescue enabled,
+which is the default, and a cgroup v2 path below the root. mavd exits when
+its parent exits and does not restart on its own.
 
 ## Known issues
 

@@ -2,7 +2,7 @@
 
 Experimental fork of scx_lavd for an arena-native cid conversion. The
 upstream policy and source organization are retained for future ports. It
-needs a kernel with the cid form of sched_ext ops and clang 22 or newer.
+needs a v7.4 or later kernel and clang 22 or newer.
 [CONVERSION.md](CONVERSION.md) states the fork's goals, the representation
 choices, the verifier constraints and the procedure for porting lavd
 changes.

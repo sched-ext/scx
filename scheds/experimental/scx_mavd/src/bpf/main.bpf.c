@@ -8,6 +8,9 @@
  * communication-heavy. It aims to minimize latency spikes while maintaining
  * overall good throughput and fair use of CPU time among tasks.
  *
+ * The baseline kernel is v7.4. Anything in v7.4 is assumed to exist and is used
+ * without a compat check or fallback, and older kernels aren't supported.
+ *
  *
  * 1. Overall procedure of the LAVD scheduler
  * ------------------------------------------
@@ -1101,7 +1104,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * 1. Within this ops.enqueue(), task_cpu and p->cpus_ptr are stable:
 	 *    enqueue and set_cmask() are both serialized by the rq lock, so
 	 *    neither changes between here and the dispatch below.
-	 * 2. If ops.select_cid() already chose the CPU (is_enq_cpu_selected),
+	 * 2. If ops.select_cid() already chose the CPU (SCX_ENQ_CPU_SELECTED),
 	 *    the kernel validated it and pi_lock spans select_cid()->enqueue(),
 	 *    so task_cpu is guaranteed to be within p->cpus_ptr. In sub mode a
 	 *    revoke may have landed since the select, so it is clamped to the
@@ -1111,7 +1114,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 *    mask and re-enqueues before affine_move_task() migrates -- so it
 	 *    can be outside p->cpus_ptr and must be clamped before use.
 	 */
-	if (likely(!__COMPAT_is_enq_cpu_selected(enq_flags))) {
+	if (likely(!(enq_flags & SCX_ENQ_CPU_SELECTED))) {
 		struct pick_ctx ictx = {
 			.taskc = taskc,
 			.prev_cpu = task_cpu,

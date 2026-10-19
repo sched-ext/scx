@@ -853,31 +853,12 @@ impl<'a> Scheduler<'a> {
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
 
         if let Some(cgid) = sub_cgid {
-            if !matches!(
-                compat::struct_has_field("sched_ext_ops_cid", "sub_ecaps_updated"),
-                Ok(true)
-            ) {
-                anyhow::bail!(
-                    "--cgroup requires a kernel with ops.sub_ecaps_updated(), \
-                     which this kernel lacks"
-                );
-            }
             rodata.sub_mode = true;
             rodata.sub_cgroup_id = cgid;
             skel.struct_ops.lavd_ops_mut().sub_cgroup_id = cgid;
         }
 
-        // Fail hard if cpu.max was explicitly requested but the kernel lacks
-        // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
-        // the struct_ops callback for the unsupported tier.
-        let cgroup_bw =
-            scx_utils::setup_cgroup_bw(skel.open_object_mut(), "lavd_cgroup_set_bandwidth")?;
-        if opts.enable_cpu_bw && cgroup_bw == scx_utils::CgroupBwSupport::Unsupported {
-            anyhow::bail!(
-                "--enable-cpu-bw requires kernel cpu.max support (ops.cgroup_set_bandwidth), \
-                 which this kernel lacks"
-            );
-        }
+        scx_utils::setup_cgroup_bw(skel.open_object_mut(), "lavd_cgroup_set_bandwidth")?;
 
         // CID kernels use the sched_switch hook to drain tasks on RT/DL takeover.
         unsafe {
