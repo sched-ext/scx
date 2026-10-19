@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 
 const SYSFS_DIR: &str = "/sys/kernel/sched_ext";
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct KernelState {
     /// Contents of `state`: "enabled", "disabled", or a transitional value
     /// ("enabling"/"disabling") if we catch a switch mid-flight.

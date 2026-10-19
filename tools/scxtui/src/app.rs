@@ -117,8 +117,12 @@ pub struct App {
     pub status: Option<Status>,
     pub status_error: Option<String>,
     /// The kernel's own view of `sched_ext`, refreshed alongside `status`.
-    /// `None` = kernel without `sched_ext` support.
+    /// `None` = kernel without `sched_ext` support, or unreadable.
     pub kernel: Option<KernelState>,
+    /// Where `kernel` comes from: sysfs in the binary, a stub in tests.
+    /// Reading the host's real sysfs from a unit test made the outcome
+    /// depend on whether the test machine's kernel has sched_ext.
+    read_kernel: Box<dyn Fn() -> Option<KernelState>>,
     /// Previous tick's dispute bit; makes the tripwire edge-triggered.
     kernel_disputed: bool,
     /// Own-arguments field; `Some` while the user is typing. While open
@@ -158,6 +162,7 @@ impl App {
             status: None,
             status_error: None,
             kernel: None,
+            read_kernel: Box::new(|| kernel::read().unwrap_or(None)),
             kernel_disputed: false,
             args_input: None,
             message: None,
@@ -255,7 +260,7 @@ impl App {
             }
 
             // Sysfs can change with no service involved; rides every tick.
-            self.kernel = kernel::read().unwrap_or(None);
+            self.kernel = (self.read_kernel)();
 
             if self.reconcile_kernel_dispute() {
                 last_refresh = Instant::now();
@@ -685,7 +690,7 @@ or the file that sets it)",
                 self.status_error = Some(format!("{err:#}"));
             }
         }
-        self.kernel = kernel::read().unwrap_or(None);
+        self.kernel = (self.read_kernel)();
     }
 
     /// The panel's warning; the event loop reuses it as a tripwire.
@@ -853,8 +858,13 @@ mod tests {
         }
     }
 
+    /// An app on the stub, with the kernel probe stubbed out too: no
+    /// test here may depend on whether the machine running it has
+    /// sched_ext.
     fn app_with_backend(backend: StubBackend) -> App {
-        App::new(Box::new(backend), Profiles::default()).unwrap()
+        let mut app = App::new(Box::new(backend), Profiles::default()).unwrap();
+        app.read_kernel = Box::new(|| None);
+        app
     }
 
     fn strs(flags: &[&str]) -> Vec<String> {
@@ -1148,6 +1158,11 @@ mod tests {
         let queries = Rc::clone(&backend.status_queries);
         let mut app = app_with_backend(backend);
         *truth.borrow_mut() = running("scx_cake", &[], "scx_cake");
+        // The kernel the refresh will see, under the test's control
+        // rather than the test machine's.
+        let kernel = Rc::new(RefCell::new(Some(disabled_kernel())));
+        let probe = Rc::clone(&kernel);
+        app.read_kernel = Box::new(move || probe.borrow().clone());
 
         // A standing dispute is not an edge; no hammering every tick.
         app.status = Some(running("scx_cake", &[], "scx_cake"));
@@ -1156,17 +1171,29 @@ mod tests {
         assert!(!app.reconcile_kernel_dispute());
         assert_eq!(*queries.borrow(), 0);
 
-        // Arm the edge; the stored bit is recomputed post-refresh.
+        // Arm the edge: one refresh. The dispute stands after it (the
+        // kernel still says disabled), so the bit stays set and the next
+        // tick must not fire again.
         app.kernel_disputed = false;
         assert!(app.reconcile_kernel_dispute());
         assert_eq!(*queries.borrow(), 1);
-        assert!(!app.kernel_disputed);
+        assert!(app.kernel_disputed);
+        assert!(!app.reconcile_kernel_dispute());
+        assert_eq!(*queries.borrow(), 1);
 
-        // A new disagreement is a new edge with its own immediate refresh.
-        app.status = Some(running("scx_cake", &[], "scx_cake"));
+        // The kernel catches up: the dispute clears without a refresh.
+        *kernel.borrow_mut() = Some(enabled_kernel("cake"));
+        app.kernel = Some(enabled_kernel("cake"));
+        assert!(!app.reconcile_kernel_dispute());
+        assert!(!app.kernel_disputed);
+        assert_eq!(*queries.borrow(), 1);
+
+        // A new disagreement is a new edge with its own immediate refresh;
+        // this one resolves on the refresh itself.
         app.kernel = Some(disabled_kernel());
         assert!(app.reconcile_kernel_dispute());
         assert_eq!(*queries.borrow(), 2);
+        assert!(!app.kernel_disputed, "the refresh saw the kernel agree");
     }
 
     #[test]
