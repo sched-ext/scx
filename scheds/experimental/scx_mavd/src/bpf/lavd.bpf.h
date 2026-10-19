@@ -372,6 +372,7 @@ extern u32 nr_cids;
 extern struct scx_cmask *online_cmask;
 extern struct scx_cmask *idle_cmask;
 extern struct scx_cmask *idle_smt_cmask;
+extern struct scx_cmask *sweep_cmask;
 
 int init_cid_masks(void);
 s32 claim_idle_cid(s32 cid);
@@ -450,6 +451,7 @@ struct cpu_ctx {
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
 	volatile u32	nr_sched;	/* number of schedules */
 	volatile u32	nr_preempt;
+	volatile u32	nr_reenq_kfunc;	/* re-enqueues with the KFUNC reason */
 
 	/*
 	 * Per-CPU task_ctx lookup cache. Local-only writes/reads, never

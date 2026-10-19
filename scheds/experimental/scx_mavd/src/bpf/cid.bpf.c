@@ -9,9 +9,11 @@ u32 nr_cids;
 struct scx_cmask *online_cmask;
 struct scx_cmask *idle_cmask;
 struct scx_cmask *idle_smt_cmask;
+/* the revoke sweep's scratch mask, one sweep runs at a time */
+struct scx_cmask *sweep_cmask;
 
 enum {
-	NR_GLOBAL_MASKS = 8,
+	NR_GLOBAL_MASKS = 9,
 	NR_CPU_MASKS = 7,
 };
 
@@ -55,6 +57,7 @@ int init_cid_masks(void)
 	online_cmask = pool_mask(pool, mask_sz, 5);
 	idle_cmask = pool_mask(pool, mask_sz, 6);
 	idle_smt_cmask = pool_mask(pool, mask_sz, 7);
+	sweep_cmask = pool_mask(pool, mask_sz, 8);
 
 	bpf_arena_for(cid, 0, nr_cids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);

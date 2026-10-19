@@ -717,13 +717,14 @@ online view shrinks to the grants.
 
 A revoke arms a sweep with bpf_call_rcu() that runs after an RCU grace
 period, once every placement that read the old view has landed. The sweep
-re-enqueues the DSQs of every core and cpdom that is not fully held, and
-enqueue places each task against the current view. A task allowed on no held
-cid is inserted with SCX_ENQ_RESCUE on an allowed cid, which the kernel
-diverts to its rescue path. Every placement is clamped to the held cids.
-While no cid is held, every task is rescued.
+walks each DSQ of a core or cpdom that is not fully held and re-enqueues the
+tasks none of its held cids can run, and enqueue places each against the
+current view. A task allowed on no held cid is inserted with SCX_ENQ_RESCUE
+on an allowed cid, which the kernel diverts to its rescue path. Every
+placement is clamped to the held cids. While no cid is held, every task is
+rescued.
 
-Only a re-enqueue from scx_bpf_dsq_reenq(), the RT/DL drain and the sweep,
+Only a re-enqueue with the KFUNC reason, from the RT/DL drain and the sweep,
 keeps the cached placement, clamped to a held cid. Every other re-enqueue
 re-runs placement.
 

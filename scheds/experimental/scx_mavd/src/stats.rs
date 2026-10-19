@@ -35,6 +35,11 @@ pub struct SysStats {
     #[stat(desc = "Number of task preemption triggered")]
     pub nr_preempt: u64,
 
+    #[stat(
+        desc = "Number of re-enqueues with the KFUNC reason: the RT/DL drain and, in sub mode, the revoke sweep"
+    )]
+    pub nr_reenq_kfunc: u64,
+
     #[stat(desc = "% of performance-critical tasks")]
     pub pc_pc: f64,
 
@@ -73,12 +78,13 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "# Q TASK",
             "# ACT CPU",
             "# SCHED",
             "# PREEMPT",
+            "# REENQ",
             "PERF-CR%",
             "LAT-CR%",
             "X-MIG%",
@@ -107,12 +113,13 @@ impl SysStats {
 
         writeln!(
             w,
-            "{color}| {:8} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "{color}| {:8} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             self.mseq,
             self.nr_queued_task,
             self.nr_active,
             self.nr_sched,
             self.nr_preempt,
+            self.nr_reenq_kfunc,
             GPoint(self.pc_pc),
             GPoint(self.pc_lc),
             GPoint(self.pc_x_migration),

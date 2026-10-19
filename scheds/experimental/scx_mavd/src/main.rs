@@ -1039,6 +1039,7 @@ impl<'a> Scheduler<'a> {
                 let nr_active = st.nr_active;
                 let nr_sched = st.nr_sched;
                 let nr_preempt = st.nr_preempt;
+                let nr_reenq_kfunc = st.nr_reenq_kfunc;
                 let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
                 let pc_lc = Self::get_pc(st.nr_lat_cri, nr_sched);
                 let pc_x_migration = Self::get_pc(st.nr_x_migration, nr_sched);
@@ -1059,6 +1060,7 @@ impl<'a> Scheduler<'a> {
                     nr_active,
                     nr_sched,
                     nr_preempt,
+                    nr_reenq_kfunc,
                     pc_pc,
                     pc_lc,
                     pc_x_migration,
