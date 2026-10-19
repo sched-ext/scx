@@ -109,10 +109,19 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
                 (true, Some(process)) => {
                     lines.push(kv("State", "running", Color::Green));
                     lines.push(kv("Scheduler", strip_prefix(&process.sched), Color::White));
-                    let mode = match app.running_mode() {
-                        Some(mode) => format!("{} profile", mode.label()),
-                        None if process.args.is_empty() => "no flags".to_owned(),
-                        None => "custom flags".to_owned(),
+                    let modes = app.running_modes();
+                    let mode = match modes.as_slice() {
+                        [] if process.args.is_empty() => "no flags".to_owned(),
+                        [] => "custom flags".to_owned(),
+                        [mode] => format!("{} profile", mode.label()),
+                        // Shared flag set: argv cannot say which was meant.
+                        many => format!(
+                            "{} profile",
+                            many.iter()
+                                .map(|m| m.label())
+                                .collect::<Vec<_>>()
+                                .join(" or ")
+                        ),
                     };
                     let args = if process.args.is_empty() {
                         mode

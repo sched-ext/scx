@@ -38,6 +38,9 @@ about the unit and the manager environment, and drives the unit with
   `default_sched` in its `default_mode`. `a` opens a field for own flags,
   written to `SCX_FLAGS` instead of a profile's. `--export-profiles` dumps
   the resolved table as JSON.
+- `--cli`: scxctl's command set (`get`, `list`, `modes`, `start`,
+  `switch`, `stop`, `restart`, `restore`) with the same flags and output
+  wording, for scripts and for a terminal without the TUI.
 - Shows what runs now and what the next start would run, separately. The
   running scheduler and its flags come from the unit's main process
   (`MainPID`, `/proc/<pid>/cmdline`), never from the file, so a file edited
@@ -92,8 +95,62 @@ cargo build --release -p scxtui
 
 ```bash
 scxtui
+scxtui --cli get
+scxtui --cli switch -s scx_lavd -m gaming
 scxtui --export-profiles profiles.json   # or - for stdout
 ```
+
+### Command line
+
+`scxtui --cli <COMMAND>` mirrors scxctl: the same subcommands and flags,
+scheduler names with or without the `scx_` prefix, and the same stdout
+text (`running Lavd in Gaming mode`, `supported schedulers: ["bpfland",
+"lavd"]`, `modes configured for Lavd: [Auto, Gaming]`), so a script changes
+the command name and nothing else. Lines scxctl could not have printed
+(see below) go to stderr. Options foreign to a subcommand are rejected;
+`<COMMAND> --help` prints its usage.
+
+| Command | Effect |
+|---|---|
+| `get` | The running scheduler and its profile or arguments, plus the next start when it differs and any override in effect |
+| `list` | The `scx_*` executables in `PATH` |
+| `modes -s <SCHED> [--show-args]` | The profiles configured for a scheduler, or every profile's resolved flags |
+| `start -s <SCHED> [-m <MODE> \| -a <ARGS>]` | Write the config and start the unit; refused while it is active |
+| `switch [-s <SCHED>] [-m <MODE> \| -a <ARGS>]` | Write the config and restart the unit; refused when nothing runs (use `start`), no `-s` means the running scheduler, no `-m` keeps its profile when the running arguments match exactly one profile and keeps the arguments as they are otherwise (`auto` for another scheduler) |
+| `stop` | Stop the unit |
+| `restart` | Write the running process' scheduler and arguments back to the config and restart the unit, so the restart keeps the running configuration even if the file was edited meanwhile; refused when nothing runs |
+| `restore` | `default_sched` in `default_mode` from the profiles file |
+
+`-a` takes arguments separated by commas or whitespace, as scxctl's
+`--args` does (`-a "--verbose,--slice-us 5000"`). They go to `SCX_FLAGS`,
+which the unit expands unquoted, so an argument containing a space cannot
+be expressed and is refused rather than split. Errors go to stderr with
+exit status 1.
+
+Where the backend cannot match the loader, the output says so rather
+than guessing, on stderr so that stdout stays scxctl's. `get` follows
+scxctl's rule on stdout: a process with arguments is reported with its
+arguments, one without is reported in `Auto` mode or with its own
+defaults. The loader knew which mode it had been asked for; here that
+would be reconstructed from argv, so the profiles whose flags match go on
+a `matching modes:` line on stderr. `get` likewise reports on stderr a
+`next start:` whenever the file would start a different scheduler or
+different arguments than what runs, and any override in effect. A
+successful `start` or `switch` means systemd accepted the operation, as a
+successful scxctl command meant the loader accepted it; neither says the
+scheduler has attached to the kernel, which `get` and the TUI's kernel
+line show. `start`, `switch`, `restore` and `restart` are refused while an
+`SCX_SCHEDULER_OVERRIDE` or `SCX_FLAGS_OVERRIDE` is in effect, since
+systemd would accept the restart and run the override instead of what the
+command reported (for `restart`, instead of what was running). A process
+without arguments is reported in `Auto` mode only when `Auto` is the one
+profile without flags for that scheduler; when several profiles are empty
+it is reported with its own defaults and the candidates listed. Repeated
+options are errors, as in scxctl. `restart`
+re-reads the process and restarts the unit afterwards; the two steps are
+not one transaction, so another writer in between wins, as with any two
+clients editing the same file. `stop`, `list`, `restart` and help do not
+read the profiles file, so a broken file does not block stopping.
 
 The export holds, for every scheduler the TUI would list, the flags each
 profile resolves to (file rows merged with the built-in defaults) plus the

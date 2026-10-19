@@ -55,6 +55,25 @@ pub const MODES: [Mode; 5] = [
 ];
 
 impl Mode {
+    /// Parses scxctl's `--mode` spelling (lower-case), case-insensitively.
+    pub fn parse(name: &str) -> Option<Self> {
+        MODES
+            .iter()
+            .copied()
+            .find(|mode| mode.label().eq_ignore_ascii_case(name))
+    }
+
+    /// The variant name, as scxctl prints it (`Gaming mode`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Auto => "Auto",
+            Mode::Gaming => "Gaming",
+            Mode::PowerSave => "PowerSave",
+            Mode::LowLatency => "LowLatency",
+            Mode::Server => "Server",
+        }
+    }
+
     /// Lower-case name, matching scxctl's CLI.
     pub fn label(self) -> &'static str {
         match self {
@@ -150,14 +169,17 @@ impl Profiles {
             })
     }
 
-    /// Which mode `flags` correspond to for `sched`, if any. First match
-    /// in [`MODES`] order wins when two modes share a flag set (common:
-    /// `auto` and `server` both empty).
-    pub fn mode_for(&self, sched: &str, flags: &[String]) -> Option<Mode> {
+    /// Every mode whose flag set for `sched` is exactly `flags`, in
+    /// [`MODES`] order. Several modes can share a flag set (lavd's gaming
+    /// and lowlatency, or two empty rows), and the process' argv cannot
+    /// tell them apart; callers that need one answer take the first and
+    /// callers that report state should show the whole list.
+    pub fn modes_for(&self, sched: &str, flags: &[String]) -> Vec<Mode> {
         MODES
             .iter()
             .copied()
-            .find(|mode| self.flags(sched, *mode) == flags)
+            .filter(|mode| self.flags(sched, *mode) == flags)
+            .collect()
     }
 
     /// The configured default, if the file names a scheduler. The mode
@@ -351,18 +373,21 @@ auto_mode = []
     fn running_flags_map_back_to_a_mode() {
         let profiles = Profiles::default();
         assert_eq!(
-            profiles.mode_for("scx_bpfland", &strs(&["-m", "all"])),
-            Some(Mode::Gaming)
+            profiles.modes_for("scx_bpfland", &strs(&["-m", "all"])),
+            [Mode::Gaming]
         );
-        // Shared flag sets resolve to the first mode in selector order.
+        // Shared flag sets: all matches are reported, the selector takes
+        // the first.
+        let shared = strs(&["--performance", "--pinned-slice-us", "500"]);
         assert_eq!(
-            profiles.mode_for(
-                "scx_lavd",
-                &strs(&["--performance", "--pinned-slice-us", "500"])
-            ),
-            Some(Mode::Gaming)
+            profiles.modes_for("scx_lavd", &shared),
+            [Mode::Gaming, Mode::LowLatency]
         );
-        assert_eq!(profiles.mode_for("scx_cosmos", &[]), Some(Mode::Auto));
-        assert_eq!(profiles.mode_for("scx_bpfland", &strs(&["-k"])), None);
+
+        assert_eq!(
+            profiles.modes_for("scx_cosmos", &[]),
+            [Mode::Auto, Mode::Server]
+        );
+        assert!(profiles.modes_for("scx_bpfland", &strs(&["-k"])).is_empty());
     }
 }

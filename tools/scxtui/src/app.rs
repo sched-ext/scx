@@ -192,12 +192,23 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The mode the running process' arguments correspond to, if they
-    /// match a row of the table for that scheduler.
+    /// The modes the running process' arguments correspond to: every
+    /// row of the table for that scheduler with exactly these flags.
+    /// Empty when none matches (custom flags). More than one when rows
+    /// share a flag set; argv cannot say which the user meant.
+    pub fn running_modes(&self) -> Vec<Mode> {
+        let Some(status) = self.status.as_ref() else {
+            return Vec::new();
+        };
+        let Some(process) = status.process.as_ref().filter(|_| status.active) else {
+            return Vec::new();
+        };
+        self.profiles.modes_for(&process.sched, &process.args)
+    }
+
+    /// First of [`Self::running_modes`], for the selector.
     pub fn running_mode(&self) -> Option<Mode> {
-        let status = self.status.as_ref()?;
-        let process = status.process.as_ref().filter(|_| status.active)?;
-        self.profiles.mode_for(&process.sched, &process.args)
+        self.running_modes().first().copied()
     }
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> Result<()> {
