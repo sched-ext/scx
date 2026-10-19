@@ -312,6 +312,13 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	 scx_bpf_cid_node(cid) : NUMA_NO_NODE)
 
 /*
+ * v7.4: Add scx_bpf_cgroup_nr_cpus().
+ */
+#define __COMPAT_scx_bpf_cgroup_nr_cpus(cgrp)					\
+	(bpf_ksym_exists(scx_bpf_cgroup_nr_cpus) ?				\
+	 scx_bpf_cgroup_nr_cpus(cgrp) : scx_bpf_nr_cpu_ids())
+
+/*
  * v6.18: Add a helper to retrieve the current task running on a CPU.
  *
  * The kernel tree dropped this helper and scx_bpf_cpu_rq(), but schedulers in

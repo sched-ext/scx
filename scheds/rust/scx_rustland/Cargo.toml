@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustland"
-version = "1.1.3"
+version = "1.1.4"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 edition = "2024"
 rust-version = "1.91"
@@ -18,15 +18,15 @@ log = "0.4"
 ordered-float = "5"
 procfs = "0.18"
 serde = { version = "1", features = ["derive"] }
-scx_stats = { path = "../../../rust/scx_stats", version = "1.1.3" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.3" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.1.3" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.4.14" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.4" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.4" }
+scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.4.15" }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.3" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.4.14" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.4" }
+scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.4.15" }
 
 [features]
 enable_backtrace = []

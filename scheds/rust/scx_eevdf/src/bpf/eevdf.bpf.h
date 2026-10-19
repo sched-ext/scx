@@ -87,6 +87,7 @@ extern const volatile bool no_place_rel_deadline;
 extern const volatile bool no_vref_update;
 extern const volatile bool no_delay_dequeue;
 extern const volatile bool no_delay_requeue;
+extern const volatile bool proxy_exec;
 extern const volatile bool no_hrtick;
 
 extern u32 nr_sched_idle_curr;
@@ -327,6 +328,7 @@ struct pack {
 	u64 curr_since;		/* when it was picked, see keep_running() */
 	u64 curr_request;	/* request for which it was picked */
 	u64 curr_vprot;		/* protected vruntime, see set_protect_slice() */
+	struct sched_ent __arena *curr_se;	/* its entity, see pack_vref_alone() */
 	s32 cid;		/* the cid whose task clock the pack runs in */
 	struct scx_edq edq;
 };
@@ -392,10 +394,6 @@ struct cid_ctx {
 	u64 busy_balance_budget; /* load left in this deferred balance pass */
 	u32 active_balance_pending; /* destination reservation: 0 none, 1 held, 2 ready */
 	s32 active_balance_cid;	/* idle cid asking for the running task */
-	u64 user_acc;
-	u64 user_util_ewma;
-	u64 user_eval_at;
-	bool user_busy;
 	u32 sis_idle_scan;	/* nr_idle_scan, meaningful at llc_base */
 	u32 asym_idle_scan;	/* same, at asym_capacity_base, see asym_domain_shared() */
 };
@@ -563,6 +561,26 @@ static u64 cid_clock_task_at(s32 cid, u64 now)
 static bool is_task_queued(const struct task_struct *p)
 {
 	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
+ * Return true if @p is a proxy-execution donor: blocked on a mutex and kept
+ * runnable so that its scheduling context can run the mutex owner.
+ *
+ * fair.c keeps such a task where it is. It stays on its runqueue with the
+ * vruntime and deadline it blocked with, and can_migrate_task() refuses it:
+ *
+ *	if (task_is_blocked(p))
+ *		return 0;
+ *
+ * Only proxy execution itself moves a donor, to the runqueue of the owner.
+ * The balancers here refuse it the same way.
+ */
+static __always_inline bool task_is_blocked(const struct task_struct *p)
+{
+	if (!proxy_exec || !bpf_core_field_exists(p->is_blocked))
+		return false;
+	return p->is_blocked;
 }
 
 /*

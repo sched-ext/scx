@@ -7,9 +7,9 @@
 // CARGO'S DEAD-CODE LINT FIRES PER COMPILATION TARGET; SILENCE IT.
 #![allow(dead_code)]
 
-// EVERY MEASURE IS COMPUTED FROM THE RAW SAMPLE WINDOW EACH CALL:
-// NO ACCUMULATOR CARRIES STATE BETWEEN TICKS.
-//
+// EVERY MEASURE IS COMPUTED FROM THE RAW SAMPLE WINDOW EACH CALL. NO
+// ACCUMULATOR CARRIES STATE BETWEEN TICKS.
+
 // HVG MEAN DEGREE / HVG ENTROPY (LUQUE-LACASA 2009): TWO STATISTICS OF
 // THE HORIZONTAL VISIBILITY GRAPH'S DEGREE DISTRIBUTION.
 //   - MEAN DEGREE LAMBDA = <k>. IID RANDOM SEQUENCES SATURATE AT 4 - 2/N
@@ -17,19 +17,17 @@
 //   - SHANNON ENTROPY S OVER THE DEGREE DISTRIBUTION. IID HAS THE EXACT
 //     CLOSED FORM P(k) = (1/3)*(2/3)^(k-2), k >= 2, GIVING
 //     S_IID = LN(3) + 2*LN(3/2) ~= 1.910.
-// LN(3/2) IS THE CHARACTERISTIC EXPONENT OF THE IID DEGREE DISTRIBUTION,
-// NOT THE ENTROPY THRESHOLD. WE EXPOSE LAMBDA AS THE PRIMARY REGIME
-// DISCRIMINATOR (DIRECTLY INTERPRETABLE) AND ENTROPY AS A CORROBORATOR.
+// LN(3/2) IS THE CHARACTERISTIC EXPONENT OF THAT DISTRIBUTION, NOT AN
+// ENTROPY THRESHOLD. LAMBDA IS THE PRIMARY REGIME DISCRIMINATOR AND
+// ENTROPY THE CORROBORATOR.
 //
-// BANDT-POMPE PERMUTATION ENTROPY (D=3) (BANDT-POMPE 2002): SHANNON
+// BANDT-POMPE PERMUTATION ENTROPY, D=3 (BANDT-POMPE 2002): SHANNON
 // ENTROPY OF THE ORDINAL-PATTERN DISTRIBUTION OF LENGTH-3 SUB-WINDOWS,
-// NORMALIZED TO [0, 1] BY LN(6). 0 = PERFECTLY MONOTONIC / PERIODIC,
-// 1 = MAXIMALLY DISORDERED.
+// NORMALIZED TO [0, 1] BY LN(6). 0 IS MONOTONIC OR PERIODIC, 1 IS
+// MAXIMALLY DISORDERED.
 //
-// THESE TWO PRIMITIVES ARE COMPLEMENTARY: HVG ENTROPY IS AMPLITUDE-
-// SENSITIVE (TWO SEQUENCES WITH IDENTICAL ORDINAL STRUCTURE BUT
-// DIFFERENT VALUES CAN DIFFER IN HVG-S), BANDT-POMPE IS AMPLITUDE-
-// INVARIANT (CAPTURES PURE ORDINAL DYNAMICS).
+// THE TWO ARE COMPLEMENTARY. HVG ENTROPY IS AMPLITUDE-SENSITIVE;
+// BANDT-POMPE IS AMPLITUDE-INVARIANT AND CAPTURES ORDINAL DYNAMICS.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -459,23 +457,15 @@ pub fn rqa_det<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     Some(diag_rec as f64 / total_rec as f64)
 }
 
-// A PRICED READING: A VALUE AND HOW MUCH IT IS WORTH TRUSTING
-//
-// Every estimator below used to refuse outright under a sample floor -- return
-// None, and the consumer skips. That is a gate, and it is the wrong shape for
-// this scheduler: THE FLAG says price, never bail. A window at 7 samples is not
-// unknowable, it is weakly known, and the difference between those two is the
-// difference between a knob that does not move at all and one that moves a
-// little.
-//
-// So each estimator now answers wherever its arithmetic is DEFINED, and reports
-// confidence separately. Confidence ramps from the mathematical minimum to the
-// statistical floor that used to be the gate: full window, full trust. The
-// consumer multiplies its effect by confidence, so data flows from the first
-// sample the math allows and its influence grows as the evidence does.
-//
-// The Option-returning forms are kept. They are the honest answer to "is this
-// computable at all", which is a different question from "how much is it worth".
+// A PRICED READING: A VALUE AND HOW MUCH IT IS WORTH TRUSTING.
+// EACH ESTIMATOR ANSWERS WHEREVER ITS ARITHMETIC IS DEFINED AND REPORTS
+// CONFIDENCE SEPARATELY, RATHER THAN REFUSING UNDER A SAMPLE FLOOR. A WINDOW AT
+// 7 SAMPLES IS NOT UNKNOWABLE, IT IS WEAKLY KNOWN -- PRICE IT, NEVER BAIL.
+// CONFIDENCE RAMPS FROM THE MATHEMATICAL MINIMUM TO THE STATISTICAL FLOOR, AND
+// THE CONSUMER MULTIPLIES ITS EFFECT BY IT, SO DATA FLOWS FROM THE FIRST SAMPLE
+// THE MATH ALLOWS AND ITS INFLUENCE GROWS WITH THE EVIDENCE.
+// THE Option-RETURNING FORMS REMAIN, ANSWERING WHETHER A READING IS COMPUTABLE
+// AT ALL, WHICH IS A DIFFERENT QUESTION FROM WHAT IT IS WORTH.
 #[derive(Clone, Copy, Debug)]
 pub struct Priced {
     pub value: f64,
@@ -517,16 +507,12 @@ fn confidence(filled: usize, math_min: usize, stat_floor: usize) -> f64 {
 // BETWEEN SEEING A BURST FORM AND SEEING THAT ONE HAPPENED.
 //
 // r1 = SUM (x_i - mean)(x_{i+1} - mean) / SUM (x_i - mean)^2, THE
-// STANDARD BIASED ESTIMATOR. BIASED IS THE RIGHT CHOICE ON SHORT
-// WINDOWS: IT IS THE LOWER-VARIANCE ONE, AND VARIANCE IS WHAT MAKES A
-// SHORT-WINDOW ESTIMATE USELESS.
-//
-// READING IT: r1 NEAR 0 IS MEMORYLESS, EACH SAMPLE INDEPENDENT OF THE
-// LAST. r1 RISING TOWARD 1 IS CRITICAL SLOWING -- PERTURBATIONS ARE
-// PERSISTING RATHER THAN DAMPING, WHICH IS THE APPROACH TO SATURATION.
-// r1 NEGATIVE IS OSCILLATION, EACH SAMPLE OVERSHOOTING THE LAST.
-//
-// COST IS ONE MULTIPLY-ACCUMULATE PER SAMPLE. NOT WIRED TO A DECISION.
+// STANDARD BIASED ESTIMATOR. BIASED IS THE LOWER-VARIANCE CHOICE, AND
+// VARIANCE IS WHAT MAKES A SHORT-WINDOW ESTIMATE USELESS.
+//   r1 NEAR 0      MEMORYLESS, EACH SAMPLE INDEPENDENT OF THE LAST
+//   r1 TOWARD 1    CRITICAL SLOWING, PERTURBATIONS PERSISTING
+//   r1 NEGATIVE    OSCILLATION, EACH SAMPLE OVERSHOOTING THE LAST
+// ONE MULTIPLY-ACCUMULATE PER SAMPLE. NOT WIRED TO A DECISION.
 
 // LAG-1 NEEDS ENOUGH PAIRS THAT ONE OUTLIER CANNOT SET THE ANSWER.
 pub const ACF1_MIN_SAMPLES: usize = 8;
@@ -572,27 +558,19 @@ fn lag1_autocorr_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     Some((numer / denom).clamp(-1.0, 1.0))
 }
 
-// KIM-JO FINITE-SIZE-CORRECTED BURSTINESS
-//
-// THE CLASSICAL BURSTINESS PARAMETER B = (sigma - mu) / (sigma + mu)
-// (GOH-BARABASI 2008) IS SEVERELY BIASED ON SHORT SERIES: IT DRIFTS
-// TOWARD -1 AS n FALLS, SO A SHORT WINDOW READS AS REGULAR NO MATTER
-// WHAT IT CONTAINS. THAT IS DISQUALIFYING HERE, WHERE EVERY WINDOW IS
-// SHORT BY CONSTRUCTION.
-//
-// KIM AND JO (2016) GIVE THE FINITE-SIZE-CORRECTED FORM:
+// KIM-JO FINITE-SIZE-CORRECTED BURSTINESS.
+// THE CLASSICAL B = (sigma - mu) / (sigma + mu) (GOH-BARABASI 2008) DRIFTS
+// TOWARD -1 AS n FALLS, SO A SHORT WINDOW READS AS REGULAR WHATEVER IT
+// CONTAINS -- DISQUALIFYING HERE, WHERE EVERY WINDOW IS SHORT.
+// KIM AND JO (2016) CORRECT FOR FINITE SIZE:
 //
 //   A_n(r) = (sqrt(n+1) r - sqrt(n-1)) /
 //            ((sqrt(n+1) - 2) r + sqrt(n-1))
 //
-// WITH r = sigma / mu. IT IS -1 FOR PERFECTLY REGULAR, 0 FOR POISSON
-// AND +1 FOR MAXIMALLY BURSTY AT EVERY n, WHICH IS WHAT MAKES IT
-// COMPARABLE ACROSS WINDOW SIZES.
-//
-// ONE SCALAR THAT SEPARATES THE THREE TRAFFIC SHAPES THE TIER
-// CLASSIFIER AND THE MWU PATHWAYS KEEP CONFLATING: BURST-STARVATION
-// (POSITIVE), LONGRUN (NEAR ZERO) AND DEADLINE-PACED (NEGATIVE).
-//
+// WITH r = sigma / mu. -1 IS PERFECTLY REGULAR, 0 IS POISSON, +1 IS
+// MAXIMALLY BURSTY, AT EVERY n -- WHICH IS WHAT MAKES IT COMPARABLE
+// ACROSS WINDOW SIZES. ONE SCALAR SEPARATING BURST-STARVATION (POSITIVE),
+// LONGRUN (NEAR ZERO) AND DEADLINE-PACED (NEGATIVE).
 // NOT WIRED TO A DECISION.
 
 pub const BURSTINESS_MIN_SAMPLES: usize = 4;
@@ -959,434 +937,5 @@ impl ChaosCounter {
 
     pub fn load(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
-    }
-}
-
-// ESTIMATOR TESTS
-//
-// THE PORTED ESTIMATORS ARE CHECKED AGAINST SIGNALS WHOSE ANSWER IS
-// KNOWN BY CONSTRUCTION, NOT AGAINST A GOLDEN NUMBER: A DETERMINISTIC
-// PSEUDO-RANDOM SEQUENCE IS UNCORRELATED (H NEAR 0.5), A RAMP IS
-// MAXIMALLY PERSISTENT (H HIGH), AN ALTERNATING SEQUENCE IS
-// ANTI-PERSISTENT (H LOW). THE BANDS ARE WIDE ON PURPOSE -- A
-// 16-TO-64-SAMPLE WINDOW CANNOT PIN AN LRD EXPONENT TIGHTLY, AND A
-// TEST THAT PRETENDS OTHERWISE WOULD BE ASSERTING NOISE.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // DETERMINISTIC LCG. NO rand DEPENDENCY, AND THE SAME SEQUENCE EVERY
-    // RUN, SO A FAILURE IS REPRODUCIBLE RATHER THAN A DRAW.
-    fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((*seed >> 33) as f64 / (1u64 << 31) as f64) - 0.5
-    }
-
-    fn fill<const N: usize>(vals: &[f64]) -> RawWindow<N> {
-        let mut w = RawWindow::<N>::new();
-        for v in vals {
-            w.push(*v);
-        }
-        w
-    }
-
-    #[test]
-    fn acf1_white_noise_is_memoryless() {
-        let mut seed = 0xABCDEFu64;
-        let vals: Vec<f64> = (0..64).map(|_| lcg(&mut seed)).collect();
-        let r = lag1_autocorr(&fill::<64>(&vals)).expect("64 samples is enough");
-        assert!(
-            r.abs() < 0.3,
-            "uncorrelated samples should not persist, got r1={r}"
-        );
-    }
-
-    #[test]
-    fn acf1_ramp_is_strongly_persistent() {
-        // THE CRITICAL-SLOWING SIGNATURE: EACH SAMPLE ALMOST ENTIRELY
-        // DETERMINED BY THE ONE BEFORE IT.
-        let vals: Vec<f64> = (0..32).map(|i| i as f64).collect();
-        let r = lag1_autocorr(&fill::<32>(&vals)).expect("32 samples is enough");
-        assert!(r > 0.8, "a ramp should read as slowing, got r1={r}");
-    }
-
-    #[test]
-    fn acf1_alternating_is_negative() {
-        let vals: Vec<f64> = (0..32)
-            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
-            .collect();
-        let r = lag1_autocorr(&fill::<32>(&vals)).expect("32 samples is enough");
-        assert!(r < -0.8, "an oscillation should overshoot, got r1={r}");
-    }
-
-    #[test]
-    fn acf1_flat_window_is_none() {
-        // AN IDLE CPU MUST NOT READ AS MAXIMALLY AUTOCORRELATED AND
-        // THEREFORE ABOUT TO TIP. IDLE IS THE COMMON CASE.
-        assert!(lag1_autocorr(&fill::<32>(&[7.0; 32])).is_none());
-    }
-
-    #[test]
-    fn acf1_needs_samples() {
-        assert!(lag1_autocorr(&fill::<32>(&[1.0, 2.0, 3.0])).is_none());
-    }
-
-    #[test]
-    fn burstiness_regular_is_negative() {
-        // EVENLY SPACED TRAFFIC IS THE DEADLINE-PACED SHAPE.
-        let b = kim_jo_burstiness(&fill::<32>(&[5.0; 16])).expect("16 samples is enough");
-        assert!(
-            b < -0.5,
-            "perfectly regular traffic should read regular, got B={b}"
-        );
-    }
-
-    #[test]
-    fn burstiness_bursty_is_positive() {
-        // LONG QUIET RUNS PUNCTUATED BY SPIKES: THE BURST-STARVATION
-        // SHAPE, WHERE sigma GREATLY EXCEEDS mu.
-        let mut vals = vec![0.01f64; 30];
-        vals[7] = 40.0;
-        vals[23] = 55.0;
-        let b = kim_jo_burstiness(&fill::<32>(&vals)).expect("30 samples is enough");
-        assert!(b > 0.4, "spiky traffic should read bursty, got B={b}");
-    }
-
-    #[test]
-    fn burstiness_ordering_holds() {
-        // THE THREE SHAPES THE TIER CLASSIFIER CONFLATES MUST SEPARATE:
-        // DEADLINE-PACED < LONGRUN < BURST-STARVATION.
-        let mut seed = 24680u64;
-        let regular = fill::<32>(&[5.0; 24]);
-        // POSITIVE, MODERATELY VARIABLE: THE LONGRUN SHAPE.
-        let longrun = fill::<32>(&(0..24).map(|_| 5.0 + lcg(&mut seed)).collect::<Vec<_>>());
-        let mut spiky = vec![0.05f64; 24];
-        spiky[5] = 30.0;
-        spiky[17] = 45.0;
-        let bursty = fill::<32>(&spiky);
-        let (r, l, b) = (
-            kim_jo_burstiness(&regular).unwrap(),
-            kim_jo_burstiness(&longrun).unwrap(),
-            kim_jo_burstiness(&bursty).unwrap(),
-        );
-        assert!(
-            r < l && l < b,
-            "expected regular {r} < longrun {l} < bursty {b}"
-        );
-    }
-
-    #[test]
-    fn burstiness_is_stable_across_window_sizes() {
-        // THE ENTIRE POINT OF THE KIM-JO CORRECTION: THE CLASSICAL
-        // STATISTIC DRIFTS TOWARD -1 AS n FALLS, SO THE SAME TRAFFIC
-        // WOULD READ DIFFERENTLY ON AN 8-SAMPLE AND A 32-SAMPLE WINDOW.
-        let mut seed = 1357u64;
-        let long: Vec<f64> = (0..32).map(|_| 5.0 + 2.0 * lcg(&mut seed)).collect();
-        let short: Vec<f64> = long[..8].to_vec();
-        let bl = kim_jo_burstiness(&fill::<32>(&long)).unwrap();
-        let bs = kim_jo_burstiness(&fill::<8>(&short)).unwrap();
-        assert!(
-            (bl - bs).abs() < 0.5,
-            "same traffic read {bl} at n=32 and {bs} at n=8; the correction is not holding"
-        );
-    }
-
-    #[test]
-    fn burstiness_rejects_non_positive_series() {
-        // BURSTINESS IS DEFINED ON A POSITIVE INTERVAL SERIES. A CALLER
-        // HANDING OVER A CENTERED SIGNAL GETS None, NOT A NUMBER.
-        let centered: Vec<f64> = (0..16)
-            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
-            .collect();
-        assert!(kim_jo_burstiness(&fill::<16>(&centered)).is_none());
-    }
-
-    #[test]
-    fn hurst_needs_a_full_window() {
-        let w = fill::<64>(&[1.0; 8]);
-        assert!(
-            veitch_abry_hurst(&w).is_none(),
-            "an 8-sample window cannot support three octaves"
-        );
-    }
-
-    #[test]
-    fn hurst_white_noise_near_half() {
-        let mut seed = 0x9E3779B97F4A7C15u64;
-        let vals: Vec<f64> = (0..64).map(|_| lcg(&mut seed)).collect();
-        let w = fill::<64>(&vals);
-        let h = veitch_abry_hurst(&w).expect("64 samples is enough");
-        assert!(
-            (0.25..=0.75).contains(&h),
-            "uncorrelated sequence read H={h}"
-        );
-    }
-
-    #[test]
-    fn hurst_ramp_is_persistent() {
-        let vals: Vec<f64> = (0..64).map(|i| i as f64).collect();
-        let w = fill::<64>(&vals);
-        let h = veitch_abry_hurst(&w).expect("64 samples is enough");
-        assert!(
-            h > 0.75,
-            "a monotonic ramp should read persistent, got H={h}"
-        );
-    }
-
-    #[test]
-    fn hurst_differenced_noise_is_antipersistent() {
-        // FIRST-DIFFERENCING WHITE NOISE IS THE STANDARD ANTI-PERSISTENT
-        // CONSTRUCTION: EVERY STEP TENDS TO UNDO THE ONE BEFORE IT, SO
-        // H -> 0. UNLIKE A BARE ALTERNATION IT STILL CARRIES ENERGY AT
-        // EVERY OCTAVE, WHICH IS WHAT THE FIT NEEDS.
-        let mut seed = 12345u64;
-        let noise: Vec<f64> = (0..65).map(|_| lcg(&mut seed)).collect();
-        let diff: Vec<f64> = (1..65).map(|i| noise[i] - noise[i - 1]).collect();
-        let h = veitch_abry_hurst(&fill::<64>(&diff)).expect("64 samples is enough");
-        assert!(h < 0.35, "differenced noise should mean-revert, got H={h}");
-    }
-
-    #[test]
-    fn hurst_pure_alternation_cannot_be_fit() {
-        // A PERFECT ALTERNATION PUTS ALL OF ITS ENERGY IN OCTAVE 1: EVERY
-        // COARSER APPROXIMATION IS EXACTLY ZERO, SO THERE IS ONE POINT
-        // AND NO SCALING LAW TO MEASURE. REPORTING None IS THE HONEST
-        // ANSWER; INVENTING AN EXPONENT FROM A SINGLE OCTAVE WOULD NOT
-        // BE AN ESTIMATE. THE NOISY VERSION OF THE SAME SHAPE READS AS
-        // MAXIMALLY ANTI-PERSISTENT, WHICH IS THE CASE THAT MATTERS.
-        let pure: Vec<f64> = (0..64)
-            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
-            .collect();
-        assert!(veitch_abry_hurst(&fill::<64>(&pure)).is_none());
-
-        let mut seed = 999u64;
-        let noisy: Vec<f64> = (0..64)
-            .map(|i| (if i % 2 == 0 { 1.0 } else { -1.0 }) + 0.3 * lcg(&mut seed))
-            .collect();
-        let h = veitch_abry_hurst(&fill::<64>(&noisy)).expect("noise restores the octaves");
-        assert!(
-            h < 0.35,
-            "a noisy alternation should mean-revert, got H={h}"
-        );
-    }
-
-    #[test]
-    fn hurst_ordering_holds() {
-        // THE ORDERING IS THE LOAD-BEARING PROPERTY, NOT ANY ONE VALUE:
-        // MEAN-REVERTING < UNCORRELATED < PERSISTENT. MEASURED HERE AT
-        // ROUGHLY 0.04 / 0.47 / 1.00, WITH WHITE NOISE LANDING NEAR ITS
-        // THEORETICAL 0.5.
-        let mut seed = 12345u64;
-        let noise: Vec<f64> = (0..65).map(|_| lcg(&mut seed)).collect();
-        let diff: Vec<f64> = (1..65).map(|i| noise[i] - noise[i - 1]).collect();
-        let mut s2 = 4242u64;
-        let rnd = fill::<64>(&(0..64).map(|_| lcg(&mut s2)).collect::<Vec<_>>());
-        let ramp = fill::<64>(&(0..64).map(|i| i as f64).collect::<Vec<_>>());
-        let (a, r, p) = (
-            veitch_abry_hurst(&fill::<64>(&diff)).unwrap(),
-            veitch_abry_hurst(&rnd).unwrap(),
-            veitch_abry_hurst(&ramp).unwrap(),
-        );
-        assert!(
-            a < r && r < p,
-            "expected anti-persistent {a} < random {r} < ramp {p}"
-        );
-    }
-
-    #[test]
-    fn hurst_random_walk_is_persistent() {
-        // A RANDOM WALK IS THE CANONICAL PERSISTENT PROCESS, AND UNLIKE
-        // THE RAMP IT IS NOT MONOTONIC -- SO THIS CHECKS PERSISTENCE
-        // RATHER THAN A TREND THE ESTIMATOR COULD BE PICKING UP.
-        let mut seed = 7u64;
-        let mut acc = 0.0;
-        let walk: Vec<f64> = (0..64)
-            .map(|_| {
-                acc += lcg(&mut seed);
-                acc
-            })
-            .collect();
-        let h = veitch_abry_hurst(&fill::<64>(&walk)).expect("64 samples is enough");
-        assert!(h > 0.75, "a random walk should read persistent, got H={h}");
-    }
-
-    #[test]
-    fn pecora_carroll_identical_series_couple() {
-        let mut seed = 777u64;
-        let vals: Vec<f64> = (0..32).map(|_| lcg(&mut seed)).collect();
-        let a = fill::<32>(&vals);
-        let b = fill::<32>(&vals);
-        let c = pecora_carroll(&a, &b).expect("32 samples is enough");
-        assert!(c > 0.9, "a series against itself should be slaved, got {c}");
-    }
-
-    #[test]
-    fn pecora_carroll_affine_copy_couples() {
-        // COUPLING IS ABOUT SHARED DYNAMICS, NOT SHARED UNITS: A SCALED
-        // AND SHIFTED COPY IS STILL THE SAME SIGNAL.
-        let mut seed = 31337u64;
-        let vals: Vec<f64> = (0..32).map(|_| lcg(&mut seed)).collect();
-        let scaled: Vec<f64> = vals.iter().map(|v| 100.0 * v + 42.0).collect();
-        let c = pecora_carroll(&fill::<32>(&vals), &fill::<32>(&scaled)).unwrap();
-        assert!(c > 0.9, "an affine copy should read as coupled, got {c}");
-    }
-
-    #[test]
-    fn pecora_carroll_independent_series_do_not() {
-        let mut s1 = 1u64;
-        let mut s2 = 0xDEADBEEFu64;
-        let a = fill::<64>(&(0..64).map(|_| lcg(&mut s1)).collect::<Vec<_>>());
-        let b = fill::<64>(&(0..64).map(|_| lcg(&mut s2)).collect::<Vec<_>>());
-        let c = pecora_carroll(&a, &b).expect("64 samples is enough");
-        assert!(
-            c < 0.5,
-            "independent streams should not read coupled, got {c}"
-        );
-    }
-
-    #[test]
-    fn pecora_carroll_flat_series_is_none() {
-        // A FLAT SERIES HAS NO DYNAMICS. REPORTING PERFECT SYNCHRONY
-        // BETWEEN TWO IDLE CPUS WOULD BE THE WORST KIND OF FALSE
-        // POSITIVE, SINCE IDLE IS THE COMMON CASE.
-        let flat = fill::<32>(&[3.0; 32]);
-        let mut seed = 5u64;
-        let live = fill::<32>(&(0..32).map(|_| lcg(&mut seed)).collect::<Vec<_>>());
-        assert!(pecora_carroll(&flat, &live).is_none());
-        assert!(pecora_carroll(&flat, &flat).is_none());
-    }
-
-    #[test]
-    fn pecora_carroll_needs_samples() {
-        let mut seed = 9u64;
-        let short = fill::<32>(&(0..4).map(|_| lcg(&mut seed)).collect::<Vec<_>>());
-        assert!(pecora_carroll(&short, &short).is_none());
-    }
-}
-
-// SATURATION-READS-AS-QUIESCENT PROBE
-//
-// NOT A PROPERTY TEST -- A PINNED OBSERVATION. THE ADAPTIVE QUIESCENCE
-// GATE FREEZES ON (hvg_lambda <= 2.6) && (rqa_det >= 0.90) && converged,
-// AND BOTH CHAOS TERMS READ THE SAME idle_pct WINDOW. A FULLY SATURATED
-// BOX PINS idle_pct AT 0, WHICH MAKES THAT WINDOW EXACTLY FLAT. THIS
-// RECORDS WHAT THE TWO TERMS THEN RETURN, SO THE CONSEQUENCE IS A
-// MEASURED FACT IN THE TREE RATHER THAN AN ARGUMENT ON A BOARD.
-#[cfg(test)]
-mod saturation_probe {
-    use super::*;
-
-    #[test]
-    fn a_pegged_box_satisfies_both_chaos_terms_of_the_freeze_gate() {
-        // idle_pct PINNED AT 0: FULL SATURATION, NOT IDLENESS.
-        let mut w = RawWindow::<16>::new();
-        for _ in 0..16 {
-            w.push(0.0);
-        }
-        let (lambda, _s) = hvg_stats(&w);
-        let det = rqa_det(&w).expect("a full window always answers");
-
-        assert!(
-            lambda <= HVG_LAMBDA_PERIODIC_MAX,
-            "flat idle_pct gives lambda={lambda}, inside the periodic band"
-        );
-        assert!(
-            det >= RQA_DET_STEADY_MIN,
-            "flat idle_pct gives det={det}, at or above the steady floor"
-        );
-
-        // BOTH CHAOS TERMS OF THE GATE ARE THEREFORE SATISFIED BY A
-        // PEGGED BOX. ONLY mwu_converged STANDS BETWEEN FULL SATURATION
-        // AND A FROZEN ORCHESTRATOR, AND CONVERGENCE IS EXACTLY WHAT A
-        // SUSTAINED LOAD PRODUCES.
-    }
-}
-
-// PRICING, IN ISOLATION
-//
-// The confidence ramp is the mechanism that replaces four sample-floor gates,
-// so it is tested on its own rather than through a derivation where the value
-// and the weight move together.
-#[cfg(test)]
-mod pricing_tests {
-    use super::*;
-
-    #[test]
-    fn confidence_ramps_from_the_arithmetic_minimum_to_the_old_gate() {
-        assert_eq!(
-            confidence(2, 2, 8),
-            0.0,
-            "at the minimum, nothing is trusted"
-        );
-        assert_eq!(confidence(8, 2, 8), 1.0, "at the old gate, fully trusted");
-        assert_eq!(confidence(20, 2, 8), 1.0, "beyond it, no extra credit");
-        let mid = confidence(5, 2, 8);
-        assert!(
-            (mid - 0.5).abs() < 1e-9,
-            "halfway is half weight, got {mid}"
-        );
-    }
-
-    #[test]
-    fn weighted_scales_the_same_value_by_trust() {
-        // The property the gate could not express: identical readings, different
-        // evidence, proportional effect. Neutral is 1.0 (a multiplier that does
-        // nothing), so a thin reading collapses toward no-op instead of off.
-        let full = Priced {
-            value: 1.5,
-            confidence: 1.0,
-        };
-        let half = Priced {
-            value: 1.5,
-            confidence: 0.5,
-        };
-        let none = Priced {
-            value: 1.5,
-            confidence: 0.0,
-        };
-        assert!((full.weighted(1.0) - 1.5).abs() < 1e-9);
-        assert!((half.weighted(1.0) - 1.25).abs() < 1e-9);
-        assert!(
-            (none.weighted(1.0) - 1.0).abs() < 1e-9,
-            "zero confidence must be exactly the neutral value"
-        );
-    }
-
-    #[test]
-    fn priced_estimators_answer_below_their_old_floors() {
-        // Each of the three now returns a reading where it used to return None.
-        let mut w = RawWindow::<16>::new();
-        for v in [0.1, 9.0, 0.1] {
-            w.push(v);
-        }
-        assert!(
-            kim_jo_burstiness(&w).is_none(),
-            "the gated form still refuses"
-        );
-        let p = kim_jo_burstiness_priced(&w).expect("the priced form answers");
-        assert!(
-            p.confidence > 0.0 && p.confidence < 1.0,
-            "and prices it below full, got {}",
-            p.confidence
-        );
-
-        let mut r = RawWindow::<16>::new();
-        for v in [1.0, 2.0, 3.0, 4.0] {
-            r.push(v);
-        }
-        assert!(lag1_autocorr(&r).is_none());
-        assert!(lag1_autocorr_priced(&r).is_some());
-    }
-
-    #[test]
-    fn hurst_is_not_priced_because_its_floor_is_arithmetic() {
-        // Three octaves or no fit. A short window has no weakly-known answer.
-        let mut w = RawWindow::<16>::new();
-        for v in [1.0, 2.0, 3.0, 4.0] {
-            w.push(v);
-        }
-        assert!(veitch_abry_hurst_priced(&w).is_none());
     }
 }

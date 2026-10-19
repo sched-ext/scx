@@ -71,6 +71,14 @@ issues. It is able to target by pid or cgroup.
 [README](https://github.com/sched-ext/scx/blob/main/tools/scxtop/README.md) for
 more details.
 
+## [scxtui](https://github.com/sched-ext/scx/blob/main/tools/scxtui/README.md)
+
+`scxtui` is a terminal UI for `scx.service`: it starts, switches, stops and
+restarts the scheduler the unit runs, shows the kernel's own `sched_ext`
+state next to it, and browses the unit's journal. See the
+[README](https://github.com/sched-ext/scx/blob/main/tools/scxtui/README.md) for
+more details.
+
 ### [Perfetto](https://perfetto.dev/)
 
 [Perfetto](https://perfetto.dev/) is a profiling and trace visualization

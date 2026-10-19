@@ -1,86 +1,92 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Task lifecycle ops with adaptive slice plus reclaim.
+ *
+ * Running claims the segment start from zero with an unconditional
+ * pid store. Only stopping charges. The snapshot counts live pids for
+ * the on CPU gauge. Stopping claims the start once, charges the raw
+ * segment to total runtime, advances vruntime by the scaled delta, folds
+ * the CPU minimum forward, then feeds the burst predictor average plus
+ * deviation from the same delta with up plus down shifts plus half
+ * deviation margin, then resumes a preempt-like head with start plus cur
+ * minus now clamped to 10us plus 100us for latency else 1ms with inherit
+ * on bad start plus end else carries the latency-critical slice up to one
+ * quantum clamped to 10us plus 1ms else adapts proportionally by exceed
+ * SHIFT capped 1ms plus half then halved shrink on late else slack SHIFT
+ * capped 1ms plus half then halved grow on early with deadband hold plus
+ * clamp to 10us plus 1ms and latency grow to 100us without changing
+ * virtual time, then counts one requeue per runnable stop else one
+ * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
+ * priority holds. C holds burst else slice else quantum, and V holds
+ * weight with zero mapped to 128, so the slice adapts while virtual time
+ * stays untouched. A global saved credit at or past the fixed 256us Emax
+ * reclaims one value ordered reject with positive laxity plus same
+ * key or strictly after with a single move. A runnable preempt-like yield
+ * with history plus tail left and no wall miss keeps start plus cur minus
+ * now, else a yield before one quantum keeps the unused remainder only
+ * when wall time still meets the deadline plus unified latency holds, else
+ * the proportional step runs on the same expiring deadline. A wall
+ * completion past the deadline counts one miss without a kick, since the
+ * task already left the CPU. Miss plus Term where Term equals completions
+ * stay counters only, so misses plus completions record history. Frozen
+ * rejects plus on CPU plus overflow hold wire compat without a BPF writer,
+ * whitelisted with readers using gate plus RED plus live pids.
+ * Enable clears vruntime plus deadline plus stamps plus predictor plus lag
+ * plus weight plus slice plus hint plus hint weight plus misses plus adapt
+ * miss plus sat plus delta, and Disable plus exit clear without charging,
+ * so each segment meets exactly one charge in stopping without double
+ * counting. Disable clears the cached hierarchy id like move plus enable
+ * plus exit, so a reused pid never reads stale. A closed gate still counts
+ * one reject without charging. Release clears a stale running view without
+ * charging. The gate runs first in every op except the exiting paths, so a
+ * stale CPU fails closed with one counter. See intf.h for the shared
+ * helpers and enqueue.bpf.c for the fair time choice.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
 	struct flow_cpu_state *st;
 	s32 cpu;
-	tctx = flow_lookup(p);
+	u64 now;
+	u64 stamp;
 	cpu = scx_bpf_task_cpu(p);
-	if (tctx)
-		tctx->run_at = flow_now();
-	if (cpu < 0)
-		goto inc;
-	if (!flow_cpu_live((u32)cpu))
-		goto inc;
-	st = flow_cpu((u32)cpu);
-	if (st) {
-		u32 perf;
-		u64 est;
-		s32 nice;
-		u32 w;
-		u64 dsq;
-		u64 q;
-		u8 sample;
-		u8 nwin;
-		u8 ncur;
-		u16 ncnt;
-		/* Pure-EMA hint at M2 uniform both groups. */
-		/* No group branch, so light plus hog share */
-		/* the same map from the stored EMA. Cold */
-		/* zero maps to zero until the first climb. */
-		perf = flow_cpuperf_from_ema(
-		    st->cpuperf_ema);
-		if (scx_bpf_cpuperf_set)
-			scx_bpf_cpuperf_set(cpu, perf);
-		est = tctx ?
-		    flow_clamp_est(tctx->est_ns) : 0;
-		nice = flow_nice_of(p);
-		w = flow_weight_of(nice);
-		st->running_est = est;
-		st->running_pid = (u32)p->pid;
-		st->running_nice = (s16)nice;
-		st->running_weight = (u16)w;
-		__sync_fetch_and_and(&st->cursor,
-		    ~(u32)FLOW_CURSOR_RATE_BIT);
-		/* Own count plus close with no loop. */
-		/* Enqueue stamps max only, so 8 means */
-		/* 8 runnings with no double count. */
-		/* Dual max drops one sample max, decay */
-		/* intact, persists idle, decays at 1/8. */
-		dsq = flow_dsq_for_cpu((u32)cpu);
-		q = scx_bpf_dsq_nr_queued(dsq);
-		sample = flow_delay_from_queued(q);
-		nwin = flow_delay_max(st->delay_win,
-		    sample);
-		ncur = flow_delay_max(st->delay_cur,
-		    sample);
-		ncnt = st->delay_cnt + 1;
-		if ((u64)ncnt >=
-		    (u64)FLOW_DELAY_WIN_LEN) {
-			nwin = flow_delay_close(nwin,
-			    ncur);
-			ncur = 0;
-			ncnt = 0;
-		}
-		st->delay_win = nwin;
-		st->delay_cur = ncur;
-		st->delay_cnt = ncnt;
-		if (flow_delay_armed_latched(nwin,
-		    flow_stand_held(st->cursor)))
-			__sync_fetch_and_or(&st->cursor,
-			    (u32)FLOW_CURSOR_STAND_BIT);
-		else
-			__sync_fetch_and_and(&st->cursor,
-			    ~(u32)FLOW_CURSOR_STAND_BIT);
-	} else {
-		/* No state, so hold max with no EMA read. */
-		if (scx_bpf_cpuperf_set)
-			scx_bpf_cpuperf_set(cpu,
-			    (u32)FLOW_CPUPERF_LEVEL);
+	/* The gate runs first with fail closed and no count on pass. */
+	/* Exiting tasks never reach here through the running path. */
+	if (unlikely(!flow_entry_ok(cpu, p, 0))) {
+		flow_gate_reject();
+		return;
 	}
-inc:
-	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
+	tctx = flow_lookup(p);
+	now = flow_now();
+	if (likely(tctx)) {
+		/* Zero never marks a run, so a zero clock folds to one. */
+		/* The claim swaps from zero only, so a second running */
+		/* without a stop keeps the first start with no second use. */
+		/* The on CPU gauge lives in the snapshot with no BPF count, */
+		/* so this path holds no gauge add. */
+		stamp = now ? now : 1;
+		__sync_val_compare_and_swap(&tctx->run_at,
+		    0, stamp);
+	}
+	if (unlikely(cpu < 0))
+		return;
+	if (unlikely(!flow_cpu_live((u32)cpu)))
+		return;
+	st = flow_cpu((u32)cpu);
+	if (likely(st)) {
+		/* Claim the pid with an unconditional store, so a concurrent */
+		/* clear plus run keeps the running task with no lost update. */
+		/* The clear only clears when it still owns the pid, so the */
+		/* store always wins over a stale clear with no torn write. A */
+		/* compare and swap from the observed owner loses here, when */
+		/* the clear wins the race to zero first, the swap fails and */
+		/* leaves zero while this task still runs. The next running */
+		/* would fold again, but the live view stays wrong until then. */
+		__sync_lock_test_and_set(&st->running_pid,
+		    (u32)p->pid);
+	}
 }
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	u64 deq_flags)
@@ -88,183 +94,81 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Pressure refresh from per CPU queued counts capped */
-/* at 4. Sums light plus hog queued tasks over per CPU */
-/* queues in halves order with early stop when both hit */
-/* 4. Halves matches dispatch isolation with no table */
-/* cost. Placement uses live table seeded by online rank */
-/* with offline inert, so strict iff ready is zero, best */
-/* effort iff ready is one. Park stays */
-/* out, so the measure tracks CPU pressure only with */
-/* one pass and bounded cost. Stores depths plus */
-/* allowance for snapshot with no task field. Returns */
-/* the allowance for the burst check. Stopping only, */
-/* never dispatch. */
-static __always_inline u64 flow_refresh_pressure(void)
+/**
+ * struct flow_stop_tail - stopping commit args for the outlined commit.
+ * @tctx: task state with slice plus adapt miss plus sat plus delta.
+ * @slice: new slice in nanos to store.
+ * @miss: true counts one adapt miss else clears the streak.
+ * @sat_hi: saturation ceiling with 100us for latency else 1ms.
+ * @cost_avg: burst average for the RED cost, zero for no history.
+ * @cost_slice: stored slice for the RED cost.
+ * @delta: raw service in nanos of the stopping segment.
+ *
+ * Bundles the adapt plus carry commit, so the four stopping paths share
+ * one store with no inline growth and the same order.
+ */
+struct flow_stop_tail {
+	struct flow_task_ctx *tctx;
+	u32 slice;
+	bool miss;
+	u32 sat_hi;
+	u64 cost_avg;
+	u32 cost_slice;
+	u64 delta;
+};
+/**
+ * flow_stop_commit - commit one stopping slice plus adapt plus delta.
+ * @t: stop tail with state plus slice plus miss plus ceiling plus cost
+ * plus delta, read once by the caller.
+ *
+ * Stores the slice, folds the adapt miss streak with saturation at
+ * 0xffff, folds the clamp streak at the floor plus ceiling, then saves
+ * the unused cost minus delta for the global credit with no wrap. Like
+ * fair.c, the step paces service, unlike rt.c, no fixed priority
+ * holds. Virtual time stays untouched.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so resume plus carry plus adapt share the same commit with no
+ * inline growth.
+ */
+static __noinline void flow_stop_commit(const struct flow_stop_tail *t)
 {
-	u64 light = 0;
-	u64 hog = 0;
-	u64 allow;
-	s32 cpu;
-	bpf_for(cpu, 0, 1024) {
-		u64 dsq;
-		u64 n;
-		u8 g;
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= nr_cpu_ids)
-			break;
-		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-			break;
-		g = flow_group_of_cpu((u32)cpu,
-		    nr_cpu_ids);
-		dsq = flow_dsq_for_cpu((u32)cpu);
-		n = scx_bpf_dsq_nr_queued(dsq);
-		if (g == (u8)FLOW_GROUP_LIGHT) {
-			light += n;
-			if (light >= 4)
-				light = 4;
-		} else {
-			hog += n;
-			if (hog >= 4)
-				hog = 4;
-		}
-		if (light >= 4 && hog >= 4)
-			break;
-	}
-	allow = flow_burst_allowance(light);
-	flow_light_depth = light;
-	flow_hog_depth = hog;
-	flow_burst_allowance_ns = allow;
-	return allow;
-}
-/* Burn step for one stop with window plus burst plus wake. */
-/* Burst allowance adapts to light depth with 4ms quiet to */
-/* 2ms mild to 1ms floor during flood. Short blocks below */
-/* 1ms with burn below 4ms count toward 8 for fast promote. */
-/* A burst at the allowance clears wake hits. A short with */
-/* burn at or past 4ms clears wake hits. A hot window at or */
-/* past 16ms clears wake hits. A middle window at the end */
-/* clears wake hits with low runs. A low window below 4ms */
-/* keeps wake hits. A window in progress keeps wake hits. */
-/* Slow path with 64 low wins stays intact. Stopping only, */
-/* never dispatch. */
-static __always_inline void flow_classify(
-	struct flow_task_ctx *tctx, u64 now,
-	u64 delta)
-{
-	u8 group;
-	u64 sum;
-	u64 allow;
+	struct flow_task_ctx *tctx;
+	u32 slice;
+	bool miss;
+	u32 sat_hi;
+	u64 ccost;
+	u64 csaved;
+	u32 cs;
+	if (!t)
+		return;
+	tctx = t->tctx;
 	if (!tctx)
 		return;
-	group = tctx->group;
-	if (group != (u8)FLOW_GROUP_LIGHT &&
-	    group != (u8)FLOW_GROUP_HOG) {
-		group = (u8)FLOW_GROUP_LIGHT;
-		tctx->group = group;
+	slice = t->slice;
+	miss = t->miss;
+	sat_hi = t->sat_hi;
+	__sync_lock_test_and_set(&tctx->slice_ns, slice);
+	if (miss) {
+		u16 mm = READ_ONCE(tctx->adapt_miss);
+		if (mm < 0xffffU)
+			tctx->adapt_miss = mm + 1;
+	} else {
+		tctx->adapt_miss = 0;
 	}
-	sum = (u64)tctx->burn + delta;
-	if (sum > 0xffffffffULL)
-		sum = 0xffffffffULL;
-	tctx->burn = (u32)sum;
-	allow = flow_refresh_pressure();
-	if (flow_burst_hot_at(delta, allow)) {
-		tctx->wake_hits = 0;
-		if (group ==
-		    (u8)FLOW_GROUP_LIGHT) {
-			tctx->group =
-			    (u8)FLOW_GROUP_HOG;
-			tctx->low_runs = 0;
-			tctx->win_start = now;
-			tctx->burn = 0;
-			__sync_fetch_and_add(
-			    &flow_stats.group_demote,
-			    1);
+	{
+		u16 sat = READ_ONCE(tctx->adapt_sat);
+		if (slice == (u32)FLOW_SLICE_MIN_NS || slice == sat_hi) {
+			if (sat < 0xffffU)
+				tctx->adapt_sat = sat + 1;
 		} else {
-			tctx->low_runs = 0;
-		}
-		return;
-	}
-	if (flow_wake_short(delta)) {
-		if (group == (u8)FLOW_GROUP_HOG) {
-			if (flow_burn_low(tctx->burn)) {
-				u16 hits = tctx->wake_hits;
-				if (hits < 0xffff)
-					hits++;
-				tctx->wake_hits = hits;
-				if (flow_wake_ready(hits)) {
-					tctx->group =
-					    (u8)FLOW_GROUP_LIGHT;
-					tctx->low_runs = 0;
-					tctx->wake_hits = 0;
-					tctx->win_start = now;
-					tctx->burn = 0;
-					__sync_fetch_and_add(
-					    &flow_stats.group_promote,
-					    1);
-					__sync_fetch_and_add(
-					    &flow_stats.group_wake_promote,
-					    1);
-					return;
-				}
-			} else {
-				tctx->wake_hits = 0;
-			}
-		} else {
-			tctx->wake_hits = 0;
+			tctx->adapt_sat = 0;
 		}
 	}
-	if (tctx->win_start == 0) {
-		tctx->win_start = now;
-		return;
-	}
-	if (!flow_win_ready(now, tctx->win_start))
-		return;
-	if (flow_burn_hot(tctx->burn)) {
-		tctx->wake_hits = 0;
-		if (group ==
-		    (u8)FLOW_GROUP_LIGHT) {
-			tctx->group =
-			    (u8)FLOW_GROUP_HOG;
-			tctx->low_runs = 0;
-			__sync_fetch_and_add(
-			    &flow_stats.group_demote,
-			    1);
-		} else {
-			tctx->low_runs = 0;
-		}
-		tctx->win_start = now;
-		tctx->burn = 0;
-		return;
-	}
-	if (flow_burn_low(tctx->burn)) {
-		if (group == (u8)FLOW_GROUP_HOG) {
-			if (tctx->low_runs < 255)
-				tctx->low_runs++;
-			if (tctx->low_runs >=
-			    (u8)FLOW_PROMOTE_WINS) {
-				tctx->group =
-				    (u8)FLOW_GROUP_LIGHT;
-				tctx->low_runs = 0;
-				tctx->wake_hits = 0;
-				__sync_fetch_and_add(
-				    &flow_stats.group_promote,
-				    1);
-			}
-		} else {
-			if (tctx->low_runs <
-			    (u8)FLOW_PROMOTE_WINS)
-				tctx->low_runs++;
-		}
-		tctx->win_start = now;
-		tctx->burn = 0;
-		return;
-	}
-	tctx->low_runs = 0;
-	tctx->wake_hits = 0;
-	tctx->win_start = now;
-	tctx->burn = 0;
+	ccost = flow_red_cost(t->cost_avg, t->cost_slice);
+	csaved = ccost > t->delta ? ccost - t->delta : 0;
+	cs = csaved > 0xffffffffULL ? 0xffffffffU : (u32)csaved;
+	tctx->adapt_delta = cs;
 }
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	bool runnable)
@@ -273,189 +177,336 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	s32 cpu;
 	u64 now;
 	u64 delta;
-	u64 est;
-	u64 scaled;
-	u64 nv;
-	tctx = flow_lookup(p);
+	u64 start;
+	u64 n_avg_keep = 0;
+	u64 n_dev_keep = 0;
+	bool have_pred = false;
+	bool stop_is_lat = false;
 	cpu = scx_bpf_task_cpu(p);
-	now = flow_now();
-	/* No minus one check: zero init plus never minus one. */
-	if (!tctx || !tctx->run_at) {
-		flow_clear_running(cpu);
-		flow_on_cpu_dec();
-		if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
-			struct flow_cpu_state *est;
-			u64 dsq_nr;
-			u64 local_nr;
-			u64 now_e = now;
-			/* Decay only with no climb at M2. */
-			/* Elapsed is wrap safe via time before, */
-			/* so a zero at stays zero with no under. */
-			est = flow_cpu((u32)cpu);
-			if (est) {
-				u64 at = est->cpuperf_ema_at;
-				u64 elapsed = 0;
-				if (at != 0 &&
-				    !flow_time_before(now_e,
-				    at))
-					elapsed = now_e - at;
-				est->cpuperf_ema =
-				    flow_ema_decay(
-				    est->cpuperf_ema,
-				    elapsed,
-				    (u64)FLOW_CPUPERF_HALF_LIFE_NS);
-				est->cpuperf_ema_at = now_e;
-			}
-			dsq_nr = scx_bpf_dsq_nr_queued(
-			    flow_dsq_for_cpu((u32)cpu));
-			local_nr = scx_bpf_dsq_nr_queued(
-			    (u64)SCX_DSQ_LOCAL_ON |
-			    (u64)cpu);
-			if (flow_should_restore_hint(runnable,
-			    dsq_nr, local_nr)) {
-				u32 perf =
-				    (u32)FLOW_CPUPERF_IDLE;
-				/* M2 maps the decayed EMA. */
-				/* Long idle still maps to zero. */
-				if (est)
-					perf =
-					    flow_cpuperf_from_ema(
-					    est->cpuperf_ema);
-				if (scx_bpf_cpuperf_set)
-					scx_bpf_cpuperf_set(cpu,
-					    perf);
-			}
-		}
+	if (!flow_entry_ok(cpu, p, 0)) {
+		flow_gate_reject();
 		return;
 	}
-	if (now >= tctx->run_at)
-		delta = now - tctx->run_at;
-	else
+	tctx = flow_lookup(p);
+	now = flow_now();
+	/* Tasks without state hold no claim, so they hold no count. */
+	/* The pid view still clears when owned. */
+	if (!tctx) {
+		flow_clear_running_if_owner(cpu, (u32)p->pid);
+		return;
+	}
+	/* The start claims with an exchange, so only stopping charges. */
+	/* A zero claim means no counted start, */
+	/* so this pass drops with no charge. The on CPU gauge lives in */
+	/* the snapshot with no BPF drop, so every pass ends here with no */
+	/* gauge use. */
+	start = __sync_lock_test_and_set(&tctx->run_at, 0);
+	if (start == 0) {
+		flow_clear_running_if_owner(cpu, (u32)p->pid);
+		return;
+	}
+	if (flow_time_before(now, start))
 		delta = 0;
-	est = flow_clamp_est(delta);
-	tctx->est_ns = est;
-	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
-	flow_classify(tctx, now, delta);
-	flow_clear_running(cpu);
-	flow_on_cpu_dec();
-	tctx->run_at = 0;
-	scaled = flow_scale_by_weight(est,
-	    flow_weight_of(flow_nice_of(p)));
-	nv = flow_vruntime_add(tctx->vruntime, scaled);
-	tctx->vruntime = nv;
-	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
-		struct flow_cpu_state *st;
-		u64 dsq_nr;
-		u64 local_nr;
-		dsq_nr = scx_bpf_dsq_nr_queued(
-		    flow_dsq_for_cpu((u32)cpu));
-		local_nr = scx_bpf_dsq_nr_queued(
-		    (u64)SCX_DSQ_LOCAL_ON |
-		    (u64)cpu);
-		st = flow_cpu((u32)cpu);
-		/* Pure-EMA update at M2 before frontier. */
-		/* Elapsed is wrap safe via time before with */
-		/* zero at staying zero. Decays then climbs */
-		/* when delta is past zero, then stamps now. */
-		if (st) {
-			u64 at = st->cpuperf_ema_at;
-			u64 elapsed = 0;
-			u64 ema;
-			if (at != 0 &&
-			    !flow_time_before(now, at))
-				elapsed = now - at;
-			ema = flow_ema_decay(st->cpuperf_ema,
-			    elapsed,
-			    (u64)FLOW_CPUPERF_HALF_LIFE_NS);
-			if (delta > 0)
-				ema = flow_ema_climb(ema,
-				    delta);
-			st->cpuperf_ema = ema;
-			st->cpuperf_ema_at = now;
-		}
-		if (st) {
-			if (!runnable) {
-				if (dsq_nr == 0 &&
-				    local_nr == 0) {
-					if (nv != 0)
-						st->frontier =
-						    flow_frontier_idle(nv);
-				} else {
-					st->frontier =
-					    flow_frontier_max(
-					    st->frontier, nv);
-				}
-			} else {
-				st->frontier = flow_frontier_max(
-				    st->frontier, nv);
-			}
-		}
-		if (flow_should_restore_hint(runnable,
-		    dsq_nr, local_nr)) {
-			u32 perf =
-			    (u32)FLOW_CPUPERF_IDLE;
-			/* M2 keeps the M1 predicate but maps */
-			/* the decayed EMA with no hard zero. */
-			/* Long sleep decays to zero before */
-			/* the climb, so zero delta maps zero. */
-			if (st)
-				perf = flow_cpuperf_from_ema(
-				    st->cpuperf_ema);
-			if (scx_bpf_cpuperf_set)
-				scx_bpf_cpuperf_set(cpu,
-				    perf);
-		}
+	else
+		delta = now - start;
+	/* Every segment counts raw time while vruntime counts scaled time. */
+	/* The predictor average rises fast with shift 3 plus falls slow */
+	/* with shift 4, and the deviation widens fast with shift 2 plus */
+	/* narrows slow with shift 3, plus a first deviation floor at */
+	/* average quarter, so later deadlines track recent bursts with no */
+	/* extra walk. A zero delta keeps the predictor, so a backward clock */
+	/* never pulls the average to 1ns. The vruntime advance uses the */
+	/* effective share of task times stored hint over 128 with no divide */
+	/* and no lookup, so heavy tasks move slowly while light tasks move */
+	/* quickly with no neutral cliff. The CPU minimum folds forward best */
+	/* effort with no regression past a concurrent win. */
+	flow_count_runtime(delta);
+	if (delta) {
+		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
+		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
+		u32 task_w = READ_ONCE(tctx->weight);
+		u32 hint_w = READ_ONCE(tctx->hint_w);
+		u32 eff_w;
+		u64 n_avg = flow_pred_avg(avg, delta);
+		/* Deviation updates from the observed delta with the new average, */
+		/* so a fresh mean shapes the margin at once with no lagging bound. */
+		u64 n_dev = flow_pred_dev(dev, n_avg, delta);
+		u64 vrun = READ_ONCE(tctx->vruntime);
+		u64 n_vrun;
+		if (task_w == 0)
+			task_w = (u32)FLOW_WEIGHT_BASE;
+		eff_w = flow_task_effective_weight(task_w, hint_w);
+		n_vrun = flow_ledger_advance(vrun, delta, eff_w);
+		__sync_lock_test_and_set(&tctx->avg_ns, (u32)n_avg);
+		__sync_lock_test_and_set(&tctx->dev_ns, (u32)n_dev);
+		__sync_lock_test_and_set(&tctx->vruntime, n_vrun);
+		flow_min_advance(cpu, n_vrun);
+		n_avg_keep = n_avg;
+		n_dev_keep = n_dev;
+		have_pred = true;
+	}
+	/* Latency-critical slice carryover from the fixed quantum with no knob. */
+	/* A runnable task that yields before one quantum keeps quantum */
+	/* minus delta as the next slice when wall time still meets the */
+	/* deadline plus predictor slack still holds critical, so short */
+	/* bursts earn a nearer virtual deadline without an extra slice. All */
+	/* other stops adapt proportionally with exceed right 3 capped 1ms */
+	/* plus half of base then halved grow on late else slack right 3 */
+	/* capped 1ms plus half of base then halved grow on early with */
+	/* deadband hold plus clamp to 10us plus 1ms without changing virtual */
+	/* time, so the slice tracks recent runs with shifts only. The same */
+	/* expiring deadline feeds exceed plus slack, and the carry gate runs */
+	/* first. */
+	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
+	/* C holds burst else slice else quantum, and V holds weight with */
+	/* zero mapped to 128. Exiting plus completion paths skip the carry */
+	/* with adapt only, so only runnable waits carry with one kick per */
+	/* wait at enqueue. Misses count lifetime with saturation, adapt */
+	/* miss counts the consecutive wall miss streak with saturation, so */
+	/* promotion latches on lifetime while adapt tracks the window. */
+	/* Latency recompute per stop without a stored bit, so 72B holds. */
+	/* Sleep stays unknown with fail open, while hint plus effective */
+	/* share veto toward batch with quantum-relative bounds and */
+	/* probation, so newcomers stay batch. Like fair.c, the test paces */
+	/* service, unlike rt.c, no fixed priority holds. Carry caps at */
+	/* 100us plus adapt re-clamps at 100us past the 1ms step with */
+	/* slack grow allowed to the cap, so urgent bursts rotate each tenth quantum. */
+	stop_is_lat = false;
+	{
+		u64 s_avg = have_pred ? n_avg_keep :
+		    (u64)READ_ONCE(tctx->avg_ns);
+		u64 s_dev = have_pred ? n_dev_keep :
+		    (u64)READ_ONCE(tctx->dev_ns);
+		u32 s_hint = READ_ONCE(tctx->hint_us);
+		u32 s_task_w = READ_ONCE(tctx->weight);
+		u32 s_hint_w = READ_ONCE(tctx->hint_w);
+		u32 s_eff;
+		if (s_task_w == 0)
+			s_task_w = (u32)FLOW_WEIGHT_BASE;
+		s_eff = flow_task_effective_weight(s_task_w, s_hint_w);
+		/* No stable uclamp field in this task view, so fail open to */
+		/* zero without an extra map, and probation holds through both */
+		/* helpers. */
+		stop_is_lat = flow_is_lat(s_avg, s_dev, s_hint, 0, 0, s_eff);
 	}
 	if (runnable) {
-		__sync_fetch_and_add(&flow_stats.requeues, 1);
+		u64 exp_dl = READ_ONCE(tctx->deadline);
+		bool wmiss = !flow_deadline_ok(exp_dl, now);
+		u32 pre_cur = READ_ONCE(tctx->slice_ns);
+		/* Preempt-like resume keeps the start plus cur leftover when */
+		/* runnable yields early with history plus tail left and no wall */
+		/* miss, so only preempt heads with more than 100us left resume */
+		/* with occ start plus cur clamped to 10us plus 100us for latency */
+		/* else 1ms with inherit on bad start plus end. The tail check is */
+		/* delta plus 100us below cur here, so the helper keeps no tail */
+		/* check. Equality fails closed and floors, so a latency head at */
+		/* the 100us cap never resumes: cap equals tail, so delta plus */
+		/* tail never falls below cap with delta past zero. This path */
+		/* never runs and keeps latency rotating via carry plus adapt */
+		/* without changing virtual time. Voluntary short yields fall */
+		/* through to carry plus adapt, so resume never shadows. */
+		if (!wmiss && have_pred && delta > 0 &&
+		    flow_sat_add(delta, (u64)FLOW_PREEMPT_TAIL_NS) <
+		    (u64)pre_cur) {
+			u32 rem = flow_slice_resume(start, now, stop_is_lat,
+			    pre_cur);
+			u32 rem_cap = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			/* Resume plus carry plus adapt commit through the */
+			/* shared helper, so the four stores share one copy */
+			/* with no behavior change. */
+			struct flow_stop_tail commit = {
+				.tctx = tctx,
+				.slice = rem,
+				.miss = false,
+				.sat_hi = rem_cap,
+				.cost_avg = have_pred ? n_avg_keep : 0,
+				.cost_slice = pre_cur,
+				.delta = delta,
+			};
+			flow_stop_commit(&commit);
+		} else if (!wmiss && have_pred && delta > 0 &&
+		    delta < (u64)FLOW_QUANTUM_NS && stop_is_lat) {
+			u32 carry = flow_carry_for(delta);
+			u32 lat_cap = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			struct flow_stop_tail commit;
+			carry = flow_slice_lat_clamp(carry, stop_is_lat);
+			commit.tctx = tctx;
+			commit.slice = carry;
+			commit.miss = false;
+			commit.sat_hi = lat_cap;
+			commit.cost_avg = n_avg_keep;
+			commit.cost_slice = pre_cur;
+			commit.delta = delta;
+			flow_stop_commit(&commit);
+		} else {
+			u32 cur = READ_ONCE(tctx->slice_ns);
+			u64 exceed = 0;
+			u64 slack = 0;
+			u32 nxt;
+			bool m = wmiss;
+			u32 sat_hi;
+			struct flow_stop_tail commit;
+			if (exp_dl != 0) {
+				if (m)
+					exceed = now - exp_dl;
+				else if (now != exp_dl)
+					slack = exp_dl - now;
+			}
+			nxt = flow_adapt_prop(cur, exceed, slack);
+			if (stop_is_lat)
+				nxt = flow_slice_lat_clamp(nxt, true);
+			sat_hi = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			commit.tctx = tctx;
+			commit.slice = nxt;
+			commit.miss = m;
+			commit.sat_hi = sat_hi;
+			commit.cost_avg = have_pred ? n_avg_keep : 0;
+			commit.cost_slice = cur;
+			commit.delta = delta;
+			flow_stop_commit(&commit);
+		}
+	} else {
+		/* Completion adapt without carry and without a kick. An exceed */
+		/* shrinks by exceed right 3 capped 1ms plus half of base, a slack */
+		/* grows by slack right 3 capped 1ms plus half of base, both clamped */
+		/* without changing virtual time. The */
+		/* global credit funds reclaim below. */
+		u64 exp_dl = READ_ONCE(tctx->deadline);
+		u32 cur = READ_ONCE(tctx->slice_ns);
+		bool cmiss = !flow_deadline_ok(exp_dl, now);
+		u64 exceed = 0;
+		u64 slack = 0;
+		u32 nxt;
+		if (exp_dl != 0) {
+			if (cmiss)
+				exceed = now - exp_dl;
+			else if (now != exp_dl)
+				slack = exp_dl - now;
+		}
+		nxt = flow_adapt_prop(cur, exceed, slack);
+		if (stop_is_lat)
+			nxt = flow_slice_lat_clamp(nxt, true);
+		{
+			u32 sat_hi = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			struct flow_stop_tail commit = {
+				.tctx = tctx,
+				.slice = nxt,
+				.miss = cmiss,
+				.sat_hi = sat_hi,
+				.cost_avg = have_pred ? n_avg_keep : 0,
+				.cost_slice = cur,
+				.delta = delta,
+			};
+			flow_stop_commit(&commit);
+			/* Reclaim runs in dispatch from the global credit at or past */
+			/* the fixed 256us Emax with tiers-empty fallback plus aged */
+			/* cover past one period, so this path records only without */
+			/* walking. The global credit funds the retry without shaping */
+			/* shares. Dispatch scans at most eight value ordered rejects */
+			/* with positive laxity plus same key or strictly after plus */
+			/* mask wins, so strict order holds with a single move. Zero */
+			/* service completions fund nothing, so only a real delta with */
+			/* a fresh predictor adds credit. Credit reuses the committed */
+			/* delta, so funding agrees with the stored value with no */
+			/* second cost pass. */
+			if (delta > 0 && have_pred)
+				flow_credit_add((u64)READ_ONCE(tctx->adapt_delta));
+		}
+	}
+	/* The pid view clears when owned. The snapshot counts live pids for */
+	/* the on CPU gauge. */
+	flow_clear_running_if_owner(cpu, (u32)p->pid);
+	/* A wall completion past the deadline counts one miss without a kick, */
+	/* since the task already left the CPU. The miss count stays lifetime */
+	/* without a reset here, so stopping records only. The miss count */
+	/* tracks the proportional shrink. */
+	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
+		flow_count_miss(tctx);
+	if (runnable) {
+		flow_count_requeue(true);
 		return;
 	}
-	if (tctx->deadline == (u64)-1)
-		return;
-	__sync_fetch_and_add(&flow_stats.completions, 1);
-	tctx->deadline = (u64)-1;
+	flow_count_requeue(false);
 }
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
+	s32 cpu = scx_bpf_task_cpu(p);
+	if (!flow_entry_ok(cpu, p, 0)) {
+		flow_gate_reject();
+		return;
+	}
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
-	tctx->est_ns = 0;
-	tctx->run_at = 0;
+	/* Fresh tasks hold no vruntime, no deadline, no stamps, no */
+	/* predictor, no lag, neutral weight, fixed slice, no hint, neutral */
+	/* hint weight, no misses, no adapt miss, no adapt sat, and no adapt */
+	/* delta. The first enqueue clamps vruntime to the CPU minimum */
+	/* minus the lag bound with a fallback deadline plus a virtual */
+	/* deadline, so sleepers gain no more than one boost. The cached */
+	/* hierarchy id clears too, so a reused pid never reads a stale */
+	/* hierarchy. */
+	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx->vruntime = 0;
-	tctx->deadline = (u64)-1;
-	tctx->win_start = 0;
-	tctx->burn = 0;
-	tctx->group = (u8)FLOW_GROUP_LIGHT;
-	tctx->low_runs = 0;
-	tctx->wake_hits = 0;
+	tctx->deadline = 0;
+	tctx->wait_at = 0;
+	tctx->run_at = 0;
+	tctx->hint_w = (u32)FLOW_WEIGHT_BASE;
+	tctx->avg_ns = 0;
+	tctx->dev_ns = 0;
+	tctx->vlag = 0;
+	tctx->weight = (u32)FLOW_WEIGHT_BASE;
+	tctx->slice_ns = (u32)FLOW_QUANTUM_NS;
+	tctx->hint_us = 0;
+	tctx->misses = 0;
+	tctx->adapt_miss = 0;
+	tctx->adapt_sat = 0;
+	tctx->adapt_delta = 0;
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
-	struct flow_task_ctx *tctx;
-	flow_clear_running_if_owner(scx_bpf_task_cpu(p),
-	    (u32)p->pid);
-	tctx = flow_lookup(p);
-	if (!tctx)
+	s32 cpu = scx_bpf_task_cpu(p);
+	if (!flow_entry_ok(cpu, p, 0)) {
+		flow_gate_reject();
 		return;
-	if (tctx->deadline == (u64)-1)
-		return;
-	__sync_fetch_and_add(&flow_stats.completions, 1);
-	tctx->deadline = (u64)-1;
+	}
+	/* Clear the cached hierarchy id for ABA safety, so a later pid */
+	/* reuse never reads a stale hierarchy like move plus enable plus */
+	/* exit. A zero pid needs no clear with the zero sentinel. */
+	flow_cgrp_cache_invalidate((u32)p->pid);
+	/* Charge lives only in stopping with no leftover, so disable */
+	/* clears the pid view with no advance and no minimum fold. */
+	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	struct scx_exit_task_args *args)
 {
-	struct flow_task_ctx *tctx;
+	s32 cpu = scx_bpf_task_cpu(p);
 	(void)args;
-	flow_clear_running_if_owner(scx_bpf_task_cpu(p),
-	    (u32)p->pid);
-	tctx = flow_lookup(p);
-	if (!tctx)
+	/* Exiting tasks stay exempt from the gate with no count. The */
+	/* cached hierarchy id clears too, so a later pid reuse never */
+	/* reads a stale hierarchy. */
+	flow_cgrp_cache_invalidate((u32)p->pid);
+	/* Charge lives only in stopping with no leftover, so exit clears */
+	/* the pid view with no advance and no minimum fold. */
+	flow_clear_running_if_owner(cpu, (u32)p->pid);
+}
+void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,
+	struct scx_cpu_release_args *args)
+{
+	(void)args;
+	/* The gate runs with no task here, so only the CPU checks. */
+	/* A stale CPU counts one reject with no clear. */
+	if (cpu >= 0 && !flow_cpu_live((u32)cpu)) {
+		flow_gate_reject();
 		return;
-	if (tctx->deadline == (u64)-1)
-		return;
-	__sync_fetch_and_add(&flow_stats.completions, 1);
-	tctx->deadline = (u64)-1;
+	}
+	/* Clear the stale running view with no charge. */
+	/* The segment still ends through stopping or disable. */
+	flow_clear_running(cpu);
 }

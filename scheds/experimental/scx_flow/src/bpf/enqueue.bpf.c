@@ -1,463 +1,362 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
-/* Group of one task with light as default. */
-static __always_inline u8 flow_task_group(
-	struct flow_task_ctx *tctx)
-{
-	if (!tctx)
-		return (u8)FLOW_GROUP_LIGHT;
-	if (tctx->group == (u8)FLOW_GROUP_HOG)
-		return (u8)FLOW_GROUP_HOG;
-	return (u8)FLOW_GROUP_LIGHT;
-}
-/* True when one task cannot move to another CPU. */
-static __always_inline bool flow_task_pinned(
-	const struct task_struct *p)
-{
-	if (is_migration_disabled(p))
-		return true;
-	if (p->nr_cpus_allowed == 1)
-		return true;
-	return false;
-}
-/* Target in one group from selected plus least. */
-/* Least picks lowest queued depth with lowest id on ties. */
-/* Strict keeps group only, perf widens to any allowed on */
-/* miss with same least rule over the widened set. Mask */
-/* always wins with no dispatch use. */
-static __always_inline s32 flow_pick_in_group(
-	const struct task_struct *p, s32 sel,
-	u8 group)
-{
-	s32 first;
-	if (sel >= 0 && flow_cpu_ok(p, sel)) {
-		u8 g = flow_group_live((u32)sel,
-		    nr_cpu_ids);
-		if (g == group)
-			return sel;
-		if (flow_perf_enabled())
-			return sel;
-		__sync_fetch_and_add(
-		    &flow_stats.group_steal_skipped, 1);
-	}
-	first = flow_first_in_group(p, group);
-	if (first >= 0)
-		return first;
-	if (flow_perf_enabled()) {
-		first = flow_first_allowed(p);
-		if (first >= 0)
-			return first;
-	}
-	return -1;
-}
-static __always_inline u64 flow_ref_frontier(
-	const struct task_struct *p, s32 ref_cpu)
-{
-	struct flow_cpu_state *rst;
-	s32 first;
-	if (!flow_cpu_ok(p, ref_cpu)) {
-		first = (s32)bpf_cpumask_first(p->cpus_ptr);
-		if (flow_cpu_ok(p, first))
-			ref_cpu = first;
-		else
-			return 0;
-	}
-	if (ref_cpu < 0)
-		return 0;
-	rst = flow_cpu((u32)ref_cpu);
-	if (rst)
-		return rst->frontier;
-	return 0;
-}
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Enqueue op with RED admission plus strict PRIQ.
+ *
+ * Every wakeup earns one EDF deadline from the burst predictor else
+ * the hint period plus one virtual deadline from vruntime plus slice
+ * over weight, then passes the RED check with residual plus exceed
+ * plus tolerance used only for the guarantee. The deadline bounds the
+ * check without shaping vruntime. A zero exceed admits at once, a
+ * critical exceed admits without a swap, else the newcomer itself is
+ * tested as the O(1) victim with cost past the fixed 256us Emax plus
+ * cost past the exceed plus never critical, else the newcomer admits and a full least
+ * value scan stays a noted alternative. Queue order uses the strict EDF
+ * key of the earlier of the two times in three PRIQ tiers (local plus
+ * node plus machine) plus value ordered reject plus steal for five total
+ * with insert vtime, so urgent tasks still win while hogs fall behind
+ * with lag bounds. Fresh waits earn a dynamic slice from the saturated
+ * remaining time clamped to 10us plus 1ms, while misses hold else floor
+ * only and rejoin via the same tier escalation re-derived with a fresh
+ * deadline plus skip aging. Tasks join direct only when all tiers
+ * including the reject hold no work or the target still drains before
+ * the key with an empty machine and an empty reject, so no earlier key
+ * waits behind this arrival. Missed tasks rejoin a tier queue with a
+ * fresh deadline plus a miss count and one idle kick without waiting,
+ * else the reject queue on overload. Pinned tasks wait in a tier queue
+ * with wait set and one idle kick, else the reject queue on overload.
+ * Exiting tasks run at once on the task CPU without queueing. The gate
+ * runs first for all other arrivals, so a stale CPU or a moved task fails
+ * closed with one counter. The predictor average rises fast with shift 3
+ * plus falls slow with shift 4 and the deviation widens fast with shift 2
+ * plus narrows slow with shift 3 plus half deviation margin from stopping,
+ * so short bursts earn tight deadlines without a table walk. Vruntime advances by scaled
+ * service with one divide, and the CPU minimum folds forward on every
+ * charge, so fairness tracks service without a table. Every tier join
+ * counts one admit and every RED overload counts one RED reject without
+ * double counting the gate. The exiting, bypass, tier idle, and preempt
+ * paths form the kick points, so every wait meets at most one kick. A
+ * direct preempt needs unified latency with probation plus an eligible lat
+ * arrival against a batch owner plus a 100us margin lead with more than
+ * 100us still left on the owner, so near ties and nearly done owners
+ * never bounce while one kick per wait stays. The owner paces on start
+ * plus inherit cur without a fresh quantum, so the tail tracks the stored
+ * slice. A preempted head resumes via lifecycle only with start plus cur
+ * clamped to 10us plus 100us for latency else 1ms with inherit on bad
+ * start plus tail plus history, so the same head resumes with its
+ * leftover. Latency-critical slice carryover keeps the unused quantum, so
+ * short bursts earn nearer keys. Strict slice writes run here before the
+ * key. Fresh waits earn the dynamic remaining clamp, misses hold else
+ * floor only, and rotations inherit zero. Slice expiry paces the rest
+ * without stamping here. Local plus node depths read once, so the drain
+ * gated bypass and the combined drain tier escalation share one read. See
+ * intf.h for the deadline plus fairness helpers and dispatch.bpf.c for
+ * the tier scans.
+ *
+ * The op holds the target plus insert plus miss plus open plus kick
+ * helpers in enqueue/ with the fair plus clamp noinline on scalar input
+ * plus the pinned plus miss plus open plus place plus kick noinline on
+ * tail pointers, so the verifier stays small.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
+#include "enqueue/target.bpf.c"
+#include "enqueue/insert.bpf.c"
+#include "enqueue/miss.bpf.c"
+#include "enqueue/open.bpf.c"
+#include "enqueue/kick.bpf.c"
+
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {
 	struct flow_task_ctx *tctx;
-	struct flow_cpu_state *st;
 	s32 sel;
 	s32 cpu = -1;
-	bool is_requeue = false;
-	bool is_fresh = false;
 	bool pinned = false;
-	u8 group;
-	u64 est = 0;
-	u64 slice = (u64)FLOW_SLICE_NS;
-	/* Exiting tasks run at once on the task CPU */
-	/* via LOCAL_ON with no order wait, so short */
-	/* exits never stall in a queue behind other */
-	/* work. Task CPU wins over the enqueuer, so */
-	/* an exit enqueued elsewhere still runs where */
-	/* the task lives. Single insert plus return */
-	/* with no double enqueue. Falls back when the */
-	/* task CPU is not allowed. Idle kick only with */
-	/* no coalesce plus no preempt. */
-	if (p->flags & PF_EXITING) {
+	u64 now;
+	u64 deadline;
+	u64 vtime;
+	u32 hint;
+	u32 hint_w = (u32)FLOW_WEIGHT_BASE;
+	u64 avg = 0;
+	u64 dev = 0;
+	bool is_reenq = false;
+	u64 hoist_vr = 0;
+	s32 hoist_lag = 0;
+	u64 hoist_min = 0;
+	bool hoist_elig = false;
+	struct flow_open_out open_out = { 0 };
+	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
+	/* the occupant preempt lookup, so slice rotation stays cheap. The */
+	/* stored hint plus hint weight in the task state carry the period */
+	/* plus the share, and the owner paces at slice expiry with no */
+	/* extra kick. The requeue case is rare beside fresh wakeups, so */
+	/* it stays unlikely. */
+	if (unlikely(enq_flags & (SCX_ENQ_REENQ | SCX_ENQ_LAST)))
+		is_reenq = true;
+	/* Exiting tasks run at once on the task CPU with no queue wait. */
+	/* The gate never runs here, so exiting work stays exempt. Exiting */
+	/* is rare, so it stays unlikely. */
+	if (unlikely(p->flags & PF_EXITING)) {
 		s32 tgt = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, tgt)) {
 			struct flow_cpu_state *tst;
 			scx_bpf_dsq_insert(p,
 			    (u64)SCX_DSQ_LOCAL_ON | (u64)tgt,
-			    slice, enq_flags);
+			    (u64)FLOW_QUANTUM_NS, enq_flags);
 			tst = flow_cpu((u32)tgt);
-			if (tst && tst->running_pid == 0) {
+			if (tst &&
+			    READ_ONCE(tst->running_pid) == 0) {
 				scx_bpf_kick_cpu(tgt,
 				    SCX_KICK_IDLE);
-				__sync_fetch_and_add(
-				    &flow_stats.kicks, 1);
+				flow_count_kick();
 			}
 			return;
 		}
 	}
-	if (enq_flags & SCX_ENQ_REENQ)
-		is_requeue = true;
-	tctx = flow_get(p);
+	tctx = NULL;
 	sel = p->scx.selected_cpu;
 	pinned = flow_task_pinned(p);
-	if (!tctx) {
-		u64 frontier;
-		u64 clamped;
-		u64 scaled;
-		u64 dl;
-		frontier = flow_ref_frontier(p, sel);
-		clamped = flow_clamp_vruntime(0, frontier,
-		    slice);
-		/* No task state, so weight stays 1024. */
-		scaled = flow_scale_by_weight(
-		    flow_clamp_est(slice),
-		    (u32)FLOW_WEIGHT);
-		dl = flow_deadline(clamped, scaled);
-		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
-		__sync_fetch_and_add(&flow_stats.edf_enqueued,
-		    1);
-		if (clamped != 0)
-			__sync_fetch_and_add(
-			    &flow_stats.edf_clamped, 1);
-		__sync_fetch_and_add(&flow_stats.edf_ordered,
-		    1);
-		scx_bpf_dsq_insert_vtime(p,
-		    (u64)FLOW_DSQ_PARK, slice, dl, 0);
+	now = flow_now();
+	/* The gate runs first without creating state, so stale CPUs or */
+	/* moved tasks fail closed. The lookup stays read only here, and the */
+	/* create follows only on pass. Rejects are rare, so they stay */
+	/* unlikely. Gate misses join the value ordered reject queue without */
+	/* waiting, so no path needs a tail queue and no insert touches the */
+	/* kernel global queue. */
+	if (unlikely(!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
+	    scx_bpf_task_cpu(p), p, 0))) {
+		struct flow_task_ctx *lctx = flow_lookup(p);
+		u32 gval;
+		flow_gate_reject();
+		if (lctx)
+			lctx->wait_at = now;
+		/* Gate misses thread the stored share plus unified latency when */
+		/* state holds, else batch value when absent with probation. */
+		if (lctx) {
+			u32 gw = READ_ONCE(lctx->weight);
+			u32 ghw = READ_ONCE(lctx->hint_w);
+			u64 gavg = (u64)READ_ONCE(lctx->avg_ns);
+			u64 gdev = (u64)READ_ONCE(lctx->dev_ns);
+			u32 ghint = READ_ONCE(lctx->hint_us);
+			u32 geff = flow_task_effective_weight(gw, ghw);
+			bool gcrit = flow_is_lat(gavg, gdev, ghint, 0, 0,
+			    geff);
+			gval = flow_red_value(geff, gcrit);
+		} else {
+			gval = flow_red_value((u32)FLOW_WEIGHT_BASE, false);
+		}
+		flow_overflow_insert(p, enq_flags, gval);
+		flow_kick_idle_allowed(p, sel);
 		return;
 	}
-	group = flow_task_group(tctx);
-	if (tctx->est_ns == 0)
-		is_fresh = true;
-	if (is_migration_disabled(p)) {
-		s32 here = scx_bpf_task_cpu(p);
-		if (flow_cpu_ok(p, here)) {
-			cpu = here;
-			group = flow_group_live((u32)here,
-			    nr_cpu_ids);
-			tctx->group = group;
+	tctx = flow_get(p);
+	/* Tasks without state join a tier queue with a fallback deadline */
+	/* as the fair time plus an idle kick. The kick targets one idle */
+	/* allowed CPU without preempting, so a waiting task wakes cleanly. */
+	/* The gate already passed, so this path adds no gate count. Missing */
+	/* state is rare, so it stays unlikely. */
+	if (unlikely(!tctx)) {
+		s32 mc = flow_pick_target(p, sel);
+		u32 mh = 0;
+		u32 mhw = (u32)FLOW_WEIGHT_BASE;
+		u64 mdl;
+		/* No state means no predictor, so the hint weight threads */
+		/* with BASE-only task share and batch value with probation. */
+		flow_task_hint_weight(p, &mh, &mhw);
+		mdl = flow_fallback_deadline(now, mh);
+		if (flow_cpu_ok(p, mc)) {
+			flow_tier_insert(p, mc, mdl, now);
+			flow_count_admit();
 		} else {
-			cpu = flow_pick_in_group(p, sel,
-			    group);
+			u32 meff = flow_task_effective_weight(
+			    (u32)FLOW_WEIGHT_BASE, mhw);
+			flow_gate_reject();
+			flow_overflow_insert(p, enq_flags,
+			    flow_red_value(meff, false));
 		}
-	} else if (p->nr_cpus_allowed == 1) {
-		s32 first;
-		first = (s32)bpf_cpumask_first(
-		    p->cpus_ptr);
-		if (flow_cpu_ok(p, first)) {
-			cpu = first;
-			group = flow_group_live((u32)first,
-			    nr_cpu_ids);
-			tctx->group = group;
-		} else {
-			cpu = -1;
-		}
-	} else {
-		s32 waker =
-		    (s32)bpf_get_smp_processor_id();
-		struct flow_cpu_state *wst =
-		    flow_cpu((u32)waker);
-		/* Waker CPU first, see select. Strict needs in */
-		/* group, perf takes any allowed idle with mask win. */
-		if (wst && wst->running_pid == 0 &&
-		    flow_cpu_ok(p, waker) &&
-		    (flow_group_live((u32)waker,
-		    nr_cpu_ids) == group || flow_perf_enabled()))
-			cpu = waker;
-		else
-			cpu = flow_pick_in_group(p, sel,
-			    group);
-		if (cpu < 0) {
-			s32 first;
-			first = (s32)bpf_cpumask_first(
-			    p->cpus_ptr);
-			if (flow_cpu_ok(p, first)) {
-				cpu = first;
-				group = flow_group_live(
-				    (u32)first,
-				    nr_cpu_ids);
-				tctx->group = group;
-			}
-		}
-	}
-	if (cpu < 0) {
-		u64 frontier;
-		u64 v;
-		u64 clamped;
-		u64 scaled;
-		u64 dl;
-		u64 park;
-		s32 nice;
-		u32 w;
-		if (is_fresh)
-			est = slice;
-		else
-			est = flow_clamp_est(tctx->est_ns);
-		tctx->est_ns = est;
-		if (is_fresh) {
-			tctx->vruntime = 0;
-			__sync_fetch_and_add(&flow_stats.inserts,
-			    1);
-		} else if (is_requeue) {
-			__sync_fetch_and_add(&flow_stats.requeues,
-			    1);
-		}
-		v = tctx->vruntime;
-		frontier = flow_ref_frontier(p, sel);
-		nice = flow_nice_of(p);
-		w = flow_weight_of(nice);
-		clamped = flow_clamp_vruntime_w(v, frontier,
-		    slice, w);
-		scaled = flow_scale_by_weight(est, w);
-		dl = flow_deadline(clamped, scaled);
-		if (group == (u8)FLOW_GROUP_HOG &&
-		    pinned) {
-			dl = flow_inflate_deadline(dl);
-			__sync_fetch_and_add(
-			    &flow_stats.pinned_hog_inflated,
-			    1);
-		}
-		if (dl == (u64)-1)
-			dl = (u64)-2;
-		tctx->deadline = dl;
-		__sync_fetch_and_add(&flow_stats.edf_enqueued,
-		    1);
-		if (clamped != v)
-			__sync_fetch_and_add(
-			    &flow_stats.edf_clamped, 1);
-		__sync_fetch_and_add(&flow_stats.edf_ordered,
-		    1);
-		park = flow_park_for_group(group);
-		scx_bpf_dsq_insert_vtime(p, park, slice,
-		    dl, 0);
-		/* Park sends no kick. Park holds tasks with */
-		/* no live allowed CPU after fallback, so no */
-		/* single idle target can run them. The next */
-		/* dispatch pass on any thief in the park */
-		/* group collects them when the mask allows. */
-		/* A target scan would need a loop with storm */
-		/* risk, so no kick is sent. */
+		flow_kick_idle_allowed(p, sel);
 		return;
 	}
-	if (is_fresh)
-		est = slice;
-	else
-		est = flow_clamp_est(tctx->est_ns);
-	tctx->est_ns = est;
-	if (is_fresh)
-		__sync_fetch_and_add(&flow_stats.inserts, 1);
-	else if (is_requeue)
-		__sync_fetch_and_add(&flow_stats.requeues, 1);
+	/* Ensure the fairness fields hold sane defaults without a divide. */
+	/* A zero weight means no history, so the neutral share applies. */
+	/* A zero slice means no history, so the fixed quantum applies. */
 	{
-		u64 frontier = 0;
-		u64 v = tctx->vruntime;
-		u64 clamped;
-		u64 scaled;
-		u64 dl;
-		u64 dsq;
-		s32 nice;
-		u32 w;
-		u64 target = 0;
-		u64 ref_f = 0;
-		st = flow_cpu((u32)cpu);
-		if (st)
-			target = st->frontier;
-		ref_f = flow_ref_frontier(p, sel);
-		/* Normal path only, park plus no tctx keep */
-		/* ref only. Corrected feeds clamp plus */
-		/* deserved with max wrap safety. */
-		frontier = flow_frontier_max(ref_f, target);
-		nice = flow_nice_of(p);
-		w = flow_weight_of(nice);
-		clamped = flow_clamp_vruntime_w(v, frontier,
-		    slice, w);
-		scaled = flow_scale_by_weight(est, w);
-		dl = flow_deadline(clamped, scaled);
-		if (group == (u8)FLOW_GROUP_HOG &&
-		    pinned) {
-			dl = flow_inflate_deadline(dl);
-			__sync_fetch_and_add(
-			    &flow_stats.pinned_hog_inflated,
-			    1);
-		}
-		if (dl == (u64)-1)
-			dl = (u64)-2;
-		tctx->vruntime = clamped;
-		tctx->deadline = dl;
-		__sync_fetch_and_add(&flow_stats.edf_enqueued,
-		    1);
-		if (clamped != v)
-			__sync_fetch_and_add(
-			    &flow_stats.edf_clamped, 1);
-		__sync_fetch_and_add(&flow_stats.edf_ordered,
-		    1);
-		dsq = flow_dsq_for_cpu((u32)cpu);
-		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
-		/* Kick idle plus busy preempt with delay. */
-		/* Idle fast path first with one queued read. */
-		/* Q2 idle in 50us coalesces when not pinned. */
-		/* Q1 always kicks, deep stays quiet, no slide. */
-		/* Busy stamps max only, running owns count. */
-		/* Dual max drops one sample max, decay intact. */
-		/* Needs latched arm 16 stand 8 plus deserved */
-		/* woken dl before frontier plus quarter gran */
-		/* plus 32us slack plus same group plus mask */
-		/* plus atomic rate claim with one kick per */
-		/* slice. Frontier is the floor, so beating */
-		/* it by granule plus slack proves earliness */
-		/* with no lookup. Fail closed with */
-		/* no kick plus total plus reason in branch */
-		/* order armed plus deserved plus group plus */
-		/* mask plus rate. No loop. Delay persists */
-		/* across idle, next running decays, delay */
-		/* shows stale idle. */
-		if (flow_cpu_ok(p, cpu)) {
-			u64 q;
-			u64 now;
-			u64 last;
-			u8 sample;
-			u8 win;
-			u8 cur;
-			u8 swin;
-			u8 scur;
-			bool held;
-			bool armed;
-			bool is_deserved;
-			u64 granule;
-			bool same;
-			bool mask_ok;
-			if (!st)
-				return;
-			q = scx_bpf_dsq_nr_queued(dsq);
-			if (st->running_pid == 0) {
-				if (q >
-				    (u64)FLOW_STEAL_MIN_DEPTH)
-					return;
-				if (q ==
-				    (u64)FLOW_STEAL_MIN_DEPTH &&
-				    !pinned &&
-				    (u32)cpu < 1024) {
-					now = flow_now();
-					last =
-					    flow_kick_at[
-					    (u32)cpu];
-					if (flow_kick_recent(
-					    now, last)) {
-						__sync_fetch_and_add(
-						    &flow_stats.kick_coalesced,
-						    1);
-						return;
-					}
-					scx_bpf_kick_cpu(cpu,
-					    SCX_KICK_IDLE);
-					__sync_fetch_and_add(
-					    &flow_stats.kicks,
-					    1);
-					flow_kick_at[
-					    (u32)cpu] = now;
-					return;
-				}
-				scx_bpf_kick_cpu(cpu,
-				    SCX_KICK_IDLE);
-				__sync_fetch_and_add(
-				    &flow_stats.kicks, 1);
-				if ((u32)cpu < 1024)
-					flow_kick_at[
-					    (u32)cpu] =
-					    flow_now();
-				return;
-			}
-			sample = flow_delay_from_queued(q);
-			win = st->delay_win;
-			cur = st->delay_cur;
-			swin = flow_delay_max(win, sample);
-			scur = flow_delay_max(cur, sample);
-			st->delay_win = swin;
-			st->delay_cur = scur;
-			held = flow_stand_held(st->cursor);
-			armed = flow_delay_armed_latched(
-			    swin, held);
-			if (armed)
-				__sync_fetch_and_or(&st->cursor,
-				    (u32)FLOW_CURSOR_STAND_BIT);
-			else
-				__sync_fetch_and_and(&st->cursor,
-				    ~(u32)FLOW_CURSOR_STAND_BIT);
-			granule = flow_granule_for_weight(w,
-			    slice);
-			is_deserved = flow_deserved(dl,
-			    frontier, granule);
-			same = group ==
-			    flow_group_live((u32)cpu,
-			    nr_cpu_ids);
-			/* S1 perf bypasses group with no recount, */
-			/* so pskip_g stays flat in perf. */
-			if (flow_perf_enabled())
-				same = true;
-			mask_ok =
-			    bpf_cpumask_test_cpu(
-			    (u32)cpu, p->cpus_ptr);
-			if (!armed) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_armed,
-				    1);
-				return;
-			}
-			if (!is_deserved) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_deserved,
-				    1);
-				return;
-			}
-			if (!same) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_group,
-				    1);
-				return;
-			}
-			if (!mask_ok) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_mask,
-				    1);
-				return;
-			}
-			if (!flow_rate_claim(&st->cursor)) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_rate,
-				    1);
-				return;
-			}
-			scx_bpf_kick_cpu(cpu,
-			    SCX_KICK_PREEMPT);
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_kicks, 1);
-		}
+		u32 w = READ_ONCE(tctx->weight);
+		u32 s = READ_ONCE(tctx->slice_ns);
+		if (w == 0)
+			__sync_lock_test_and_set(&tctx->weight,
+			    (u32)FLOW_WEIGHT_BASE);
+		if (s == 0)
+			__sync_lock_test_and_set(&tctx->slice_ns,
+			    (u32)FLOW_QUANTUM_NS);
+	}
+	/* Pinned tasks wait in a tier queue with wait set and one idle kick. */
+	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
+	/* on drain, so a pinned task still meets only its allowed CPU. */
+	/* The pinned wait runs Outlined on scalars with no tail struct, so */
+	/* the open path keeps verifier headroom with the same fair time */
+	/* plus miss plus clamp plus kick and no stack spill. */
+	if (unlikely(pinned)) {
+		flow_enqueue_pinned(p, tctx, sel, now, enq_flags);
+		return;
+	}
+	cpu = flow_pick_target(p, sel);
+	/* No live CPU waits in the value ordered reject queue with an idle */
+	/* kick. Homeless work waits there with the stored share plus value */
+	/* order and enq flags kept, so no insert touches the kernel global */
+	/* queue. */
+	if (!flow_cpu_ok(p, cpu)) {
+		u32 hw = READ_ONCE(tctx->weight);
+		u32 hw_hint = READ_ONCE(tctx->hint_w);
+		u32 hhint = READ_ONCE(tctx->hint_us);
+		u64 h_avg = (u64)READ_ONCE(tctx->avg_ns);
+		u64 h_dev = (u64)READ_ONCE(tctx->dev_ns);
+		u64 h_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
+		    h_avg);
+		u32 heff = flow_task_effective_weight(hw, hw_hint);
+		bool hcrit = flow_is_lat(h_avg, h_dev, hhint, h_sleep, 0,
+		    heff);
+		flow_gate_reject();
+		tctx->wait_at = now;
+		flow_overflow_insert(p, enq_flags, flow_red_value(heff, hcrit));
+		flow_kick_idle_allowed(p, sel);
+		return;
+	}
+	if (READ_ONCE(tctx->deadline) == 0 && READ_ONCE(tctx->wait_at) == 0)
+		flow_count_insert();
+	/* One predictor period plus one EDF deadline plus one fair time. */
+	/* A zero average means no history, so the fresh hint period */
+	/* applies with the default when the hint is zero. Later wakeups */
+	/* add average plus deviation with saturation, so short bursts earn */
+	/* tight deadlines with no table walk. The hint stores with no lag, */
+	/* while the predictor shapes only the deadline once history exists. */
+	/* A miss on the last deadline counts before the new deadline, so */
+	/* the miss count tracks wall completion past deadline. Requeues */
+	/* reuse the stored hint plus hint weight with no lookup and no */
+	/* cgroup acquire, so slice rotation keeps the heavy share with no */
+	/* neutral cliff. The reuse may stay stale across one slice when */
+	/* the share changed, so the new values show on the next fresh */
+	/* wakeup with no order break. A cgroup move shows the same way */
+	/* on the next fresh wakeup with no order break. Vruntime clamps within the lag bound of the target */
+	/* minimum with a compare and swap, so sleepers gain no more than */
+	/* one boost with no storm. The effective share stacks task times */
+	/* hint over 128 on the stack, so every task earns a clamped share */
+	/* with no special case and the hint weight stored alongside. */
+	if (is_reenq) {
+		hint = READ_ONCE(tctx->hint_us);
+		hint_w = READ_ONCE(tctx->hint_w);
+	} else {
+		/* One cache plus one row read for both values, so the fresh */
+		/* path pays no double lookup with no behavior change. The */
+		/* task base stays stored, only the hint reads here. */
+		flow_task_hint_weight(p, &hint, &hint_w);
+	}
+	avg = (u64)READ_ONCE(tctx->avg_ns);
+	dev = (u64)READ_ONCE(tctx->dev_ns);
+	tctx->hint_us = hint;
+	tctx->hint_w = hint_w;
+	/* Clamp vruntime within the lag bound of the target minimum */
+	/* through the shared helper with no order change. */
+	flow_clamp_to_min(tctx, (u32)cpu);
+	/* Miss rejoins self-contained through the outlined helper with the */
+	/* same fresh deadline plus held slice plus RED plus tier plus kick, */
+	/* so the open path below handles only fresh plus requeue compute */
+	/* with no inline growth and the same counts. */
+	{
+		struct flow_miss_tail miss = {
+			.tctx = tctx,
+			.cpu = cpu,
+			.sel = sel,
+			.now = now,
+			.enq_flags = enq_flags,
+			.hint = hint,
+			.hint_w = hint_w,
+			.avg = avg,
+			.dev = dev,
+		};
+		if (flow_enqueue_miss(p, &miss))
+			return;
+	}
+	deadline = flow_pred_deadline(now, avg, dev, hint);
+	__sync_lock_test_and_set(&tctx->deadline, deadline);
+	/* Open fair time runs outlined with out fields for RED plus place */
+	/* plus kick, so fresh plus requeue share one divide copy with no */
+	/* inline growth and the same order. */
+	{
+		struct flow_open_tail open = {
+			.tctx = tctx,
+			.deadline = deadline,
+			.now = now,
+			.enq_flags = enq_flags,
+			.hint = hint,
+			.hint_w = hint_w,
+			.avg = avg,
+			.dev = dev,
+			.is_reenq = is_reenq,
+		};
+		flow_enqueue_open(&open, &open_out);
+		vtime = open_out.vtime;
+	}
+	/* RED admission through the shared outlined helper. A reject needs */
+	/* cost past the fixed 256us Emax plus cost past the exceed with no */
+	/* critical, else the newcomer admits to the tier path. The deadline */
+	/* bounds the check without shaping vruntime. Critical follows the */
+	/* unified latency and cost uses the pre-clamp slice for fresh */
+	/* waits, so RED and slice agree. A full O(n) least value scan stays */
+	/* a noted alternative, so the verifier keeps one pass. Shares one */
+	/* copy with miss plus pinned, so the dispatcher stays thin. */
+	{
+		u32 csl = READ_ONCE(tctx->slice_ns);
+		bool ccrit = open_out.is_lat;
+		u32 cost_sl = csl;
+		struct flow_reject_tail rej;
+		if (open_out.is_fresh && !(enq_flags & SCX_ENQ_PREEMPT))
+			cost_sl = open_out.pre_slice;
+		rej.tctx = tctx;
+		rej.deadline = deadline;
+		rej.now = now;
+		rej.avg = avg;
+		rej.slice = cost_sl;
+		rej.is_lat = ccrit;
+		rej.hint_w = hint_w;
+		rej.enq_flags = enq_flags;
+		rej.sel = sel;
+		if (flow_enqueue_reject(p, &rej))
+			return;
+	}
+	/* Every tier plus bypass join counts one admit without double */
+	/* counting, so the counters track joins while tier queues hold */
+	/* misses plus pins. */
+	flow_count_admit();
+	/* Eligibility read takes vruntime plus lag plus minimum once per */
+	/* wait. The bypass and the kick share this one gate, so hogs pace */
+	/* with one minimum read. Dropped reads keep the same order. */
+	hoist_vr = READ_ONCE(tctx->vruntime);
+	hoist_lag = READ_ONCE(tctx->vlag);
+	hoist_min = flow_cpu_min((u32)cpu);
+	hoist_elig = flow_eligible(hoist_vr, hoist_min, hoist_lag);
+	/* Idle direct bypass plus tier join run outlined without changing */
+	/* order, so the drain gate and the tier escalation share one read. */
+	/* A direct bypass returns at once with one kick, else the tier join */
+	/* falls into the single kick tail. The deadline plus admit already */
+	/* hold, so order plus counters stay correct without extra waiting. */
+	/* Strict fair order gates the bypass with eligibility plus drain, so */
+	/* hogs pace through tiers without a direct jump and one kick per wait */
+	/* stays. A stale hint only races a concurrent tier join, since */
+	/* dispatch still drains in fair order with mask wins on the next pass. */
+	/* Arrival sleep threads the pre-overwrite gap, so kick agrees with */
+	/* RED plus slice on the same latency with no second wait read. */
+	{
+		struct flow_enqueue_tail tail;
+		tail.cpu = cpu;
+		tail.vtime = vtime;
+		tail.now = now;
+		tail.enq_flags = enq_flags;
+		tail.arr_sleep = open_out.sleep_ns;
+		tail.is_reenq = is_reenq;
+		tail.hoist_elig = hoist_elig;
+		if (flow_enqueue_place(p, &tail))
+			return;
+		flow_enqueue_kick(p, &tail);
 	}
 }

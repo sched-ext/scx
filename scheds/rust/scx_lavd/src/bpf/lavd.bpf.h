@@ -18,6 +18,12 @@
  */
 #define U64_MAX		((u64)~0ULL)
 #define S64_MAX		((s64)(U64_MAX >> 1))
+/*
+ * "Never" for a completion-time estimate: far above any real value, so it
+ * never wins a comparison, yet far below U64_MAX, so a caller can add a
+ * residual to it without wrapping. Positive as s64 as well.
+ */
+#define LAVD_COMP_TIME_INF	(U64_MAX >> 2)
 #define U32_MAX		((u32)~0U)
 #define S32_MAX		((s32)(U32_MAX >> 1))
 
@@ -248,6 +254,8 @@ struct task_ctx {
 	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
 	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
+	u64	queued_svc_snapshot;	/* avg_runtime_invr snapshotted at enqueue time for the per-cpdom counter */
+	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
@@ -284,6 +292,7 @@ struct cpdom_ctx {
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
+	u64	qload_svc_invr;			    /* queued service time: sum of avg_runtime_invr for all queued tasks, tracked atomically */
 	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
@@ -300,6 +309,11 @@ struct cpdom_ctx {
 	u32	avg_dom_pinned_util_invr_sum;	    /* the sum of average invariant domain-pinned task utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
+	u32	nr_overflow_cpus;		    /* the number of of overflow CPUs in this cpdom,
+						     * maintained via atomic inc/dec at every
+						     * overflow cpumask mutation. */
+	u32	cap_sum_overflow_cpus;		    /* sum of effective_capacity of overflow
+						     * CPUs in this cpdom. */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 
 	/* per-cpdom preemption vulnerability threshold tracking */
@@ -387,6 +401,7 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
 	u8		__pad0[2];
+	volatile u32	ovrflw_cap;	/* effective_capacity counted in the overflow set */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -563,6 +578,8 @@ struct cpu_ctx {
 	 * decremented likewise on dispatch/dequeue/exit.
 	 */
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
+	u64	qload_svc_invr;		/* queued service time: sum of avg_runtime_invr,
+					   same write pattern as qload_invr above */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
@@ -648,11 +665,13 @@ extern volatile u64		powersave_mode_ns;
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 extern const volatile u64	pinned_slice_ns;
+extern const volatile u64	xmig_min_gain_ns;
 extern const volatile u8	no_ovrflw_extend;
 
 extern volatile bool		reinit_cpumask_for_performance;
 extern volatile bool		no_preemption;
 extern volatile bool		no_core_compaction;
+extern volatile bool		ovrflw_counted_active;
 extern volatile bool		no_freq_scaling;
 
 bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
@@ -736,6 +755,53 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 	       scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdomc->id)) >
 		       scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdomc->id)) ||
 	       cpdomc->nr_steady_cpus == 0;
+}
+
+u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
+		   u64 nr_cpus);
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc);
+u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc);
+
+/*
+ * Time until whatever is running on @cpuc stops, in wall-clock ns.
+ *
+ * Kept apart from the calc_comp_time_on_*() estimators, which carry no
+ * residual so that they stay comparable with one another. A caller that needs
+ * a wall-clock wait rather than a comparison adds this on top.
+ *
+ * SCX_SLICE_INF means nothing is running: lavd only ever writes it to
+ * est_stopping_clk when a CPU goes idle, is taken offline, or is initialized,
+ * and never as a task's slice. So there is nothing to wait for and the
+ * residual is zero.
+ *
+ * est_stopping_clk is the running task's average runtime counted from its
+ * start, not its slice. While it lies ahead it is the better guess, bounded
+ * by the slice the kernel will enforce. Once the task has outrun its average
+ * there is nothing left to predict from, so guess twice and take the larger:
+ * a quarter of the average, as the spread of its runtimes, so a task a
+ * little past its average still reads as about to stop; and the overrun
+ * itself, so a task deep into a burst reads as staying for as long again.
+ * The remaining slice caps them, being the bound the kernel enforces.
+ */
+static __always_inline u64 calc_residual_time(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 est = READ_ONCE(cpuc->est_stopping_clk);
+	struct task_struct *curr;
+	u64 remaining;
+
+	if (est == SCX_SLICE_INF)
+		return 0;
+
+	curr = __COMPAT_scx_bpf_cpu_curr(cpuc->cpu_id);
+	remaining = curr ? curr->scx.slice : 0;
+	if (now >= est) {
+		u64 spread = time_delta(est, cpuc->running_clk) / 4;
+		u64 overrun = time_delta(now, est);
+
+		return min(max(spread, overrun), remaining);
+	}
+
+	return min(time_delta(est, now), remaining);
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
@@ -823,25 +889,51 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 /* Overflow-set bookkeeping helpers. */
 
 /*
- * Atomically add @cpu to the global overflow cpumask. Mirrors the return
- * semantics of bpf_cpumask_test_and_set_cpu(): true if the bit was
- * already set, false if it was newly set.
+ * Atomically add @cpu to the global overflow cpumask and, on a 0->1
+ * transition, bump the per-cpdom (nr_overflow_cpus,
+ * cap_sum_overflow_cpus) counters used by completion-time-based
+ * migration to estimate cpdom throughput over active+overflow CPUs.
+ *
+ * Returns true if the bit was already set (no counter update); false if
+ * it was newly set (counters bumped).
  */
 static __always_inline bool
 ovrflw_test_and_set(struct bpf_cpumask *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (bpf_cpumask_test_and_set_cpu(cpu, ovrflw))
+		return true;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !(cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])))
+		return false;
+	__sync_fetch_and_add(&cpdc->nr_overflow_cpus, 1);
+	cpuc->ovrflw_cap = cpuc->effective_capacity;
+	__sync_fetch_and_add(&cpdc->cap_sum_overflow_cpus, cpuc->ovrflw_cap);
+	return false;
 }
 
 /*
- * Atomically remove @cpu from the global overflow cpumask. Mirrors the
- * return semantics of bpf_cpumask_test_and_clear_cpu(): true if the bit
- * was set before this call, false if it was already clear.
+ * Atomically remove @cpu from the global overflow cpumask and, on a
+ * 1->0 transition, decrement the per-cpdom counters. Returns true if
+ * the bit was set before this call (counters decremented); false if it
+ * was already clear.
  */
 static __always_inline bool
 ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (!bpf_cpumask_test_and_clear_cpu(cpu, ovrflw))
+		return false;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !(cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])))
+		return true;
+	__sync_fetch_and_sub(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_sub(&cpdc->cap_sum_overflow_cpus, cpuc->ovrflw_cap);
+	return true;
 }
 
 /* Load balancer helpers. */

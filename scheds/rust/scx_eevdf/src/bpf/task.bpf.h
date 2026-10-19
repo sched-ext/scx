@@ -302,9 +302,49 @@ static u64 pack_vref(pack_t *pk)
  * point, see eevdf_dispatch(), so the estimate would be running past
  * what it can know.
  */
+/* Project the running entity's vruntime to @now. */
+static u64 curr_vruntime_at(pack_t *pk, u64 now)
+{
+	u64 run_at = pk->curr_run_at;
+
+	if (time_before(now, run_at))
+		now = run_at;
+
+	return pk->curr_v + (now - run_at) * NICE_0_WEIGHT / pk->curr_w;
+}
+
+/*
+ * The reference of @pk when its only member is the entity running there:
+ * that entity's vruntime at @now, which is what avg_vruntime() returns for
+ * a lone entity. The stored reference can sit a unit below it, since every
+ * member that leaves truncates its share away, and a task woken against
+ * it would find the running one over-served by that unit and preempt it.
+ *
+ * The entity is read only once the weights say it may be alone, and it
+ * must still be a member at the pack's whole weight: one that has just
+ * blocked has left already, though it stays published until it stops.
+ */
+static bool pack_vref_alone(pack_t *pk, u64 now, u64 *vref)
+{
+	u64 sum_w = pk->vsum_w;
+	sched_ent_t *se;
+
+	if (!sum_w || pk->curr_w != sum_w)
+		return false;
+	se = pk->curr_se;
+	if (!se || se->vpack != pk || se->vjoin_w != sum_w)
+		return false;
+
+	*vref = curr_vruntime_at(pk, now);
+	return true;
+}
+
 static u64 pack_vref_at(pack_t *pk, u64 now)
 {
-	u64 w, sum_w, delta, dv;
+	u64 w, sum_w, delta, dv, vref;
+
+	if (pack_vref_alone(pk, now, &vref))
+		return vref;
 
 	w = pk->curr_w;
 	sum_w = pk->vsum_w;
@@ -347,10 +387,12 @@ static u64 pack_vref_place(pack_t *pk, u64 now)
 static u64 pack_vref_before_join(pack_t *pk, const sched_ent_t *se,
 				 u64 join_w, u64 now)
 {
-	u64 curr_w, sum_w, delta, dv, projection;
+	u64 curr_w, sum_w, delta, dv, projection, vref;
 
 	if (no_vref_update || se->vpack == pk)
 		return pack_vref_place(pk, now);
+	if (pack_vref_alone(pk, now, &vref))
+		return vref;
 
 	curr_w = pk->curr_w;
 	sum_w = pk->vsum_w;
@@ -408,17 +450,6 @@ static bool curr_owed_service(pack_t *pk, u64 now)
 	dv = delta * NICE_0_WEIGHT / w;
 
 	return !time_after(pk->curr_v + dv, pack_vref_at(pk, now));
-}
-
-/* Project the running entity's vruntime to @now. */
-static u64 curr_vruntime_at(pack_t *pk, u64 now)
-{
-	u64 run_at = pk->curr_run_at;
-
-	if (time_before(now, run_at))
-		now = run_at;
-
-	return pk->curr_v + (now - run_at) * NICE_0_WEIGHT / pk->curr_w;
 }
 
 /*
@@ -499,7 +530,8 @@ static void vref_leave(sched_ent_t *se)
  */
 static void vref_join(pack_t *pk, sched_ent_t *se, u64 join_w)
 {
-	u64 w;
+	sched_ent_t *curr;
+	u64 w, vref, base;
 	s64 d;
 
 	se->vjoin_w = join_w;
@@ -512,8 +544,25 @@ static void vref_join(pack_t *pk, sched_ent_t *se, u64 join_w)
 	 * reference, which is what the average of one is.
 	 */
 	w = __sync_fetch_and_add(&pk->vsum_w, join_w);
-	d = (s64)(se->vruntime - pk->vref);
-	__sync_fetch_and_add(&pk->vref, vdiv((s64)join_w * d, w + join_w));
+	vref = pk->vref;
+	/*
+	 * A pack whose only member is the entity running there has that
+	 * entity's vruntime as its average, and pack_vref_alone() places
+	 * against it. The stored reference can have drifted from it by the
+	 * truncation of every join and leave since the pack last emptied, and
+	 * a join against that would hand the drift to the joining entity as
+	 * lag. Join against the member's vruntime instead, as far as it has
+	 * been folded in, which also drops the drift.
+	 */
+	curr = pk->curr_se;
+	if (w && pk->curr_w == w && curr && curr != se && curr->vpack == pk &&
+	    curr->vjoin_w == w)
+		base = curr->vjoin_v;
+	else
+		base = vref;
+	d = (s64)(se->vruntime - base);
+	__sync_fetch_and_add(&pk->vref,
+			     (s64)(base - vref) + vdiv((s64)join_w * d, w + join_w));
 }
 
 /*
@@ -669,6 +718,21 @@ static void vref_charge(sched_ent_t *se)
 }
 
 /*
+ * Charge the service @p has taken on @cid since it started running or was
+ * last charged, to its vruntime, its pack and its cgroup's bandwidth, the
+ * way update_curr() does.
+ */
+static void charge_run(struct task_struct *p, task_ctx_t *tctx, s32 cid, u64 now)
+{
+	u64 delta = now - tctx->last_run_at;
+
+	task_bw_charge(tctx, cid, delta);
+	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
+	tctx->last_run_at = now;
+	vref_charge(&tctx->se);
+}
+
+/*
  * Settle up with the task that is keeping @cid across the end of its
  * slice, see keep_running().
  *
@@ -686,18 +750,14 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 {
 	struct cid_ctx __arena *cctx = cid_ctx(cid);
 	task_ctx_t *tctx = try_lookup_task_ctx(p);
-	u64 delta, weight;
+	u64 weight;
 	pack_t *pk;
 
 	if (!tctx)
 		return;
 	pk = task_pack(tctx, cid);
 
-	delta = now - tctx->last_run_at;
-	task_bw_charge(tctx, cid, delta);
-	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);
-	tctx->last_run_at = now;
-	vref_charge(&tctx->se);
+	charge_run(p, tctx, cid, now);
 
 	pk->curr_dl = task_dl(p, tctx);
 	pk->curr_v = tctx->se.vruntime;
@@ -705,6 +765,7 @@ static void keep_charge(struct task_struct *p, s32 cid, u64 now)
 	pk->curr_request = task_request(p);
 	weight = task_weight(p, tctx);
 	set_protect_slice(pk, weight);
+	pk->curr_se = &tctx->se;
 	pk->curr_w = weight;
 	cctx->curr_idle = p->policy == SCHED_IDLE;
 }

@@ -67,6 +67,34 @@ pub(crate) struct CpuRecipient {
 }
 
 impl CpuRecipient {
+    /// Create a recipient restricted to and preferentially claiming `cpus`.
+    pub(crate) fn pinned(id: u32, weight: f64, cpus: &Cpumask) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: cpus.clone(),
+            claimed: Some(cpus.clone()),
+            minimum: CpuMinimum {
+                protected: 1,
+                requested: 0,
+            },
+        }
+    }
+
+    /// Create the unpinned root recipient with a best-effort CPU minimum.
+    pub(crate) fn root(id: u32, weight: f64, domain: &Cpumask, requested: usize) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: domain.clone(),
+            claimed: None,
+            minimum: CpuMinimum {
+                protected: 0,
+                requested,
+            },
+        }
+    }
+
     /// Create an unpinned recipient over the complete allocation domain.
     ///
     /// It may run anywhere in `domain`, claims no CPU preferentially, and
@@ -763,6 +791,141 @@ fn read_dir_sorted(path: &Path) -> Result<Vec<DirEntry>> {
     Ok(entries)
 }
 
+/// Add `cpus` to recipient `id`'s mask in `assignments`.
+fn add_cpus_to_assignment(
+    assignments: &mut HashMap<u32, Cpumask>,
+    id: u32,
+    cpus: &[usize],
+) -> Result<()> {
+    let assignment = assignments
+        .get_mut(&id)
+        .expect("chunk assignment missing initialized recipient");
+    for &cpu in cpus {
+        assignment
+            .set_cpu(cpu)
+            .with_context(|| format!("adding CPU {} to recipient {}", cpu, id))?;
+    }
+    Ok(())
+}
+
+/// Group the CPUs of `domain` into chunks by partition (LLC), ordered by
+/// partition id. CPUs without a partition become one-CPU chunks at the end.
+fn partition_chunks(
+    domain: &Cpumask,
+    cpu_to_partition: &HashMap<usize, usize>,
+) -> Vec<(usize, Vec<usize>)> {
+    let mut by_partition: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut missing = Vec::new();
+
+    for cpu in domain.iter() {
+        if let Some(&partition) = cpu_to_partition.get(&cpu) {
+            by_partition.entry(partition).or_default().push(cpu);
+        } else {
+            missing.push(cpu);
+        }
+    }
+
+    let mut chunks: Vec<(usize, Vec<usize>)> = by_partition.into_iter().collect();
+    chunks.extend(missing.into_iter().map(|cpu| (usize::MAX, vec![cpu])));
+    chunks.sort_by(|(a_partition, a_cpus), (b_partition, b_cpus)| {
+        a_partition
+            .cmp(b_partition)
+            .then_with(|| a_cpus[0].cmp(&b_cpus[0]))
+    });
+    chunks
+}
+
+/// Place the per-recipient CPU `counts` onto `domain` by partition chunk.
+/// The recipient with the most CPUs left takes the largest chunk that still
+/// fits, so each recipient collects whole partitions first; whatever counts
+/// remain are carved contiguously from the chunks nobody could take whole.
+/// `counts` must sum to the domain size.
+fn assign_partition_chunks(
+    domain: &Cpumask,
+    counts: &[(u32, usize)],
+    cpu_to_partition: &HashMap<usize, usize>,
+) -> Result<HashMap<u32, Cpumask>> {
+    let total_count: usize = counts.iter().map(|(_, count)| *count).sum();
+    if total_count != domain.weight() {
+        bail!(
+            "chunk assignment count mismatch: counts sum to {} but domain has {} CPUs",
+            total_count,
+            domain.weight()
+        );
+    }
+
+    let mut assignments: HashMap<u32, Cpumask> =
+        counts.iter().map(|(id, _)| (*id, Cpumask::new())).collect();
+    let mut remaining: HashMap<u32, usize> = counts.iter().copied().collect();
+    let mut chunks = partition_chunks(domain, cpu_to_partition);
+
+    while !chunks.is_empty() {
+        let Some((&id, &remaining_count)) = remaining
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .max_by(|(a_id, a_count), (b_id, b_count)| {
+                a_count.cmp(b_count).then_with(|| b_id.cmp(a_id))
+            })
+        else {
+            break;
+        };
+
+        let Some(chunk_idx) = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, cpus))| cpus.len() <= remaining_count)
+            .max_by(|(_, (a_partition, a_cpus)), (_, (b_partition, b_cpus))| {
+                a_cpus
+                    .len()
+                    .cmp(&b_cpus.len())
+                    .then_with(|| b_partition.cmp(a_partition))
+            })
+            .map(|(idx, _)| idx)
+        else {
+            break;
+        };
+
+        let (_, cpus) = chunks.remove(chunk_idx);
+        add_cpus_to_assignment(&mut assignments, id, &cpus)?;
+        *remaining
+            .get_mut(&id)
+            .expect("remaining count missing recipient") -= cpus.len();
+    }
+
+    let partial_cpus: Vec<usize> = chunks.into_iter().flat_map(|(_, cpus)| cpus).collect();
+    let mut offset = 0;
+    let mut partial_recipients: Vec<(u32, usize)> = remaining
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    partial_recipients.sort_by(|(a_id, a_count), (b_id, b_count)| {
+        b_count.cmp(a_count).then_with(|| a_id.cmp(b_id))
+    });
+
+    for (id, count) in partial_recipients {
+        let end = offset + count;
+        if end > partial_cpus.len() {
+            bail!(
+                "chunk assignment exhausted CPUs for recipient {}: need {}, have {}",
+                id,
+                count,
+                partial_cpus.len().saturating_sub(offset)
+            );
+        }
+        add_cpus_to_assignment(&mut assignments, id, &partial_cpus[offset..end])?;
+        offset = end;
+    }
+
+    if offset != partial_cpus.len() {
+        bail!(
+            "chunk assignment left {} CPUs unassigned",
+            partial_cpus.len() - offset
+        );
+    }
+
+    Ok(assignments)
+}
+
 /// Manages cells for direct child cgroups of a specified parent
 pub struct CellManager {
     cell_parent_path: PathBuf,
@@ -1155,8 +1318,120 @@ impl CellManager {
         domain: &Cpumask,
         subcells: &[CpuRecipient],
         compute_borrowable: bool,
+        cpu_to_llc: &HashMap<usize, usize>,
     ) -> Result<Vec<CpuAssignment>> {
-        CpuManager::new(domain).compute_assignments(subcells, compute_borrowable)
+        // A cell is floored at one CPU by the cell-level split, but it may
+        // carry more subcells than that. Rather than fail the split, let every
+        // subcell run on the whole cell until it grows again.
+        if domain.weight() < subcells.len() {
+            return Ok(subcells
+                .iter()
+                .map(|subcell| CpuAssignment {
+                    id: subcell.id,
+                    primary: domain.clone(),
+                    borrowable: compute_borrowable.then(Cpumask::new),
+                })
+                .collect());
+        }
+
+        if let Some(assignments) = Self::compute_subcell_cpu_assignments_with_llc_chunks(
+            domain,
+            subcells,
+            compute_borrowable,
+            cpu_to_llc,
+        )? {
+            return Ok(assignments);
+        }
+
+        Self::compute_cpu_assignments_for(domain, subcells, compute_borrowable)
+    }
+
+    /// Size the subcells as `compute_cpu_assignments_for` would, then place
+    /// those counts onto `domain` in whole LLC chunks. Returns `None` when no
+    /// LLC map is available or a subcell is pinned or restricted to part of
+    /// the domain, so the caller keeps the plain assignment.
+    fn compute_subcell_cpu_assignments_with_llc_chunks(
+        domain: &Cpumask,
+        subcells: &[CpuRecipient],
+        compute_borrowable: bool,
+        cpu_to_llc: &HashMap<usize, usize>,
+    ) -> Result<Option<Vec<CpuAssignment>>> {
+        if cpu_to_llc.is_empty()
+            || subcells
+                .iter()
+                .any(|subcell| subcell.claimed.is_some() || subcell.allowed != *domain)
+        {
+            return Ok(None);
+        }
+
+        let baseline = Self::compute_cpu_assignments_for(domain, subcells, false)?;
+        let counts: Vec<(u32, usize)> = baseline
+            .iter()
+            .map(|assignment| (assignment.id, assignment.primary.weight()))
+            .collect();
+        let primaries = assign_partition_chunks(domain, &counts, cpu_to_llc)?;
+
+        let mut assignments: Vec<CpuAssignment> = counts
+            .into_iter()
+            .map(|(id, _)| {
+                let primary = primaries
+                    .get(&id)
+                    .cloned()
+                    .expect("chunk assignment missing recipient");
+                let borrowable = compute_borrowable.then(|| domain.and(&primary.not()));
+                CpuAssignment {
+                    id,
+                    primary,
+                    borrowable,
+                }
+            })
+            .collect();
+        assignments.sort_by_key(|assignment| assignment.id);
+
+        Ok(Some(assignments))
+    }
+
+    /// Compute CPU assignments over `domain` for an explicit recipient list.
+    pub(crate) fn compute_cpu_assignments_for(
+        domain: &Cpumask,
+        recipients: &[CpuRecipient],
+        compute_borrowable: bool,
+    ) -> Result<Vec<CpuAssignment>> {
+        CpuManager::new(domain).compute_assignments(recipients, compute_borrowable)
+    }
+
+    /// Compute cell assignments with topology-aware requested-minimum steering.
+    pub(crate) fn compute_configured_cell_cpu_assignments(
+        domain: &Cpumask,
+        recipients: &[CpuRecipient],
+        compute_borrowable: bool,
+        cpu_to_partition: &HashMap<usize, usize>,
+    ) -> Result<(Vec<CpuAssignment>, bool)> {
+        let assignments = CpuManager::with_partitions(domain, cpu_to_partition)
+            .compute_assignments(recipients, compute_borrowable)?;
+        let displaced_claim = Self::requested_minimum_displaced_claim(recipients, &assignments);
+        Ok((assignments, displaced_claim))
+    }
+
+    fn requested_minimum_displaced_claim(
+        recipients: &[CpuRecipient],
+        assignments: &[CpuAssignment],
+    ) -> bool {
+        recipients
+            .iter()
+            .filter(|recipient| recipient.minimum.requested > 0)
+            .any(|recipient| {
+                let mut other_claims = Cpumask::new();
+                for other in recipients.iter().filter(|other| other.id != recipient.id) {
+                    if let Some(claimed) = &other.claimed {
+                        other_claims = other_claims.or(claimed);
+                    }
+                }
+                assignments
+                    .iter()
+                    .find(|assignment| assignment.id == recipient.id)
+                    .is_some_and(|assignment| assignment.primary.and(&other_claims).weight() > 0)
+            })
     }
 
     /// Internal implementation shared by equal-weight and demand-weighted assignment.
@@ -1213,20 +1488,8 @@ impl CellManager {
 
         // The sticky statistic records when satisfying cell 0's requested
         // minimum displaced any CPU preferentially claimed by a workload cell.
-        if self.cell0_min_cpus > 0 {
-            let mut workload_claims = Cpumask::new();
-            for recipient in recipients.iter().filter(|recipient| recipient.id != 0) {
-                if let Some(claimed) = &recipient.claimed {
-                    workload_claims = workload_claims.or(claimed);
-                }
-            }
-            if assignments
-                .iter()
-                .find(|assignment| assignment.id == 0)
-                .is_some_and(|assignment| assignment.primary.and(&workload_claims).weight() > 0)
-            {
-                self.enforced_holdout.store(true, Ordering::Relaxed);
-            }
+        if Self::requested_minimum_displaced_claim(&recipients, &assignments) {
+            self.enforced_holdout.store(true, Ordering::Relaxed);
         }
 
         Ok(assignments)
@@ -1817,6 +2080,28 @@ mod tests {
             .collect();
         assert!(donor_weights.contains(&7));
         assert!(donor_weights.contains(&8));
+    }
+
+    #[test]
+    fn test_configured_cell_assignments_apply_root_holdout() {
+        let domain = cpumask_for_range(8);
+        let recipients = vec![
+            CpuRecipient::root(0, 1.0, &domain, 2),
+            CpuRecipient::pinned(1, 1.0, &domain),
+        ];
+        let cpu_to_llc = (0..8).map(|cpu| (cpu, cpu / 4)).collect();
+
+        let (assignments, displaced_claim) = CellManager::compute_configured_cell_cpu_assignments(
+            &domain,
+            &recipients,
+            false,
+            &cpu_to_llc,
+        )
+        .expect("configured holdout should reserve CPUs for root");
+
+        assert_eq!(find_assignment(&assignments, 0).primary.weight(), 2);
+        assert_eq!(find_assignment(&assignments, 1).primary.weight(), 6);
+        assert!(displaced_claim);
     }
 
     #[test]
@@ -3560,8 +3845,13 @@ mod tests {
         let domain = cpumask_from_cpulist(32, "8-9,12,14-15");
         let recipients = vec![CpuRecipient::unpinned(0, 1.0, &domain)];
 
-        let assignments =
-            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false).unwrap();
+        let assignments = CellManager::compute_subcell_cpu_assignments(
+            &domain,
+            &recipients,
+            false,
+            &HashMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(assignments.len(), 1);
         let subcell0 = find_assignment(&assignments, 0);
@@ -3574,8 +3864,13 @@ mod tests {
         let domain = cpumask_from_cpulist(32, "3-4,8,10-11");
         let recipients = vec![CpuRecipient::unpinned(0, 1.0, &domain)];
 
-        let assignments =
-            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, true).unwrap();
+        let assignments = CellManager::compute_subcell_cpu_assignments(
+            &domain,
+            &recipients,
+            true,
+            &HashMap::new(),
+        )
+        .unwrap();
         let subcell0 = find_assignment(&assignments, 0);
 
         assert_eq!(subcell0.primary, domain);
@@ -3590,12 +3885,75 @@ mod tests {
             CpuRecipient::unpinned(2, 1.0, &domain),
         ];
 
-        let assignments =
-            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false).unwrap();
+        let assignments = CellManager::compute_subcell_cpu_assignments(
+            &domain,
+            &recipients,
+            false,
+            &HashMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(assignments.len(), 2);
         assert_eq!(find_assignment(&assignments, 0).primary.weight(), 4);
         assert_eq!(find_assignment(&assignments, 2).primary.weight(), 4);
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_shares_cell_smaller_than_subcell_count() {
+        let domain = cpumask_from_cpulist(32, "5");
+        let recipients = vec![
+            CpuRecipient::unpinned(0, 1.0, &domain),
+            CpuRecipient::unpinned(1, 1.0, &domain),
+        ];
+        let cpu_to_llc: HashMap<usize, usize> = (0..32).map(|cpu| (cpu, cpu / 4)).collect();
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, true, &cpu_to_llc)
+                .unwrap();
+
+        assert_eq!(assignments.len(), 2);
+        for id in [0, 1] {
+            let assignment = find_assignment(&assignments, id);
+            assert_eq!(assignment.primary, domain);
+            assert_eq!(assignment.borrowable.as_ref().map(|m| m.weight()), Some(0));
+        }
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_prefers_full_llc_chunks() {
+        let domain = cpumask_from_cpulist(32, "0-15");
+        let recipients = vec![
+            CpuRecipient::unpinned(0, 15.0, &domain),
+            CpuRecipient::unpinned(1, 85.0, &domain),
+        ];
+        let cpu_to_llc: HashMap<usize, usize> = (0..16).map(|cpu| (cpu, cpu / 4)).collect();
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false, &cpu_to_llc)
+                .unwrap();
+        let rest = find_assignment(&assignments, 0);
+        let worker = find_assignment(&assignments, 1);
+
+        assert_eq!(rest.primary.weight(), 3);
+        assert_eq!(worker.primary.weight(), 13);
+
+        let mut split_llcs = 0;
+        let mut worker_full_llcs = 0;
+        for llc in 0..4 {
+            let llc_mask = cpumask_from_cpulist(32, &format!("{}-{}", llc * 4, llc * 4 + 3));
+            let rest_cpus = rest.primary.and(&llc_mask).weight();
+            let worker_cpus = worker.primary.and(&llc_mask).weight();
+
+            if rest_cpus > 0 && worker_cpus > 0 {
+                split_llcs += 1;
+            }
+            if worker_cpus == llc_mask.weight() {
+                worker_full_llcs += 1;
+            }
+        }
+
+        assert_eq!(split_llcs, 1);
+        assert_eq!(worker_full_llcs, 3);
     }
 
     /// Symmetric pairwise overlaps must produce equal cell sizes regardless

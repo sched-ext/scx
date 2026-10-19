@@ -68,6 +68,10 @@
  * update_blocked_averages() for an idle CPU, which has no idle balancer
  * here to run it.
  *
+ * The same walk keeps the CPU count of every cgroup's cpuset, which bounds
+ * the scaling above, tg_cpus(): the kernel reports no cpuset change, so it
+ * is read again once a second, see grp_cpus_refresh().
+ *
  *
  * cpu.max
  * -------
@@ -204,6 +208,48 @@ static u64 grp_free_head;	/* blocks waiting to be freed, see grp_free_defer() */
  */
 #define GRP_SWEEP_NS		NSEC_PER_MSEC
 #define GRP_SWEEP_BUDGET	64
+
+/*
+ * How long the CPU count of a cgroup's cpuset is trusted, see
+ * grp_cpus_refresh().
+ */
+#define GRP_CPUS_NS		NSEC_PER_SEC
+
+/*
+ * Read how many CPUs the effective cpuset of @cgrp has, tg_cpus(), which
+ * bounds the scaling of the group's weight in grp_update_shares(). A kernel
+ * without scx_bpf_cgroup_nr_cpus() answers with every CPU, and the cids of
+ * the scheduler bound it then.
+ */
+static void grp_cpus_set(struct grp_hdr __arena *hdr, struct cgroup *cgrp, u64 now)
+{
+	u64 nr = __COMPAT_scx_bpf_cgroup_nr_cpus(cgrp);
+
+	nr = MIN(MAX(nr, 1ULL), (u64)nr_cids);
+	if (nr != READ_ONCE(hdr->nr_cpus))
+		WRITE_ONCE(hdr->nr_cpus, nr);
+	hdr->nr_cpus_at = now;
+}
+
+/*
+ * Read the CPU count of @hdr's cpuset again if it is older than GRP_CPUS_NS.
+ * Nothing tells the scheduler when a cpuset changes or a CPU goes away, so
+ * grp_sweep() polls on its way past the cgroup. A cgroup on its way out is
+ * not found by its id any more and keeps the count it had.
+ */
+static void grp_cpus_refresh(struct grp_hdr __arena *hdr, u64 now)
+{
+	struct cgroup *cgrp;
+
+	if (!bpf_ksym_exists(scx_bpf_cgroup_nr_cpus) ||
+	    now - hdr->nr_cpus_at < GRP_CPUS_NS)
+		return;
+	cgrp = bpf_cgroup_from_id(hdr->cgid);
+	if (!cgrp)
+		return;
+	grp_cpus_set(hdr, cgrp, now);
+	bpf_cgroup_release(cgrp);
+}
 
 /*
  * Nothing of the group is left on the cid of @gq: give back what the cid holds
@@ -388,6 +434,8 @@ __noinline u64 grp_sweep_step(u64 pos, u64 now)
 	k = cid / 64;
 	if (!hdr || k >= words)
 		return (u64)(slot + 1) << 32;
+	if (!cid)
+		grp_cpus_refresh(hdr, now);
 
 	live = grp_live(hdr, nr_cids);
 	w = READ_ONCE(live[k]) & (~0ULL << (cid & 63));
@@ -476,6 +524,8 @@ __noinline int grp_free_drain(void)
 /*
  * Walk the queues that still add to their cgroup's sums, a few per
  * GRP_SWEEP_NS, and decay the ones that have gone quiet, see grp_decay().
+ * Each cgroup the walk enters also has its cpuset's CPU count read again
+ * when that is due, see grp_cpus_refresh().
  * One cid at a time does it, from its tick, where fair.c's idle balancer
  * updates the blocked averages of idle CPUs.
  *
@@ -534,7 +584,9 @@ __noinline int grp_sweep(u64 now)
  * every CPU has it on every CPU. Without the scaling, the shares of a group
  * spread over N cids would average 1/N of the weight and nested groups
  * 1/N^depth, which a single runqueue cannot afford. tg_cpus() counts the
- * CPUs of the group's cpuset; the cids of the scheduler stand in for them.
+ * CPUs of the group's cpuset, which grp_sweep() keeps in @hdr->nr_cpus: a
+ * group confined to two CPUs cannot run more than two CPUs' worth of tasks,
+ * however many it has.
  *
  * The averages are kept from the owner of the cid, where the tick runs, and
  * the sums shared by every cid of the cgroup are written at most once a
@@ -575,7 +627,7 @@ static void grp_update_shares(grp_q_t *gq, u64 now)
 	grp_avg_unlock(gq);
 
 	nr = READ_ONCE(hdr->nr_avg) >> RAVG_FRAC_BITS;
-	nr = MIN(MAX(nr, 1ULL), (u64)nr_cids);
+	nr = MIN(MAX(nr, 1ULL), READ_ONCE(hdr->nr_cpus));
 	total = nr * READ_ONCE(hdr->weight);
 
 	load = MAX(load, la);
@@ -1100,6 +1152,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_cpuctl_init, struct cgroup *cgrp,
 	hdr->idle = cgrp_is_idle(cgrp);
 	hdr->weight = hdr->idle ? WEIGHT_IDLEPRIO : cgrp_load_weight(args->weight);
 	hdr->pages = pages;
+	hdr->cgid = cgrp->kn->id;
+	grp_cpus_set(hdr, cgrp, scx_bpf_now());
 	ents = (grp_q_t *)((char __arena *)hdr + sizeof(struct grp_hdr));
 
 	/* Fresh arena pages read as zero: only what is not zero is stored. */

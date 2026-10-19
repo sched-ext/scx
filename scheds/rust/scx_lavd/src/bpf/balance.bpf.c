@@ -21,7 +21,7 @@ extern const volatile u8	mig_delta_pct;
 extern const volatile u8	no_fast_lb;
 extern const volatile u64	lb_low_util_wall;
 
-u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
+u64 __attribute__ ((noinline)) calc_mig_delta(u64 base_share_invr, int nz_qlen,
 					      u64 mig_delta_factor)
 {
 	/*
@@ -31,12 +31,12 @@ u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
 	 * shift-based heuristic.
 	 */
 	if (mig_delta_factor > 0)
-		return avg_load_invr * mig_delta_factor / LAVD_SCALE;
+		return base_share_invr * mig_delta_factor / LAVD_SCALE;
 	if (nz_qlen >= sys_stat.nr_active_cpdoms)
-		return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT_OL;
+		return base_share_invr >> LAVD_CPDOM_MIG_SHIFT_OL;
 	if (nz_qlen == 0)
-		return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT_UL;
-	return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT;
+		return base_share_invr >> LAVD_CPDOM_MIG_SHIFT_UL;
+	return base_share_invr >> LAVD_CPDOM_MIG_SHIFT;
 }
 
 /*
@@ -49,8 +49,8 @@ int __attribute__((noinline))
 classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 	       u64 total_cap_sum, int nz_qlen, u64 mig_delta_factor)
 {
+	u64 fair_share_invr = 0, other_share_invr, base_share_invr;
 	u64 x_mig_delta = 0;
-	u64 fair_share_invr = 0;
 	u64 stealer_threshold = 0;
 	u64 stealee_threshold = 0;
 
@@ -63,14 +63,26 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 		stealer_threshold = avg - x_mig_delta;
 		stealee_threshold = avg + x_mig_delta;
 	} else if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
+		/*
+		 * Size the band by the domain's fair share, but no wider than
+		 * the share of all the other active domains. A domain can never
+		 * carry more than that above its own fair share. A wider band,
+		 * as a big cluster holding most of the capacity would get, sets
+		 * its stealee threshold above the most load the domain can
+		 * ever carry, so it is never marked overloaded however idle the
+		 * others are. A lone active domain has no other share to cap by
+		 * and keeps its band.
+		 */
 		fair_share_invr = total_load_invr *
 			     cpdomc->cap_sum_active_cpus /
 			     total_cap_sum;
+		other_share_invr = total_load_invr - fair_share_invr;
+		base_share_invr = other_share_invr?
+					min(fair_share_invr, other_share_invr) :
+					fair_share_invr;
 
-		x_mig_delta = calc_mig_delta(
-				fair_share_invr, nz_qlen,
-				mig_delta_factor);
-
+		x_mig_delta = calc_mig_delta(base_share_invr, nz_qlen,
+					     mig_delta_factor);
 		stealer_threshold = fair_share_invr - x_mig_delta;
 		stealee_threshold = fair_share_invr + x_mig_delta;
 	}
@@ -91,6 +103,7 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, true);
 		WRITE_ONCE(cpdomc->is_stealee, false);
+		debugln("load_balance: cpdom%llu becomes a stealer", cpdomc->id);
 		return 0;
 	}
 
@@ -128,6 +141,7 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 		WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, false);
 		WRITE_ONCE(cpdomc->is_stealee, true);
+		debugln("load_balance: cpdom%llu becomes a stealee", cpdomc->id);
 		return 1;
 	}
 
@@ -264,6 +278,129 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 		cpdomc->dsq_consume_lat = time_delta(bpf_ktime_get_ns(), before);
 
 	return ret;
+}
+
+/*
+ * Estimated completion time for a task, in wall-clock ns.
+ *
+ *   comp_time = wait + run
+ *   wait      = queued_svc_invr             * LAVD_SCALE / cap_sum
+ *   run       = task_svc_invr   * nr_cpus   * LAVD_SCALE / cap_sum
+ *
+ * Both inputs are invariant time -- time as it would elapse on a CPU of
+ * capacity LAVD_SCALE -- so multiplying by LAVD_SCALE and dividing by the
+ * summed capacity converts them to wall clock at the target's mean per-CPU
+ * capacity, cap_sum / nr_cpus. @nr_cpus scales the run term because the queue
+ * drains across every CPU while the task itself runs on one.
+ *
+ * The run term is optional. A caller passes @task_svc_invr as 0 for the wait
+ * alone, when the question is how soon the task starts rather than when it
+ * finishes, or when its service time is not known well enough to price.
+ *
+ * Two approximations, both over-estimates, so they largely cancel when the
+ * result is used as a difference between two candidate targets:
+ *   - the task is served last, ignoring its vtime position; that error grows
+ *     with queue depth, biasing away from deep queues as desired;
+ *   - it is not preempted once running.
+ *
+ * Returns LAVD_COMP_TIME_INF for a target with no capacity, so it never wins.
+ */
+u64 __attribute__((noinline))
+calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum, u64 nr_cpus)
+{
+	u64 svc_invr;
+
+	if (unlikely(!cap_sum))
+		return LAVD_COMP_TIME_INF;
+
+	svc_invr = queued_svc_invr + (task_svc_invr * nr_cpus);
+
+	return (svc_invr * LAVD_SCALE) / cap_sum;
+}
+
+/*
+ * Estimated completion time for a task placed on @cpuc, in wall-clock ns: the
+ * time to drain that CPU's queues (i.e., @cpuc's local DSQ and its per-CPU
+ * DSQ) and the task itself.
+ *
+ * The per-CPU DSQ is per physical core: lavd_init() creates one only for the
+ * primary sibling, and every writer charges qload_svc_invr through
+ * get_primary_cpu(). Count both SMT siblings in the drain rate, since both
+ * consume the per-CPU DSQ.
+ *
+ * Summing the two capacities halves the wait term while leaving the run term
+ * unchanged, @nr_cpus scaling it back: the queue drains on two threads, the
+ * task runs on only one.
+ *
+ * No residual for the task already running, as with calc_comp_time_on_cpdom(),
+ * so the two stay comparable; a caller that wants a wall-clock wait adds
+ * calc_residual_time() itself.
+ */
+__hidden __attribute__((noinline))
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx *cpuc)
+{
+	struct cpu_ctx *primary_cpuc = cpuc, *sibling_cpuc;
+	u64 cap_sum = READ_ONCE(cpuc->effective_capacity);
+	u64 nr_cpus = 1;
+	u32 cpu = cpuc->cpu_id, sib;
+
+	sib = get_sibling_cpu(cpu);
+	if (sib != cpu) {
+		sibling_cpuc = get_cpu_ctx_id(sib);
+		if (unlikely(!sibling_cpuc))
+			return LAVD_COMP_TIME_INF;
+
+		/* An offline sibling drains nothing. */
+		if (sibling_cpuc->is_online) {
+			cap_sum += READ_ONCE(sibling_cpuc->effective_capacity);
+			nr_cpus = 2;
+		}
+
+		/* Get the primary cpu's context correctly. */
+		if (get_primary_cpu(cpu) != cpu)
+			primary_cpuc = sibling_cpuc;
+	}
+
+	return calc_comp_time(task_svc_invr, primary_cpuc->qload_svc_invr,
+			      cap_sum, nr_cpus);
+}
+
+/*
+ * Estimated completion time for a task placed in @cpdomc.
+ *
+ * Inclusive of every task queued anywhere in the domain -- local, per-CPU and
+ * cpdom DSQs alike -- because all of them compete for the domain's CPUs.
+ *
+ * No residual for tasks already running. A domain has many of them and no
+ * single one to read, so any residual would be a statistic. Hence, when
+ * comparing against a domain's completion time, the other side must not
+ * include its residual either, to be fair.
+ *
+ * The domain's two DSQs are collapsed into one logical queue, and the drain
+ * rate is the whole domain to match: qload_svc_invr counts the tasks queued in
+ * both. Collapsing them is a fair approximation because the queues are not
+ * independent. Steady CPUs drain the turbulent DSQ, and
+ * can_consume_steady_dsq() lets a turbulent CPU reach into the steady one to
+ * prevent starvation, so the split is a routing preference rather than a
+ * partition.
+ */
+u64 __attribute__((noinline))
+calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx *cpdomc)
+{
+	u64 cap_sum, nr_cpus;
+
+	if (unlikely(!cpdomc))
+		return LAVD_COMP_TIME_INF;
+
+	cap_sum = cpdomc->cap_sum_active_cpus;
+	nr_cpus = cpdomc->nr_active_cpus;
+	if (!READ_ONCE(ovrflw_counted_active)) {
+		cap_sum += cpdomc->cap_sum_overflow_cpus;
+		nr_cpus += cpdomc->nr_overflow_cpus;
+	}
+
+	return calc_comp_time(task_svc_invr, cpdomc->qload_svc_invr,
+			      cap_sum, nr_cpus);
 }
 
 u64 __attribute__((noinline)) dsq_peek_task_load(u64 dsq_id)
@@ -434,6 +571,9 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 					decrement_stealee_budget(cpdomc_pick, task_load);
 					decrement_stealer_budget(cpdomc, task_load);
 				}
+				debugln("migrate: try_steal stealer=cpdom%llu stealee=cpdom%llu load=%llu cpu=%d",
+					cpdomc->id, cpdomc_pick->id, task_load,
+					bpf_get_smp_processor_id());
 				return true;
 			}
 		}
@@ -514,6 +654,9 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 					decrement_stealee_budget(cpdomc_pick, task_load);
 					decrement_stealer_budget(cpdomc, task_load);
 				}
+				debugln("migrate: force_steal stealer=cpdom%llu stealee=cpdom%llu load=%llu cpu=%d",
+					cpdomc->id, cpdomc_pick->id, task_load,
+					bpf_get_smp_processor_id());
 				return true;
 			}
 		}

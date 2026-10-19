@@ -576,13 +576,13 @@ that has not been done.
    debt is settled at the affinity change rather than continuing to decay
    until it wakes.
 
- - **A group's cpuset is not known.** `fair.c` scales a task group's shares by
+ - **A group's cpuset is polled.** `fair.c` scales a task group's shares by
    `min(tg_tasks, tg_cpus)`, where `tg_cpus` is the weight of the effective
-   cpuset. sched_ext has no interface to that, and cpuset changes are not
-   reported at all, so a group confined to part of the machine counts as the
-   whole of it: eight hogs in a two-CPU cpuset against eight pinned to the same
-   two CPUs get 576/423 where `fair.c` gives 247/752. This one is blocked on a
-   kernel ABI.
+   cpuset. scx_eevdf reads the same count with `scx_bpf_cgroup_nr_cpus()`, but
+   cpuset changes and CPU hotplug are not reported to sched_ext, so it reads
+   it again once a second and the shares follow a change that late. On a
+   kernel without the kfunc a group confined to part of the machine counts as
+   the whole of it, and gets more than `fair.c` would give it.
 
 ### Not implemented at all
 

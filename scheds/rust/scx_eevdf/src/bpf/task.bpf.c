@@ -190,15 +190,17 @@ void BPF_STRUCT_OPS(eevdf_quiescent, struct task_struct *p, u64 deq_flags)
 			pk = task_pack(tctx, cid);
 		/*
 		 * update_curr() first: dequeue_entity() charges the service
-		 * the task has taken before it measures the lag, and this op
-		 * runs before ops.stopping() does the charging here. Without
-		 * it the lag is taken against a reference that has the last
-		 * run projected in, from a vruntime that has not, and comes
-		 * out too generous by that run. The charge is real and once;
-		 * ops.stopping() finds nothing left to add.
+		 * the task has taken before it measures the lag. A task that
+		 * blocks while running has been charged by ops.stopping()
+		 * already, which the kernel calls before this op, and finds
+		 * nothing left to add here. One that has not stopped yet is
+		 * charged now, or its lag would be taken against a reference
+		 * with its last run projected in, from a vruntime without it.
+		 * It is charged only: keep_charge() would publish it again as
+		 * the cid's running task, which ops.stopping() has withdrawn.
 		 */
 		if (scx_bpf_task_running(p) && cid == scx_bpf_task_cid(p))
-			keep_charge(p, cid, cid_clock_task_owned(cid, now));
+			charge_run(p, tctx, cid, cid_clock_task_owned(cid, now));
 		lag = task_lag_at(p, tctx, pk, now);
 		tctx->se.vlag = lag;
 	}
@@ -274,18 +276,25 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 	 * balancer or an idle pull, carries a vruntime that means nothing
 	 * against this cid's pack: taken from a pack that was far ahead it
 	 * would wait here until the pack climbs past it, seconds under
-	 * load. Carry the lag instead, the way a migration does in
-	 * place_entity(): how far the task was from the pack it left is how
-	 * far it is placed from the pack it joins.
+	 * load. Carry the lag instead, the way a migration does: dequeued
+	 * without sleeping, it keeps what is left of its request, and
+	 * place_entity() places it from its lag, inflated so that it is
+	 * what the join leaves, and only on a runqueue with something on it,
+	 *
+	 *	if (sched_feat(PLACE_LAG) && nr_queued && se->vlag) {
+	 *		...
+	 *		lag *= load + weight;
+	 *		...
+	 *		lag = div64_long(lag, load);
+	 *
+	 * which is place_task() for a task that did not sleep. A move made
+	 * here is the one arrival in a new pack that does not otherwise go
+	 * through it.
 	 */
-	if (tctx->se.vpack && cid_valid(cid) &&
+	if (!placed && tctx->se.vpack && cid_valid(cid) &&
 	    tctx->se.vpack != task_pack(tctx, cid)) {
-		s64 lag = task_lag_at(p, tctx, tctx->se.vpack, now);
-
-		set_vruntime(&tctx->se,
-			     pack_vref_place(task_pack(tctx, cid),
-					     tctx->last_run_at) - lag,
-			     false);
+		place_task(cid, p, tctx, now, false);
+		placed = true;
 	}
 
 	/*
@@ -318,6 +327,7 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 		pk->curr_request = task_request(p);
 		weight = task_weight(p, tctx);
 		set_protect_slice(pk, weight);
+		pk->curr_se = &tctx->se;
 		/* Publish a complete current-task snapshot to remote wakeups. */
 		pk->curr_w = weight;
 		cctx->curr_idle = p->policy == SCHED_IDLE;
@@ -394,6 +404,12 @@ void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 	 */
 	tctx->se.vruntime += calc_delta_fair(p, tctx, slice);
 	vref_charge(&tctx->se);
+	/*
+	 * The next charge starts from here, as update_se() moves exec_start:
+	 * ops.quiescent() follows for a task that blocks, and must find
+	 * nothing left to charge.
+	 */
+	tctx->last_run_at = tnow;
 
 	/* The same service against the bandwidth of the task's cgroup. */
 	task_bw_charge(tctx, cid, slice);

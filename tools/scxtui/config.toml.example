@@ -1,0 +1,20 @@
+# scxtui profiles. Same schema as scx_loader's config, so an existing
+# /etc/scx_loader.toml is read as-is when this file does not exist.
+#
+# Searched in order: /etc/scxtui/config.toml, /etc/scxtui.toml,
+# /etc/scx_loader/config.toml, /etc/scx_loader.toml, then the same four
+# names under /usr/share. Without any file, scx_loader's built-in tables
+# apply.
+
+# Scheduler and profile the `d` key restores. The profile defaults to Auto.
+#default_sched = "scx_bpfland"
+#default_mode = "Auto"      # Auto | Gaming | PowerSave | LowLatency | Server
+
+# Per-scheduler flag sets. A missing row keeps the built-in default for
+# that scheduler and profile; an explicit empty list means "no flags".
+#[scheds.scx_bpfland]
+#auto_mode = ["-m", "auto"]
+#gaming_mode = ["-m", "all"]
+#lowlatency_mode = ["-m", "performance", "-w"]
+#powersave_mode = ["-s", "20000", "-m", "powersave", "-I", "100", "-t", "100"]
+#server_mode = ["-s", "20000", "-S"]

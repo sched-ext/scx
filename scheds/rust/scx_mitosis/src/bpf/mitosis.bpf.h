@@ -107,8 +107,23 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *llc_cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	/* running time is charged up to here, see charge_running() */
-	u64 charged_at;
+	/* scx_clock_task() timestamp through which running time has been
+	 * charged to the demand counters; advanced on ticks and slice
+	 * extensions so long runs show up continuously. */
+	u64 running_accounted_at;
+	/* When the task last became runnable without running; 0 while running
+	 * or sleeping. Closed into its subcell's queued_ns. */
+	u64 runnable_at;
+	/* scx_bpf_now() timestamp when the task slept; 0 while runnable. */
+	u64 quiescent_at;
+	/* Start of the current demand window and the running and sleeping
+	 * time observed in it. Windows close at stopping and when dispatch
+	 * extends a slice, and on ticks after the time constant has elapsed. */
+	u64 demand_window_at;
+	u64 window_run_ns;
+	u64 window_sleep_ns;
+	/* EWMA of run / (run + sleep), 1.0 == 1 << DEMAND_SHIFT. */
+	u32 demand;
 	/* Packed subcell whose vtime should be charged for this task. */
 	u32 vtime_charge_subcell;
 	u64 basis_vtime;

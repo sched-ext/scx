@@ -37,6 +37,9 @@ struct grp_hdr {
 	u64 idle;		/* cpu.idle, see eevdf_cpuctl_set_idle() */
 	u64 slot;		/* its index in @grp_hdrs */
 	u64 next_free;		/* next block to free, see grp_free_defer() */
+	u64 cgid;		/* the cgroup's id, for grp_cpus_refresh() */
+	u64 nr_cpus;		/* CPUs of its effective cpuset, tg_cpus() */
+	u64 nr_cpus_at;		/* when @nr_cpus was last read */
 
 	/* cpu.max, see eevdf_cpuctl_set_bandwidth() */
 	u64 quota;		/* what the group may run for in a period, 0 for no limit */

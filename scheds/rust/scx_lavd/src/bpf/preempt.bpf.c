@@ -248,10 +248,10 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 			bool ret = __sync_bool_compare_and_swap(
 				&victim_cpuc->est_stopping_clk, old, 0);
 			if (ret)
-				WRITE_ONCE(victim_p->scx.slice, new_slice);
+				scx_bpf_task_set_slice(victim_p, new_slice);
 		} else {
 			if (victim_p->scx.slice > new_slice)
-				WRITE_ONCE(victim_p->scx.slice, new_slice);
+				scx_bpf_task_set_slice(victim_p, new_slice);
 		}
 	}
 	bpf_rcu_read_unlock();

@@ -173,9 +173,6 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	} else {
 		cpuc->effective_capacity = capacity_observed;
 	}
-
-	debugln("[cpu%d] effective_capacity: %d -- capacity_policy: %d -- capacity_observed: %d -- maximum_freq_observed: %d -- hw_pressure: %u",
-		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
 }
 
 bool is_perf_cri(task_ctx __arg_arena *taskc)
@@ -467,6 +464,12 @@ int do_core_compaction(void)
 	}
 	sys_stat.nr_active_cpdoms = nr_active_cpdoms;
 
+	/*
+	 * The active counters just published no longer include the overflow
+	 * CPUs.
+	 */
+	WRITE_ONCE(ovrflw_counted_active, false);
+
 unlock_out:
 	bpf_rcu_read_unlock();
 
@@ -729,6 +732,14 @@ int reinit_active_cpumask_for_performance(void)
 	 * In a symmetric system, all online CPUs belong to the active set.
 	 */
 	if (have_little_core) {
+		/*
+		 * The little CPUs below are counted as active and put in the
+		 * overflow set, the latter only to give the big CPUs priority.
+		 * Raise the flag before they enter the overflow set, so that
+		 * calc_comp_time_on_cpdom() never counts them twice;
+		 * do_core_compaction() lowers it once they no longer are.
+		 */
+		WRITE_ONCE(ovrflw_counted_active, true);
 		bpf_for(cpu, 0, nr_cpu_ids) {
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc)
@@ -760,9 +771,14 @@ int reinit_active_cpumask_for_performance(void)
 		bpf_cpumask_copy(active, online_cpumask);
 		scx_bpf_put_cpumask(online_cpumask);
 
-		bpf_cpumask_clear(ovrflw);
-
 		bpf_for(cpu, 0, nr_cpu_ids) {
+			/*
+			 * Clear overflow bits one by one (rather than the
+			 * bulk bpf_cpumask_clear) so per-cpdom counters are
+			 * decremented atomically alongside each bit.
+			 */
+			ovrflw_test_and_clear(ovrflw, cpu);
+
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
 				continue;
