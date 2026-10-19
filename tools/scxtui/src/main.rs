@@ -54,7 +54,7 @@ fn main() -> Result<()> {
         let backend = || Ok(Box::new(ServiceBackend::connect()?) as Box<dyn SchedulerBackend>);
         if let Err(err) = cli::run(&args, backend, Profiles::load) {
             eprintln!("error: {err:#}");
-            std::process::exit(1);
+            std::process::exit(cli::exit_status(&err));
         }
         return Ok(());
     }

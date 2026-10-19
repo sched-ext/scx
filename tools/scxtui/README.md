@@ -120,6 +120,22 @@ the command name and nothing else. Lines scxctl could not have printed
 | `stop` | Stop the unit |
 | `restart` | Write the running process' scheduler and arguments back to the config and restart the unit, so the restart keeps the running configuration even if the file was edited meanwhile; refused when nothing runs |
 | `restore` | `default_sched` in `default_mode` from the profiles file |
+| `--wait[=SECS]` | On the four commands above: wait until systemd and the kernel both show the scheduler running; exit 1 if not, 2 if attached but unconfirmable |
+
+`--wait[=SECS]` on `start`, `switch`, `restart` and `restore` goes beyond
+scxctl: after systemd accepts the operation, the command polls until two
+independent observers agree, systemd (the unit is active and its main
+process is the requested scheduler) and the kernel (`sched_ext` enabled in
+`/sys/kernel/sched_ext`, with an ops name matching the scheduler), for up
+to the given time (default 5 s, at most 3600). The kernel alone is not enough: a
+scheduler started by hand reads as attached too. Exit status 0 means both
+agree; 1 means the scheduler did not attach (or the unit went inactive
+first, reported at once); 2 means systemd is satisfied and a scheduler is
+attached, but its ops name could not be matched to the executable, so the
+identity is unconfirmed rather than wrong (ops names are chosen by each
+scheduler). Every non-zero message says that the operation itself went
+through; only the confirmation is missing. Without `--wait`, success means
+acceptance, as it did with scxctl.
 
 `-a` takes arguments separated by commas or whitespace, as scxctl's
 `--args` does (`-a "--verbose,--slice-us 5000"`). They go to `SCX_FLAGS`,

@@ -12,6 +12,8 @@
 use std::fs;
 use std::path::Path;
 
+use anyhow::{Context, Result};
+
 const SYSFS_DIR: &str = "/sys/kernel/sched_ext";
 
 pub struct KernelState {
@@ -53,22 +55,32 @@ impl KernelState {
     }
 }
 
-/// Reads the kernel's `sched_ext` state. `None` means the sysfs directory is
-/// absent, i.e. the running kernel was built without `sched_ext`.
-pub fn read() -> Option<KernelState> {
+/// Reads the kernel's `sched_ext` state. `Ok(None)` means the sysfs
+/// directory is absent, i.e. the running kernel was built without
+/// `sched_ext`; `Err` means it is there but `state` could not be read,
+/// which is a different fact and must not be reported as the former.
+/// `root/ops` is absent while nothing is attached, so NotFound on it is
+/// not an error; any other failure on it is.
+pub fn read() -> Result<Option<KernelState>> {
     let dir = Path::new(SYSFS_DIR);
     if !dir.is_dir() {
-        return None;
+        return Ok(None);
     }
     let state = fs::read_to_string(dir.join("state"))
-        .ok()?
+        .with_context(|| format!("cannot read {}/state", dir.display()))?
         .trim()
         .to_owned();
-    let ops = fs::read_to_string(dir.join("root/ops"))
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    Some(KernelState { state, ops })
+    // `root/ops` exists only while a scheduler is attached, so NotFound
+    // is the normal "nothing attached" answer; any other failure is a
+    // broken observation and must not pass for one.
+    let ops = match fs::read_to_string(dir.join("root/ops")) {
+        Ok(s) => Some(s.trim().to_owned()).filter(|s| !s.is_empty()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("cannot read {}/root/ops", dir.display()));
+        }
+    };
+    Ok(Some(KernelState { state, ops }))
 }
 
 #[cfg(test)]

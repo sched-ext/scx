@@ -255,7 +255,7 @@ impl App {
             }
 
             // Sysfs can change with no service involved; rides every tick.
-            self.kernel = kernel::read();
+            self.kernel = kernel::read().unwrap_or(None);
 
             if self.reconcile_kernel_dispute() {
                 last_refresh = Instant::now();
@@ -685,7 +685,7 @@ or the file that sets it)",
                 self.status_error = Some(format!("{err:#}"));
             }
         }
-        self.kernel = kernel::read();
+        self.kernel = kernel::read().unwrap_or(None);
     }
 
     /// The panel's warning; the event loop reuses it as a tripwire.

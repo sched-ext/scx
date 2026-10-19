@@ -21,11 +21,23 @@
 //! `SCX_FLAGS`, which the unit expands unquoted, so a quoted value with a
 //! space is refused instead of mangled.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result, bail};
 
 use crate::backend::service::validate_value;
 use crate::backend::{SchedulerBackend, Status};
+use crate::kernel::{self, KernelState};
 use crate::profiles::{MODES, Mode, Profiles};
+
+/// `--wait` without a value.
+const DEFAULT_WAIT: Duration = Duration::from_secs(5);
+/// Largest `--wait` accepted. Far beyond any attach time, and small
+/// enough that `Instant + Duration` cannot overflow, which would panic
+/// after the configuration is already written and the unit started.
+const MAX_WAIT_SECS: u64 = 3600;
+/// How often the kernel is re-read while waiting.
+const WAIT_POLL: Duration = Duration::from_millis(100);
 
 const SCHED_PREFIX: &str = "scx_";
 
@@ -44,6 +56,13 @@ Commands:
   stop                Stop the current scheduler
   restart             Restart the current scheduler with original configuration
   restore             Restore the default scheduler from configuration
+
+Options for start, switch, restart and restore:
+  --wait[=SECS]       After systemd accepts the operation, wait until the
+                      unit runs the scheduler and the kernel reports it
+                      attached (default 5 s, at most 3600). Exit 1 if it
+                      has not by then, 2 if a scheduler is attached but
+                      its ops name cannot be matched to the executable
 
 Scheduler names with or without the scx_ prefix (lavd, scx_lavd).
 Modes: auto, gaming, powersave, lowlatency, server
@@ -80,13 +99,13 @@ static COMMANDS: [Command; 8] = [
     },
     Command {
         name: "start",
-        usage: "scxtui --cli start -s <SCHED> [-m <MODE> | -a <ARGS>]",
-        allowed: &["sched", "mode", "args"],
+        usage: "scxtui --cli start -s <SCHED> [-m <MODE> | -a <ARGS>] [--wait[=SECS]]",
+        allowed: &["sched", "mode", "args", "wait"],
     },
     Command {
         name: "switch",
-        usage: "scxtui --cli switch [-s <SCHED>] [-m <MODE> | -a <ARGS>]",
-        allowed: &["sched", "mode", "args"],
+        usage: "scxtui --cli switch [-s <SCHED>] [-m <MODE> | -a <ARGS>] [--wait[=SECS]]",
+        allowed: &["sched", "mode", "args", "wait"],
     },
     Command {
         name: "stop",
@@ -95,13 +114,13 @@ static COMMANDS: [Command; 8] = [
     },
     Command {
         name: "restart",
-        usage: "scxtui --cli restart",
-        allowed: &[],
+        usage: "scxtui --cli restart [--wait[=SECS]]",
+        allowed: &["wait"],
     },
     Command {
         name: "restore",
-        usage: "scxtui --cli restore",
-        allowed: &[],
+        usage: "scxtui --cli restore [--wait[=SECS]]",
+        allowed: &["wait"],
     },
 ];
 
@@ -113,6 +132,10 @@ struct Opts {
     mode: Option<Mode>,
     args: Option<Vec<String>>,
     show_args: bool,
+    /// `--wait`: how long to wait for the kernel to report the scheduler
+    /// attached before failing. `None` = report acceptance only, like
+    /// scxctl.
+    wait: Option<Duration>,
 }
 
 /// What a parsed command line asks for.
@@ -160,6 +183,8 @@ fn parse(args: &[String]) -> Result<Request> {
             "-m" | "--mode" => ("mode", true),
             "-a" | "--args" => ("args", true),
             "--show-args" => ("show-args", false),
+            // The value is optional: `--wait` alone means the default.
+            "--wait" => ("wait", false),
             other => bail!(
                 "unexpected argument {other:?} for {}\n\nUsage: {}",
                 command.name,
@@ -177,6 +202,8 @@ fn parse(args: &[String]) -> Result<Request> {
             inline
                 .or_else(|| iter.next().cloned())
                 .with_context(|| format!("{key} requires a value"))?
+        } else if field == "wait" {
+            inline.unwrap_or_default()
         } else {
             if inline.is_some() {
                 bail!("{key} takes no value");
@@ -189,6 +216,7 @@ fn parse(args: &[String]) -> Result<Request> {
             "sched" => opts.sched.is_some(),
             "mode" => opts.mode.is_some(),
             "args" => opts.args.is_some(),
+            "wait" => opts.wait.is_some(),
             _ => opts.show_args,
         };
         if repeated {
@@ -202,6 +230,19 @@ fn parse(args: &[String]) -> Result<Request> {
                 })?);
             }
             "args" => opts.args = Some(expand_args(&value)?),
+            "wait" => {
+                opts.wait = Some(if value.is_empty() {
+                    DEFAULT_WAIT
+                } else {
+                    let secs: u64 = value.parse().ok().filter(|s| *s > 0).with_context(|| {
+                        format!("--wait wants a number of seconds, got {value:?}")
+                    })?;
+                    if secs > MAX_WAIT_SECS {
+                        bail!("--wait={secs} is more than the {MAX_WAIT_SECS} s maximum");
+                    }
+                    Duration::from_secs(secs)
+                });
+            }
             _ => opts.show_args = true,
         }
     }
@@ -324,8 +365,8 @@ pub fn run<'a>(
             println!("stopped");
             Ok(())
         }
-        "restart" => cmd_restart(backend),
-        "restore" => cmd_restore(backend, profiles.expect("loaded")),
+        "restart" => cmd_restart(backend, &opts),
+        "restore" => cmd_restore(backend, profiles.expect("loaded"), &opts),
         _ => unreachable!("parse admits only COMMANDS"),
     }
 }
@@ -503,11 +544,14 @@ fn cmd_start(backend: &dyn SchedulerBackend, profiles: &Profiles, opts: &Opts) -
     launch(
         backend,
         profiles,
-        "started",
-        sched,
-        opts.mode,
-        opts.args.as_deref(),
-        false,
+        Launch {
+            verb: "started",
+            sched,
+            mode: opts.mode,
+            args: opts.args.as_deref(),
+            restart: false,
+            wait: opts.wait,
+        },
     )
 }
 
@@ -538,11 +582,14 @@ fn cmd_switch(backend: &dyn SchedulerBackend, profiles: &Profiles, opts: &Opts) 
                     return launch(
                         backend,
                         profiles,
-                        "switched to",
-                        &sched,
-                        None,
-                        Some(&process.args),
-                        true,
+                        Launch {
+                            verb: "switched to",
+                            sched: &sched,
+                            mode: None,
+                            args: Some(&process.args),
+                            restart: true,
+                            wait: opts.wait,
+                        },
                     );
                 }
             }
@@ -552,11 +599,14 @@ fn cmd_switch(backend: &dyn SchedulerBackend, profiles: &Profiles, opts: &Opts) 
     launch(
         backend,
         profiles,
-        "switched to",
-        &sched,
-        mode,
-        opts.args.as_deref(),
-        true,
+        Launch {
+            verb: "switched to",
+            sched: &sched,
+            mode,
+            args: opts.args.as_deref(),
+            restart: true,
+            wait: opts.wait,
+        },
     )
 }
 
@@ -566,7 +616,7 @@ fn cmd_switch(backend: &dyn SchedulerBackend, profiles: &Profiles, opts: &Opts) 
 /// process' scheduler and arguments are written back first. Not atomic:
 /// another writer between the read and the restart wins, as with any
 /// two clients editing the same file.
-fn cmd_restart(backend: &dyn SchedulerBackend) -> Result<()> {
+fn cmd_restart(backend: &dyn SchedulerBackend, opts: &Opts) -> Result<()> {
     let status = status(backend)?;
     require_running(&status, "restart")?;
     // An override set since the last start would make the restart run
@@ -575,6 +625,15 @@ fn cmd_restart(backend: &dyn SchedulerBackend) -> Result<()> {
     refuse_overrides(&status)?;
     let process = status.process.as_ref().expect("running implies a process");
     backend.switch(&process.sched, &process.args)?;
+    if let Some(timeout) = opts.wait {
+        wait_for_attach(
+            backend,
+            &process.sched,
+            timeout,
+            kernel::read,
+            std::thread::sleep,
+        )?;
+    }
     println!("restarted");
     Ok(())
 }
@@ -607,7 +666,7 @@ clear it (systemctl unset-environment, or the file that sets it) and retry",
     }
 }
 
-fn cmd_restore(backend: &dyn SchedulerBackend, profiles: &Profiles) -> Result<()> {
+fn cmd_restore(backend: &dyn SchedulerBackend, profiles: &Profiles, opts: &Opts) -> Result<()> {
     let Some((sched, mode)) = profiles.default_launch() else {
         bail!(
             "no default scheduler configured\nSet 'default_sched' in the profiles file to use this command"
@@ -618,11 +677,14 @@ fn cmd_restore(backend: &dyn SchedulerBackend, profiles: &Profiles) -> Result<()
     launch(
         backend,
         profiles,
-        "restored default scheduler",
-        sched,
-        Some(mode),
-        None,
-        active,
+        Launch {
+            verb: "restored default scheduler",
+            sched,
+            mode: Some(mode),
+            args: None,
+            restart: active,
+            wait: opts.wait,
+        },
     )
 }
 
@@ -630,15 +692,27 @@ fn cmd_restore(backend: &dyn SchedulerBackend, profiles: &Profiles) -> Result<()
 /// scxctl's words. `restart` says which systemd verb applies; the
 /// callers decided that from the state they checked, so the file and
 /// the unit action stay consistent with the message.
-fn launch(
-    backend: &dyn SchedulerBackend,
-    profiles: &Profiles,
-    verb: &str,
-    sched: &str,
+/// What a start, switch or restore asks `launch` to do.
+struct Launch<'a> {
+    /// scxctl's verb for the success line.
+    verb: &'static str,
+    sched: &'a str,
     mode: Option<Mode>,
-    args: Option<&[String]>,
+    args: Option<&'a [String]>,
+    /// Whether the unit is active, so the systemd verb is restart.
     restart: bool,
-) -> Result<()> {
+    wait: Option<Duration>,
+}
+
+fn launch(backend: &dyn SchedulerBackend, profiles: &Profiles, launch: Launch<'_>) -> Result<()> {
+    let Launch {
+        verb,
+        sched,
+        mode,
+        args,
+        restart,
+        wait,
+    } = launch;
     refuse_overrides(&status(backend)?)?;
     let (flags, how) = match (args, mode) {
         (Some(args), _) => (
@@ -661,8 +735,121 @@ fn launch(
     } else {
         backend.start(sched, &flags)?;
     }
+    if let Some(timeout) = wait {
+        wait_for_attach(backend, sched, timeout, kernel::read, std::thread::sleep)?;
+    }
     println!("{verb} {} {how}", display_name(sched));
     Ok(())
+}
+
+/// The one outcome of `--wait` that is neither success nor failure: the
+/// unit runs the requested scheduler and the kernel has a scheduler
+/// attached, but the ops name it registered cannot be matched to the
+/// executable's name, so the identity is not confirmed. Exit status 2,
+/// so a script can tell it from "did not attach" (1).
+#[derive(Debug)]
+pub struct Unconfirmed(String);
+
+impl std::fmt::Display for Unconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unconfirmed {}
+
+/// Exit status for a CLI error: 2 for [`Unconfirmed`], 1 otherwise.
+pub fn exit_status(err: &anyhow::Error) -> i32 {
+    if err.downcast_ref::<Unconfirmed>().is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+/// `--wait`: systemd accepting a start says nothing about the scheduler
+/// attaching, so poll until two independent observers agree: systemd
+/// (the unit is active and its main process is `sched`) and the kernel
+/// (`sched_ext` enabled, and the registered ops name is `sched`'s). The
+/// kernel alone is not enough: a scheduler started by hand, or one the
+/// unit no longer owns, reads as attached too. The unit going inactive
+/// meanwhile (the scheduler exited and Restart= gave up) fails at once
+/// instead of waiting out the clock.
+///
+/// Every failure says that the operation itself went through: the file
+/// is written and the unit (re)started, only the confirmation is
+/// missing. When the deadline passes with systemd satisfied and a
+/// scheduler attached whose ops name just does not match, the result is
+/// [`Unconfirmed`] rather than a failure: the ops name is chosen by each
+/// scheduler and [`KernelState::matches`] knows the common shapes, not
+/// every one. `probe` and `sleep` are parameters so the loop is testable
+/// without a kernel or a clock.
+fn wait_for_attach(
+    backend: &dyn SchedulerBackend,
+    sched: &str,
+    timeout: Duration,
+    mut probe: impl FnMut() -> Result<Option<KernelState>>,
+    sleep: impl Fn(Duration),
+) -> Result<()> {
+    const ACCEPTED: &str = "systemd accepted the operation, but";
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = status(backend)
+            .with_context(|| format!("{ACCEPTED} the unit's state could not be re-read"))?;
+        if !status.active {
+            bail!(
+                "{ACCEPTED} scx.service is no longer active: {} exited before attaching \
+(see journalctl -u scx.service)",
+                display_name(sched)
+            );
+        }
+        let unit_runs_it = status.running() == Some(sched);
+        let state = match probe() {
+            Ok(Some(state)) => state,
+            Ok(None) => bail!(
+                "{ACCEPTED} there is nothing to wait for: this kernel has no sched_ext \
+(/sys/kernel/sched_ext is absent)"
+            ),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("{ACCEPTED} the kernel state could not be read"));
+            }
+        };
+        let now = Instant::now();
+        // The deadline is checked before any success is granted, so a
+        // probe that comes back late cannot turn into a pass.
+        let expired = now >= deadline;
+        if !expired && unit_runs_it && state.enabled() && state.matches(sched) {
+            return Ok(());
+        }
+        if expired {
+            let ops = state.ops.as_deref().unwrap_or("none");
+            // Unconfirmed is for an ops name the heuristic cannot match.
+            // A late probe that does match is a plain timeout: the names
+            // agree, only the clock ran out.
+            if unit_runs_it && state.enabled() && !state.matches(sched) {
+                return Err(Unconfirmed(format!(
+                    "{ACCEPTED} the identity of the attached scheduler could not be confirmed \
+within {} s: scx.service runs {}, the kernel reports ops name {ops:?}, and the two could \
+not be matched; check scxtop or the journal",
+                    timeout.as_secs(),
+                    display_name(sched)
+                ))
+                .into());
+            }
+            bail!(
+                "{ACCEPTED} {} did not attach within {} s (unit runs {}, kernel: sched_ext {}, \
+ops: {ops})",
+                display_name(sched),
+                timeout.as_secs(),
+                status
+                    .running()
+                    .map_or("no readable process".to_owned(), display_name),
+                state.state
+            );
+        }
+        sleep(WAIT_POLL.min(deadline.saturating_duration_since(now)));
+    }
 }
 
 #[cfg(test)]
@@ -687,6 +874,8 @@ mod tests {
     struct Stub {
         truth: Status,
         calls: RefCell<Vec<Call>>,
+        status_broken: bool,
+        status_reads: RefCell<usize>,
     }
 
     impl Stub {
@@ -694,6 +883,8 @@ mod tests {
             Self {
                 truth: Status::default(),
                 calls: RefCell::new(Vec::new()),
+                status_broken: false,
+                status_reads: RefCell::new(0),
             }
         }
 
@@ -710,6 +901,8 @@ mod tests {
                     ..Status::default()
                 },
                 calls: RefCell::new(Vec::new()),
+                status_broken: false,
+                status_reads: RefCell::new(0),
             }
         }
     }
@@ -719,6 +912,10 @@ mod tests {
             "stub".into()
         }
         fn status(&self) -> Result<Status> {
+            *self.status_reads.borrow_mut() += 1;
+            if self.status_broken {
+                bail!("cannot read the unit's state");
+            }
             Ok(self.truth.clone())
         }
         fn supported_schedulers(&self) -> Result<Vec<String>> {
@@ -883,6 +1080,8 @@ mod tests {
                 ..Status::default()
             },
             calls: RefCell::new(Vec::new()),
+            status_broken: false,
+            status_reads: RefCell::new(0),
         };
         assert!(run_with(&blind, &["switch", "-s", "lavd"]).is_err());
         assert!(run_with(&blind, &["restart"]).is_err());
@@ -977,6 +1176,174 @@ mod tests {
             unique.calls.borrow().last(),
             Some(&Call::Switch("scx_bpfland".into(), strs(&["-m", "all"])))
         );
+    }
+
+    #[test]
+    fn wait_option_parses_and_is_per_command() {
+        let Request::Run(_, opts) = parse(&strs(&["start", "-s", "lavd", "--wait"])).unwrap()
+        else {
+            panic!("run expected");
+        };
+        assert_eq!(opts.wait, Some(DEFAULT_WAIT));
+        let Request::Run(_, opts) = parse(&strs(&["restart", "--wait=30"])).unwrap() else {
+            panic!("run expected");
+        };
+        assert_eq!(opts.wait, Some(Duration::from_secs(30)));
+        assert!(parse(&strs(&["restart", "--wait=0"])).is_err());
+        assert!(parse(&strs(&["restart", "--wait=3600"])).is_ok());
+        assert!(parse(&strs(&["restart", "--wait=3601"])).is_err());
+        assert!(parse(&strs(&["restart", "--wait=18446744073709551615"])).is_err());
+        assert!(parse(&strs(&["restart", "--wait=soon"])).is_err());
+        assert!(parse(&strs(&["restart", "--wait", "--wait"])).is_err());
+        assert!(
+            parse(&strs(&["stop", "--wait"])).is_err(),
+            "stop has nothing to wait for"
+        );
+        assert!(parse(&strs(&["get", "--wait"])).is_err());
+    }
+
+    #[test]
+    fn wait_for_attach_needs_systemd_and_the_kernel_to_agree() {
+        let kernel = |state: &str, ops: Option<&str>| KernelState {
+            state: state.into(),
+            ops: ops.map(str::to_owned),
+        };
+        let no_sleep = |_: Duration| {};
+        let long = Duration::from_secs(60);
+
+        // Unit active with the expected process, kernel attaches on the
+        // third probe: success.
+        let running = Stub::running("scx_lavd", &[]);
+        let mut probes = 0;
+        wait_for_attach(
+            &running,
+            "scx_lavd",
+            long,
+            || {
+                probes += 1;
+                Ok(Some(if probes < 3 {
+                    kernel("disabled", None)
+                } else {
+                    kernel("enabled", Some("lavd"))
+                }))
+            },
+            no_sleep,
+        )
+        .unwrap();
+        assert_eq!(probes, 3);
+
+        // The kernel says lavd, but the unit is inactive (lavd was
+        // started by hand): no confirmation, the unit's state wins.
+        let idle = Stub::idle();
+        let err = wait_for_attach(
+            &idle,
+            "scx_lavd",
+            long,
+            || Ok(Some(kernel("enabled", Some("lavd")))),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no longer active"));
+
+        // The kernel says lavd, but the unit's process is bpfland: the
+        // attached scheduler is not the unit's. Times out as "did not
+        // attach", not as unconfirmed, since the unit does not run it.
+        let other = Stub::running("scx_bpfland", &[]);
+        let err = wait_for_attach(
+            &other,
+            "scx_lavd",
+            Duration::ZERO,
+            || Ok(Some(kernel("enabled", Some("lavd")))),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("did not attach"));
+        assert_eq!(exit_status(&err), 1);
+
+        // Deadline passed, but the names match: the clock ran out, the
+        // identity is not in doubt. Exit 1, never 2.
+        let err = wait_for_attach(
+            &running,
+            "scx_lavd",
+            Duration::ZERO,
+            || Ok(Some(kernel("enabled", Some("lavd")))),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("did not attach"));
+        assert_eq!(exit_status(&err), 1);
+
+        // Unit runs lavd, kernel enabled, ops name unrecognisable: the
+        // identity is unconfirmed, exit 2, distinct from failure.
+        let err = wait_for_attach(
+            &running,
+            "scx_lavd",
+            Duration::ZERO,
+            || Ok(Some(kernel("enabled", Some("fancy_ops_name")))),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("could not be confirmed"));
+        assert_eq!(exit_status(&err), 2);
+
+        // Unit runs lavd, kernel never enables: plain timeout.
+        let err = wait_for_attach(
+            &running,
+            "scx_lavd",
+            Duration::ZERO,
+            || Ok(Some(kernel("disabled", None))),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("did not attach"));
+        assert_eq!(exit_status(&err), 1);
+
+        // sysfs present but unreadable is not "no sched_ext".
+        let err = wait_for_attach(
+            &running,
+            "scx_lavd",
+            long,
+            || bail!("permission denied"),
+            no_sleep,
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("kernel state could not be read"));
+        assert!(text.contains("permission denied"));
+        assert!(!text.contains("no sched_ext"));
+        assert!(
+            format!(
+                "{:#}",
+                wait_for_attach(&running, "scx_lavd", long, || Ok(None), no_sleep).unwrap_err()
+            )
+            .contains("no sched_ext")
+        );
+
+        // A failed unit read after the operation still says it went through.
+        let broken = Stub {
+            truth: Status::default(),
+            calls: RefCell::new(Vec::new()),
+            status_broken: true,
+            status_reads: RefCell::new(0),
+        };
+        let err = wait_for_attach(
+            &broken,
+            "scx_lavd",
+            long,
+            || Ok(Some(kernel("enabled", Some("lavd")))),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("systemd accepted the operation"));
+    }
+
+    #[test]
+    fn without_wait_nothing_is_polled() {
+        // The stub counts status reads: start without --wait reads the
+        // state for its preconditions only, never in a loop.
+        let idle = Stub::idle();
+        run_with(&idle, &["start", "-s", "lavd"]).unwrap();
+        assert!(*idle.status_reads.borrow() <= 3, "preconditions only");
     }
 
     #[test]
