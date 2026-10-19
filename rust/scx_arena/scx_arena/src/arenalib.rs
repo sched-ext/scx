@@ -79,6 +79,7 @@ impl ArenaLib {
             static_pages: Self::STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
             task_ctx_size: task_size as c_ulong,
             task_ctx_align: task_align as c_ulong,
+            ..Default::default()
         };
 
         let input = ProgramInput {
@@ -93,10 +94,28 @@ impl ArenaLib {
 
         let ret = Self::run_prog_by_name(obj, "arena_init", input)?;
         if ret != 0 {
-            bail!("Could not initialize arenas, setup_arenas returned {}", ret);
+            bail!(
+                "Could not initialize arenas, setup_arenas returned {} from {}",
+                ret,
+                Self::arena_init_step_name(args.failed_step)
+            );
         }
 
         Ok(())
+    }
+
+    fn arena_init_step_name(step: types::arena_init_step) -> &'static str {
+        match step {
+            types::arena_init_step::ARENA_INIT_NULL_GUARD => "the NULL guard reservation",
+            types::arena_init_step::ARENA_INIT_STATIC => "scx_static_init()",
+            types::arena_init_step::ARENA_INIT_NR_CPU_IDS => "the nr_cpu_ids check",
+            types::arena_init_step::ARENA_INIT_BITMAP => "scx_bitmap_init()",
+            types::arena_init_step::ARENA_INIT_CMASK => "cmask_distribute_init()",
+            types::arena_init_step::ARENA_INIT_TASK => "scx_task_init()",
+            types::arena_init_step::ARENA_INIT_RB => "scx_rb_init()",
+            types::arena_init_step::ARENA_INIT_ATQ => "scx_atq_init()",
+            _ => "an unknown step",
+        }
     }
 
     fn setup_topology_node(obj: &Object, mask: &[u64], id: usize) -> Result<()> {

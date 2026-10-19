@@ -31,10 +31,55 @@ enum {
 	NULL_GUARD_PAGES	= 8192,	/* 32MB with 4k pages */
 };
 
+/*
+ * bpf_arena_reserve_pages() fails with -EBUSY both when it can't take the arena
+ * lock and when part of the range is already allocated. Retry once for the
+ * former. If that fails too, reserve the pages one at a time and report how
+ * many were busy, which tells the two apart. The scheduler fails to start
+ * either way.
+ */
+/* the busy page tally, global so that the verifier doesn't track it per page */
+static u32 null_guard_nr_busy, null_guard_first_busy, null_guard_last_busy;
+
+static __always_inline int null_guard_reserve(void)
+{
+	int ret;
+	u32 i;
+
+	ret = bpf_arena_reserve_pages(&arena, NULL, NULL_GUARD_PAGES);
+	if (!ret)
+		return 0;
+
+	ret = bpf_arena_reserve_pages(&arena, NULL, NULL_GUARD_PAGES);
+	if (!ret) {
+		bpf_printk("NULL guard: reserving pages [0, %u) succeeded on retry",
+			   NULL_GUARD_PAGES);
+		return 0;
+	}
+
+	bpf_for(i, 0, NULL_GUARD_PAGES) {
+		void __arena *page = (void __arena *)((u64)i * PAGE_SIZE);
+
+		if (!bpf_arena_reserve_pages(&arena, page, 1))
+			continue;
+		if (!null_guard_nr_busy)
+			null_guard_first_busy = i;
+		null_guard_last_busy = i;
+		null_guard_nr_busy++;
+	}
+
+	bpf_printk("NULL guard: reserving pages [0, %u) failed with %d, %u busy in [%u, %u]",
+		   NULL_GUARD_PAGES, ret, null_guard_nr_busy, null_guard_first_busy,
+		   null_guard_last_busy);
+	return ret;
+}
+
 SEC("syscall")
 int arena_init(struct arena_init_args *args)
 {
 	int ret;
+
+	args->failed_step = ARENA_INIT_DONE;
 
 	/*
 	 * On kernels without full-range LDIMM64 offset support, libbpf places
@@ -44,21 +89,22 @@ int arena_init(struct arena_init_args *args)
 	 */
 	if (bpf_ksym_exists(bpf_arena_reserve_pages) &&
 	    (u32)(u64)qnodes >= NULL_GUARD_PAGES * PAGE_SIZE) {
-		ret = bpf_arena_reserve_pages(&arena, NULL, NULL_GUARD_PAGES);
+		ret = null_guard_reserve();
 		if (ret) {
-			bpf_printk("NULL guard: reserving pages [0, %u) failed with %d, "
-				   "the arena front was allocated before arena_init()",
-				   NULL_GUARD_PAGES, ret);
+			args->failed_step = ARENA_INIT_NULL_GUARD;
 			return ret;
 		}
 	}
 
 	ret = scx_static_init(args->static_pages);
-	if (ret)
+	if (ret) {
+		args->failed_step = ARENA_INIT_STATIC;
 		return ret;
+	}
 
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
 		bpf_printk("uninitialized nr_cpu_ids variable");
+		args->failed_step = ARENA_INIT_NR_CPU_IDS;
 		return -ENODEV;
 	}
 
@@ -66,30 +112,35 @@ int arena_init(struct arena_init_args *args)
 	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
 	if (ret) {
 		bpf_printk("scx_bitmap_init failed with %d", ret);
+		args->failed_step = ARENA_INIT_BITMAP;
 		return ret;
 	}
 
 	ret = cmask_distribute_init(&arena);
 	if (ret) {
 		bpf_printk("cmask_distribute_init failed with %d", ret);
+		args->failed_step = ARENA_INIT_CMASK;
 		return ret;
 	}
 
 	ret = scx_task_init(args->task_ctx_size, args->task_ctx_align);
 	if (ret) {
 		bpf_printk("scx_task_init failed with %d", ret);
+		args->failed_step = ARENA_INIT_TASK;
 		return ret;
 	}
 
 	ret = scx_rb_init();
 	if (ret) {
 		bpf_printk("scx_rb_init failed with %d", ret);
+		args->failed_step = ARENA_INIT_RB;
 		return ret;
 	}
 
 	ret = scx_atq_init();
 	if (ret) {
 		bpf_printk("scx_atq_init failed with %d", ret);
+		args->failed_step = ARENA_INIT_ATQ;
 		return ret;
 	}
 

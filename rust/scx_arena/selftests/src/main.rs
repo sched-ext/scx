@@ -109,6 +109,7 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
         static_pages: STATIC_ALLOC_PAGES_GRANULARITY,
         task_ctx_size: TASK_SIZE,
         task_ctx_align: 0,
+        ..Default::default()
     };
 
     let input = ProgramInput {
@@ -124,8 +125,9 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     let output = skel.progs.arena_init.test_run(input)?;
     if output.return_value != 0 {
         bail!(
-            "Could not initialize arenas, arena_init returned {}",
-            output.return_value as i32
+            "Could not initialize arenas, arena_init returned {} at step {:?}",
+            output.return_value as i32,
+            args.failed_step
         );
     }
 
