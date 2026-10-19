@@ -240,18 +240,23 @@ run scxtui as root to control {UNIT}",
             .and_then(|()| tmp.as_file().sync_all())
             .with_context(|| format!("cannot write {}", tmp.path().display()))?;
         // The temp file is created 0600 and owned by this process; carry
-        // the original's mode, owner and POSIX access ACL over so the
-        // rename neither widens nor tightens access to a file the admin
-        // set up. Other xattrs are not carried over. A missing config
-        // keeps the defaults.
+        // the original's owner, POSIX access ACL and mode over, in that
+        // order, so the rename neither widens nor tightens access to a
+        // file the admin set up. The mode goes last: once the file is
+        // group- or world-accessible it already belongs to the right
+        // owner and carries the right ACL, so there is no window in
+        // which the wrong principals can reach it. Other xattrs are not
+        // carried over. A missing config keeps the defaults.
         match fs::metadata(&path) {
             Ok(meta) => {
-                fs::set_permissions(tmp.path(), meta.permissions()).with_context(|| {
-                    format!("cannot preserve permissions from {}", path.display())
-                })?;
                 std::os::unix::fs::chown(tmp.path(), Some(meta.uid()), Some(meta.gid()))
                     .with_context(|| format!("cannot preserve ownership of {}", path.display()))?;
                 copy_access_acl(&path, tmp.path())?;
+                tmp.as_file()
+                    .set_permissions(meta.permissions())
+                    .with_context(|| {
+                        format!("cannot preserve permissions from {}", path.display())
+                    })?;
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
@@ -678,13 +683,12 @@ fn render_config(content: &str, sched: &str, flags: &[String]) -> String {
 }
 
 /// The service has no advertised scheduler list, so the closest honest
-/// source of truth is what is actually installed: every `scx_*` executable
-/// in PATH, minus the known non-schedulers. Sorted and deduplicated.
-fn scan_path_for_schedulers() -> Vec<String> {
-    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
-    scan_dirs(dirs)
+/// source of truth is what is actually installed: every `scx_*`
+/// executable in systemd's default search path (see
+/// [`system_binary_dirs`]), minus the known non-schedulers. Sorted and
+/// deduplicated.
+fn scan_path_for_schedulers() -> Result<Vec<String>> {
+    Ok(scan_dirs(system_binary_dirs()?))
 }
 
 fn scan_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
@@ -722,9 +726,11 @@ const ACCESS_ACL: &str = "system.posix_acl_access";
 /// ACL when the original had none. Mode and owner alone would leave an
 /// admin's `setfacl` grants behind on every rewrite. A filesystem that
 /// does not support extended attributes has no ACLs to preserve, so
-/// ENOTSUP is not a failure.
+/// ENOTSUP (EOPNOTSUPP on Linux, a different number on MIPS) is not a
+/// failure. std folds both into [`ErrorKind::Unsupported`], so no errno
+/// constant is needed.
 fn copy_access_acl(from: &Path, to: &Path) -> Result<()> {
-    let not_supported = |err: &std::io::Error| err.raw_os_error() == Some(libc_enotsup());
+    let not_supported = |err: &std::io::Error| err.kind() == ErrorKind::Unsupported;
     let acl = match xattr::get(from, ACCESS_ACL) {
         Ok(acl) => acl,
         Err(err) if not_supported(&err) => return Ok(()),
@@ -747,25 +753,61 @@ fn copy_access_acl(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
-/// `ENOTSUP` without pulling in libc: the value is the same on every
-/// Linux architecture.
-const fn libc_enotsup() -> i32 {
-    95
+/// Where `systemd-path` lives. Called by absolute path, with a cleared
+/// environment, so that the directory list scxtui trusts cannot itself
+/// come from a directory in the caller's PATH.
+const SYSTEMD_PATH: &str = "/usr/bin/systemd-path";
+
+/// The directories the unit's shell searches for a bare `SCX_SCHEDULER`:
+/// systemd's compiled-in default search path, as `systemd-path
+/// search-binaries-default` reports it. This is deliberately not
+/// scxtui's own PATH. scxtui runs as root to edit the config, and a
+/// user-writable directory in root's PATH (a `~/bin` kept by `sudo -E`,
+/// say) would let anyone drop an `scx_*` executable there and have the
+/// service start it as root. systemd's default path holds only
+/// system-owned directories, and it is also what the unit itself
+/// resolves against, so the list scxtui shows is the list the service
+/// can run.
+fn system_binary_dirs() -> Result<Vec<PathBuf>> {
+    let out = Command::new(SYSTEMD_PATH)
+        .arg("search-binaries-default")
+        .env_clear()
+        .output()
+        .with_context(|| format!("cannot run {SYSTEMD_PATH}"))?;
+    if !out.status.success() {
+        bail!(
+            "{SYSTEMD_PATH} search-binaries-default failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let text = std::str::from_utf8(&out.stdout).context("systemd-path printed non-UTF-8")?;
+    parse_search_path(text)
 }
 
-/// The absolute path `SCX_SCHEDULER` is written with. The scheduler list
-/// comes from scxtui's PATH, but the unit runs under systemd's, which
-/// need not contain the same directories or the same binaries; a bare
-/// name could resolve to another build there, or to nothing. Writing
-/// the path scxtui found pins the unit to the binary the user picked.
-/// The first PATH entry that holds an executable of that name wins, as
-/// the shell's lookup would. The found path is kept as is, symlink and
-/// all, since packaging may rely on the link.
+/// Splits `systemd-path` output into directories. Only absolute entries
+/// are acceptable: a relative one would be resolved against scxtui's
+/// working directory, which is exactly the kind of place the system
+/// path is meant to exclude.
+fn parse_search_path(text: &str) -> Result<Vec<PathBuf>> {
+    let dirs: Vec<PathBuf> = std::env::split_paths(text.trim()).collect();
+    if dirs.is_empty() || dirs.iter().any(|dir| !dir.is_absolute()) {
+        bail!(
+            "systemd-path returned an invalid search path: {:?}",
+            text.trim()
+        );
+    }
+    Ok(dirs)
+}
+
+/// The absolute path `SCX_SCHEDULER` is written with. A bare name would
+/// be looked up again by the unit's shell at every start, so a binary
+/// installed later, earlier in the search path, would silently replace
+/// the one the user picked. Writing the path pins the choice. The first
+/// directory that holds an executable of that name wins, as the shell's
+/// lookup would. The found path is kept as is, symlink and all, since
+/// packaging may rely on the link.
 fn resolve_executable(sched: &str) -> Result<String> {
-    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
-    resolve_in(sched, &dirs)
+    resolve_in(sched, &system_binary_dirs()?)
 }
 
 fn resolve_in(sched: &str, dirs: &[PathBuf]) -> Result<String> {
@@ -773,7 +815,7 @@ fn resolve_in(sched: &str, dirs: &[PathBuf]) -> Result<String> {
         .map(|dir| dir.join(sched))
         .find(|candidate| candidate.is_absolute() && is_executable_file(candidate))
         .map(|path| path.to_string_lossy().into_owned())
-        .with_context(|| format!("{sched} is not an executable in any absolute PATH directory"))
+        .with_context(|| format!("{sched} is not an executable in systemd's default search path"))
 }
 
 /// The scheduler name behind a value of `SCX_SCHEDULER` or its override:
@@ -839,9 +881,9 @@ impl SchedulerBackend for ServiceBackend {
     }
 
     fn supported_schedulers(&self) -> Result<Vec<String>> {
-        let scheds = scan_path_for_schedulers();
+        let scheds = scan_path_for_schedulers()?;
         if scheds.is_empty() {
-            bail!("no scx_* scheduler binaries found in PATH");
+            bail!("no scx_* scheduler binaries found in systemd's default search path");
         }
         Ok(scheds)
     }
@@ -1424,7 +1466,7 @@ mod tests {
             fs::set_permissions(d.join("scx_lavd"), fs::Permissions::from_mode(0o755)).unwrap();
         }
         // Present in the second directory only, and not executable in
-        // the first: PATH order and the execute bit both apply.
+        // the first: search order and the execute bit both apply.
         fs::File::create(bin.join("scx_cake")).unwrap();
         fs::File::create(other.join("scx_cake")).unwrap();
         fs::set_permissions(other.join("scx_cake"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -1439,8 +1481,8 @@ mod tests {
             other.join("scx_cake").to_string_lossy()
         );
         assert!(resolve_in("scx_nope", &dirs).is_err());
-        // A relative PATH entry would write a path that means something
-        // else under the unit's working directory; it does not count.
+        // A relative entry would write a path that means something else
+        // under the unit's working directory; it does not count.
         assert!(resolve_in("scx_lavd", &[PathBuf::from("bin")]).is_err());
 
         // The status reduces a written path back to the name, so it
@@ -1448,6 +1490,23 @@ mod tests {
         assert_eq!(sched_name("/usr/bin/scx_lavd"), "scx_lavd");
         assert_eq!(sched_name("scx_lavd"), "scx_lavd");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_path_from_systemd_must_be_absolute_and_non_empty() {
+        assert_eq!(
+            parse_search_path("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin\n").unwrap(),
+            [
+                PathBuf::from("/usr/local/sbin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/usr/sbin"),
+                PathBuf::from("/usr/bin"),
+            ]
+        );
+        assert!(parse_search_path("\n").is_err());
+        assert!(parse_search_path("/usr/bin:bin\n").is_err());
+        // An empty element is a relative "." to the shell; refuse it too.
+        assert!(parse_search_path("/usr/bin::/usr/sbin\n").is_err());
     }
 
     #[test]

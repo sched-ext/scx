@@ -31,7 +31,7 @@ OPTIONS:
                                 restart, restore; --cli help for details)
     --export-profiles <FILE|->  Write the resolved profile table (file rows
                                 merged with built-in defaults, for every
-                                scheduler in PATH) as JSON and exit
+                                scheduler systemd can start) as JSON and exit
     -h, --help                  Show this help
     -V, --version               Show the version
 ";

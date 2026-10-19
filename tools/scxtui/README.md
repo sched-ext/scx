@@ -25,7 +25,9 @@ about the unit and the manager environment, and drives the unit with
 
 ## Features
 
-- Lists the `scx_*` scheduler executables installed in `PATH`.
+- Lists the `scx_*` scheduler executables installed in systemd's default
+  search path (`systemd-path search-binaries-default`), the directories
+  the unit's own shell searches.
 - Starts a scheduler in a profile, or switches the running one, by
   rewriting `SCX_SCHEDULER` and `SCX_FLAGS` in the unit's environment file
   and (re)starting the unit. The file is rewritten atomically through a
@@ -113,7 +115,7 @@ the command name and nothing else. Lines scxctl could not have printed
 | Command | Effect |
 |---|---|
 | `get` | The running scheduler and its profile or arguments, plus the next start when it differs and any override in effect |
-| `list` | The `scx_*` executables in `PATH` |
+| `list` | The `scx_*` executables in systemd's default search path |
 | `modes -s <SCHED> [--show-args]` | The profiles configured for a scheduler, or every profile's resolved flags |
 | `start -s <SCHED> [-m <MODE> \| -a <ARGS>]` | Write the config and start the unit; refused while it is active |
 | `switch [-s <SCHED>] [-m <MODE> \| -a <ARGS>]` | Write the config and restart the unit; refused when nothing runs (use `start`), no `-s` means the running scheduler, no `-m` keeps its profile when the running arguments match exactly one profile and keeps the arguments as they are otherwise (`auto` for another scheduler) |
@@ -246,11 +248,10 @@ leave the old scheduler running under a file that names the new one.
 
 A profile is a flag list. Starting or switching writes the selected
 scheduler to `SCX_SCHEDULER=`, as the absolute path scxtui found it under
-in its own `PATH` (the unit runs under systemd's `PATH`, which need not
-hold the same binaries), and the profile's flags to `SCX_FLAGS=` (write
-to a unique temporary file in the same directory, carry the original
-mode, owner and POSIX access ACL over, re-check that the file did not
-change meanwhile,
+in systemd's default search path, and the profile's flags to `SCX_FLAGS=`
+(write to a unique temporary file in the same directory, carry the
+original owner, POSIX access ACL and mode over, in that order, re-check
+that the file did not change meanwhile,
 rename into place, through a symlink to its target) and starts or restarts
 the unit. Nothing records which profile
 was started: the running profile is recognised by comparing the process'
@@ -258,6 +259,13 @@ arguments with the table, and anything else shows as custom flags. An
 active `SCX_SCHEDULER_OVERRIDE` or `SCX_FLAGS_OVERRIDE` still wins over
 the file; the notice names it instead of letting the next poll look like a
 failed switch or a wrong profile.
+
+Scheduler discovery and resolution never consult scxtui's own `PATH`.
+scxtui runs as root to edit the config, and a user-writable directory in
+root's `PATH` would let anyone place an `scx_*` executable that the
+service then starts as root. systemd's default path holds only
+system-owned directories, and it is what the unit resolves a bare name
+against anyway. `/usr/bin/systemd-path` is required.
 
 Independently of the unit, `scxtui` reads `/sys/kernel/sched_ext/state` and
 `/sys/kernel/sched_ext/root/ops` to show what the kernel itself reports, and
