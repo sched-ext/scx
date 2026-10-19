@@ -1135,7 +1135,9 @@ impl Stats {
             let Some(domain) = name.strip_prefix("mon_L3_") else {
                 continue;
             };
-            let domain = usize::from_str_radix(domain, 16)
+            // resctrl uses zero-padded decimal cache IDs (mon_L3_%02d).
+            let domain = domain
+                .parse::<usize>()
                 .with_context(|| format!("invalid resctrl monitor domain {name}"))?;
             let node = if topo.nodes.len() == 1 {
                 0
