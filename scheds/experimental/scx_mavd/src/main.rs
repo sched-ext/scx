@@ -16,9 +16,14 @@ mod cpu_order;
 use scx_utils::init_libbpf_logging;
 mod stats;
 use std::ffi::CStr;
+use std::ffi::CString;
 use std::ffi::c_int;
 use std::mem;
 use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::str;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -242,6 +247,11 @@ struct Opts {
     #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
     enable_cpu_bw: bool,
 
+    /// Attach as a sub-scheduler to the cgroup v2 at PATH and schedule its
+    /// subtree on the cids the parent scheduler grants. Experimental.
+    #[clap(long = "cgroup", value_name = "PATH")]
+    cgroup: Option<String>,
+
     /// Maximum number of cgroups CPU bandwidth control (cpu.max) can manage.
     /// Cgroups beyond the cap run unmanaged. Only meaningful with
     /// --enable-cpu-bw.
@@ -281,6 +291,7 @@ struct Opts {
     stats: Option<f64>,
 
     /// Run in stats monitoring mode with the specified interval. Scheduler is not launched.
+    /// With --cgroup, monitor the sub-scheduler attached to that cgroup.
     #[clap(long)]
     monitor: Option<f64>,
 
@@ -490,7 +501,11 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &'a Opts,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+        sub: Option<(u64, PathBuf)>,
+    ) -> Result<Self> {
         if *NR_CPU_IDS > LAVD_CPU_ID_MAX as usize {
             panic!(
                 "Num possible CPU IDs ({}) exceeds maximum of ({})",
@@ -535,7 +550,13 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, opts, &order, debug_level)?;
+        Self::init_globals(
+            &mut skel,
+            opts,
+            &order,
+            debug_level,
+            sub.as_ref().map(|s| s.0),
+        )?;
 
         // Mirror the cpu.max caps into rodata so the BPF admission gates match
         // the map sizes set just below.
@@ -560,9 +581,44 @@ impl<'a> Scheduler<'a> {
         // Programs start observing the arena globals at attach, so seed them first.
         Self::init_arena_globals(&mut skel, &order, opts)?;
 
-        // Attach.
-        let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
-        let stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64)).launch()?;
+        // A sub-scheduler serves its stats under its cgroup's path. Launch
+        // before attaching so that a failure here does not pull the cgroup's
+        // tasks through an attach and a detach.
+        let mut stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64));
+        if let Some((_, sched_path)) = &sub {
+            stats_server = stats_server.set_sched_path(sched_path);
+        }
+        let stats_server = stats_server.launch()?;
+
+        // Attach, next to a running root scheduler in sub mode. The kernel
+        // refuses a sub-scheduler before creating it for the reasons below,
+        // with no exit info to report. Every later failure is reported through
+        // ops.exit() like a root scheduler's.
+        let struct_ops = if sub.is_some() {
+            if !compat::is_sched_ext_enabled().context("Failed to read the sched_ext state")? {
+                anyhow::bail!("--cgroup needs a running root scheduler");
+            }
+            skel.attach()
+                .context("Failed to attach non-struct_ops BPF programs")?;
+            match skel.maps.lavd_ops.attach_struct_ops() {
+                Ok(link) => Some(link),
+                Err(e) => {
+                    let why = match e.kind() {
+                        libbpf_rs::ErrorKind::Unsupported => {
+                            "the root scheduler has no sub-scheduler support"
+                        }
+                        libbpf_rs::ErrorKind::NotFound => {
+                            "the cgroup is outside this cgroup namespace"
+                        }
+                        _ => "a sub-scheduler may already be attached at or above the cgroup",
+                    };
+                    return Err(e)
+                        .with_context(|| format!("Failed to attach as a sub-scheduler: {why}"));
+                }
+            }
+        } else {
+            Some(scx_ops_attach!(skel, lavd_ops)?)
+        };
 
         Ok(Self {
             _arenalib: arenalib,
@@ -770,6 +826,7 @@ impl<'a> Scheduler<'a> {
         opts: &Opts,
         order: &CpuOrder,
         debug_level: u8,
+        sub_cgid: Option<u64>,
     ) -> Result<()> {
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.nr_llcs = order.nr_llcs as u64;
@@ -794,6 +851,21 @@ impl<'a> Scheduler<'a> {
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
+
+        if let Some(cgid) = sub_cgid {
+            if !matches!(
+                compat::struct_has_field("sched_ext_ops_cid", "sub_ecaps_updated"),
+                Ok(true)
+            ) {
+                anyhow::bail!(
+                    "--cgroup requires a kernel with ops.sub_ecaps_updated(), \
+                     which this kernel lacks"
+                );
+            }
+            rodata.sub_mode = true;
+            rodata.sub_cgroup_id = cgid;
+            skel.struct_ops.lavd_ops_mut().sub_cgroup_id = cgid;
+        }
 
         // Fail hard if cpu.max was explicitly requested but the kernel lacks
         // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
@@ -1100,6 +1172,7 @@ impl<'a> Scheduler<'a> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut autopower = opts.autopower;
         let mut profile = PowerProfile::Unknown;
+        let mut immed_warned = false;
 
         if opts.performance {
             let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
@@ -1112,6 +1185,20 @@ impl<'a> Scheduler<'a> {
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if autopower {
                 (autopower, profile) = self.update_power_profile(profile);
+            }
+            if !immed_warned
+                && self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
+                    .unwrap()
+                    .sub_immed_only_seen
+            {
+                immed_warned = true;
+                warn!(
+                    "A cid granted ENQ_IMMED alone is left unused: borrowing is not implemented."
+                );
             }
 
             match req_ch.recv_timeout(Duration::from_secs(1)) {
@@ -1144,6 +1231,43 @@ impl Drop for Scheduler<'_> {
             drop(struct_ops);
         }
     }
+}
+
+/// The stats socket is /var/run/scx/<scheduler path>/stats and a UNIX socket
+/// path holds at most 107 bytes.
+const SUB_SCHED_PATH_MAX: usize = 107 - "/var/run/scx/".len() - "/stats".len();
+
+/// Resolve the attach cgroup: its id, which is its inode number, and the
+/// scheduler path its stats server lives under. The path mirrors the cgroup's
+/// path below /sys/fs/cgroup under sub/, or is sub/<id> for a cgroup outside
+/// that mount or with a path too long for a socket. A path that is not a
+/// cgroup, or the cgroup root, is refused.
+fn sub_cgroup(path: &str) -> Result<(u64, PathBuf)> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("Failed to resolve cgroup path {path}"))?;
+    let cpath = CString::new(path.as_os_str().as_bytes())?;
+    let mut st: libc::statfs = unsafe { mem::zeroed() };
+    if unsafe { libc::statfs(cpath.as_ptr(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("Failed to statfs {}", path.display()));
+    }
+    if st.f_type as u64 != libc::CGROUP2_SUPER_MAGIC as u64 || !path.is_dir() {
+        anyhow::bail!("{} is not a cgroup", path.display());
+    }
+    let cgid = std::fs::metadata(&path)
+        .with_context(|| format!("Failed to stat cgroup {}", path.display()))?
+        .ino();
+    if cgid <= 1 {
+        anyhow::bail!("{} is the cgroup root", path.display());
+    }
+    let mirrored = path
+        .strip_prefix("/sys/fs/cgroup")
+        .ok()
+        .filter(|rel| !rel.as_os_str().is_empty())
+        .map(|rel| Path::new("sub").join(rel))
+        .filter(|p| p.as_os_str().len() <= SUB_SCHED_PATH_MAX);
+    let sched_path = mirrored.unwrap_or_else(|| PathBuf::from(format!("sub/{cgid}")));
+    Ok((cgid, sched_path))
 }
 
 /// Return heap freed during initialization to the OS.
@@ -1231,10 +1355,14 @@ fn main(mut opts: Opts) -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
+    // A sub-scheduler serves its stats under its cgroup's path.
+    let sub = opts.cgroup.as_deref().map(sub_cgroup).transpose()?;
+    let sched_path = sub.as_ref().map(|s| s.1.clone());
+
     if let Some(nr_samples) = opts.monitor_sched_samples {
         let shutdown_copy = shutdown.clone();
         let jh = std::thread::spawn(move || {
-            stats::monitor_sched_samples(nr_samples, shutdown_copy).unwrap()
+            stats::monitor_sched_samples(nr_samples, shutdown_copy, sched_path).unwrap()
         });
         let _ = jh.join();
         return Ok(());
@@ -1243,7 +1371,7 @@ fn main(mut opts: Opts) -> Result<()> {
     if let Some(intv) = opts.monitor.or(opts.stats) {
         let shutdown_copy = shutdown.clone();
         let jh = std::thread::spawn(move || {
-            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy, sched_path).unwrap()
         });
         if opts.monitor.is_some() {
             let _ = jh.join();
@@ -1253,7 +1381,7 @@ fn main(mut opts: Opts) -> Result<()> {
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        let mut sched = Scheduler::init(&opts, &mut open_object, sub.clone())?;
         info!(
             "scx_mavd scheduler is initialized (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))

@@ -94,6 +94,28 @@ static bool is_worth_kick_other_task(task_ctx *taskc)
 	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
 
+/*
+ * A scheduler may always preempt its own tasks and needs PREEMPT only for
+ * another scheduler's. mavd preempts by writing the victim's slice, which the
+ * kernel allows on its own tasks only, so in sub mode a victim has to be
+ * running one of mavd's own tasks.
+ */
+static bool own_task_running(struct cpu_ctx *cpuc)
+{
+	struct task_struct *p;
+	struct scx_sched *sched;
+
+	if (!sub_mode)
+		return true;
+	p = scx_bpf_cid_curr(cpuc->cid);
+	if (!p)
+		return false;
+	/* the verifier rejects a reload of the pointer after its NULL test */
+	sched = p->scx.sched;
+	barrier_var(sched);
+	return sched && sched->ops.sub_cgroup_id == sub_cgroup_id;
+}
+
 static struct cpu_ctx *find_victim_cpu(const struct scx_cmask *cpumask, s32 preferred_cpu,
 				       task_ctx *taskc, u64 now)
 {
@@ -121,7 +143,8 @@ static struct cpu_ctx *find_victim_cpu(const struct scx_cmask *cpumask, s32 pref
 	 * If there is a preferred CPU on which a task wants to run,
 	 * check that CPU first.
 	 */
-	if (preferred_cpu >= 0 && (cpuc = get_cpu_ctx_id(preferred_cpu))) {
+	if (preferred_cpu >= 0 && (cpuc = get_cpu_ctx_id(preferred_cpu)) &&
+	    own_task_running(cpuc)) {
 		if (can_x_kick_cpu2(&prm_task, &prm_cpus[v], cpuc))
 			v++;
 	}
@@ -152,6 +175,8 @@ static struct cpu_ctx *find_victim_cpu(const struct scx_cmask *cpumask, s32 pref
 		 */
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc->is_online)
+			continue;
+		if (!own_task_running(cpuc))
 			continue;
 
 		/*

@@ -87,10 +87,13 @@ int init_cid_masks(void)
 
 		cpuc->core_nr_cids = cpu_ctxs[cpuc->core_cid].core_nr_cids;
 	}
-	online = scx_bpf_online_cmask();
-	if (!online)
-		return -ENOENT;
-	cmask_copy(online_cmask, online);
+	/* a sub starts with no cid, see lavd_sub_ecaps_updated() */
+	if (!sub_mode) {
+		online = scx_bpf_online_cmask();
+		if (!online)
+			return -ENOENT;
+		cmask_copy(online_cmask, online);
+	}
 	cmask_copy(active_cmask, online_cmask);
 	nr_cpus_onln = cmask_weight(online_cmask);
 

@@ -667,6 +667,15 @@ d762220c6c41 ("scx_lavd: fix neighbor migration never firing on non-SMT
 machines"); the previous measurement read 74,546, 91,512, 719,743, 168,388
 and 46,246.
 
+The sub-scheduler mode was measured with veristat on 2026-10-07. veristat
+verifies the object with the source defaults, so its counts are not
+comparable with the ones above. Root mode and sub mode (sub_mode forced to
+1 with -G), in that order: select_cid 66,266 and 61,176, enqueue 78,814 and
+82,238, dispatch 592,062 and 643,427, init_task 163,698 both, init 41,300
+and 66,838. Measured before the sweep moved from the stat timer to the
+bpf_call_rcu() callback; veristat no longer loads the object since the arena
+scalar rebase.
+
 Dispatch rose from 473k to 720k when the cleanup dropped the tests on
 lookups that can still return NULL, the effect above, and the last result
 tests in the callbacks did not move it. An experiment that replaced the
@@ -694,6 +703,48 @@ lookups themselves with direct array indexing in the callbacks brought it to
    file:line` annotations give a per-line histogram of where the budget
    goes.
 6. Record the new chains and counts in this section.
+
+## Running as a sub-scheduler
+
+`--cgroup PATH` attaches mavd under the root scheduler that owns the cgroup
+hierarchy, scheduling PATH's subtree on the cids the parent grants. mavd
+learns of each grant and revoke per cid through ops.sub_ecaps_updated().
+Gaining ENQ is the cid's online transition and losing it the offline one,
+the same transitions hotplug drives in root mode, so the picker, the
+balancer, core compaction and the stats work from the online view unchanged.
+The topology, cpdoms and preference tables stay machine-derived. Only the
+online view shrinks to the grants.
+
+A revoke arms a sweep with bpf_call_rcu() that runs after an RCU grace
+period, once every placement that read the old view has landed. The sweep
+re-enqueues the DSQs of every core and cpdom that is not fully held, and
+enqueue places each task against the current view. A task allowed on no held
+cid is inserted with SCX_ENQ_RESCUE on an allowed cid, which the kernel
+diverts to its rescue path. Every placement is clamped to the held cids.
+While no cid is held, every task is rescued.
+
+Only a re-enqueue from scx_bpf_dsq_reenq(), the RT/DL drain and the sweep,
+keeps the cached placement, clamped to a held cid. Every other re-enqueue
+re-runs placement.
+
+Only a cid running one of mavd's own tasks is a preemption victim, so
+PREEMPT is not consulted. Cpuperf targets are written only with PERF. A cid
+granted ENQ_IMMED alone, borrowable under scx_nitosis, is left unused and
+reported once.
+
+The stats server lives under sub/ plus the cgroup's path below
+/sys/fs/cgroup, or sub/<id> for a cgroup outside that mount or with a path
+too long for a socket, and `--monitor` with the same `--cgroup` reaches it.
+Cgroup bandwidth control is rooted at the cgroup.
+
+Requirements: a kernel with ops.sub_ecaps_updated() (sched_ext v7.3), which
+is checked at start, and bpf_call_rcu() (bpf-next), which is assumed, a
+parent that leaves rescue enabled, which is the default, and a cgroup v2
+path below the root. Without the attach-time ecaps report posted for
+sched_ext for-7.4, every task that wakes before the first grants is rescued.
+mavd exits when its parent exits and does not restart on its own. A parent
+with hotplug ops would leave an unplugged cid in mavd's online view, since
+the kernel zeroes its caps without a notification.
 
 ## Known issues
 

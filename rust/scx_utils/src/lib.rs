@@ -101,6 +101,7 @@ pub mod mangoapp;
 
 pub mod misc;
 pub use misc::monitor_stats;
+pub use misc::monitor_stats_sched;
 pub use misc::normalize_load_metric;
 pub use misc::try_set_rlimit_infinity;
 
