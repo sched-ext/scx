@@ -1,0 +1,40 @@
+[package]
+name = "scxtui"
+version = "1.1.4"
+edition = "2024"
+rust-version = "1.91"
+authors = ["Piotr Gorski <piotrgorski@cachyos.org>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "TUI for managing sched_ext schedulers through scx.service"
+readme = "README.md"
+keywords = ["sched-ext", "scx", "tui", "scheduler", "linux"]
+categories = ["command-line-utilities"]
+# Prototype: keep it out of the release publish run until the crate on
+# crates.io (currently published from scx-loader) is handed over.
+publish = false
+
+[package.metadata.scx]
+ci.use_clippy = true
+
+[package.metadata.veristat]
+disable = true
+
+[dependencies]
+anyhow = "1"
+ratatui = "0.30"
+# `shell_words::join` for the panel: renders a flag vector so that token
+# boundaries survive and the line parses back into the same vector.
+# (Parsing systemd's output has its own tokenizer, see backend/service.rs.)
+shell-words = "1"
+# Log view: journalctl --output=json parsing + local-time formatting, and
+# the --export-profiles output.
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Profiles file, scx_loader's schema.
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+# Unique scratch file next to the environment file for the atomic rewrite.
+tempfile = "3"
+# Carries the environment file's POSIX access ACL over the rewrite.
+xattr = "1"

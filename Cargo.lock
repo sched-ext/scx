@@ -6556,6 +6556,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "scxtui"
+version = "1.1.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "tempfile",
+ "toml",
+ "xattr",
+]
+
+[[package]]
 name = "seccomp"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

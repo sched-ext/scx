@@ -77,3 +77,17 @@ journalctl -u scx.service
 journalctl -u scx.service -b 0
 ```
 
+
+## Interactive management
+
+[`scxtui`](../tools/scxtui/README.md) wraps the steps above in a terminal
+UI: it rewrites `SCX_SCHEDULER` and `SCX_FLAGS` in the unit's environment
+file (`/etc/default/scx` here, `/etc/sysconfig/scx` on distributions that
+patch the unit), drives the unit with `systemctl`, shows the running
+scheduler next to what the next start would run, including any
+`SCX_SCHEDULER_OVERRIDE` in effect, and browses the unit's journal.
+
+```
+cargo build --release -p scxtui
+sudo ./target/release/scxtui
+```
