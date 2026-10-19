@@ -9,10 +9,10 @@
 //! flattened into display lines here, with continuations marked so the UI
 //! can indent or fold them.
 
-use std::process::Command;
-
 use anyhow::{Context, Result, bail};
 use chrono::TimeZone;
+
+use crate::backend::service::system_command;
 
 /// The unit the log view inspects: the scheduler runs as its main process,
 /// so its stdout/stderr land in the unit's journal.
@@ -48,7 +48,7 @@ pub struct LogFetch {
 pub fn fetch(unit: &str, previous_boot: bool) -> Result<LogFetch> {
     let boot = if previous_boot { "-1" } else { "0" };
     let limit = MAX_ENTRIES.to_string();
-    let output = Command::new("journalctl")
+    let output = system_command("journalctl")?
         .args([
             "--unit",
             unit,

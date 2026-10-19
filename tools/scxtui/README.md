@@ -81,8 +81,9 @@ about the unit and the manager environment, and drives the unit with
   to read the system journal.
 - Root privileges to control the unit and edit its environment file.
   Reading the state works as any user.
-- Optional: `scxtop` in `PATH` for integrated monitoring. `scxtop` may
-  require root privileges or suitable BPF capabilities.
+- Optional: `scxtop`, in systemd's default search path, for integrated
+  monitoring. `scxtop` may require root privileges or suitable BPF
+  capabilities.
 
 ## Installation
 
@@ -260,10 +261,12 @@ active `SCX_SCHEDULER_OVERRIDE` or `SCX_FLAGS_OVERRIDE` still wins over
 the file; the notice names it instead of letting the next poll look like a
 failed switch or a wrong profile.
 
-Scheduler discovery and resolution never consult scxtui's own `PATH`.
-scxtui runs as root to edit the config, and a user-writable directory in
-root's `PATH` would let anyone place an `scx_*` executable that the
-service then starts as root. systemd's default path holds only
+Nothing scxtui starts is looked up in its own `PATH`: the schedulers,
+`systemctl`, `journalctl` and `scxtop` are all resolved in systemd's
+default search path. scxtui runs as root to edit the config, and a
+user-writable directory in root's `PATH` would let anyone place an
+`scx_*` executable that the service then starts as root, or a `systemctl`
+that scxtui itself runs as root. systemd's default path holds only
 system-owned directories, and it is what the unit resolves a bare name
 against anyway. `/usr/bin/systemd-path` is required.
 

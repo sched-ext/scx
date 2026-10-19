@@ -104,7 +104,7 @@ impl ServiceBackend {
     /// Verifies the unit exists (so startup fails fast on systems without
     /// the scx service) and resolves the environment file it edits.
     pub fn connect() -> Result<Self> {
-        let out = Command::new("systemctl")
+        let out = system_command("systemctl")?
             .args(["cat", UNIT])
             .output()
             .context("failed to run systemctl — is this a systemd system?")?;
@@ -126,13 +126,12 @@ impl ServiceBackend {
     /// reset is not an error here: the start that follows reports the
     /// real problem, with the unit's own wording.
     fn reset_failed() {
-        let _ = Command::new("systemctl")
-            .args(["reset-failed", UNIT])
-            .output();
+        let _ = system_command("systemctl")
+            .and_then(|mut command| Ok(command.args(["reset-failed", UNIT]).output()?));
     }
 
     fn systemctl(verb: &str) -> Result<()> {
-        let out = Command::new("systemctl")
+        let out = system_command("systemctl")?
             .args([verb, UNIT])
             .output()
             .context("failed to run systemctl")?;
@@ -288,7 +287,7 @@ run scxtui as root to control {UNIT}",
 }
 
 fn unit_info() -> Result<UnitInfo> {
-    let out = Command::new("systemctl")
+    let out = system_command("systemctl")?
         .args([
             "show",
             UNIT,
@@ -354,7 +353,7 @@ fn editable_config_path(info: &UnitInfo) -> Option<PathBuf> {
 /// error, not an empty layer: `systemctl set-environment` overrides live
 /// here, and a next-start answer computed without them would be wrong.
 fn manager_environment() -> Result<Vec<(String, String)>> {
-    let out = Command::new("systemctl")
+    let out = system_command("systemctl")?
         .arg("show-environment")
         .output()
         .context("failed to run systemctl show-environment")?;
@@ -757,6 +756,18 @@ fn copy_access_acl(from: &Path, to: &Path) -> Result<()> {
 /// environment, so that the directory list scxtui trusts cannot itself
 /// come from a directory in the caller's PATH.
 const SYSTEMD_PATH: &str = "/usr/bin/systemd-path";
+
+/// A command for a system tool (`systemctl`, `journalctl`, `scxtop`),
+/// resolved in systemd's default search path rather than scxtui's PATH.
+/// scxtui runs as root, so every program it starts by bare name is a
+/// program root runs, and a user-writable directory ahead of `/usr/bin`
+/// in root's PATH would let anyone substitute one. Resolving against
+/// the system path closes that for the helpers the same way
+/// [`system_binary_dirs`] closes it for the schedulers.
+pub(crate) fn system_command(name: &str) -> Result<Command> {
+    let executable = resolve_in(name, &system_binary_dirs()?)?;
+    Ok(Command::new(executable))
+}
 
 /// The directories the unit's shell searches for a bare `SCX_SCHEDULER`:
 /// systemd's compiled-in default search path, as `systemd-path

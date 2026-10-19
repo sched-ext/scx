@@ -2,15 +2,13 @@
 
 //! Application state and event loop.
 
-use std::io::ErrorKind;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::backend::service::validate_value;
+use crate::backend::service::{system_command, validate_value};
 use crate::backend::{SchedulerBackend, Status};
 use crate::kernel::{self, KernelState};
 use crate::logs::{self, LogLine};
@@ -281,8 +279,18 @@ impl App {
     /// over. Keeping scxtop out-of-process also keeps its heavyweight BPF
     /// dependency chain out of this binary.
     fn run_monitor(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        // Resolved like every other helper: in systemd's default search
+        // path, not scxtui's, since it runs with scxtui's privileges.
+        let command = system_command("scxtop");
+        let Ok(mut command) = command else {
+            self.error(
+                "scxtop not found in systemd's default search path — install \
+it (cargo install scxtop, or your distro's scx tools package)",
+            );
+            return Ok(());
+        };
         ratatui::restore();
-        let result = Command::new("scxtop").status();
+        let result = command.status();
         *terminal = ratatui::init();
         terminal.clear()?;
 
@@ -292,10 +300,6 @@ impl App {
                 "scxtop exited with {status} — it needs root/CAP_BPF; \
 try running scxtui as root or granting scxtop capabilities"
             )),
-            Err(err) if err.kind() == ErrorKind::NotFound => self.error(
-                "scxtop not found in PATH — install it (cargo install scxtop, \
-or your distro's scx tools package)",
-            ),
             Err(err) => self.error(&format!("failed to launch scxtop: {err}")),
         }
         Ok(())
