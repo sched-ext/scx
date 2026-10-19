@@ -351,7 +351,7 @@ void BPF_STRUCT_OPS(eevdf_running, struct task_struct *p)
 	/*
 	 * Refresh cpufreq performance level.
 	 */
-	update_cpufreq(cid, now);
+	update_cpufreq(cid, now, placed);
 }
 
 void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
