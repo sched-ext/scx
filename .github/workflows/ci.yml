@@ -263,6 +263,8 @@ jobs:
           flags[mitosis]="--cell-parent-cgroup /ci.slice -v"
           for sched in ${{ matrix.scheds }}; do
             echo "=== Testing ${sched} ==="
+            # start each run with an empty trace buffer, see the dump below
+            sudo sh -c ': > /sys/kernel/tracing/trace'
             stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
               --affinity 1 --affinity-delay 1 --affinity-pin &
             stress_pid=$!
@@ -278,6 +280,9 @@ jobs:
             kill $stress_pid 2>/dev/null || true
             wait $stress_pid 2>/dev/null || true
             if [ $rc -ne 0 ]; then
+              # bpf_printk() output, e.g. why the arena library failed to set up
+              echo "=== Kernel trace buffer after ${sched} failed ==="
+              sudo tail -n 100 /sys/kernel/tracing/trace
               failed="${failed} ${sched}"
               results[$sched]="FAIL"
             else
