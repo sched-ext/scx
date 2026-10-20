@@ -43,6 +43,21 @@ int arena_init(struct arena_init_args *args)
 	 */
 	if (bpf_ksym_exists(bpf_arena_reserve_pages) &&
 	    (u32)(u64)qnodes >= NULL_GUARD_PAGES * PAGE_SIZE) {
+		/*
+		 * A fault on an unallocated arena page allocates it, including
+		 * a read through /proc/PID/mem by another process. Memory
+		 * scanners, such as the one on GitHub's hosted runners, read
+		 * the front of large new mappings and may have left guard pages
+		 * allocated. Nothing lives there yet, so free them before
+		 * reserving.
+		 *
+		 * Unlike bpf_arena_reserve_pages(), bpf_arena_free_pages()
+		 * returns without freeing on a NULL pointer. Only the lower 32
+		 * bits of the address select the pages, so pass page 0's full
+		 * user address instead, taking the upper bits from qnodes.
+		 */
+		bpf_arena_free_pages(&arena, (void __arena *)((u64)qnodes & ~0xffffffffULL),
+				     NULL_GUARD_PAGES);
 		ret = bpf_arena_reserve_pages(&arena, NULL, NULL_GUARD_PAGES);
 		if (ret) {
 			bpf_printk("NULL guard: reserving pages [0, %u) failed with %d, "
