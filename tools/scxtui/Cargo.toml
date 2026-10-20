@@ -10,9 +10,6 @@ description = "TUI for managing sched_ext schedulers through scx.service"
 readme = "README.md"
 keywords = ["sched-ext", "scx", "tui", "scheduler", "linux"]
 categories = ["command-line-utilities"]
-# Prototype: keep it out of the release publish run until the crate on
-# crates.io (currently published from scx-loader) is handed over.
-publish = false
 
 [package.metadata.scx]
 ci.use_clippy = true
