@@ -1,5 +1,14 @@
-# List of scx_schedulers: scx_beerland scx_bpfland scx_chaos scx_cosmos scx_flash scx_lavd scx_p2dq scx_rustland scx_rusty scx_tickless
+# Configuration for scx.service
+#
+# Available schedulers and documentation:
+# https://github.com/sched-ext/scx/blob/main/scheds/rust/README.md
+
+# Scheduler to launch.
 SCX_SCHEDULER=scx_cosmos
 
-# Set custom flags for each scheduler, below is an example of how to use
-#SCX_FLAGS='-s 700 -S'
+# Optional command-line arguments for the selected scheduler.
+# Available options vary by scheduler; check its --help output.
+# Leave commented out to use the scheduler's built-in defaults.
+#
+# Example:
+# SCX_FLAGS='-s 700 -S'
