@@ -340,6 +340,7 @@ struct core_sched_state {
 
 struct cid_ctx {
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
+	u64 perf_period;	/* PELT period cpufreq was last told in, plus one, see update_cpufreq() */
 	struct ravg_data load_avg;	/* weight of what is runnable here, see cid_load() */
 	u64 fork_place_at;	/* last fork selection in this core, at core_base */
 	u64 fork_cid_place_at;	/* last fork selection of this cid */
