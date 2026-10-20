@@ -162,9 +162,11 @@ line show. `start`, `switch`, `restore` and `restart` are refused while an
 `SCX_SCHEDULER_OVERRIDE` or `SCX_FLAGS_OVERRIDE` is in effect, since
 systemd would accept the restart and run the override instead of what the
 command reported (for `restart`, instead of what was running). A process
-without arguments is reported in `Auto` mode only when `Auto` is the one
-profile without flags for that scheduler; when several profiles are empty
-it is reported with its own defaults and the candidates listed. Repeated
+without arguments is reported in `Auto` mode; modes that merely have no
+row are not profiles and are never listed as matching, so a scheduler
+without any profiles reads as `Auto`, not as all five modes at once. When
+the file gives `Auto` flags of its own and the process has none, it is
+reported with its own defaults. Repeated
 options are errors, as in scxctl. `restart`
 re-reads the process and restarts the unit afterwards; the two steps are
 not one transaction, so another writer in between wins, as with any two

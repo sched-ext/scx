@@ -402,9 +402,9 @@ fn cmd_get(backend: &dyn SchedulerBackend, profiles: &Profiles) -> Result<()> {
             let name = display_name(&process.sched);
             let modes = profiles.modes_for(&process.sched, &process.args);
             if process.args.is_empty() {
-                // No arguments: scxctl would name the mode. Only a unique
-                // match earns one here; cosmos' auto and server share an
-                // empty row, and naming Auto would be a guess.
+                // No arguments: Auto, as scxctl would say, unless the
+                // file gives Auto flags of its own and the process has
+                // none, in which case it runs the plain defaults.
                 if modes == [Mode::Auto] {
                     println!("running {name} in Auto mode");
                 } else {
@@ -497,10 +497,9 @@ fn cmd_modes(backend: &dyn SchedulerBackend, profiles: &Profiles, opts: &Opts) -
             }
         }
     } else {
-        // scxctl's rule: Auto always counts, the rest when they have flags.
         let configured: Vec<&str> = MODES
             .iter()
-            .filter(|mode| **mode == Mode::Auto || !profiles.flags(sched, **mode).is_empty())
+            .filter(|mode| profiles.configured(sched, **mode))
             .map(|mode| mode.name())
             .collect();
         println!("modes configured for {name}: [{}]", configured.join(", "));
