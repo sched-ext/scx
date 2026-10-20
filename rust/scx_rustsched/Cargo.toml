@@ -1,0 +1,22 @@
+[package]
+name = "scx_rustsched"
+version = "1.1.4"
+edition = "2024"
+description = "The sched_ext runtime for Rust BPF schedulers: arena, task slots, queues, idle CIDs, struct_ops"
+license = "GPL-2.0-only"
+authors = ["Andrea Righi <arighi@nvidia.com>"]
+repository = "https://github.com/sched-ext/scx"
+homepage = "https://github.com/sched-ext/scx"
+publish = false
+
+# Built for the BPF target by a scheduler's build script, with build-std,
+# so not a member of the scx workspace.
+[workspace]
+
+[features]
+# scx_bpf_cid_topo() takes the structure's size.
+topo_size = []
+
+[dependencies]
+scx_rustsched_abi = { path = "../scx_rustsched_abi", version = "1.1.4" }
+scx_rustsched_macros = { path = "../scx_rustsched_macros", version = "1.1.4" }

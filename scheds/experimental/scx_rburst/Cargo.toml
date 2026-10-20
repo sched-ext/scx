@@ -1,0 +1,23 @@
+[package]
+name = "scx_rburst"
+version = "1.1.4"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "An EEVDF-style sched_ext scheduler with virtual-time borrowing and requests sized by the CPU burst, written in Rust BPF on scx_rustsched"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+scx_rustsched_loader = { path = "../../../rust/scx_rustsched_loader", version = "1.1.4" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.4" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.4" }
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+scx_rustsched_build = { path = "../../../rust/scx_rustsched_build", version = "1.1.4" }
+
+# CI has no Rust BPF toolchain, and builds scx_rburst without its BPF
+# objects.
+[package.metadata.veristat]
+disable = true

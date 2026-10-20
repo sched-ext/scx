@@ -239,6 +239,9 @@ static u64 cid_wake_load(s32 cid)
 	return READ_ONCE(cid_ctx(cid)->wake_load);
 }
 
+/* PELT's period, 1024 us. */
+#define PELT_PERIOD_SHIFT	20
+
 /*
  * Tell the cpufreq governor how busy @cid is.
  *
@@ -255,11 +258,25 @@ static u64 cid_wake_load(s32 cid)
  * there, and @min already keeps a CPU above whatever floor the bandwidth
  * of what runs on it demands. This is what the fair class passes, see
  * cpu_util_cfs_boost() in sugov_get_util().
+ *
+ * fair.c tells the governor when the runqueue's load average decays, at
+ * most once a PELT period, and when a task attaches to it, the
+ * cfs_rq_util_change() calls of update_load_avg(). So does this: @attach
+ * is a task that has just joined @cid's pack.
  */
-static void update_cpufreq(s32 cid, u64 now)
+static void update_cpufreq(s32 cid, u64 now, bool attach)
 {
+	struct cid_ctx __arena *cctx;
+	u64 period;
+
 	if (!cpufreq_enabled || !cid_valid(cid))
 		return;
+
+	cctx = cid_ctx(cid);
+	period = (now >> PELT_PERIOD_SHIFT) + 1;
+	if (!attach && cctx->perf_period == period)
+		return;
+	cctx->perf_period = period;
 
 	/*
 	 * cpu_util_cfs() reads the average as of the last update, and

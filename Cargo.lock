@@ -6347,6 +6347,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_rburst"
+version = "1.1.4"
+dependencies = [
+ "clap",
+ "log",
+ "scx_rustsched_build",
+ "scx_rustsched_loader",
+ "scx_stats",
+ "scx_stats_derive",
+ "serde",
+]
+
+[[package]]
 name = "scx_rlfifo"
 version = "1.1.4"
 dependencies = [
@@ -6359,6 +6372,15 @@ dependencies = [
  "scx_cargo",
  "scx_rustland_core",
  "scx_utils",
+]
+
+[[package]]
+name = "scx_rlocal"
+version = "1.1.4"
+dependencies = [
+ "clap",
+ "scx_rustsched_build",
+ "scx_rustsched_loader",
 ]
 
 [[package]]
@@ -6396,6 +6418,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_rustsched_abi"
+version = "1.1.4"
+
+[[package]]
+name = "scx_rustsched_build"
+version = "1.1.4"
+dependencies = [
+ "libbpf-rs 0.27.2",
+]
+
+[[package]]
+name = "scx_rustsched_loader"
+version = "1.1.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs 0.27.2",
+ "libc",
+ "log",
+ "scx_rustsched_abi",
+ "scx_rustsched_macros",
+ "scx_stats",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
+[[package]]
+name = "scx_rustsched_macros"
+version = "1.1.4"
+
+[[package]]
 name = "scx_rusty"
 version = "1.1.4"
 dependencies = [
@@ -6417,6 +6472,15 @@ dependencies = [
  "simplelog",
  "sorted-vec",
  "static_assertions",
+]
+
+[[package]]
+name = "scx_rvtime"
+version = "1.1.4"
+dependencies = [
+ "clap",
+ "scx_rustsched_build",
+ "scx_rustsched_loader",
 ]
 
 [[package]]
