@@ -46,6 +46,7 @@ pub struct Enums {
     pub SCX_KICK_ALL_FLAGS: u64,
     pub SCX_ENQ_WAKEUP: u64,
     pub SCX_ENQ_HEAD: u64,
+    pub SCX_ENQ_CPU_SELECTED: u64,
     pub SCX_ENQ_PREEMPT: u64,
     pub SCX_ENQ_PREEMPT_LAZY: u64,
     pub SCX_ENQ_IMMED: u64,
@@ -101,6 +102,7 @@ lazy_static::lazy_static! {
         SCX_KICK_ALL_FLAGS: read_enum("scx_kick_flags","SCX_KICK_ALL_FLAGS").unwrap_or(0),
         SCX_ENQ_WAKEUP: read_enum("scx_enq_flags","SCX_ENQ_WAKEUP").unwrap_or(0),
         SCX_ENQ_HEAD: read_enum("scx_enq_flags","SCX_ENQ_HEAD").unwrap_or(0),
+        SCX_ENQ_CPU_SELECTED: read_enum("scx_enq_flags","SCX_ENQ_CPU_SELECTED").unwrap_or(0),
         SCX_ENQ_PREEMPT: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT").unwrap_or(0),
         SCX_ENQ_PREEMPT_LAZY: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT_LAZY").unwrap_or(0),
         SCX_ENQ_IMMED: read_enum("scx_enq_flags","SCX_ENQ_IMMED").unwrap_or(0),
@@ -160,6 +162,7 @@ macro_rules! import_enums {
         rodata.__SCX_KICK_ALL_FLAGS = $crate::scx_enums.SCX_KICK_ALL_FLAGS;
         rodata.__SCX_ENQ_WAKEUP = $crate::scx_enums.SCX_ENQ_WAKEUP;
         rodata.__SCX_ENQ_HEAD = $crate::scx_enums.SCX_ENQ_HEAD;
+        rodata.__SCX_ENQ_CPU_SELECTED = $crate::scx_enums.SCX_ENQ_CPU_SELECTED;
         rodata.__SCX_ENQ_PREEMPT = $crate::scx_enums.SCX_ENQ_PREEMPT;
         rodata.__SCX_ENQ_PREEMPT_LAZY = $crate::scx_enums.SCX_ENQ_PREEMPT_LAZY;
         rodata.__SCX_ENQ_IMMED = $crate::scx_enums.SCX_ENQ_IMMED;

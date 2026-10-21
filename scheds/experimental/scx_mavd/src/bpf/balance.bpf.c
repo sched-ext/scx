@@ -252,7 +252,7 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 
 u64 __attribute__((noinline)) dsq_peek_task_load(u64 dsq_id)
 {
-	struct task_struct *peek_p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	struct task_struct *peek_p = scx_bpf_dsq_peek(dsq_id);
 
 	if (peek_p) {
 		task_ctx *peek_taskc = find_task_ctx(peek_p);

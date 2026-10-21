@@ -8,6 +8,9 @@
  * communication-heavy. It aims to minimize latency spikes while maintaining
  * overall good throughput and fair use of CPU time among tasks.
  *
+ * The baseline kernel is v7.4. Anything in v7.4 is assumed to exist and is used
+ * without a compat check or fallback, and older kernels aren't supported.
+ *
  *
  * 1. Overall procedure of the LAVD scheduler
  * ------------------------------------------
@@ -1001,6 +1004,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 reenq_reason = p->scx.flags & SCX_TASK_REENQ_REASON_MASK;
 	s32 task_cpu, cpu = -ENOENT;
 	bool is_idle = false;
+	bool reenq_kfunc;
 	task_ctx *taskc;
 	u64 dsq_id;
 
@@ -1010,16 +1014,18 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	task_cpu = scx_bpf_task_cid(p);
+	reenq_kfunc = (enq_flags & SCX_ENQ_REENQ) && reenq_reason == SCX_TASK_REENQ_KFUNC;
+	if (unlikely(reenq_kfunc))
+		cpuc_cur->nr_reenq_kfunc++;
 
 	/*
 	 * SCX_ENQ_REENQ returns a previously placed task. Only a re-enqueue
-	 * from scx_bpf_dsq_reenq(), the RT/DL drain and the sweep, reuses the
+	 * with the KFUNC reason, from the RT/DL drain and the sweep, reuses the
 	 * cached placement, clamped to a held cid. Every other reason, and a
 	 * task left with no held cid, takes the full path, which rescues the
 	 * latter.
 	 */
-	if (unlikely(enq_flags & SCX_ENQ_REENQ) && reenq_reason == SCX_TASK_REENQ_KFUNC &&
-	    !rescue_needed(taskc)) {
+	if (unlikely(reenq_kfunc) && !rescue_needed(taskc)) {
 		/*
 		 * If the task’s cgroup is throttled, the task should be
 		 * backlogged, and its accounted load should be reverted since
@@ -1101,7 +1107,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * 1. Within this ops.enqueue(), task_cpu and p->cpus_ptr are stable:
 	 *    enqueue and set_cmask() are both serialized by the rq lock, so
 	 *    neither changes between here and the dispatch below.
-	 * 2. If ops.select_cid() already chose the CPU (is_enq_cpu_selected),
+	 * 2. If ops.select_cid() already chose the CPU (SCX_ENQ_CPU_SELECTED),
 	 *    the kernel validated it and pi_lock spans select_cid()->enqueue(),
 	 *    so task_cpu is guaranteed to be within p->cpus_ptr. In sub mode a
 	 *    revoke may have landed since the select, so it is clamped to the
@@ -1111,7 +1117,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 *    mask and re-enqueues before affine_move_task() migrates -- so it
 	 *    can be outside p->cpus_ptr and must be clamped before use.
 	 */
-	if (likely(!__COMPAT_is_enq_cpu_selected(enq_flags))) {
+	if (likely(!(enq_flags & SCX_ENQ_CPU_SELECTED))) {
 		struct pick_ctx ictx = {
 			.taskc = taskc,
 			.prev_cpu = task_cpu,
@@ -1504,12 +1510,13 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 /*
  * A cap change leaves tasks queued where no held cid serves them: on the DSQs
  * of a core or cpdom that lost cids, and on any DSQ while nothing was held.
- * Enqueue places every task against the current view, so the sweep re-enqueues
- * the DSQs of every core and cpdom that is not fully held. It runs after an RCU
- * grace period that began after the change: every op that read the old view has
- * returned by then, so nothing it inserted is missed, and nothing placed
- * afterwards uses the old view. Without the wait, an insert from an op still in
- * flight could land after the sweep walked that DSQ and strand the task.
+ * Enqueue places every task against the current view, so the sweep walks the
+ * DSQs of every core and cpdom that is not fully held, see sub_sweep_dsq(). It
+ * runs after an RCU grace period that began after the change: every op that
+ * read the old view has returned by then, so nothing it inserted is missed, and
+ * nothing placed afterwards uses the old view. Without the wait, an insert from
+ * an op still in flight could land after the sweep walked that DSQ and strand
+ * the task.
  */
 struct sub_sweep_rcu {
 	struct bpf_rcu_head	rh;
@@ -1540,6 +1547,22 @@ static void sub_request_sweep(void)
 	sub_sweep_owed = bpf_call_rcu(&v->rh, &sub_sweep_rcu, sub_sweep_cb) == -EBUSY;
 }
 
+/*
+ * Re-enqueue the tasks on @dsq_id that no cid in @held, the held cids consuming
+ * it, can run, so that enqueue places them against the current view.
+ */
+static void sub_sweep_dsq(u64 dsq_id, const struct scx_cmask *held)
+{
+	struct task_struct *p;
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		task_ctx *taskc = find_task_ctx(p);
+
+		if (taskc && !cmask_intersects(&taskc->allowed, held))
+			scx_bpf_dsq_reenq_task(BPF_FOR_EACH_ITER, p);
+	}
+}
+
 static int sub_sweep_cb(struct bpf_map *map, void *key, void *value)
 {
 	u32 cpdom_id, cid;
@@ -1547,21 +1570,27 @@ static int sub_sweep_cb(struct bpf_map *map, void *key, void *value)
 	if (use_per_cpu_dsq()) {
 		bpf_arena_for(cid, 0, nr_cids) {
 			struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
+			u32 nr;
 
 			/* NULL once the scheduler is gone */
 			if (!cpuc)
 				continue;
 			/*
-			 * One DSQ per core, consumed only by the core's cids. A
-			 * task queued there is allowed on at least one of them,
-			 * not necessarily all. Losing any cid can strand a task
-			 * and keeping all can't, so sweep unless the core is
-			 * fully held.
+			 * One DSQ per core with SMT, consumed only by the
+			 * core's cids, and one per cid without. A task queued
+			 * there is allowed on at least one of its consumers,
+			 * not necessarily all. Losing any consumer can strand a
+			 * task and keeping all can't, so sweep unless they are
+			 * all held.
 			 */
-			if (cpuc->core_cid != cid ||
-			    cmask_full_range(online_cmask, cid, cpuc->core_nr_cids))
+			nr = is_smt_active ? cpuc->core_nr_cids : 1;
+			if ((is_smt_active && cpuc->core_cid != cid) ||
+			    cmask_full_range(online_cmask, cid, nr))
 				continue;
-			scx_bpf_dsq_reenq(cpu_to_dsq(cid), SCX_REENQ_ANY);
+			cmask_zero(sweep_cmask);
+			cmask_set_range(sweep_cmask, cid, nr);
+			cmask_and(sweep_cmask, sweep_cmask, online_cmask);
+			sub_sweep_dsq(cpu_to_dsq(cid), sweep_cmask);
 		}
 	}
 	if (use_cpdom_dsq()) {
@@ -1570,8 +1599,9 @@ static int sub_sweep_cb(struct bpf_map *map, void *key, void *value)
 
 			if (!cpdomc->is_valid || cmask_subset(&cpdomc->cpus, online_cmask))
 				continue;
-			scx_bpf_dsq_reenq(cpdom_to_dsq(cpdom_id), SCX_REENQ_ANY);
-			scx_bpf_dsq_reenq(cpdom_to_turb_dsq(cpdom_id), SCX_REENQ_ANY);
+			cmask_and(sweep_cmask, &cpdomc->cpus, online_cmask);
+			sub_sweep_dsq(cpdom_to_dsq(cpdom_id), sweep_cmask);
+			sub_sweep_dsq(cpdom_to_turb_dsq(cpdom_id), sweep_cmask);
 		}
 	}
 

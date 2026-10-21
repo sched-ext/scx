@@ -62,6 +62,7 @@ struct sys_stat_ctx {
 	u64		sum_lat_cri;
 	u32		nr_sched;
 	u32		nr_preempt;
+	u32		nr_reenq_kfunc;
 	u32		nr_perf_cri;
 	u32		nr_lat_cri;
 	u32		nr_x_migration;
@@ -512,6 +513,9 @@ static void collect_sys_stat(void)
 		c->nr_preempt += cpuc->nr_preempt;
 		cpuc->nr_preempt = 0;
 
+		c->nr_reenq_kfunc += cpuc->nr_reenq_kfunc;
+		cpuc->nr_reenq_kfunc = 0;
+
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
@@ -698,6 +702,7 @@ static void calc_sys_stat(void)
 
 	sys_stat.nr_sched += c->nr_sched;
 	sys_stat.nr_preempt += c->nr_preempt;
+	sys_stat.nr_reenq_kfunc += c->nr_reenq_kfunc;
 	sys_stat.nr_perf_cri += c->nr_perf_cri;
 	sys_stat.nr_lat_cri += c->nr_lat_cri;
 	sys_stat.nr_x_migration += c->nr_x_migration;

@@ -72,6 +72,7 @@ struct sys_stat {
 
 	u64	nr_sched;	/* total scheduling so far */
 	u64	nr_preempt;	/* total number of preemption operations triggered */
+	u64	nr_reenq_kfunc;	/* re-enqueues with the KFUNC reason, cumulative */
 	u64	nr_perf_cri;	/* number of performance-critical tasks scheduled */
 	u64	nr_lat_cri;	/* number of latency-critical tasks scheduled */
 	u64	nr_x_migration; /* number of cross domain migration */

@@ -417,7 +417,7 @@ u64 peek_dsq_vtime(u64 dsq_id)
 {
 	struct task_struct *p;
 
-	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	p = scx_bpf_dsq_peek(dsq_id);
 	return p ? p->scx.dsq_vtime : U64_MAX;
 }
 
