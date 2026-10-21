@@ -10,12 +10,12 @@
 //! recognised by comparing the process' arguments with the table, and
 //! anything that matches no row is shown as custom flags.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Where the profile file is looked for, first hit wins. scxtui's own
 /// paths come first, then scx_loader's, so a system migrating off the
@@ -31,7 +31,7 @@ const CONFIG_CANDIDATES: [&str; 8] = [
     "/usr/share/scx_loader.toml",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Mode {
     #[serde(alias = "auto")]
     Auto,
@@ -88,12 +88,17 @@ impl Mode {
 
 /// One scheduler's table. A `None` row falls back to the built-in default
 /// for that scheduler and mode; an explicit empty list means "no flags".
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 struct Sched {
+    #[serde(skip_serializing_if = "Option::is_none")]
     auto_mode: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     gaming_mode: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     lowlatency_mode: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     powersave_mode: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     server_mode: Option<Vec<String>>,
 }
 
@@ -108,14 +113,28 @@ impl Sched {
         }
         .as_deref()
     }
+
+    fn row_mut(&mut self, mode: Mode) -> &mut Option<Vec<String>> {
+        match mode {
+            Mode::Auto => &mut self.auto_mode,
+            Mode::Gaming => &mut self.gaming_mode,
+            Mode::PowerSave => &mut self.powersave_mode,
+            Mode::LowLatency => &mut self.lowlatency_mode,
+            Mode::Server => &mut self.server_mode,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+/// The file's schema, scx_loader's. Schedulers are kept sorted so that
+/// an export is deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
     default_sched: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     default_mode: Option<Mode>,
-    scheds: HashMap<String, Sched>,
+    scheds: BTreeMap<String, Sched>,
 }
 
 /// The loaded profile set: file contents over built-in defaults.
@@ -202,19 +221,94 @@ impl Profiles {
     }
 }
 
+/// Output format of `--export-profiles`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// For scripts and other front ends: every row filled in.
+    Json,
+    /// The file's own schema, so the output loads back as a profiles
+    /// file: a starting point to edit, or a record of what is in effect.
+    Toml,
+}
+
+impl ExportFormat {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "json" => Some(Self::Json),
+            "toml" => Some(Self::Toml),
+            _ => None,
+        }
+    }
+}
+
 impl Profiles {
-    /// The resolved table as JSON: for every scheduler in `schedulers`
-    /// (plus any the file names) the flags each profile resolves to, with
-    /// file rows and built-in defaults already merged, so a consumer
-    /// sees exactly what `Enter` would write. The shape is deliberately
-    /// not the TOML schema: that one has holes (missing rows) this one
-    /// fills in.
-    pub fn export(&self, schedulers: &[String]) -> serde_json::Value {
-        let mut names: Vec<&str> = schedulers.iter().map(String::as_str).collect();
-        names.extend(self.config.scheds.keys().map(String::as_str));
+    /// The schedulers an export covers: `installed` (what the TUI would
+    /// list) and every one the file names, as a row or as the default,
+    /// plus, when `builtin` is set, every one with a built-in row.
+    /// Sorted and deduplicated. The JSON export keeps `builtin` off: its
+    /// keys have meant "available here" since it appeared, and a front
+    /// end may offer them as such. The TOML export sets it: a profiles
+    /// file is configuration, not inventory, and a row for a scheduler
+    /// that is not installed today must not drop out of it.
+    fn export_names(&self, installed: &[String], builtin: bool) -> Vec<String> {
+        let mut names: Vec<String> = installed.to_vec();
+        names.extend(self.config.scheds.keys().cloned());
+        names.extend(self.config.default_sched.iter().cloned());
+        if builtin {
+            names.extend(BUILTIN_SCHEDS.iter().map(|s| (*s).to_owned()));
+        }
         names.sort_unstable();
         names.dedup();
-        let scheds: serde_json::Map<String, serde_json::Value> = names
+        names
+    }
+
+    /// The resolved table in the file's own schema: every row filled in
+    /// with what it resolves to, so loading the output gives the same
+    /// flags for every scheduler and mode (an empty row stays empty,
+    /// which reads back as "no flags" either way). The guarantee is
+    /// that semantic round trip, not identical text: the header names
+    /// the file the rows came from, since the merge leaves no other
+    /// trace, and an export installed as a file is exported again under
+    /// that file's name.
+    pub fn export_toml(&self, installed: &[String]) -> Result<String> {
+        let scheds: BTreeMap<String, Sched> = self
+            .export_names(installed, true)
+            .into_iter()
+            .map(|sched| {
+                let mut table = Sched::default();
+                for mode in MODES {
+                    *table.row_mut(mode) = Some(self.flags(&sched, mode));
+                }
+                (sched, table)
+            })
+            .collect();
+        let config = Config {
+            default_sched: self.config.default_sched.clone(),
+            default_mode: self.config.default_mode,
+            scheds,
+        };
+        let body = toml::to_string(&config).context("cannot serialise the profiles")?;
+        let origin = match &self.source {
+            Some(path) => format!("{} over the built-in defaults", path.display()),
+            None => "the built-in defaults".to_owned(),
+        };
+        Ok(format!(
+            "# scxtui profiles, resolved from {origin}.\n\
+# Every row is spelled out; a row left out of a file keeps the\n\
+# built-in default for that scheduler and mode.\n\n{body}"
+        ))
+    }
+
+    /// The resolved table as JSON: for every installed scheduler (plus
+    /// any the file names) the flags each profile resolves to, with file
+    /// rows and built-in defaults already merged, so a consumer sees
+    /// exactly what `Enter` would write. The shape is deliberately not
+    /// the TOML schema: that one has holes (missing rows) this one fills
+    /// in. `builtin` stands in for the installed list when there is no
+    /// system to ask.
+    pub fn export(&self, installed: &[String], builtin: bool) -> serde_json::Value {
+        let scheds: serde_json::Map<String, serde_json::Value> = self
+            .export_names(installed, builtin)
             .into_iter()
             .map(|sched| {
                 let modes: serde_json::Map<String, serde_json::Value> = MODES
@@ -222,11 +316,11 @@ impl Profiles {
                     .map(|mode| {
                         (
                             mode.label().to_owned(),
-                            serde_json::Value::from(self.flags(sched, *mode)),
+                            serde_json::Value::from(self.flags(&sched, *mode)),
                         )
                     })
                     .collect();
-                (sched.to_owned(), serde_json::Value::Object(modes))
+                (sched, serde_json::Value::Object(modes))
             })
             .collect();
         serde_json::json!({
@@ -238,6 +332,17 @@ impl Profiles {
         })
     }
 }
+
+/// The schedulers [`builtin_flags`] has rows for, in table order. Kept
+/// in step with the table by hand; the test below catches a name that
+/// resolves to nothing.
+const BUILTIN_SCHEDS: [&str; 5] = [
+    "scx_bpfland",
+    "scx_lavd",
+    "scx_p2dq",
+    "scx_tickless",
+    "scx_cosmos",
+];
 
 /// scx_loader's built-in mode tables, keyed by scheduler name. Kept in
 /// sync by hand; the loader is the reference.
@@ -350,7 +455,7 @@ auto_mode = []
             config,
             source: Some(PathBuf::from("/etc/scxtui.toml")),
         };
-        let out = profiles.export(&strs(&["scx_rusty", "scx_lavd"]));
+        let out = profiles.export(&strs(&["scx_rusty", "scx_lavd"]), false);
         assert_eq!(out["source"], "/etc/scxtui.toml");
         assert_eq!(out["default"]["sched"], "scx_lavd");
         assert_eq!(out["default"]["mode"], "auto");
@@ -371,7 +476,106 @@ auto_mode = []
             out["schedulers"]["scx_rusty"]["gaming"],
             serde_json::json!([])
         );
-        assert_eq!(out["schedulers"].as_object().unwrap().len(), 3);
+        // The installed ones and the file's, not the whole built-in
+        // table: the keys have meant "available here" since the export
+        // appeared. The default counts as named by the file.
+        let names: Vec<&String> = out["schedulers"].as_object().unwrap().keys().collect();
+        assert_eq!(names, ["scx_bpfland", "scx_lavd", "scx_rusty"]);
+        let out = profiles.export(&strs(&["scx_rusty"]), false);
+        assert!(out["schedulers"].get("scx_lavd").is_some(), "default_sched");
+        assert!(out["schedulers"].get("scx_cosmos").is_none());
+        // --builtin: the table's own schedulers, nothing installed.
+        let out = Profiles::default().export(&[], true);
+        let names: Vec<&String> = out["schedulers"].as_object().unwrap().keys().collect();
+        assert_eq!(names.len(), BUILTIN_SCHEDS.len());
+    }
+
+    #[test]
+    fn every_builtin_scheduler_has_a_row() {
+        // The list is kept by hand; a name that resolves to nothing in
+        // every mode is a typo or a scheduler dropped from the table.
+        for sched in BUILTIN_SCHEDS {
+            assert!(
+                MODES
+                    .iter()
+                    .any(|mode| !builtin_flags(sched, *mode).is_empty()),
+                "{sched} has no built-in rows"
+            );
+        }
+    }
+
+    #[test]
+    fn toml_export_loads_back_to_the_same_flags() {
+        // Built-in only, nothing installed: the output is a profiles
+        // file that resolves every scheduler and mode as the table does.
+        let builtin = Profiles::default();
+        let text = builtin.export_toml(&[]).unwrap();
+        assert!(text.starts_with("# scxtui profiles, resolved from the built-in defaults."));
+        let reloaded = Profiles {
+            config: Profiles::parse(&text).unwrap(),
+            source: None,
+        };
+        for sched in BUILTIN_SCHEDS {
+            for mode in MODES {
+                assert_eq!(
+                    reloaded.flags(sched, mode),
+                    builtin.flags(sched, mode),
+                    "{sched} {mode:?}"
+                );
+            }
+        }
+        assert_eq!(reloaded.default_launch(), None);
+        // Same source on both sides, so here the text itself is a fixed
+        // point. With a file the header names it, so only the flags are
+        // promised to come back; see below.
+        assert_eq!(reloaded.export_toml(&[]).unwrap(), text);
+
+        // With a file: its rows, its default, a scheduler it names that
+        // has no table, and one that is only installed, all survive the
+        // round trip, for every scheduler the export covers and every
+        // mode. The default scheduler is covered even without a row.
+        let config = Profiles::parse(
+            "default_sched = \"scx_flash\"\ndefault_mode = \"PowerSave\"\n\
+[scheds.scx_bpfland]\ngaming_mode = [\"-k\"]\nauto_mode = []\n\
+[scheds.scx_rusty]\nserver_mode = [\"-x\"]\n",
+        )
+        .unwrap();
+        let profiles = Profiles {
+            config,
+            source: Some(PathBuf::from("/etc/scxtui.toml")),
+        };
+        let installed = strs(&["scx_rlfifo"]);
+        let text = profiles.export_toml(&installed).unwrap();
+        assert!(text.contains("/etc/scxtui.toml over the built-in defaults"));
+        let reloaded = Profiles {
+            config: Profiles::parse(&text).unwrap(),
+            source: None,
+        };
+        assert_eq!(
+            reloaded.default_launch(),
+            Some(("scx_flash", Mode::PowerSave))
+        );
+        for sched in profiles.export_names(&installed, true) {
+            for mode in MODES {
+                assert_eq!(
+                    reloaded.flags(&sched, mode),
+                    profiles.flags(&sched, mode),
+                    "{sched} {mode:?}"
+                );
+            }
+        }
+        for sched in ["scx_flash", "scx_rlfifo", "scx_rusty", "scx_lavd"] {
+            assert!(text.contains(&format!("[scheds.{sched}]")), "{sched}");
+        }
+        // Spot checks on what the loop proves: file row, explicit empty
+        // row, built-in fallback, a row for a scheduler with no table.
+        assert_eq!(reloaded.flags("scx_bpfland", Mode::Gaming), strs(&["-k"]));
+        assert!(reloaded.flags("scx_bpfland", Mode::Auto).is_empty());
+        assert_eq!(
+            reloaded.flags("scx_bpfland", Mode::Server),
+            strs(&["-s", "20000", "-S"])
+        );
+        assert_eq!(reloaded.flags("scx_rusty", Mode::Server), strs(&["-x"]));
     }
 
     #[test]

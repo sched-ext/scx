@@ -4,7 +4,8 @@
 # Searched in order: /etc/scxtui/config.toml, /etc/scxtui.toml,
 # /etc/scx_loader/config.toml, /etc/scx_loader.toml, then the same four
 # names under /usr/share. Without any file, scx_loader's built-in tables
-# apply.
+# apply. `scxtui --export-profiles --builtin --format toml` writes those
+# tables in this format, as a complete file to start from.
 
 # Scheduler and profile the `d` key restores. The profile defaults to Auto.
 #default_sched = "scx_bpfland"
