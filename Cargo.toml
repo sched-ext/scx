@@ -36,6 +36,7 @@ members = [
     "scheds/experimental/scx_rlocal",
     "scheds/experimental/scx_rvtime",
     "scheds/experimental/scx_tickless",
+    "scheds/experimental/scx_intent",
     "tools/scx_characterize",
     "tools/scxcli",
     "tools/scxtop",
