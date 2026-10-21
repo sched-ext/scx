@@ -923,6 +923,7 @@ static __noinline bool bw_unpark_one(struct grp_hdr __arena *hdr, u64 now)
 			      tctx->se.vruntime, 0))
 		return true;
 	cid_queued_set(cid);
+	cid_note_queued(cid);
 	if (cid != scx_bpf_this_cid())
 		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 

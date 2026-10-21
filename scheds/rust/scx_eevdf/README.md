@@ -332,6 +332,16 @@ be turned off on the command line to compare the two rules against each other.
    balance, and that core moves one queued task or requests a running one
    after queued pulling fails. This makes one runnable task per physical core
    the steady state whenever affinity allows it.
+   A CPU going idle does the same without waiting for the tick: when its pull
+   took nothing while the system is overloaded, it asks the source with the
+   strongest imbalance for its running task at once, as `sched_balance_rq()`
+   does for `CPU_NEWLY_IDLE`. The overload indicator follows
+   `rd->overloaded`: set when a task is queued behind a running one and
+   recomputed by every balance of the whole system, periodic or newly idle.
+   As in `asym_active_balance()`, a packing move takes the running task
+   whatever its size. Without this, tasks that sleep briefly on SMT cores fell
+   into step, and on a hybrid CPU every core halting at once makes the package
+   drop all clocks.
 
  - **Utilization.** What a task uses is a running average of the time it spends
    on a CPU, read as the larger of that and what it used over its last

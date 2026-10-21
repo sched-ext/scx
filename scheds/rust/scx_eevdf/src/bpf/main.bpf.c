@@ -525,6 +525,7 @@ void BPF_STRUCT_OPS(eevdf_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cid_queue_insert(p, tctx, cid, task_request(p), dl,
 				     tctx->se.vruntime, enq_flags)) {
 			cid_queued_set(cid);
+			cid_note_queued(cid);
 			if (cid_idle_test(cid))
 				scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 		}
@@ -715,6 +716,7 @@ queue:
 		return;
 	}
 	cid_queued_set(prev_cid);
+	cid_note_queued(prev_cid);
 
 	/*
 	 * queued_cid_should_preempt() arms the hrtick for the running task when
@@ -938,8 +940,10 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 	 * detach_tasks() fails.
 	 */
 	cid_idle_rearm(cid);
-	if (active_balance && request_active_balance(cid, now))
-		return;
+	if (active_balance)
+		request_active_balance(cid, now);
+	else
+		newidle_active_balance(cid, now);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init)

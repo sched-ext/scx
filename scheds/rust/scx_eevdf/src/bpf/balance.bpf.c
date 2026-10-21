@@ -278,7 +278,6 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 				 u64 now)
 {
 	struct cid_topo __arena *src;
-	task_ctx_t *tctx;
 	bool restricted;
 	u32 base, nr, nr_tiers, sibling, t;
 
@@ -296,15 +295,6 @@ static s32 idle_asym_packing_cid(const struct task_struct *p, s32 src_cid,
 				return sibling;
 		}
 	}
-
-	/*
-	 * scx_eevdf has no fair-style group load attached to the running task.
-	 * Do not actively chase a bursty current task through transient idle
-	 * gaps; queued work is handled independently by the detach scan.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx || util_fits_cap(task_util(tctx, now), src->cap))
-		return -EBUSY;
 
 	/* Balance the child LLC domain before walking its parent, as fair.c does. */
 	nr_tiers = src->place_tier;
@@ -435,6 +425,18 @@ static s32 idle_balance_cid(const struct task_struct *p, s32 src_cid, u64 now)
 	return cid >= 0 ? select_idle_smt_balance_cid(p, cid, now) : cid;
 }
 
+/*
+ * Does the core of @dst_cid count as idle for an active balance to it? Every
+ * cid of it must be idle, except that a @newly_idle destination, still in
+ * the dispatch that finds it idle and not idle yet, needs only its siblings
+ * idle, as is_core_idle() leaves the CPU itself out.
+ */
+static bool dst_core_idle(s32 dst_cid, bool newly_idle)
+{
+	return !smt_enabled ||
+	       (newly_idle ? siblings_idle(dst_cid) : core_is_idle(dst_cid));
+}
+
 enum active_balance_type {
 	ACTIVE_BALANCE_NONE,
 	ACTIVE_BALANCE_CAPACITY,
@@ -446,9 +448,10 @@ enum active_balance_type {
 /*
  * Classify the imbalance between an idle destination and a source. This is
  * task-independent: affinity and capacity fit are checked when a queued task
- * is detached or the source revalidates its current task.
+ * is detached or the source revalidates its current task. @whole_core says
+ * whether the core of @dst_cid counts as idle, see dst_core_idle().
  */
-static u32 active_balance_type(s32 dst_cid, s32 src_cid)
+static u32 active_balance_type(s32 dst_cid, s32 src_cid, bool whole_core)
 {
 	struct cid_topo __arena *dst, *src;
 
@@ -467,12 +470,11 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 		       dst->place_tier < src->place_tier ?
 		       ACTIVE_BALANCE_LOCAL_PACKING : ACTIVE_BALANCE_NONE;
 	if (smt_enabled && dst->ranges.llc_base == src->ranges.llc_base &&
-	    core_is_idle(dst_cid) && !siblings_idle(src_cid))
+	    whole_core && !siblings_idle(src_cid))
 		return ACTIVE_BALANCE_LOCAL_SMT;
 
 	if (asym_packing) {
-		if (dst->ranges.llc_base == src->ranges.llc_base &&
-		    (!smt_enabled || core_is_idle(dst_cid))) {
+		if (dst->ranges.llc_base == src->ranges.llc_base && whole_core) {
 			if (dst->place_tier < src->place_tier)
 				return ACTIVE_BALANCE_LOCAL_PACKING;
 			if (smt_enabled && !siblings_idle(src_cid))
@@ -480,49 +482,51 @@ static u32 active_balance_type(s32 dst_cid, s32 src_cid)
 		}
 		if (dst->ranges.llc_base != src->ranges.llc_base &&
 		    (!numa_enabled || dst->ranges.node_base == src->ranges.node_base) &&
-		    (!smt_enabled || core_is_idle(dst_cid)) &&
-		    dst->llc_place_tier < src->llc_place_tier) {
+		    whole_core && dst->llc_place_tier < src->llc_place_tier) {
 			return ACTIVE_BALANCE_REMOTE_PACKING;
 		}
 	}
 
-	if (asym_capacity && dst->cap > src->cap &&
-	    (!smt_enabled || core_is_idle(dst_cid)))
+	if (asym_capacity && dst->cap > src->cap && whole_core)
 		return ACTIVE_BALANCE_CAPACITY;
 
 	return ACTIVE_BALANCE_NONE;
 }
 
 /*
- * Select the busiest source with the strongest asymmetric imbalance. Try to
- * detach an eligible queued task from it first; only if that fails ask for its
- * current task through active balance. This is the focused equivalent of
- * sched_balance_find_src_group(), sched_balance_find_src_rq(), detach_tasks()
- * and the active-balance fallback.
+ * The source with the strongest asymmetric imbalance against the idle
+ * @dst_cid, then the worst place tier, the most tasks runnable and the
+ * busiest, or -1: sched_balance_find_src_group() and
+ * sched_balance_find_src_rq(). @newly_idle as for dst_core_idle(). A global
+ * function, so that the walk is verified once for both callers.
  */
-static bool request_active_balance(s32 dst_cid, u64 now)
+__noinline s32 active_balance_find_src(s32 dst_cid, u64 now, u32 newly_idle)
 {
-	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
-	u32 base = numa_enabled ? cid_topo(dst_cid)->ranges.node_base : 0;
-	u32 nr = numa_enabled ? cid_topo(dst_cid)->ranges.node_nr : nr_cids;
-	u32 start = dst->steal_cursor;
+	struct cid_ctx __arena *dst;
+	u32 base, nr, start;
 	u32 best_type = ACTIVE_BALANCE_NONE, best_tier = 0;
 	u32 best_nr_running = 0;
-	u32 detach = ACTIVE_BALANCE_MISS;
 	u64 best_util = 0;
 	s32 best = -1;
+	bool whole_core;
 	u32 i;
 
-	if ((!smt_enabled && !asym_packing && !asym_capacity) ||
-	    !cid_idle_test(dst_cid))
-		return false;
+	TOUCH_ARENA();
+
+	if (!cid_valid(dst_cid))
+		return -1;
+	dst = cid_ctx(dst_cid);
+	base = numa_enabled ? cid_topo(dst_cid)->ranges.node_base : 0;
+	nr = numa_enabled ? cid_topo(dst_cid)->ranges.node_nr : nr_cids;
+	start = dst->steal_cursor;
+	whole_core = dst_core_idle(dst_cid, newly_idle);
 	if (start < base || start >= base + nr)
 		start = base;
 
 	bpf_arena_for(i, 0, nr) {
 		s32 src_cid = base + (start - base + i) % nr;
 		struct cid_ctx __arena *src = cid_ctx(src_cid);
-		u32 type = active_balance_type(dst_cid, src_cid);
+		u32 type = active_balance_type(dst_cid, src_cid, whole_core);
 		u32 nr_running;
 		u64 util;
 
@@ -553,6 +557,26 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 		best_util = util;
 	}
 
+	return best;
+}
+
+/*
+ * Select the busiest source with the strongest asymmetric imbalance. Try to
+ * detach an eligible queued task from it first; only if that fails ask for its
+ * current task through active balance. This is the focused equivalent of
+ * sched_balance_find_src_group(), sched_balance_find_src_rq(), detach_tasks()
+ * and the active-balance fallback.
+ */
+static bool request_active_balance(s32 dst_cid, u64 now)
+{
+	struct cid_ctx __arena *dst = cid_ctx(dst_cid);
+	u32 detach = ACTIVE_BALANCE_MISS;
+	s32 best;
+
+	if ((!smt_enabled && !asym_packing && !asym_capacity) ||
+	    !cid_idle_test(dst_cid))
+		return false;
+	best = active_balance_find_src(dst_cid, now, false);
 	if (best < 0) {
 		active_balance_complete(dst_cid, ACTIVE_BALANCE_MISS);
 		return false;
@@ -574,6 +598,37 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
 
 	return false;
+}
+
+/*
+ * need_active_balance() for @dst_cid, in the dispatch that finds it newly
+ * idle, if its idle pull took nothing while the system is overloaded, see
+ * newidle_stuck: ask the source it would relieve most for its running task
+ * at once, as sched_balance_rq() does for CPU_NEWLY_IDLE, with no interval
+ * of its own between requests. A source with work queued is left to the
+ * pulls. The source revalidates the request with the destination idle, see
+ * active_balance_target(). Returns 1 if a request went out. A global
+ * function, so that ops.dispatch() is verified with one call instead of the
+ * source walk.
+ */
+__noinline int newidle_active_balance(s32 dst_cid, u64 now)
+{
+	s32 best;
+
+	TOUCH_ARENA();
+
+	if ((!smt_enabled && !asym_packing && !asym_capacity) ||
+	    !cid_ctx(dst_cid)->newidle_stuck)
+		return 0;
+	best = active_balance_find_src(dst_cid, now, true);
+	if (best < 0 || cid_queue_nr(best) ||
+	    !READ_ONCE(cid_pack(best)->curr_w) ||
+	    __sync_val_compare_and_swap(&cid_ctx(best)->active_balance_cid, -1,
+					dst_cid) != -1)
+		return 0;
+	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
+
+	return 1;
 }
 
 /*
@@ -608,20 +663,15 @@ static s32 active_balance_target(const struct task_struct *p, s32 src_cid,
 	src = cid_topo(src_cid);
 	dst = cid_topo(dst_cid);
 
-	type = active_balance_type(dst_cid, src_cid);
+	type = active_balance_type(dst_cid, src_cid,
+				   dst_core_idle(dst_cid, false));
+	/*
+	 * A busy sibling and a better place tier are the imbalance itself,
+	 * whatever the size of the task, as for asym_active_balance(). Only a
+	 * misfit move needs a task too big for @src_cid.
+	 */
 	if (type > ACTIVE_BALANCE_CAPACITY) {
-		/* Preferred SMT siblings remain fair.c's direct priority case. */
-		if (dst->ranges.core_base == src->ranges.core_base) {
-			target = dst_cid;
-			goto out;
-		}
-		if (type == ACTIVE_BALANCE_LOCAL_SMT) {
-			target = dst_cid;
-			goto out;
-		}
-		tctx = try_lookup_task_ctx(p);
-		if (tctx && !util_fits_cap(task_util(tctx, now), src->cap))
-			target = dst_cid;
+		target = dst_cid;
 		goto out;
 	}
 
@@ -1140,6 +1190,8 @@ busy_balance_domain(s32 dst_cid, u32 base, u32 nr, u32 level, u64 now)
 	if (time_before(now, READ_ONCE(dst->busy_balance_next[level])) ||
 	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL))
 		return false;
+	if (nr == nr_cids)
+		update_overloaded();
 
 	start = READ_ONCE(dst->busy_balance_cursor[level]);
 	if (start < base || start >= base + nr)

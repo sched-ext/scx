@@ -483,7 +483,9 @@ steal_from_range(s32 dst_cid, s32 t, u32 base, u32 nr, u32 start, u64 now,
  * Only the heads are considered, a queue whose head cannot run on @dst_cid
  * (or is still hot there) is skipped as a whole.
  *
- * Return true if a task has been dispatched, false otherwise.
+ * Return true if a task has been dispatched, false otherwise. A scan that
+ * took nothing records in newidle_stuck whether the system is overloaded,
+ * see newidle_overload_check().
  */
 static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			   bool kicked)
@@ -498,7 +500,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	u32 failed = cctx->nr_balance_failed;
 	bool sample_newidle = newidle_sampling && !force_steal && !kicked;
 	bool budget = false, node_skipped = false, system_skipped = false;
-	bool scanned = false, admitted;
+	bool scanned = false, admitted, root = false;
 	u64 curr_cost = 0, t0 = 0;
 	u32 weight;
 	u32 start;
@@ -512,6 +514,8 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 	 */
 	if (force_steal)
 		WRITE_ONCE(cctx->force_steal, 0);
+	if (cctx->newidle_stuck)
+		cctx->newidle_stuck = 0;
 
 	/*
 	 * A cid that is keeping the task it is running has nothing to pull:
@@ -568,6 +572,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 		u64 t1;
 
 		scanned = true;
+		root = topo->ranges.llc_nr == nr_cids;
 		if (nr_place_tiers > 1 &&
 		    (!smt_enabled || core_is_idle(dst_cid))) {
 			u32 t;
@@ -611,6 +616,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			u64 t1, cost;
 
 			scanned = true;
+			root = node_nr == nr_cids;
 			src = steal_from_range(dst_cid, -1, node_base, node_nr,
 					       start + 1, now,
 					       !force_steal &&
@@ -639,6 +645,7 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 			u64 t1, cost;
 
 			scanned = true;
+			root = true;
 			src = steal_from_range(dst_cid, -1, 0, nr_cids,
 					       start + 1, now,
 					       !force_steal &&
@@ -667,6 +674,9 @@ static bool try_steal_task(s32 dst_cid, bool has_prev, bool keep, u64 now,
 		cctx->steal_cursor = src >= 0 ? src : start + 1;
 	}
 
+	if (scanned && src < 0)
+		cctx->newidle_stuck = newidle_overload_check(dst_cid, root);
+
 own:
 	if (src < 0 && own)
 		src = dst_cid;
@@ -680,6 +690,7 @@ own:
 		      move_first_eligible_to_local(src, cid_clock_task_at(src, now), has_prev) :
 		      cid_queue_move_head_to_local(src))) {
 			cid_queued_check(src);
+			cctx->newidle_stuck = 0;
 			return false;
 		}
 	}
