@@ -388,10 +388,11 @@ fn toml_basic_string(text: &str) -> String {
 /// The schedulers [`builtin_flags`] has rows for, in table order. Kept
 /// in step with the table by hand; the test below catches a name that
 /// resolves to nothing.
-const BUILTIN_SCHEDS: [&str; 5] = [
+const BUILTIN_SCHEDS: [&str; 6] = [
     "scx_bpfland",
     "scx_lavd",
     "scx_p2dq",
+    "scx_chaos",
     "scx_tickless",
     "scx_cosmos",
 ];
@@ -407,6 +408,14 @@ fn builtin_flags(sched: &str, mode: Mode) -> &'static [&'static str] {
         }
         ("scx_bpfland", Mode::LowLatency) => &["-m", "performance", "-w"],
         ("scx_bpfland", Mode::Server) => &["-s", "20000", "-S"],
+
+        ("scx_chaos", Mode::Auto) => &["--sched-mode", "default"],
+        ("scx_chaos", Mode::Gaming) => {
+            &["--task-slice", "true", "-f", "--sched-mode", "performance"]
+        }
+        ("scx_chaos", Mode::PowerSave) => &["--sched-mode", "efficiency"],
+        ("scx_chaos", Mode::LowLatency) => &["-y", "-f", "--task-slice", "true"],
+        ("scx_chaos", Mode::Server) => &["--keep-running"],
 
         ("scx_lavd", Mode::Auto) => &["--autopilot", "--pinned-slice-us", "500"],
         ("scx_lavd", Mode::Gaming | Mode::LowLatency) => {
