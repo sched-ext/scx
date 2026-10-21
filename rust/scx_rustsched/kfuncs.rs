@@ -26,6 +26,8 @@ kfuncs! {
     #[safe] fn scx_bpf_kick_cid(cid: I32, flags: U64);
     #[safe] fn scx_bpf_nr_cpu_ids() -> U32;
     #[safe] fn scx_bpf_tid_to_task(tid: U64) -> TaskPtr;
+    fn bpf_task_acquire(task: TaskPtr) -> TaskPtr;
+    fn bpf_task_release(task: TaskPtr);
     #[safe] fn scx_bpf_cidperf_set(cid: I32, perf: U32) -> I32;
     #[safe] fn scx_bpf_this_cid() -> I32;
     #[safe] fn scx_bpf_cpu_to_cid(cpu: I32) -> I32;
