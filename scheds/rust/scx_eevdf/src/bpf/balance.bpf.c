@@ -595,6 +595,7 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 		active_balance_complete(dst_cid, detach);
 		return false;
 	}
+	cid_note_active_balance();
 	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
 
 	return false;
@@ -626,6 +627,7 @@ __noinline int newidle_active_balance(s32 dst_cid, u64 now)
 	    __sync_val_compare_and_swap(&cid_ctx(best)->active_balance_cid, -1,
 					dst_cid) != -1)
 		return 0;
+	cid_note_active_balance();
 	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
 
 	return 1;

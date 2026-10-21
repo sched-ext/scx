@@ -274,7 +274,8 @@ static void cid_queued_set(s32 cid)
 /*
  * The root domain's overload indicator, rd->overloaded: set when a cid gets
  * a task queued behind the one it runs, as add_nr_running() sets it when a
- * runqueue reaches two tasks, and recomputed by any balance of the whole
+ * runqueue reaches two tasks, or is asked for its running task, see
+ * cid_note_active_balance(), and recomputed by any balance of the whole
  * system, periodic or newly idle, as update_sd_lb_stats() does at the root.
  * Written only when it changes, in a section of its own, as it is read on
  * every enqueue.
@@ -286,6 +287,17 @@ static void cid_note_queued(s32 cid)
 {
 	if (!READ_ONCE(eevdf_overloaded) && cid_valid(cid) &&
 	    READ_ONCE(cid_pack(cid)->curr_w))
+		WRITE_ONCE(eevdf_overloaded, 1);
+}
+
+/*
+ * An active balance request went out to a cid. fair.c queues the stopper
+ * beside the task running there, and that second runnable task sets the
+ * indicator as any other would.
+ */
+static void cid_note_active_balance(void)
+{
+	if (!READ_ONCE(eevdf_overloaded))
 		WRITE_ONCE(eevdf_overloaded, 1);
 }
 
