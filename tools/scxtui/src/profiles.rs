@@ -169,16 +169,28 @@ impl Profiles {
             })
     }
 
-    /// Every mode whose flag set for `sched` is exactly `flags`, in
-    /// [`MODES`] order. Several modes can share a flag set (lavd's gaming
-    /// and lowlatency, or two empty rows), and the process' argv cannot
-    /// tell them apart; callers that need one answer take the first and
-    /// callers that report state should show the whole list.
+    /// Whether `mode` is configured for `sched`, by scx_loader's rule:
+    /// `Auto` always is, since it means the scheduler's own defaults;
+    /// any other mode only when it has flags. A mode without a row is
+    /// not a profile, it is the absence of one, so it is neither listed
+    /// by `modes` nor recognised in a running process.
+    pub fn configured(&self, sched: &str, mode: Mode) -> bool {
+        mode == Mode::Auto || !self.flags(sched, mode).is_empty()
+    }
+
+    /// Every configured mode whose flag set for `sched` is exactly
+    /// `flags`, in [`MODES`] order. Several modes can share a flag set
+    /// (lavd's gaming and lowlatency), and the process' argv cannot tell
+    /// them apart; callers that need one answer take the first and
+    /// callers that report state should show the whole list. A process
+    /// without flags matches `Auto` alone: the unconfigured modes run
+    /// the same way, but naming them would list every mode for a
+    /// scheduler that has no profiles at all.
     pub fn modes_for(&self, sched: &str, flags: &[String]) -> Vec<Mode> {
         MODES
             .iter()
             .copied()
-            .filter(|mode| self.flags(sched, *mode) == flags)
+            .filter(|mode| self.configured(sched, *mode) && self.flags(sched, *mode) == flags)
             .collect()
     }
 
@@ -384,10 +396,18 @@ auto_mode = []
             [Mode::Gaming, Mode::LowLatency]
         );
 
-        assert_eq!(
-            profiles.modes_for("scx_cosmos", &[]),
-            [Mode::Auto, Mode::Server]
-        );
+        // No flags: Auto alone, never the modes that merely lack a row.
+        // cosmos has rows for three modes, rburst for none; both run
+        // their own defaults in Auto, and the answer is the same.
+        assert_eq!(profiles.modes_for("scx_cosmos", &[]), [Mode::Auto]);
+        assert_eq!(profiles.modes_for("scx_rburst", &[]), [Mode::Auto]);
         assert!(profiles.modes_for("scx_bpfland", &strs(&["-k"])).is_empty());
+        // A file row that is explicitly empty is still not a profile.
+        let empty_row = Profiles::parse("[scheds.scx_rburst]\nserver_mode = []\n").unwrap();
+        let profiles = Profiles {
+            config: empty_row,
+            ..Profiles::default()
+        };
+        assert_eq!(profiles.modes_for("scx_rburst", &[]), [Mode::Auto]);
     }
 }
