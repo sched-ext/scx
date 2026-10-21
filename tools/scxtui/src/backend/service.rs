@@ -818,7 +818,30 @@ fn parse_search_path(text: &str) -> Result<Vec<PathBuf>> {
 /// lookup would. The found path is kept as is, symlink and all, since
 /// packaging may rely on the link.
 fn resolve_executable(sched: &str) -> Result<String> {
-    resolve_in(sched, &system_binary_dirs()?)
+    resolve_scheduler(sched, &system_binary_dirs()?)
+}
+
+/// Admits only a name the scan of `dirs` discovers, then resolves it.
+/// This is the backend's own check, so it holds for every caller: the
+/// CLI validates against the discovered list before it gets here, but
+/// the TUI's restore takes `default_sched` straight from the profiles
+/// file, and a path there (`/tmp/scx_evil`) would survive
+/// [`validate_value`] and, joined onto a search directory, replace it
+/// wholesale. A discovered name is a bare `scx_*` executable in a
+/// system directory and nothing else.
+fn resolve_scheduler(sched: &str, dirs: &[PathBuf]) -> Result<String> {
+    let known = scan_dirs(dirs.iter().cloned());
+    if !known.iter().any(|name| name == sched) {
+        bail!(
+            "{sched:?} is not a scheduler in systemd's default search path (found: {})",
+            if known.is_empty() {
+                "none".to_owned()
+            } else {
+                known.join(", ")
+            }
+        );
+    }
+    resolve_in(sched, dirs)
 }
 
 fn resolve_in(sched: &str, dirs: &[PathBuf]) -> Result<String> {
@@ -1495,6 +1518,29 @@ mod tests {
         // A relative entry would write a path that means something else
         // under the unit's working directory; it does not count.
         assert!(resolve_in("scx_lavd", &[PathBuf::from("bin")]).is_err());
+
+        // The scheduler resolver admits discovered names only. A path,
+        // absolute or relative, joins onto the search directories as
+        // itself and must not get that far; nor does a name that is
+        // there but not a scheduler, or not executable.
+        assert_eq!(
+            resolve_scheduler("scx_lavd", &dirs).unwrap(),
+            bin.join("scx_lavd").to_string_lossy()
+        );
+        let evil = dir.join("scx_evil");
+        fs::File::create(&evil).unwrap();
+        fs::set_permissions(&evil, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            resolve_in(evil.to_str().unwrap(), &dirs).is_ok(),
+            "join replaces"
+        );
+        assert!(resolve_scheduler(evil.to_str().unwrap(), &dirs).is_err());
+        assert!(resolve_scheduler("../scx_evil", &dirs).is_err());
+        fs::File::create(bin.join("scx_loader")).unwrap();
+        fs::set_permissions(bin.join("scx_loader"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(resolve_scheduler("scx_loader", &dirs).is_err());
+        let err = resolve_scheduler("scx_nope", &dirs).unwrap_err();
+        assert!(format!("{err:#}").contains("scx_cake, scx_lavd"), "{err:#}");
 
         // The status reduces a written path back to the name, so it
         // compares with the process and reads well in the panel.
