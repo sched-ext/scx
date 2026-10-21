@@ -195,95 +195,156 @@ fn write_target(info: &UnitInfo, shown: Option<&Path>) -> Result<PathBuf> {
 /// The file rewrite itself, separated from the systemd checks so it can
 /// be tested against scratch files.
 fn write_env_file(config_path: &Path, sched: &str, flags: &[String]) -> Result<()> {
-    {
-        // Edit the file behind a symlink, not the link: renaming over the
-        // link would replace it with a regular file.
-        let path = match fs::canonicalize(config_path) {
-            Ok(real) => real,
-            Err(err) if err.kind() == ErrorKind::NotFound => config_path.to_path_buf(),
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("cannot resolve {}", config_path.display()));
-            }
-        };
-        let original = match fs::read_to_string(&path) {
-            Ok(content) => Some(content),
-            Err(err) if err.kind() == ErrorKind::NotFound => None,
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "cannot read {} — refusing to rewrite a config that could not be read",
-                        path.display()
-                    )
-                });
-            }
-        };
-        let text = render_config(original.as_deref().unwrap_or(""), sched, flags);
-
-        // Write to a unique temporary file in the same directory, then
-        // rename: a crash or a full disk mid-write can never leave the
-        // config truncated, two scxtui instances never share a scratch
-        // file, and the rename is atomic within one filesystem.
-        let dir = path.parent().unwrap_or_else(|| Path::new("/"));
-        let mut tmp = tempfile::Builder::new()
-            .prefix(".scxtui-")
-            .tempfile_in(dir)
-            .with_context(|| {
+    let path = resolve_target(config_path)?;
+    let original = match fs::read_to_string(&path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| {
                 format!(
-                    "cannot create a temporary file in {} — editing the config requires root; \
-run scxtui as root to control {UNIT}",
-                    dir.display()
+                    "cannot read {} — refusing to rewrite a config that could not be read",
+                    path.display()
                 )
-            })?;
-        tmp.write_all(text.as_bytes())
-            .and_then(|()| tmp.as_file().sync_all())
-            .with_context(|| format!("cannot write {}", tmp.path().display()))?;
-        // The temp file is created 0600 and owned by this process; carry
-        // the original's owner, POSIX access ACL and mode over, in that
-        // order, so the rename neither widens nor tightens access to a
-        // file the admin set up. The mode goes last: once the file is
-        // group- or world-accessible it already belongs to the right
-        // owner and carries the right ACL, so there is no window in
-        // which the wrong principals can reach it. Other xattrs are not
-        // carried over. A missing config keeps the defaults.
-        match fs::metadata(&path) {
-            Ok(meta) => {
-                std::os::unix::fs::chown(tmp.path(), Some(meta.uid()), Some(meta.gid()))
-                    .with_context(|| format!("cannot preserve ownership of {}", path.display()))?;
-                copy_access_acl(&path, tmp.path())?;
-                tmp.as_file()
-                    .set_permissions(meta.permissions())
-                    .with_context(|| {
-                        format!("cannot preserve permissions from {}", path.display())
-                    })?;
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("cannot read permissions from {}", path.display()));
-            }
+            });
         }
-        // Last look before the swap: if someone else changed the file
-        // since it was read, their edit must not be overwritten with a
-        // rendering of the old contents. Not airtight (nothing short of a
-        // lock is), but it closes the window to the rename itself.
-        let now = match fs::read_to_string(&path) {
-            Ok(content) => Some(content),
-            Err(err) if err.kind() == ErrorKind::NotFound => None,
-            Err(err) => {
-                return Err(err).with_context(|| format!("cannot re-read {}", path.display()));
-            }
-        };
-        if now != original {
-            bail!(
-                "{} changed while scxtui was editing it — nothing written, refresh and retry",
-                path.display()
-            );
-        }
-        tmp.persist(&path)
-            .map(drop)
-            .with_context(|| format!("cannot move the new config into {}", path.display()))
+    };
+    let text = render_config(original.as_deref().unwrap_or(""), sched, flags);
+    let existing = existing_metadata(&path)?;
+    // A config scxtui creates is private, as it always has been: the
+    // unit reads it as root, nobody else needs to.
+    let mut tmp = scratch_file(&path, existing.is_some(), NewFile::Private).with_context(|| {
+        format!("editing the config requires root; run scxtui as root to control {UNIT}")
+    })?;
+    tmp.write_all(text.as_bytes())
+        .and_then(|()| tmp.as_file().sync_all())
+        .with_context(|| format!("cannot write {}", tmp.path().display()))?;
+    if let Some(meta) = &existing {
+        carry_identity(&path, meta, &tmp)?;
     }
+    // Last look before the swap: if someone else changed the file
+    // since it was read, their edit must not be overwritten with a
+    // rendering of the old contents. Not airtight (nothing short of a
+    // lock is), but it closes the window to the rename itself.
+    let now = match fs::read_to_string(&path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("cannot re-read {}", path.display()));
+        }
+    };
+    if now != original {
+        bail!(
+            "{} changed while scxtui was editing it — nothing written, refresh and retry",
+            path.display()
+        );
+    }
+    tmp.persist(&path)
+        .map(drop)
+        .with_context(|| format!("cannot move the new config into {}", path.display()))
+}
+
+/// Replaces `path` with `text` the way the environment file is
+/// rewritten: through a scratch file in the same directory and a
+/// rename, so that a failure midway leaves the file as it was, and with
+/// an existing file's identity (the file behind a symlink, owner, POSIX
+/// access ACL, mode) carried over. A new file is created as
+/// `File::create` would create it, under the umask, which is what the
+/// caller's plain write used to do. For the profile export, whose
+/// target is often the live profiles file.
+pub(crate) fn replace_file(path: &Path, text: &str) -> Result<()> {
+    let path = resolve_target(path)?;
+    let existing = existing_metadata(&path)?;
+    let mut tmp = scratch_file(&path, existing.is_some(), NewFile::Umask)?;
+    tmp.write_all(text.as_bytes())
+        .and_then(|()| tmp.as_file().sync_all())
+        .with_context(|| format!("cannot write {}", tmp.path().display()))?;
+    if let Some(meta) = &existing {
+        carry_identity(&path, meta, &tmp)?;
+    }
+    tmp.persist(&path)
+        .map(drop)
+        .with_context(|| format!("cannot move the new file into {}", path.display()))
+}
+
+/// The file behind a symlink, not the link: renaming over the link
+/// would replace it with a regular file. A missing file is itself,
+/// unless what is missing is the target of a link that is there: a
+/// rename would then replace the link, so that is refused rather than
+/// resolved either way.
+fn resolve_target(path: &Path) -> Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(real) => Ok(real),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                bail!(
+                    "{} is a symlink whose target does not exist; create the target first",
+                    path.display()
+                );
+            }
+            Ok(path.to_path_buf())
+        }
+        Err(err) => Err(err).with_context(|| format!("cannot resolve {}", path.display())),
+    }
+}
+
+/// `Some` for a file that is there, `None` for one that is not; any
+/// other failure is an error, since replacing a file whose attributes
+/// could not be read would drop whatever they were.
+fn existing_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => {
+            Err(err).with_context(|| format!("cannot read the attributes of {}", path.display()))
+        }
+    }
+}
+
+/// The mode a file that did not exist before is created with. The
+/// scratch file's own 0600 is the right thing while an existing file's
+/// identity is being copied onto it, and for a file that should stay
+/// private; a file that a plain `File::create` would have made public
+/// under the umask should come out the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewFile {
+    /// 0600, whatever the umask.
+    Private,
+    /// 0666 under the umask, as `File::create` would do.
+    Umask,
+}
+
+/// A unique scratch file in `path`'s directory, so that the rename is
+/// atomic within one filesystem and two scxtui instances never share
+/// one. When `path` exists the scratch file stays 0600 until the
+/// original's identity is copied onto it; when it does not, `new_file`
+/// decides.
+fn scratch_file(path: &Path, existing: bool, new_file: NewFile) -> Result<tempfile::NamedTempFile> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("/"));
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".scxtui-");
+    if !existing && new_file == NewFile::Umask {
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    builder
+        .tempfile_in(dir)
+        .with_context(|| format!("cannot create a temporary file in {}", dir.display()))
+}
+
+/// Carries the original's owner, POSIX access ACL and mode over to the
+/// scratch file, in that order, so the rename neither widens nor
+/// tightens access to a file the admin set up. The mode goes last: once
+/// the file is group- or world-accessible it already belongs to the
+/// right owner and carries the right ACL, so there is no window in
+/// which the wrong principals can reach it. Other xattrs are not
+/// carried over: a `security.selinux` label in particular is the new
+/// inode's, from the directory's default labelling, not the old one's.
+fn carry_identity(path: &Path, meta: &fs::Metadata, tmp: &tempfile::NamedTempFile) -> Result<()> {
+    std::os::unix::fs::chown(tmp.path(), Some(meta.uid()), Some(meta.gid()))
+        .with_context(|| format!("cannot preserve ownership of {}", path.display()))?;
+    copy_access_acl(path, tmp.path())?;
+    tmp.as_file()
+        .set_permissions(meta.permissions())
+        .with_context(|| format!("cannot preserve permissions from {}", path.display()))
 }
 
 fn unit_info() -> Result<UnitInfo> {
@@ -1546,6 +1607,134 @@ mod tests {
         // compares with the process and reads well in the panel.
         assert_eq!(sched_name("/usr/bin/scx_lavd"), "scx_lavd");
         assert_eq!(sched_name("scx_lavd"), "scx_lavd");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_file_keeps_an_existing_files_identity_and_honours_the_umask() {
+        let dir = scratch_dir("replace");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // A new file gets what File::create would give it under the
+        // current umask, whatever that is: compare with one.
+        let reference = dir.join("reference");
+        fs::File::create(&reference).unwrap();
+        let fresh = dir.join("fresh.toml");
+        replace_file(&fresh, "a\n").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "a\n");
+        assert_eq!(
+            mode(&fresh),
+            mode(&reference),
+            "umask applies to a new file"
+        );
+
+        // An existing file keeps its mode, however the umask is set.
+        fs::set_permissions(&fresh, fs::Permissions::from_mode(0o600)).unwrap();
+        replace_file(&fresh, "b\n").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "b\n");
+        assert_eq!(mode(&fresh), 0o600);
+
+        // Through a symlink: the link survives, the target is replaced.
+        // A link whose target is missing is refused, not replaced.
+        let dangling = dir.join("dangling.toml");
+        std::os::unix::fs::symlink(dir.join("nowhere.toml"), &dangling).unwrap();
+        let err = replace_file(&dangling, "x").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("target does not exist"),
+            "{err:#}"
+        );
+        assert!(
+            fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!dir.join("nowhere.toml").exists());
+        let target = dir.join("target.toml");
+        fs::write(&target, "old\n").unwrap();
+        let link = dir.join("link.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        replace_file(&link, "new\n").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+
+        // Owner and group, when this process may give files away
+        // (root); otherwise they could only be its own anyway.
+        if fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0) {
+            std::os::unix::fs::chown(&target, Some(65534), Some(65534)).unwrap();
+            replace_file(&link, "newer\n").unwrap();
+            let meta = fs::metadata(&target).unwrap();
+            assert_eq!((meta.uid(), meta.gid()), (65534, 65534));
+        }
+
+        // A POSIX access ACL comes along, where the filesystem has ACLs
+        // (the mode as the kernel stores it after the ACL is what is
+        // compared, like the config write test does).
+        if xattr::set(&target, ACCESS_ACL, &sample_acl()).is_ok() {
+            let before = xattr::get(&target, ACCESS_ACL).unwrap().expect("acl set");
+            replace_file(&link, "acl\n").unwrap();
+            assert_eq!(
+                xattr::get(&target, ACCESS_ACL).unwrap().as_deref(),
+                Some(&before[..])
+            );
+        } else {
+            eprintln!(
+                "skipping the ACL check: no POSIX ACL support on {}",
+                dir.display()
+            );
+        }
+
+        // A directory that cannot take the scratch file fails before
+        // anything is touched: no target appears.
+        let nowhere = dir.join("missing").join("x.toml");
+        assert!(replace_file(&nowhere, "x").is_err());
+        assert!(!nowhere.exists());
+        // Nothing of the scratch files is left behind.
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "dangling.toml",
+                "fresh.toml",
+                "link.toml",
+                "reference",
+                "target.toml"
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_scxtui_creates_is_private_whatever_the_umask() {
+        // The export follows the umask; the environment file does not.
+        // Both are created in the same directory under the same umask,
+        // and only the config must come out 0600.
+        let dir = scratch_dir("newconfig");
+        let config = dir.join("scx");
+        write_env_file(&config, "scx_lavd", &strs(&["-p"])).unwrap();
+        assert_eq!(
+            fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "SCX_SCHEDULER=scx_lavd\nSCX_FLAGS=\"-p\"\n"
+        );
+        let export = dir.join("profiles.toml");
+        replace_file(&export, "x\n").unwrap();
+        let reference = dir.join("reference");
+        fs::File::create(&reference).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&export), mode(&reference));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -10,11 +10,13 @@ mod logs;
 mod profiles;
 mod ui;
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 
 use app::App;
 use backend::SchedulerBackend;
-use backend::service::ServiceBackend;
+use backend::service::{ServiceBackend, replace_file};
 use profiles::{ExportFormat, Profiles};
 
 const USAGE: &str = "\
@@ -188,7 +190,7 @@ fn export_profiles(export: &Export) -> Result<()> {
     if export.target == "-" {
         print!("{text}");
     } else {
-        std::fs::write(&export.target, text)
+        replace_file(Path::new(&export.target), &text)
             .with_context(|| format!("cannot write {}", export.target))?;
     }
     Ok(())
