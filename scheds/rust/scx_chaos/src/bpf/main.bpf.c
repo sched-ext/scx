@@ -86,7 +86,7 @@ static __always_inline u64 chaos_get_prandom_u64_limit(u64 s)
 	m_high = ((x >> 32) * (s >> 32)) +
 		 (((x & 0xFFFFFFFF) * (s >> 32)) >> 32) +
 		 (((x >> 32) * (s & 0xFFFFFFFF)) >> 32);
-	m_low = x * s;
+	m_low  = x * s;
 
 	if (m_low < s) {
 		t = ((u64)(-s)) % s;
@@ -99,7 +99,7 @@ static __always_inline u64 chaos_get_prandom_u64_limit(u64 s)
 			m_high = ((x >> 32) * (s >> 32)) +
 				 (((x & 0xFFFFFFFF) * (s >> 32)) >> 32) +
 				 (((x >> 32) * (s & 0xFFFFFFFF)) >> 32);
-			m_low = x * s;
+			m_low  = x * s;
 		}
 	}
 
