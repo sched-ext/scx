@@ -410,20 +410,13 @@ fn builtin_flags(sched: &str, mode: Mode) -> &'static [&'static str] {
         ("scx_bpfland", Mode::LowLatency) => &["-m", "performance", "-w"],
         ("scx_bpfland", Mode::Server) => &["-s", "20000", "-S"],
 
-        ("scx_chaos", Mode::Auto) => &["--sched-mode", "default"],
-        ("scx_chaos", Mode::Gaming) => {
-            &["--task-slice", "true", "-f", "--sched-mode", "performance"]
-        }
-        ("scx_chaos", Mode::PowerSave) => &["--sched-mode", "efficiency"],
-        ("scx_chaos", Mode::LowLatency) => &["-y", "-f", "--task-slice", "true"],
-        ("scx_chaos", Mode::Server) => &["--keep-running"],
-
-        ("scx_lavd", Mode::Auto) => &["--autopilot", "--pinned-slice-us", "500"],
-        ("scx_lavd", Mode::Gaming | Mode::LowLatency) => {
+        // scx_mavd is a fork of scx_lavd with the same command line.
+        ("scx_lavd" | "scx_mavd", Mode::Auto) => &["--autopilot", "--pinned-slice-us", "500"],
+        ("scx_lavd" | "scx_mavd", Mode::Gaming | Mode::LowLatency) => {
             &["--performance", "--pinned-slice-us", "500"]
         }
-        ("scx_lavd", Mode::PowerSave) => &["--powersave", "--pinned-slice-us", "500"],
-        ("scx_lavd", Mode::Server) => &[
+        ("scx_lavd" | "scx_mavd", Mode::PowerSave) => &["--powersave", "--pinned-slice-us", "500"],
+        ("scx_lavd" | "scx_mavd", Mode::Server) => &[
             "--performance",
             "--slice-min-us",
             "3000",
@@ -433,28 +426,14 @@ fn builtin_flags(sched: &str, mode: Mode) -> &'static [&'static str] {
             "3000",
         ],
 
-        ("scx_mavd", Mode::Auto) => &["--autopilot", "--pinned-slice-us", "500"],
-        ("scx_mavd", Mode::Gaming | Mode::LowLatency) => {
-            &["--performance", "--pinned-slice-us", "500"]
-        }
-        ("scx_mavd", Mode::PowerSave) => &["--powersave", "--pinned-slice-us", "500"],
-        ("scx_mavd", Mode::Server) => &[
-            "--performance",
-            "--slice-min-us",
-            "3000",
-            "--slice-max-us",
-            "10000",
-            "--pinned-slice-us",
-            "3000",
-        ],
-
-        ("scx_p2dq", Mode::Auto) => &["--sched-mode", "default"],
-        ("scx_p2dq", Mode::Gaming) => {
+        // scx_chaos is a fork of scx_p2dq with the same command line.
+        ("scx_p2dq" | "scx_chaos", Mode::Auto) => &["--sched-mode", "default"],
+        ("scx_p2dq" | "scx_chaos", Mode::Gaming) => {
             &["--task-slice", "true", "-f", "--sched-mode", "performance"]
         }
-        ("scx_p2dq", Mode::PowerSave) => &["--sched-mode", "efficiency"],
-        ("scx_p2dq", Mode::LowLatency) => &["-y", "-f", "--task-slice", "true"],
-        ("scx_p2dq", Mode::Server) => &["--keep-running"],
+        ("scx_p2dq" | "scx_chaos", Mode::PowerSave) => &["--sched-mode", "efficiency"],
+        ("scx_p2dq" | "scx_chaos", Mode::LowLatency) => &["-y", "-f", "--task-slice", "true"],
+        ("scx_p2dq" | "scx_chaos", Mode::Server) => &["--keep-running"],
 
         ("scx_tickless", Mode::Gaming) => &["-f", "5000", "-s", "5000"],
         ("scx_tickless", Mode::PowerSave) => &["-f", "50"],
