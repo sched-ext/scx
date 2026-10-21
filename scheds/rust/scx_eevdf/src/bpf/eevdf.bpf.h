@@ -382,6 +382,7 @@ struct cid_ctx {
 	/* Candidate handed from a periodic scan to destination dispatch. */
 	struct scx_edq_cursor busy_dispatch_cursor;
 	u32 nr_balance_failed;	/* idle scans that found nothing they could take */
+	u32 newidle_stuck;	/* the last idle pull took nothing while overloaded */
 	u64 idle_stamp;		/* when the last idle pull began, see newidle_cost() */
 	u64 avg_idle;		/* how long the cid stays idle after one, rq->avg_idle */
 	u64 max_idle_balance_cost;	/* its worst pull, rq->max_idle_balance_cost */

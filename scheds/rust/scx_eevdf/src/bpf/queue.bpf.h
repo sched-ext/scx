@@ -272,6 +272,24 @@ static void cid_queued_set(s32 cid)
 }
 
 /*
+ * The root domain's overload indicator, rd->overloaded: set when a cid gets
+ * a task queued behind the one it runs, as add_nr_running() sets it when a
+ * runqueue reaches two tasks, and recomputed by any balance of the whole
+ * system, periodic or newly idle, as update_sd_lb_stats() does at the root.
+ * Written only when it changes, in a section of its own, as it is read on
+ * every enqueue.
+ */
+private(OVERLOAD) u64 eevdf_overloaded;
+
+/* A task was queued on @cid: if something runs there, the system is overloaded. */
+static void cid_note_queued(s32 cid)
+{
+	if (!READ_ONCE(eevdf_overloaded) && cid_valid(cid) &&
+	    READ_ONCE(cid_pack(cid)->curr_w))
+		WRITE_ONCE(eevdf_overloaded, 1);
+}
+
+/*
  * Clear the queued bit of @cid if its EDQ is empty, looking again after
  * the clear for a task queued in the meantime.
  */
@@ -295,4 +313,60 @@ static void cid_queued_check(s32 cid)
 	cmask_clear(cid, queued_cids);
 	if (cid_queue_nr(cid))
 		cmask_set(cid, queued_cids);
+}
+
+/*
+ * Whether a cid other than @dst_cid has a task waiting in its EDQ, what
+ * update_sd_lb_stats() at the root sees as an overloaded runqueue. The
+ * queued mask alone overstates it: a bit is left set across a switch and
+ * cleared lazily, see cid_queued_check(), so the queues it points at are
+ * counted. A global function, verified once for its callers.
+ */
+__noinline int queued_elsewhere(s32 dst_cid)
+{
+	u32 k, nr_words = (nr_cids + 63) / 64;
+
+	TOUCH_ARENA();
+
+	bpf_arena_for(k, 0, nr_words) {
+		u64 w = cmask_word(queued_cids, k) &
+			cmask_range_word(queued_cids, k, 0, nr_cids);
+
+		while (w && can_loop) {
+			s32 cid = k * 64 + __builtin_ctzll(w);
+
+			w &= w - 1;
+			if (cid != dst_cid && cid_valid(cid) && cid_queue_nr(cid))
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
+/* A balance of the whole system: overloaded while some cid has work waiting. */
+static void update_overloaded(void)
+{
+	u64 queued = queued_elsewhere(-1);
+
+	if (READ_ONCE(eevdf_overloaded) != queued)
+		WRITE_ONCE(eevdf_overloaded, queued);
+}
+
+/*
+ * An idle pull of @dst_cid scanned and took nothing: whether the system is
+ * overloaded, the case in which sched_balance_rq() goes on to
+ * need_active_balance(). As in fair.c, a balance at the root, @root,
+ * recomputes the indicator only after the pass that read it. A global
+ * function, so that ops.dispatch() is verified without the branches.
+ */
+__noinline int newidle_overload_check(s32 dst_cid, u32 root)
+{
+	u64 overloaded = READ_ONCE(eevdf_overloaded);
+	int work = queued_elsewhere(dst_cid);
+
+	if (root && overloaded && !work)
+		WRITE_ONCE(eevdf_overloaded, 0);
+
+	return overloaded || work;
 }
