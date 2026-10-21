@@ -39,7 +39,7 @@ about the unit and the manager environment, and drives the unit with
   [`config.toml.example`](config.toml.example). `d` restores the file's
   `default_sched` in its `default_mode`. `a` opens a field for own flags,
   written to `SCX_FLAGS` instead of a profile's. `--export-profiles` dumps
-  the resolved table as JSON.
+  the resolved table as JSON, or as a profiles file (`--format toml`).
 - `--cli`: scxctl's command set (`get`, `list`, `modes`, `start`,
   `switch`, `stop`, `restart`, `restore`) with the same flags and output
   wording, for scripts and for a terminal without the TUI.
@@ -101,6 +101,8 @@ scxtui
 scxtui --cli get
 scxtui --cli switch -s scx_lavd -m gaming
 scxtui --export-profiles profiles.json   # or - for stdout
+scxtui --export-profiles --builtin --format toml > config.toml
+sudo install -Dm644 config.toml /etc/scxtui/config.toml
 ```
 
 ### Command line
@@ -173,9 +175,22 @@ not one transaction, so another writer in between wins, as with any two
 clients editing the same file. `stop`, `list`, `restart` and help do not
 read the profiles file, so a broken file does not block stopping.
 
-The export holds, for every scheduler the TUI would list, the flags each
-profile resolves to (file rows merged with the built-in defaults) plus the
-configured default, as plain JSON for scripts and other front ends.
+`--export-profiles [FILE|-]` writes the resolved profile table: the flags
+each profile resolves to (file rows merged with the built-in defaults)
+plus the configured default. The default format, JSON, fills every row in
+for every installed scheduler and every one the profiles file names, for
+scripts and other front ends; its keys are what is available here.
+`--format toml` writes the profiles file's own schema instead, with every
+row spelled out, and covers the built-in table as well, since a file is
+configuration rather than inventory. Its header names the file it came
+from. The output loads back as a profiles file that resolves every
+scheduler and mode to the same flags: a starting point to edit, or a
+record of what is in effect. `--builtin` exports the built-in table
+alone, ignoring any profiles file and without consulting systemd, so it
+works on a machine without `scx.service`. An installed export freezes
+what it spells out: every row is then the file's, so a later change to
+scxtui's built-in flags no longer reaches those profiles. Delete the
+rows that should keep following the defaults.
 
 `scxtui` checks that `scx.service` exists before switching the terminal into
 raw mode. If the unit is missing, it exits with a normal error message
