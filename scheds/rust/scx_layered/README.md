@@ -167,10 +167,23 @@ layers which configure a limit. If a node has bandwidth activity but no usable
 PMU proxy delta, that sample is left unattributed and does not trigger a layer
 policy.
 
-This attribution is an estimate. In particular, a core-side PMU event records
-the request on the CPU's node and cannot always identify the destination memory
-controller for remote accesses or DMA. A future resctrl-per-layer mode can
-provide stronger attribution where enough RMIDs are available.
+PMU proxy deltas are recorded on the executing CPU's node. On AMD Zen 3 and
+later, local and remote DRAM demand fills are counted separately. On Zen 4, L2
+prefetches which miss the L3 are counted too; they carry most streaming
+traffic, and their remote share is estimated from the layer's demand
+local/remote ratio. With `memctl` node totals, which belong to the node owning
+the memory, local fills stay on the CPU's node and remote fills are moved to the
+remote nodes in proportion to their measured traffic (exact with two nodes).
+With `resctrl` totals, which are counted on the requesting CPU's node, the
+whole proxy stays there. Other CPUs count a single event and attribute all
+fills to the CPU's node.
+
+This attribution is an estimate. Writebacks and non-temporal stores are not
+seen by any core-side event, and on CPUs without the prefetch event neither are
+hardware prefetches. Layers dominated by such traffic are under-attributed, and
+the difference is charged to other layers on the same node. DMA is not
+attributed to any layer. A future resctrl-per-layer mode can provide stronger
+attribution where enough RMIDs are available.
 
 #### Capacity and CPU sizing
 
@@ -193,8 +206,8 @@ normal allocations, and competing layers may use the released CPUs. The
 existing global `membw_gb` limit composes with this policy; the lower target
 wins.
 
-Memory-bandwidth tracking uses one pinned core PMU counter and a node source:
-memory-controller PMUs or resctrl mounted at `/sys/fs/resctrl`. Pinning
+Memory-bandwidth tracking uses up to three pinned core PMU counters and a node
+source: memory-controller PMUs or resctrl mounted at `/sys/fs/resctrl`. Pinning
 prevents silent perf multiplexing of the core proxy. Memory-controller counters
 are shared with other system-wide perf users, so their deltas are scaled by
 enabled/running time and a warning is logged when they are multiplexed.

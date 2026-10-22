@@ -200,6 +200,8 @@ struct cpu_ctx {
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			node_pinned_usage[MAX_LAYERS];
 	u64			layer_membw_agg[MAX_LAYERS][NR_LAYER_USAGES];
+	u64			layer_membw_far_agg[MAX_LAYERS];	/* remote-node demand subset */
+	u64			layer_membw_pf_agg[MAX_LAYERS];		/* L2 prefetch subset */
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			layer_duty_sum[MAX_LAYERS];

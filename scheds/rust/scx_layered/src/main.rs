@@ -782,16 +782,88 @@ fn calc_util(curr: &fb_procfs::CpuStat, prev: &fb_procfs::CpuStat) -> Result<f64
     }
 }
 
+/// Estimate the remote-node subset of each layer's per-CPU-node proxy delta.
+/// Demand fills are split by the PMU, but L2 prefetches are not; they follow
+/// the same address streams, so they take the layer's demand far ratio.
+fn membw_far_estimate(total: &[Vec<u64>], far: &[Vec<u64>], pf: &[Vec<u64>]) -> Vec<Vec<u64>> {
+    total
+        .iter()
+        .zip(far.iter().zip(pf.iter()))
+        .map(|(total, (far, pf))| {
+            total
+                .iter()
+                .zip(far.iter().zip(pf.iter()))
+                .map(|(&total, (&far, &pf))| {
+                    let demand = total.saturating_sub(pf);
+                    if demand == 0 {
+                        return 0;
+                    }
+                    let far = far.min(demand);
+                    far + (pf as f64 * far as f64 / demand as f64) as u64
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Map per-layer PMU proxy deltas, recorded on the executing CPU's node, onto
+/// the nodes whose counters provide the bandwidth totals. `total` and `far`
+/// are per-layer, per-CPU-node deltas, with `far` the remote-fill subset.
+///
+/// Memory-controller totals belong to the node owning the memory, so local
+/// fills stay on the CPU's node and remote fills move to the other nodes in
+/// proportion to their measured traffic, which is exact with two nodes.
+/// L3-based totals (resctrl) are counted on the requesting CPU's node and
+/// keep the whole proxy there.
+fn membw_proxy_deltas(
+    total: &[Vec<u64>],
+    far: &[Vec<u64>],
+    node_deltas: &[u64],
+    by_memory_node: bool,
+) -> Vec<Vec<f64>> {
+    let nr_nodes = node_deltas.len();
+    let mut proxies = vec![vec![0.0; nr_nodes]; total.len()];
+
+    for (layer, proxy) in proxies.iter_mut().enumerate() {
+        for cpu_node in 0..nr_nodes {
+            let all = total[layer][cpu_node] as f64;
+            let far = if by_memory_node && nr_nodes > 1 {
+                far[layer][cpu_node].min(total[layer][cpu_node]) as f64
+            } else {
+                0.0
+            };
+            proxy[cpu_node] += all - far;
+            if far == 0.0 {
+                continue;
+            }
+
+            let remote_traffic: u64 = (0..nr_nodes)
+                .filter(|&node| node != cpu_node)
+                .map(|node| node_deltas[node])
+                .sum();
+            for node in (0..nr_nodes).filter(|&node| node != cpu_node) {
+                let share = if remote_traffic > 0 {
+                    node_deltas[node] as f64 / remote_traffic as f64
+                } else {
+                    1.0 / (nr_nodes - 1) as f64
+                };
+                proxy[node] += far * share;
+            }
+        }
+    }
+
+    proxies
+}
+
 /// Attribute each topology domain's shared bandwidth counter to layers in
 /// proportion to their task-attributed PMU proxy deltas.
 fn pss_membw_rates(
-    proxy_cur: &[Vec<u64>],
-    proxy_prev: &[Vec<u64>],
+    proxy_deltas: &[Vec<f64>],
     total_cur: &[u64],
     total_prev: &[u64],
     elapsed_secs: f64,
 ) -> Vec<Vec<f64>> {
-    let nr_layers = proxy_cur.len();
+    let nr_layers = proxy_deltas.len();
     let nr_nodes = total_cur.len();
     let mut rates = vec![vec![0.0; nr_nodes]; nr_layers];
 
@@ -801,18 +873,14 @@ fn pss_membw_rates(
 
     for node in 0..nr_nodes {
         let total_delta = total_cur[node].saturating_sub(total_prev[node]);
-        let proxy_deltas: Vec<u64> = (0..nr_layers)
-            .map(|layer| proxy_cur[layer][node].saturating_sub(proxy_prev[layer][node]))
-            .collect();
-        let proxy_total = proxy_deltas.iter().copied().fold(0u64, u64::saturating_add);
-        if proxy_total == 0 {
+        let proxy_total: f64 = (0..nr_layers).map(|layer| proxy_deltas[layer][node]).sum();
+        if proxy_total <= 0.0 {
             continue;
         }
 
         let total_gib_per_sec = total_delta as f64 / 1024_f64.powi(3) / elapsed_secs;
         for layer in 0..nr_layers {
-            rates[layer][node] =
-                total_gib_per_sec * proxy_deltas[layer] as f64 / proxy_total as f64;
+            rates[layer][node] = total_gib_per_sec * proxy_deltas[layer][node] / proxy_total;
         }
     }
 
@@ -952,6 +1020,9 @@ impl<'b> Sub<&'b BpfStats> for &BpfStats {
 struct NodeMembwSample {
     at: Instant,
     node_bytes: Vec<u64>,
+    // Whether traffic is counted at the node owning the memory rather than
+    // the node of the requesting CPU.
+    by_memory_node: bool,
 }
 
 impl NodeMembwSample {
@@ -959,6 +1030,7 @@ impl NodeMembwSample {
         Self {
             at: Instant::now(),
             node_bytes: vec![0; nr_nodes],
+            by_memory_node: false,
         }
     }
 }
@@ -998,13 +1070,14 @@ impl NodeMembwSource {
     }
 
     fn sample(&mut self, topo: &Topology) -> Result<NodeMembwSample> {
-        let node_bytes = match self {
-            Self::MemCtl(counters) => counters.read_node_bytes()?,
-            Self::Resctrl => Stats::resctrl_read_node_membw(topo)?,
+        let (node_bytes, by_memory_node) = match self {
+            Self::MemCtl(counters) => (counters.read_node_bytes()?, true),
+            Self::Resctrl => (Stats::resctrl_read_node_membw(topo)?, false),
         };
         Ok(NodeMembwSample {
             at: Instant::now(),
             node_bytes,
+            by_memory_node,
         })
     }
 }
@@ -1042,6 +1115,8 @@ struct Stats {
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
     layer_node_membws: Vec<Vec<f64>>, // PSS-attributed per-layer/node bandwidth in GiB/s
     prev_layer_node_membw_agg: Vec<Vec<u64>>, // Previous per-layer/node PMU proxies
+    prev_layer_node_membw_far_agg: Vec<Vec<u64>>, // Remote demand-fill subset of the above
+    prev_layer_node_membw_pf_agg: Vec<Vec<u64>>, // L2 prefetch subset of the above
     prev_node_membw: NodeMembwSample, // Previous per-node memory traffic counters
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
@@ -1103,6 +1178,46 @@ impl Stats {
         }
 
         agg
+    }
+
+    /// Sum a per-CPU, per-layer membw subset counter by the CPU's node.
+    #[allow(clippy::needless_range_loop)]
+    fn read_layer_node_membw_subset_agg(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+        subset: impl Fn(&bpf_intf::cpu_ctx) -> &[u64],
+    ) -> Vec<Vec<u64>> {
+        let mut agg = vec![vec![0u64; topo.nodes.len()]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |cpu| cpu.node_id);
+            for layer in 0..nr_layers {
+                agg[layer][node] += subset(&cpu_ctxs[cpu])[layer];
+            }
+        }
+
+        agg
+    }
+
+    fn read_layer_node_membw_far_agg(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+    ) -> Vec<Vec<u64>> {
+        Self::read_layer_node_membw_subset_agg(cpu_ctxs, topo, nr_layers, |cpuc| {
+            &cpuc.layer_membw_far_agg
+        })
+    }
+
+    fn read_layer_node_membw_pf_agg(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+    ) -> Vec<Vec<u64>> {
+        Self::read_layer_node_membw_subset_agg(cpu_ctxs, topo, nr_layers, |cpuc| {
+            &cpuc.layer_membw_pf_agg
+        })
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -1273,6 +1388,8 @@ impl Stats {
             .map(|membw| membw[LAYER_USAGE_OPEN] + membw[LAYER_USAGE_OWNED])
             .sum();
         let layer_node_membw = Self::read_layer_node_membw_agg(&cpu_ctxs, &topo, nr_layers);
+        let layer_node_membw_far = Self::read_layer_node_membw_far_agg(&cpu_ctxs, &topo, nr_layers);
+        let layer_node_membw_pf = Self::read_layer_node_membw_pf_agg(&cpu_ctxs, &topo, nr_layers);
         let resctrl_total = node_membw.node_bytes.iter().sum();
 
         Ok(Self {
@@ -1305,6 +1422,8 @@ impl Stats {
             prev_layer_membw_agg: pmu_membw,
             layer_node_membws: vec![vec![0.0; nr_nodes]; nr_layers],
             prev_layer_node_membw_agg: layer_node_membw,
+            prev_layer_node_membw_far_agg: layer_node_membw_far,
+            prev_layer_node_membw_pf_agg: layer_node_membw_pf,
             prev_node_membw: node_membw,
             prev_pmu_resctrl_membw: (pmu_total, resctrl_total),
 
@@ -1391,6 +1510,10 @@ impl Stats {
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
         let cur_layer_node_membw_agg =
             Self::read_layer_node_membw_agg(&cpu_ctxs, &self.topo, self.nr_layers);
+        let cur_layer_node_membw_far_agg =
+            Self::read_layer_node_membw_far_agg(&cpu_ctxs, &self.topo, self.nr_layers);
+        let cur_layer_node_membw_pf_agg =
+            Self::read_layer_node_membw_pf_agg(&cpu_ctxs, &self.topo, self.nr_layers);
 
         // Memory BW normalization. It requires finding the delta according to perf, the delta
         // according to resctl, and finding the factor between them. This also helps in
@@ -1455,9 +1578,43 @@ impl Stats {
         // bandwidth analogue of proportional set size: each shared node total
         // is accounted exactly once instead of being charged in full to every
         // layer using that node.
+        let delta = |cur: &Vec<Vec<u64>>, prev: &Vec<Vec<u64>>| -> Vec<Vec<u64>> {
+            cur.iter()
+                .zip(prev.iter())
+                .map(|(c, p)| {
+                    c.iter()
+                        .zip(p.iter())
+                        .map(|(c, p)| c.saturating_sub(*p))
+                        .collect()
+                })
+                .collect()
+        };
+        let node_deltas: Vec<u64> = node_membw
+            .node_bytes
+            .iter()
+            .zip(self.prev_node_membw.node_bytes.iter())
+            .map(|(c, p)| c.saturating_sub(*p))
+            .collect();
+        let total_deltas = delta(&cur_layer_node_membw_agg, &self.prev_layer_node_membw_agg);
+        let far_deltas = membw_far_estimate(
+            &total_deltas,
+            &delta(
+                &cur_layer_node_membw_far_agg,
+                &self.prev_layer_node_membw_far_agg,
+            ),
+            &delta(
+                &cur_layer_node_membw_pf_agg,
+                &self.prev_layer_node_membw_pf_agg,
+            ),
+        );
+        let proxy_deltas = membw_proxy_deltas(
+            &total_deltas,
+            &far_deltas,
+            &node_deltas,
+            node_membw.by_memory_node,
+        );
         let layer_node_membws = pss_membw_rates(
-            &cur_layer_node_membw_agg,
-            &self.prev_layer_node_membw_agg,
+            &proxy_deltas,
             &node_membw.node_bytes,
             &self.prev_node_membw.node_bytes,
             membw_secs,
@@ -1507,6 +1664,8 @@ impl Stats {
             layer_node_membws,
             prev_layer_membw_agg,
             prev_layer_node_membw_agg,
+            prev_layer_node_membw_far_agg,
+            prev_layer_node_membw_pf_agg,
             prev_pmu_resctrl_membw,
             prev_node_membw,
         ) = if membw_fresh {
@@ -1526,6 +1685,8 @@ impl Stats {
                     .collect(),
                 cur_layer_membw_agg,
                 cur_layer_node_membw_agg,
+                cur_layer_node_membw_far_agg,
+                cur_layer_node_membw_pf_agg,
                 (pmu_cur, resctrl_cur),
                 node_membw.clone(),
             )
@@ -1535,6 +1696,8 @@ impl Stats {
                 self.layer_node_membws.clone(),
                 self.prev_layer_membw_agg.clone(),
                 self.prev_layer_node_membw_agg.clone(),
+                self.prev_layer_node_membw_far_agg.clone(),
+                self.prev_layer_node_membw_pf_agg.clone(),
                 self.prev_pmu_resctrl_membw,
                 self.prev_node_membw.clone(),
             )
@@ -1706,6 +1869,8 @@ impl Stats {
             prev_layer_membw_agg,
             layer_node_membws,
             prev_layer_node_membw_agg,
+            prev_layer_node_membw_far_agg,
+            prev_layer_node_membw_pf_agg,
             prev_node_membw,
             // Was updated during normalization.
             prev_pmu_resctrl_membw,
@@ -3235,7 +3400,13 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
         let membw_perf_fds = if membw_tracking {
-            match setup_membw_tracking(&mut skel).and_then(|event| open_perf_fds(event, &topo)) {
+            // One set of per-CPU fds per event, indexed like scx_pmu_map.
+            match setup_membw_tracking(&mut skel).and_then(|events| {
+                events
+                    .install_order()
+                    .map(|event| open_perf_fds(event, &topo))
+                    .collect::<Result<Vec<_>>>()
+            }) {
                 Ok(perf_fds) => perf_fds,
                 Err(err) => {
                     warn!("memory-bandwidth limits disabled: PMU tracking is unavailable: {err:#}");
@@ -5558,16 +5729,25 @@ fn open_perf_fds(event: u64, topo: &Topology) -> Result<Vec<(u32, OwnedFd)>> {
     Ok(perf_fds)
 }
 
-fn install_perf_fds(skel: &mut BpfSkel, perf_fds: &[(u32, OwnedFd)]) -> Result<()> {
+/// Per-event key stride in scx_pmu_map; must match SCX_PMU_STRIDE in
+/// lib/pmu.bpf.c.
+const SCX_PMU_STRIDE: u32 = 4096;
+
+fn install_perf_fds(skel: &mut BpfSkel, perf_fds: &[Vec<(u32, OwnedFd)>]) -> Result<()> {
     let perf_events_map = &skel.maps.scx_pmu_map;
     let map_fd = unsafe { libbpf_sys::bpf_map__fd(perf_events_map.as_libbpf_object().as_ptr()) };
 
-    for (cpu, fd) in perf_fds {
+    for (idx, (cpu, fd)) in perf_fds
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, fds)| fds.iter().map(move |fd| (idx as u32, fd)))
+    {
+        let key = cpu + idx * SCX_PMU_STRIDE;
         let value = fd.as_raw_fd() as u32;
         let ret = unsafe {
             libbpf_sys::bpf_map_update_elem(
                 map_fd,
-                cpu as *const _ as *const _,
+                &key as *const _ as *const _,
                 &value as *const _ as *const _,
                 0,
             )
@@ -5581,42 +5761,76 @@ fn install_perf_fds(skel: &mut BpfSkel, perf_fds: &[(u32, OwnedFd)]) -> Result<(
 }
 
 // Set up the counters.
-fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
+/// Core PMU events used as per-task memory-traffic proxies. When `far` is
+/// set, `near` counts demand fills from the local NUMA node and `far` counts
+/// demand fills from remote nodes; otherwise `near` counts all demand fills.
+/// `prefetch` counts L2 prefetches which miss the L3, which dominate
+/// streaming traffic and are not seen by the demand-fill events.
+struct MembwEvents {
+    near: u64,
+    far: Option<u64>,
+    prefetch: Option<u64>,
+}
+
+impl MembwEvents {
+    /// Events in BPF scx_pmu_install() order, which defines their
+    /// scx_pmu_map index.
+    fn install_order(&self) -> impl Iterator<Item = u64> {
+        std::iter::once(self.near)
+            .chain(self.far)
+            .chain(self.prefetch)
+    }
+}
+
+// Set up the counters.
+fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<MembwEvents> {
     let pmumanager = PMUManager::new()?;
     let codename = &pmumanager.codename as &str;
 
-    let pmuspec = match codename {
-        "amdzen1" | "amdzen2" | "amdzen3" => {
-            trace!("found AMD codename {codename}");
-            pmumanager.pmus.get("ls_any_fills_from_sys.mem_io_local")
-        }
-        "amdzen4" | "amdzen5" => {
-            trace!("found AMD codename {codename}");
-            pmumanager.pmus.get("ls_any_fills_from_sys.dram_io_all")
-        }
-
+    let (near, far, prefetch) = match codename {
+        "amdzen1" | "amdzen2" => ("ls_any_fills_from_sys.mem_io_local", None, None),
+        "amdzen3" => (
+            "ls_any_fills_from_sys.mem_io_local",
+            Some("ls_any_fills_from_sys.mem_io_remote"),
+            None,
+        ),
+        "amdzen4" => (
+            "ls_any_fills_from_sys.dram_io_near",
+            Some("ls_any_fills_from_sys.dram_io_far"),
+            Some("l2_pf_miss_l2_l3.all"),
+        ),
+        "amdzen5" => (
+            "ls_any_fills_from_sys.dram_io_near",
+            Some("ls_any_fills_from_sys.dram_io_far"),
+            None,
+        ),
         "haswell" | "broadwell" | "broadwellde" | "broadwellx" | "skylake" | "skylakex"
         | "cascadelakex" | "arrowlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
-        | "graniterapids" => {
-            trace!("found Intel codename {codename}");
-            pmumanager.pmus.get("LONGEST_LAT_CACHE.MISS")
-        }
-
-        _ => {
-            trace!("found unknown codename {codename}");
-            None
-        }
+        | "graniterapids" => ("LONGEST_LAT_CACHE.MISS", None, None),
+        _ => bail!("memory-bandwidth PMU event is not supported on CPU codename {codename}"),
     };
 
-    let spec = pmuspec.with_context(|| {
-        format!("memory-bandwidth PMU event is not supported on CPU codename {codename}")
-    })?;
-    let config = (spec.umask << 8) | spec.event[0];
+    let config = |name: &str| -> Result<u64> {
+        let spec = pmumanager.pmus.get(name).with_context(|| {
+            format!("memory-bandwidth PMU event {name} is missing for CPU codename {codename}")
+        })?;
+        let config = (spec.umask << 8) | spec.event[0];
+        info!("memory-bandwidth PMU proxy: {name} on {codename} (config={config:#x})");
+        Ok(config)
+    };
+    let events = MembwEvents {
+        near: config(near)?,
+        far: far.map(config).transpose()?,
+        prefetch: prefetch.map(config).transpose()?,
+    };
 
-    // Install the counter in the BPF map
-    skel.maps.rodata_data.as_mut().unwrap().membw_event = config;
+    // Install the counters in the BPF map
+    let rodata = skel.maps.rodata_data.as_mut().unwrap();
+    rodata.membw_event = events.near;
+    rodata.membw_far_event = events.far.unwrap_or(0);
+    rodata.membw_pf_event = events.prefetch.unwrap_or(0);
 
-    Ok(config)
+    Ok(events)
 }
 
 #[clap_main::clap_main]
@@ -5910,8 +6124,7 @@ mod membw_limit_tests {
     fn pss_splits_each_node_independently() {
         let gib = 1024_u64.pow(3);
         let rates = pss_membw_rates(
-            &[vec![10, 0], vec![30, 20]],
-            &[vec![0, 0], vec![0, 0]],
+            &[vec![10.0, 0.0], vec![30.0, 20.0]],
             &[gib, 2 * gib],
             &[0, 0],
             1.0,
@@ -5924,10 +6137,43 @@ mod membw_limit_tests {
     }
 
     #[test]
+    fn prefetch_follows_demand_far_ratio() {
+        // 100 bytes total: 40 prefetch, 60 demand of which 15 are remote.
+        assert_eq!(
+            membw_far_estimate(&[vec![100]], &[vec![15]], &[vec![40]]),
+            vec![vec![25]]
+        );
+        // Prefetch with no demand fills to infer locality stays local.
+        assert_eq!(
+            membw_far_estimate(&[vec![40]], &[vec![0]], &[vec![40]]),
+            vec![vec![0]]
+        );
+    }
+
+    #[test]
+    fn proxy_moves_remote_fills_to_memory_node() {
+        // Layer 0 runs on node 1 and fills 80 bytes from node 0's memory.
+        let proxies = membw_proxy_deltas(&[vec![0, 100]], &[vec![0, 80]], &[50, 50], true);
+        assert_eq!(proxies, vec![vec![80.0, 20.0]]);
+    }
+
+    #[test]
+    fn proxy_stays_on_cpu_node_for_l3_totals() {
+        let proxies = membw_proxy_deltas(&[vec![0, 100]], &[vec![0, 80]], &[50, 50], false);
+        assert_eq!(proxies, vec![vec![0.0, 100.0]]);
+    }
+
+    #[test]
+    fn proxy_splits_remote_fills_by_remote_node_traffic() {
+        let proxies = membw_proxy_deltas(&[vec![100, 0, 0]], &[vec![60, 0, 0]], &[0, 30, 10], true);
+        assert_eq!(proxies, vec![vec![40.0, 45.0, 15.0]]);
+    }
+
+    #[test]
     fn pss_does_not_attribute_without_a_proxy() {
         let gib = 1024_u64.pow(3);
         assert_eq!(
-            pss_membw_rates(&[vec![0]], &[vec![0]], &[gib], &[0], 1.0),
+            pss_membw_rates(&[vec![0.0]], &[gib], &[0], 1.0),
             vec![vec![0.0]]
         );
     }
