@@ -1612,12 +1612,18 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 	 */
 	if (scx_cid_idle_empty(&eevdf_idle))
 		return;
+	/*
+	 * The lookup returns an RCU pointer, and the idle search takes a
+	 * trusted task: hold a reference across it.
+	 */
 	tid = cid_edq_peek_tid_owned(cid);
 	head = tid ? scx_bpf_tid_to_task(tid) : NULL;
+	head = head ? bpf_task_acquire(head) : NULL;
 	if (!head)
 		return;
 
 	peer = idle_peer_cid(head, cid);
+	bpf_task_release(head);
 	if (peer >= 0 && peer != cid) {
 		/*
 		 * If the ordinary head pull fails, let the idle cid walk past a
