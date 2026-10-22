@@ -822,17 +822,20 @@ fn membw_far_estimate(total: &[Vec<u64>], far: &[Vec<u64>], pf: &[Vec<u64>]) -> 
 /// proportion to their measured traffic, which is exact with two nodes.
 /// L3-based totals (resctrl) are counted on the requesting CPU's node and
 /// keep the whole proxy there.
+///
+/// Returns `[layer][cpu_node][memory_node]` flows so that bandwidth pressure on
+/// a memory node can be traced back to the CPU nodes generating it.
 fn membw_proxy_deltas(
     total: &[Vec<u64>],
     far: &[Vec<u64>],
     node_deltas: &[u64],
     by_memory_node: bool,
-) -> Vec<Vec<f64>> {
+) -> Vec<Vec<Vec<f64>>> {
     let nr_nodes = node_deltas.len();
-    let mut proxies = vec![vec![0.0; nr_nodes]; total.len()];
+    let mut proxies = vec![vec![vec![0.0; nr_nodes]; nr_nodes]; total.len()];
 
-    for (layer, proxy) in proxies.iter_mut().enumerate() {
-        for cpu_node in 0..nr_nodes {
+    for (layer, flows) in proxies.iter_mut().enumerate() {
+        for (cpu_node, proxy) in flows.iter_mut().enumerate() {
             let all = total[layer][cpu_node] as f64;
             let far = if by_memory_node && nr_nodes > 1 {
                 far[layer][cpu_node].min(total[layer][cpu_node]) as f64
@@ -863,16 +866,16 @@ fn membw_proxy_deltas(
 }
 
 /// Attribute each topology domain's shared bandwidth counter to layers in
-/// proportion to their task-attributed PMU proxy deltas.
+/// proportion to their task-attributed PMU proxy deltas. Both are indexed
+/// `[layer][cpu_node][memory_node]`; the result is in GiB/s.
 fn pss_membw_rates(
-    proxy_deltas: &[Vec<f64>],
+    proxy_deltas: &[Vec<Vec<f64>>],
     total_cur: &[u64],
     total_prev: &[u64],
     elapsed_secs: f64,
-) -> Vec<Vec<f64>> {
-    let nr_layers = proxy_deltas.len();
+) -> Vec<Vec<Vec<f64>>> {
     let nr_nodes = total_cur.len();
-    let mut rates = vec![vec![0.0; nr_nodes]; nr_layers];
+    let mut rates = vec![vec![vec![0.0; nr_nodes]; nr_nodes]; proxy_deltas.len()];
 
     if !elapsed_secs.is_finite() || elapsed_secs <= 0.0 {
         return rates;
@@ -880,18 +883,76 @@ fn pss_membw_rates(
 
     for node in 0..nr_nodes {
         let total_delta = total_cur[node].saturating_sub(total_prev[node]);
-        let proxy_total: f64 = (0..nr_layers).map(|layer| proxy_deltas[layer][node]).sum();
+        let proxy_total: f64 = proxy_deltas
+            .iter()
+            .flat_map(|flows| flows.iter().map(|flow| flow[node]))
+            .sum();
         if proxy_total <= 0.0 {
             continue;
         }
 
         let total_gib_per_sec = total_delta as f64 / 1024_f64.powi(3) / elapsed_secs;
-        for layer in 0..nr_layers {
-            rates[layer][node] = total_gib_per_sec * proxy_deltas[layer][node] / proxy_total;
+        for (layer, flows) in proxy_deltas.iter().enumerate() {
+            for (cpu_node, flow) in flows.iter().enumerate() {
+                rates[layer][cpu_node][node] = total_gib_per_sec * flow[node] / proxy_total;
+            }
         }
     }
 
     rates
+}
+
+/// Per-memory-node totals of `[layer][cpu_node][memory_node]` flows.
+fn membw_flow_totals(flows: &[Vec<Vec<f64>>]) -> Vec<Vec<f64>> {
+    flows
+        .iter()
+        .map(|flows| {
+            let mut totals = vec![0.0; flows.len()];
+            for flow in flows {
+                for (total, bandwidth) in totals.iter_mut().zip(flow) {
+                    *total += bandwidth;
+                }
+            }
+            totals
+        })
+        .collect()
+}
+
+/// Minimum fraction of a memory node's attributed layer bandwidth that a CPU
+/// node must generate for the node's pressure to cap that CPU node.
+const MEMBW_FLOW_MIN_SHARE: f64 = 0.1;
+
+/// Pick the memory node which governs a layer's CPU cap on `cpu_node`: the
+/// most utilized node receiving at least MEMBW_FLOW_MIN_SHARE of the layer's
+/// bandwidth from `cpu_node`, preferring pressured nodes. `flows` is the
+/// layer's `[cpu_node][memory_node]` bandwidth. Returns whether the governing
+/// node is pressured, and its bandwidth and capacity.
+fn membw_governing_node(
+    flows: &[Vec<f64>],
+    cpu_node: usize,
+    pressured: &[bool],
+    capacity: &[f64],
+) -> (bool, f64, f64) {
+    let mut governing = (false, 0.0, capacity.get(cpu_node).copied().unwrap_or(0.0));
+    let mut governing_util = f64::NEG_INFINITY;
+    for node in 0..capacity.len() {
+        let bandwidth: f64 = flows.iter().map(|flow| flow[node]).sum();
+        let share = flows[cpu_node][node];
+        if bandwidth.is_nan() || bandwidth <= 0.0 || share < MEMBW_FLOW_MIN_SHARE * bandwidth {
+            continue;
+        }
+        let util = bandwidth / capacity[node].max(f64::EPSILON);
+        let better = match (pressured[node], governing.0) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => util > governing_util,
+        };
+        if better {
+            governing = (pressured[node], bandwidth, capacity[node]);
+            governing_util = util;
+        }
+    }
+    governing
 }
 
 fn copy_into_cstr(dst: &mut [i8], src: &str) {
@@ -1121,6 +1182,7 @@ struct Stats {
     layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
     layer_node_membws: Vec<Vec<f64>>, // PSS-attributed per-layer/node bandwidth in GiB/s
+    layer_node_membw_flows: Vec<Vec<Vec<f64>>>, // The above by [layer][cpu_node][memory_node]
     prev_layer_node_membw_agg: Vec<Vec<u64>>, // Previous per-layer/node PMU proxies
     prev_layer_node_membw_far_agg: Vec<Vec<u64>>, // Remote demand-fill subset of the above
     prev_layer_node_membw_pf_agg: Vec<Vec<u64>>, // L2 prefetch subset of the above
@@ -1428,6 +1490,7 @@ impl Stats {
             // iteration.
             prev_layer_membw_agg: pmu_membw,
             layer_node_membws: vec![vec![0.0; nr_nodes]; nr_layers],
+            layer_node_membw_flows: vec![vec![vec![0.0; nr_nodes]; nr_nodes]; nr_layers],
             prev_layer_node_membw_agg: layer_node_membw,
             prev_layer_node_membw_far_agg: layer_node_membw_far,
             prev_layer_node_membw_pf_agg: layer_node_membw_pf,
@@ -1620,7 +1683,7 @@ impl Stats {
             &node_deltas,
             node_membw.by_memory_node,
         );
-        let layer_node_membws = pss_membw_rates(
+        let layer_node_membw_flows = pss_membw_rates(
             &proxy_deltas,
             &node_membw.node_bytes,
             &self.prev_node_membw.node_bytes,
@@ -1668,7 +1731,7 @@ impl Stats {
         let membw_fresh = membw_secs > 0.0;
         let (
             layer_membws,
-            layer_node_membws,
+            layer_node_membw_flows,
             prev_layer_membw_agg,
             prev_layer_node_membw_agg,
             prev_layer_node_membw_far_agg,
@@ -1680,13 +1743,18 @@ impl Stats {
             (
                 // A decay rate of 0.0 keeps only the latest sample.
                 cur_layer_membw,
-                layer_node_membws
+                layer_node_membw_flows
                     .iter()
-                    .zip(self.layer_node_membws.iter())
+                    .zip(self.layer_node_membw_flows.iter())
                     .map(|(cur, prev)| {
                         cur.iter()
                             .zip(prev.iter())
-                            .map(|(c, p)| p * node_decay + c * (1.0 - node_decay))
+                            .map(|(cur, prev)| {
+                                cur.iter()
+                                    .zip(prev.iter())
+                                    .map(|(c, p)| p * node_decay + c * (1.0 - node_decay))
+                                    .collect()
+                            })
                             .collect()
                     })
                     .collect(),
@@ -1700,7 +1768,7 @@ impl Stats {
         } else {
             (
                 self.layer_membws.clone(),
-                self.layer_node_membws.clone(),
+                self.layer_node_membw_flows.clone(),
                 self.prev_layer_membw_agg.clone(),
                 self.prev_layer_node_membw_agg.clone(),
                 self.prev_layer_node_membw_far_agg.clone(),
@@ -1709,6 +1777,7 @@ impl Stats {
                 self.prev_node_membw.clone(),
             )
         };
+        let layer_node_membws = membw_flow_totals(&layer_node_membw_flows);
 
         let proc_stat = proc_reader
             .read_stat()
@@ -1875,6 +1944,7 @@ impl Stats {
             layer_membws,
             prev_layer_membw_agg,
             layer_node_membws,
+            layer_node_membw_flows,
             prev_layer_node_membw_agg,
             prev_layer_node_membw_far_agg,
             prev_layer_node_membw_pf_agg,
@@ -2317,7 +2387,7 @@ struct Scheduler<'a> {
     node_membw_capacity: Vec<f64>,
     node_membw_source: Option<NodeMembwSource>,
     layer_node_membw_pressured: Vec<Vec<bool>>,
-    layer_node_membw_cap: Vec<Vec<Option<usize>>>, // Per-node CPU caps, None if uncapped
+    layer_node_membw_cap: Vec<Vec<Option<usize>>>, // Per-CPU-node caps, None if uncapped
     layer_node_membw_adjusted_at: Vec<Vec<Instant>>,
     layer_membw_confined: Vec<bool>, // Mirrors BPF layer.membw_confined
     processing_dur: Duration,
@@ -4996,37 +5066,13 @@ impl<'a> Scheduler<'a> {
                 continue;
             };
 
-            let au = self.cpu_pool.alloc_unit();
+            // Pressure is evaluated per memory node, where capacity applies.
             for node in 0..self.topo.nodes.len() {
                 let previous = self.layer_node_membw_pressured[idx][node];
                 let bandwidth = self.sched_stats.layer_node_membws[idx][node];
                 let capacity = self.node_membw_capacity[node];
                 let pressured =
                     membw_pressure_active(bandwidth, capacity, limit.utilization_range, previous);
-
-                let cap = self.layer_node_membw_cap[idx][node];
-                let adjust = cap.is_none()
-                    || self.layer_node_membw_adjusted_at[idx][node].elapsed()
-                        >= MEMBW_ADJUST_INTERVAL;
-                let next_cap = membw_next_cap(
-                    cap,
-                    self.layers[idx].nr_node_cpus[node],
-                    pressured,
-                    bandwidth,
-                    capacity,
-                    limit,
-                    adjust,
-                    au,
-                    self.topo.nodes[&node].all_cpus.len(),
-                );
-                if next_cap != cap {
-                    self.layer_node_membw_adjusted_at[idx][node] = Instant::now();
-                    debug!(
-                        "[{}] node {} memory-bandwidth CPU cap {:?} -> {:?}",
-                        spec.name, node, cap, next_cap
-                    );
-                    self.layer_node_membw_cap[idx][node] = next_cap;
-                }
                 if pressured != previous {
                     info!(
                         "[{}] node {} memory-bandwidth pressure -> {} (attributed={:.2} GiB/s capacity={:.2} GiB/s utilization={:.3} range=[{:.3}, {:.3}] action={:?})",
@@ -5042,6 +5088,43 @@ impl<'a> Scheduler<'a> {
                     );
                 }
                 self.layer_node_membw_pressured[idx][node] = pressured;
+            }
+
+            // CPU caps apply to the CPU nodes generating the traffic, which
+            // differ from the memory node for remote accesses. Each CPU node
+            // follows the memory node it feeds which is pressured or, failing
+            // that, most utilized.
+            let au = self.cpu_pool.alloc_unit();
+            for cpu_node in 0..self.topo.nodes.len() {
+                let (pressured, bandwidth, capacity) = membw_governing_node(
+                    &self.sched_stats.layer_node_membw_flows[idx],
+                    cpu_node,
+                    &self.layer_node_membw_pressured[idx],
+                    &self.node_membw_capacity,
+                );
+                let cap = self.layer_node_membw_cap[idx][cpu_node];
+                let adjust = cap.is_none()
+                    || self.layer_node_membw_adjusted_at[idx][cpu_node].elapsed()
+                        >= MEMBW_ADJUST_INTERVAL;
+                let next_cap = membw_next_cap(
+                    cap,
+                    self.layers[idx].nr_node_cpus[cpu_node],
+                    pressured,
+                    bandwidth,
+                    capacity,
+                    limit,
+                    adjust,
+                    au,
+                    self.topo.nodes[&cpu_node].all_cpus.len(),
+                );
+                if next_cap != cap {
+                    self.layer_node_membw_adjusted_at[idx][cpu_node] = Instant::now();
+                    debug!(
+                        "[{}] node {} memory-bandwidth CPU cap {:?} -> {:?}",
+                        spec.name, cpu_node, cap, next_cap
+                    );
+                    self.layer_node_membw_cap[idx][cpu_node] = next_cap;
+                }
             }
 
             // A Grouped layer normally overflows onto CPUs it does not own,
@@ -6206,12 +6289,16 @@ mod membw_limit_tests {
     #[test]
     fn pss_splits_each_node_independently() {
         let gib = 1024_u64.pow(3);
-        let rates = pss_membw_rates(
-            &[vec![10.0, 0.0], vec![30.0, 20.0]],
+        // Local flows only: [layer][cpu_node][memory_node].
+        let rates = membw_flow_totals(&pss_membw_rates(
+            &[
+                vec![vec![10.0, 0.0], vec![0.0, 0.0]],
+                vec![vec![30.0, 0.0], vec![0.0, 20.0]],
+            ],
             &[gib, 2 * gib],
             &[0, 0],
             1.0,
-        );
+        ));
 
         assert!((rates[0][0] - 0.25).abs() < f64::EPSILON);
         assert!((rates[1][0] - 0.75).abs() < f64::EPSILON);
@@ -6280,6 +6367,32 @@ mod membw_limit_tests {
     }
 
     #[test]
+    fn remote_pressure_caps_the_generating_cpu_node() {
+        // The layer runs on node 0 and sends 90 GiB/s to node 1's memory.
+        let flows = vec![vec![10.0, 90.0], vec![0.0, 0.0]];
+        let capacity = [100.0, 100.0];
+        assert_eq!(
+            membw_governing_node(&flows, 0, &[false, true], &capacity),
+            (true, 90.0, 100.0)
+        );
+        // Node 1 has no CPUs generating the traffic, so it is not governed.
+        assert_eq!(
+            membw_governing_node(&flows, 1, &[false, true], &capacity),
+            (false, 0.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn minor_flows_do_not_inherit_pressure() {
+        // CPU node 1 generates 5% of node 0's pressured bandwidth.
+        let flows = vec![vec![95.0, 0.0], vec![5.0, 20.0]];
+        assert_eq!(
+            membw_governing_node(&flows, 1, &[true, false], &[100.0, 100.0]),
+            (false, 20.0, 100.0)
+        );
+    }
+
+    #[test]
     fn prefetch_follows_demand_far_ratio() {
         // 100 bytes total: 40 prefetch, 60 demand of which 15 are remote.
         assert_eq!(
@@ -6297,27 +6410,28 @@ mod membw_limit_tests {
     fn proxy_moves_remote_fills_to_memory_node() {
         // Layer 0 runs on node 1 and fills 80 bytes from node 0's memory.
         let proxies = membw_proxy_deltas(&[vec![0, 100]], &[vec![0, 80]], &[50, 50], true);
-        assert_eq!(proxies, vec![vec![80.0, 20.0]]);
+        assert_eq!(proxies, vec![vec![vec![0.0, 0.0], vec![80.0, 20.0]]]);
     }
 
     #[test]
     fn proxy_stays_on_cpu_node_for_l3_totals() {
         let proxies = membw_proxy_deltas(&[vec![0, 100]], &[vec![0, 80]], &[50, 50], false);
-        assert_eq!(proxies, vec![vec![0.0, 100.0]]);
+        assert_eq!(proxies, vec![vec![vec![0.0, 0.0], vec![0.0, 100.0]]]);
     }
 
     #[test]
     fn proxy_splits_remote_fills_by_remote_node_traffic() {
         let proxies = membw_proxy_deltas(&[vec![100, 0, 0]], &[vec![60, 0, 0]], &[0, 30, 10], true);
-        assert_eq!(proxies, vec![vec![40.0, 45.0, 15.0]]);
+        assert_eq!(membw_flow_totals(&proxies), vec![vec![40.0, 45.0, 15.0]]);
+        assert_eq!(proxies[0][0], vec![40.0, 45.0, 15.0]);
     }
 
     #[test]
     fn pss_does_not_attribute_without_a_proxy() {
         let gib = 1024_u64.pow(3);
         assert_eq!(
-            pss_membw_rates(&[vec![0.0]], &[gib], &[0], 1.0),
-            vec![vec![0.0]]
+            pss_membw_rates(&[vec![vec![0.0]]], &[gib], &[0], 1.0),
+            vec![vec![vec![0.0]]]
         );
     }
 

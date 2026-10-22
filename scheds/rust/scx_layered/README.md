@@ -116,6 +116,12 @@ traffic. When a layer reaches the high watermark on a node, that `(layer, node)`
 pair becomes pressured. It remains pressured until its attributed utilization
 reaches the low watermark.
 
+Pressure is evaluated on the node owning the memory, but CPU caps apply to the
+nodes whose CPUs generate the traffic, which differ for remote accesses. A
+layer's CPUs on a node are capped when that node generates at least 10% of the
+layer's attributed bandwidth into a pressured node, and Shrink sizes the cap by
+the most overloaded node it feeds.
+
 - `Hold` caps the layer at the CPUs it holds on the node when pressure starts.
 - `Shrink` cuts the cap proportionally to the overshoot, by at least one
   allocation unit, at most once per second so the bandwidth signal can settle
