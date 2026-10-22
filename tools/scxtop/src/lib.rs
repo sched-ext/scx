@@ -798,12 +798,15 @@ impl TryFrom<&bpf_event> for Action {
 impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Action::SetState(AppState::BpfPrograms) => write!(f, "AppStateBpfPrograms"),
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
             Action::SetState(AppState::Pause) => write!(f, "AppStatePause"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::SetState(AppState::Process) => write!(f, "AppStateProcess"),
+            Action::SetState(AppState::PerfTop) => write!(f, "AppStatePerfTop"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
+            Action::SetState(AppState::Memory) => write!(f, "AppStateMemory"),
             Action::Filter => write!(f, "Filter"),
             Action::UpdateColVisibility(_) => write!(f, "UpdateColVisibility"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
@@ -816,6 +819,7 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::Network) => write!(f, "AppStateNetwork"),
             Action::SetState(AppState::Node) => write!(f, "AppStateNode"),
             Action::SetState(AppState::Scheduler) => write!(f, "AppStateScheduler"),
+            Action::SetState(AppState::Power) => write!(f, "AppStatePower"),
             Action::SaveConfig => write!(f, "SaveConfig"),
             Action::RequestTrace => write!(f, "RequestTrace"),
             Action::TraceStarted(_) => write!(f, "TraceStarted"),

@@ -661,6 +661,33 @@ mod tests {
         assert!(config.default_profiling_event.is_none());
     }
 
+    #[test]
+    fn test_default_keymap_round_trip() {
+        let dir = tempdir().expect("Failed to create temporary directory");
+        let config_path = get_mock_config_path(dir.path()).expect("Failed to get mock config path");
+        fs::create_dir_all(config_path.parent().unwrap())
+            .expect("Failed to create parent directory for config");
+
+        // This is what `Config::save()` writes.
+        let mut config_to_save = Config::default_config();
+        let saved_keymap = config_to_save.active_keymap.to_hashmap();
+        config_to_save.keymap = Some(saved_keymap);
+
+        let saved_config_str =
+            toml::to_string(&config_to_save).expect("Failed to serialize config");
+        fs::write(&config_path, saved_config_str)
+            .expect("Failed to write config to mock path for saving test");
+
+        let contents = fs::read_to_string(&config_path).expect("Failed to read config file");
+        let mut loaded_config: Config =
+            toml::from_str(&contents).expect("Failed to deserialize config");
+        loaded_config
+            .resolve_keymap()
+            .expect("A saved keymap must load back");
+
+        assert_eq!(loaded_config.active_keymap, KeyMap::default());
+    }
+
     // Helper to mock xdg::BaseDirectories for testing file paths
     struct MockXdgBaseDirectories {
         config_home: PathBuf,
