@@ -879,10 +879,13 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
     });
 
     let close: Box<dyn StatsCloser<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
-        req_ch.send(StatsReq::Bye(current().id())).unwrap();
-        match res_ch.recv().unwrap() {
-            StatsRes::Bye => {}
-            res => panic!("invalid response to Bye: {:?}", res),
+        // The scheduler loop may already be gone during shutdown.
+        if req_ch.send(StatsReq::Bye(current().id())).is_err() {
+            return;
+        }
+        match res_ch.recv() {
+            Ok(StatsRes::Bye) | Err(_) => {}
+            Ok(res) => panic!("invalid response to Bye: {:?}", res),
         }
     });
 
