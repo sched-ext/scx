@@ -97,6 +97,13 @@ const DEFAULT_LAYER_WEIGHT: u32 = bpf_intf::consts_DEFAULT_LAYER_WEIGHT;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
 const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 
+/// Half-life of the per-layer, per-node bandwidth EWMA. Longer than the
+/// utilization half-life because proxy attribution is noisy at 100ms.
+const MEMBW_HALF_LIFE_SECS: f64 = 0.5;
+/// Minimum interval between memory-bandwidth cap adjustments, long enough
+/// for the bandwidth EWMA to reflect the previous adjustment.
+const MEMBW_ADJUST_INTERVAL: Duration = Duration::from_secs(1);
+
 const LAYER_USAGE_OWNED: usize = bpf_intf::layer_usage_LAYER_USAGE_OWNED as usize;
 const LAYER_USAGE_OPEN: usize = bpf_intf::layer_usage_LAYER_USAGE_OPEN as usize;
 const LAYER_USAGE_SUM_UPTO: usize = bpf_intf::layer_usage_LAYER_USAGE_SUM_UPTO as usize;
@@ -1669,7 +1676,7 @@ impl Stats {
             prev_pmu_resctrl_membw,
             prev_node_membw,
         ) = if membw_fresh {
-            let node_decay = USAGE_DECAY.powf(membw_secs);
+            let node_decay = 0.5f64.powf(membw_secs / MEMBW_HALF_LIFE_SECS);
             (
                 // A decay rate of 0.0 keeps only the latest sample.
                 cur_layer_membw,
@@ -2310,6 +2317,9 @@ struct Scheduler<'a> {
     node_membw_capacity: Vec<f64>,
     node_membw_source: Option<NodeMembwSource>,
     layer_node_membw_pressured: Vec<Vec<bool>>,
+    layer_node_membw_cap: Vec<Vec<Option<usize>>>, // Per-node CPU caps, None if uncapped
+    layer_node_membw_adjusted_at: Vec<Vec<Instant>>,
+    layer_membw_confined: Vec<bool>, // Mirrors BPF layer.membw_confined
     processing_dur: Duration,
 
     topo: Arc<Topology>,
@@ -2359,6 +2369,45 @@ fn membw_shrink_target(
     };
     let proportional = (node_cpus as f64 * ratio).floor() as usize;
     proportional.min(node_cpus.saturating_sub(allocation_unit.max(1)))
+}
+
+/// Next per-node CPU cap of a memory-bandwidth limited layer, None if
+/// uncapped. While pressured, Hold caps the layer at its current CPUs and
+/// Shrink cuts the cap proportionally once per adjustment interval. After
+/// pressure clears, the cap holds while bandwidth is inside the hysteresis
+/// band and relaxes by one allocation unit per interval below the low
+/// watermark, so a noisy signal cannot release it all at once.
+#[allow(clippy::too_many_arguments)]
+fn membw_next_cap(
+    cap: Option<usize>,
+    current: usize,
+    pressured: bool,
+    bandwidth: f64,
+    capacity: f64,
+    limit: &LayerMembwLimit,
+    adjust: bool,
+    allocation_unit: usize,
+    node_cpus: usize,
+) -> Option<usize> {
+    let (low, high) = limit.utilization_range;
+    if pressured {
+        let base = cap.unwrap_or(current).min(current);
+        return Some(match limit.action {
+            LayerMembwLimitAction::Hold => cap.unwrap_or(current),
+            LayerMembwLimitAction::Shrink if adjust => {
+                membw_shrink_target(base, bandwidth, capacity, high, allocation_unit)
+            }
+            LayerMembwLimitAction::Shrink => base,
+        });
+    }
+
+    let cap = cap?;
+    let utilization = bandwidth / capacity.max(f64::EPSILON);
+    if !adjust || !utilization.is_finite() || utilization > low {
+        return Some(cap);
+    }
+    let relaxed = cap + allocation_unit.max(1);
+    (relaxed < node_cpus).then_some(relaxed)
 }
 
 /// Cap one node of an allocation while preserving the layer-wide minimum.
@@ -3719,6 +3768,9 @@ impl<'a> Scheduler<'a> {
             node_membw_capacity,
             node_membw_source,
             layer_node_membw_pressured: vec![vec![false; nr_nodes]; nr_layers],
+            layer_node_membw_cap: vec![vec![None; nr_nodes]; nr_layers],
+            layer_node_membw_adjusted_at: vec![vec![Instant::now(); nr_nodes]; nr_layers],
+            layer_membw_confined: vec![false; nr_layers],
             processing_dur: Default::default(),
 
             proc_reader,
@@ -4436,32 +4488,20 @@ impl<'a> Scheduler<'a> {
         // independently computed allocations.
         let mut membw_freed = vec![0usize; nr_nodes];
         for (idx, alloc) in layer_allocs.iter_mut().enumerate() {
-            let Some(limit) = self.layer_specs[idx].kind.common().membw_limit.as_ref() else {
+            if self.layer_specs[idx].kind.common().membw_limit.is_none() {
                 continue;
-            };
+            }
             let min_units = targets[idx].1.div_ceil(au);
             for (node, freed) in membw_freed.iter_mut().enumerate() {
-                if !self.layer_node_membw_pressured[idx][node] {
+                let Some(cap_cpus) = self.layer_node_membw_cap[idx][node] else {
                     continue;
-                }
-
-                let current = self.layers[idx].nr_node_cpus[node];
-                let cap_cpus = match limit.action {
-                    LayerMembwLimitAction::Hold => current,
-                    LayerMembwLimitAction::Shrink => membw_shrink_target(
-                        current,
-                        self.sched_stats.layer_node_membws[idx][node],
-                        self.node_membw_capacity[node],
-                        limit.utilization_range.1,
-                        au,
-                    ),
                 };
                 *freed += cap_layer_node_alloc(alloc, node, cap_cpus / au, min_units);
             }
         }
 
         // Reassign released units on each node to other layers which still
-        // have demand there. The pressured layer is excluded on that node, so
+        // have demand there. The capped layer is excluded on that node, so
         // the cap does not get undone on the next allocation pass.
         for (node, &freed) in membw_freed.iter().enumerate() {
             if freed == 0 {
@@ -4471,7 +4511,7 @@ impl<'a> Scheduler<'a> {
             let mut indices = Vec::new();
             let mut entries = Vec::new();
             for idx in 0..layer_allocs.len() {
-                if demands[idx].spread || self.layer_node_membw_pressured[idx][node] {
+                if demands[idx].spread || self.layer_node_membw_cap[idx][node].is_some() {
                     continue;
                 }
                 let pinned_left =
@@ -4952,15 +4992,41 @@ impl<'a> Scheduler<'a> {
         for (idx, spec) in self.layer_specs.iter().enumerate() {
             let Some(limit) = spec.kind.common().membw_limit.as_ref() else {
                 self.layer_node_membw_pressured[idx].fill(false);
+                self.layer_node_membw_cap[idx].fill(None);
                 continue;
             };
 
+            let au = self.cpu_pool.alloc_unit();
             for node in 0..self.topo.nodes.len() {
                 let previous = self.layer_node_membw_pressured[idx][node];
                 let bandwidth = self.sched_stats.layer_node_membws[idx][node];
                 let capacity = self.node_membw_capacity[node];
                 let pressured =
                     membw_pressure_active(bandwidth, capacity, limit.utilization_range, previous);
+
+                let cap = self.layer_node_membw_cap[idx][node];
+                let adjust = cap.is_none()
+                    || self.layer_node_membw_adjusted_at[idx][node].elapsed()
+                        >= MEMBW_ADJUST_INTERVAL;
+                let next_cap = membw_next_cap(
+                    cap,
+                    self.layers[idx].nr_node_cpus[node],
+                    pressured,
+                    bandwidth,
+                    capacity,
+                    limit,
+                    adjust,
+                    au,
+                    self.topo.nodes[&node].all_cpus.len(),
+                );
+                if next_cap != cap {
+                    self.layer_node_membw_adjusted_at[idx][node] = Instant::now();
+                    debug!(
+                        "[{}] node {} memory-bandwidth CPU cap {:?} -> {:?}",
+                        spec.name, node, cap, next_cap
+                    );
+                    self.layer_node_membw_cap[idx][node] = next_cap;
+                }
                 if pressured != previous {
                     info!(
                         "[{}] node {} memory-bandwidth pressure -> {} (attributed={:.2} GiB/s capacity={:.2} GiB/s utilization={:.3} range=[{:.3}, {:.3}] action={:?})",
@@ -4976,6 +5042,23 @@ impl<'a> Scheduler<'a> {
                     );
                 }
                 self.layer_node_membw_pressured[idx][node] = pressured;
+            }
+
+            // A Grouped layer normally overflows onto CPUs it does not own,
+            // which would bypass a CPU cap. Confine it while any node is
+            // capped.
+            let confine = matches!(spec.kind, LayerKind::Grouped { .. })
+                && self.layer_node_membw_cap[idx].iter().any(Option::is_some);
+            if self.layer_membw_confined[idx] != confine {
+                info!(
+                    "[{}] memory-bandwidth confinement -> {}",
+                    spec.name,
+                    if confine { "ON" } else { "OFF" }
+                );
+                self.skel.maps.bss_data.as_mut().unwrap().layers[idx]
+                    .membw_confined
+                    .write(confine);
+                self.layer_membw_confined[idx] = confine;
             }
         }
     }
@@ -6134,6 +6217,66 @@ mod membw_limit_tests {
         assert!((rates[1][0] - 0.75).abs() < f64::EPSILON);
         assert_eq!(rates[0][1], 0.0);
         assert_eq!(rates[1][1], 2.0);
+    }
+
+    fn limit(action: LayerMembwLimitAction) -> LayerMembwLimit {
+        LayerMembwLimit {
+            utilization_range: (0.30, 0.40),
+            action,
+        }
+    }
+
+    #[test]
+    fn shrink_cap_cuts_only_once_per_interval() {
+        let shrink = limit(LayerMembwLimitAction::Shrink);
+        // 80% utilization on 20 CPUs targets half of them.
+        assert_eq!(
+            membw_next_cap(None, 20, true, 80.0, 100.0, &shrink, true, 2, 96),
+            Some(10)
+        );
+        assert_eq!(
+            membw_next_cap(Some(10), 10, true, 80.0, 100.0, &shrink, false, 2, 96),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn hold_cap_freezes_current_cpus() {
+        let hold = limit(LayerMembwLimitAction::Hold);
+        assert_eq!(
+            membw_next_cap(None, 12, true, 80.0, 100.0, &hold, true, 2, 96),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn cap_holds_inside_band_and_relaxes_below_low() {
+        let shrink = limit(LayerMembwLimitAction::Shrink);
+        assert_eq!(
+            membw_next_cap(Some(10), 10, false, 35.0, 100.0, &shrink, true, 2, 96),
+            Some(10)
+        );
+        assert_eq!(
+            membw_next_cap(Some(10), 10, false, 20.0, 100.0, &shrink, false, 2, 96),
+            Some(10)
+        );
+        assert_eq!(
+            membw_next_cap(Some(10), 10, false, 20.0, 100.0, &shrink, true, 2, 96),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn cap_is_released_at_node_size() {
+        let shrink = limit(LayerMembwLimitAction::Shrink);
+        assert_eq!(
+            membw_next_cap(Some(94), 94, false, 20.0, 100.0, &shrink, true, 2, 96),
+            None
+        );
+        assert_eq!(
+            membw_next_cap(None, 20, false, 20.0, 100.0, &shrink, true, 2, 96),
+            None
+        );
     }
 
     #[test]

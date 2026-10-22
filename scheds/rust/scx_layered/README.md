@@ -110,26 +110,45 @@ bandwidth:
 }
 ```
 
-The low and high values are fractions of the node's bandwidth capacity. When a
-layer reaches the high watermark on a node, that `(layer, node)` pair becomes
-pressured. It remains pressured until its attributed utilization reaches the
-low watermark.
+The low and high values are fractions of the node's bandwidth capacity, and
+the limit applies to the layer's attributed bandwidth, not to the node's total
+traffic. When a layer reaches the high watermark on a node, that `(layer, node)`
+pair becomes pressured. It remains pressured until its attributed utilization
+reaches the low watermark.
 
-- `Hold` prevents the layer from adding CPUs on a pressured node while normal
-  utilization-based shrinking remains enabled.
-- `Shrink` also lowers the layer's CPU allocation on that node proportionally,
-  removing at least one allocation unit per sizing cycle. The layer-wide
-  `cpus_range` minimum is always honored.
+- `Hold` caps the layer at the CPUs it holds on the node when pressure starts.
+- `Shrink` cuts the cap proportionally to the overshoot, by at least one
+  allocation unit, at most once per second so the bandwidth signal can settle
+  between cuts.
+
+The cap outlives the pressure: while utilization is between the watermarks the
+cap holds, and below the low watermark it relaxes by one allocation unit per
+second until it covers the whole node and is dropped. This keeps a noisy signal
+from releasing the cap all at once and regrowing the layer immediately. The
+layer-wide `cpus_range` minimum is always honored.
 
 ```mermaid
 stateDiagram-v2
     direction LR
-    [*] --> Normal
-    Normal --> Pressured: attributed bandwidth >= high * capacity
-    Pressured --> Normal: attributed bandwidth <= low * capacity
-    Normal --> Normal: pass CPU target through
-    Pressured --> Pressured: Hold blocks node growth; Shrink lowers node target
+    [*] --> Uncapped
+    Uncapped --> Capped: attributed bandwidth >= high * capacity
+    Capped --> Capped: pressured: Hold keeps cap, Shrink cuts cap (1/s)
+    Capped --> Capped: between watermarks: cap holds
+    Capped --> Capped: below low: cap += 1 alloc unit (1/s)
+    Capped --> Uncapped: cap reaches node size
 ```
+
+A cap only limits bandwidth if the layer cannot run elsewhere. Confined layers
+already stay on their CPUs. Grouped layers normally overflow onto CPUs they do
+not own, so while any node is capped they are confined the same way, and the
+overflow resumes once all caps are dropped.
+
+CPU count controls bandwidth only below the point where the layer saturates the
+node's memory. A streaming workload can saturate a node with a small fraction
+of its cores, and adding CPUs beyond that point does not add bandwidth. `Hold`
+therefore only limits a layer which is still below that point when pressure
+starts, and `Shrink` may need to cut deeply, which also limits the layer's
+non-memory work. Choose `cpus_range` minimums accordingly.
 
 #### Proportional bandwidth attribution
 
@@ -201,7 +220,7 @@ resctrl sampling is enabled.
 
 CPU utilization still computes each layer's initial target. The unified
 allocator then places that demand across nodes, after which `membw_limit` caps
-the selected layer's target on pressured nodes. Unpressured nodes retain their
+the selected layer's target on capped nodes. Uncapped nodes retain their
 normal allocations, and competing layers may use the released CPUs. The
 existing global `membw_gb` limit composes with this policy; the lower target
 wins.

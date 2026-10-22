@@ -403,6 +403,7 @@ struct layer {
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;
 	bool			idle_confined;
+	bool			membw_confined;	/* set by userspace while bandwidth-capped */
 	bool			fully_allocated;
 	int			growth_algo;
 
