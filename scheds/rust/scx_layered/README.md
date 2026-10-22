@@ -162,7 +162,8 @@ No CPU-model-specific bandwidth values are assumed. When at least one layer
 configures `membw_limit`, each node's capacity is selected in this order:
 
 1. `--node-membw-capacity-gb N`, applied uniformly to all nodes.
-2. HMAT read plus write bandwidth from sysfs.
+2. The larger of the HMAT read and write bandwidth from sysfs. Reads and writes
+   share the same channels, so they are not added.
 
 If neither source is available for every node, `membw_limit` is ignored with a
 warning instead of guessing a capacity. Without any `membw_limit` or

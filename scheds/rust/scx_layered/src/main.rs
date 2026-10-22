@@ -692,7 +692,9 @@ enum CgroupEvent {
     },
 }
 
-/// Read HMAT-declared read plus write bandwidth for a NUMA node in GiB/s.
+/// Read HMAT-declared bandwidth for a NUMA node in GiB/s. Reads and writes
+/// share the same channels, so the peak is the larger of the two rather than
+/// their sum.
 fn hmat_read_node_bandwidth(nid: usize) -> Option<f64> {
     let read_mib = fs::read_to_string(format!(
         "/sys/devices/system/node/node{nid}/access0/initiators/read_bandwidth"
@@ -708,7 +710,7 @@ fn hmat_read_node_bandwidth(nid: usize) -> Option<f64> {
     .trim()
     .parse::<f64>()
     .ok()?;
-    let capacity = (read_mib + write_mib) / 1024.0;
+    let capacity = read_mib.max(write_mib) / 1024.0;
     capacity
         .is_finite()
         .then_some(capacity)
