@@ -548,6 +548,24 @@ impl LayerStats {
             writeln!(w)?;
         }
 
+        // per-node attributed memory-bandwidth utilization, '*' if pressured
+        if self.node_membw_util.iter().any(|util| *util > 0.0)
+            || self.node_membw_pressured.iter().any(|pres| *pres != 0)
+        {
+            write!(w, "  membw   util")?;
+            for (nid, util) in self.node_membw_util.iter().enumerate() {
+                let pres = self.node_membw_pressured.get(nid).copied().unwrap_or(0) != 0;
+                write!(
+                    w,
+                    " N{}={}{}",
+                    nid,
+                    fmt_pct(*util * 100.0),
+                    if pres { "*" } else { " " }
+                )?;
+            }
+            writeln!(w)?;
+        }
+
         // cpumask
         let cpumask = Cpumask::from_vec(self.cpus.clone());
 

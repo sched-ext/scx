@@ -135,15 +135,31 @@ stateDiagram-v2
 
 The hardware PMU event used by `membw_gb` is sampled while each task runs, so
 its deltas can be associated with a layer and the NUMA node of the executing
-CPU. Root resctrl MBM provides the shared bandwidth total for each monitoring
-domain. `scx_layered` groups those domains by NUMA node and apportions each
-node's total among all layers, similar to proportional set size:
+CPU. A node-level counter provides the shared bandwidth total for each NUMA
+node, and `scx_layered` apportions each node's total among all layers, similar
+to proportional set size:
 
 ```text
-layer_bandwidth[layer, node] = node_resctrl_bandwidth[node]
+layer_bandwidth[layer, node] = node_bandwidth[node]
                               * layer_pmu_delta[layer, node]
                               / sum_layer_pmu_deltas[node]
 ```
+
+The node total comes from `--node-membw-source`:
+
+- `memctl`: memory-controller CAS counters (AMD UMC), one per DRAM channel,
+  grouped by the node owning the channel. These count actual DRAM reads and
+  writes, including prefetches, writebacks, DMA, and remote-socket accesses to
+  the node's memory, which matches what node capacity describes. Packages that
+  span multiple NUMA nodes (NPS2/NPS4) are not supported.
+- `resctrl`: root-group MBM, with L3 monitoring domains grouped by NUMA node.
+  MBM counts traffic leaving each L3 regardless of where it is served, so a
+  node's total includes its CPUs' remote accesses and, on AMD, cache-to-cache
+  transfers. It can exceed the node's local DRAM capacity.
+- `auto` (default): `memctl` when available, otherwise `resctrl`.
+
+Rates are computed over the interval between two node samples, which the
+scheduler takes immediately before reading the per-layer PMU proxies.
 
 Every layer participates in the denominator, including layers without a
 `membw_limit`, so shared traffic is counted once. The policy is applied only to
@@ -177,11 +193,14 @@ normal allocations, and competing layers may use the released CPUs. The
 existing global `membw_gb` limit composes with this policy; the lower target
 wins.
 
-Memory-bandwidth tracking uses one pinned core PMU counter and resctrl mounted
-at `/sys/fs/resctrl`. Pinning prevents silent perf multiplexing; scheduler
-startup logs a warning and ignores memory-bandwidth limits if the required
-event cannot run on every online CPU or resctrl MBM is unavailable. See
-`examples/membw_limit.json`.
+Memory-bandwidth tracking uses one pinned core PMU counter and a node source:
+memory-controller PMUs or resctrl mounted at `/sys/fs/resctrl`. Pinning
+prevents silent perf multiplexing of the core proxy. Memory-controller counters
+are shared with other system-wide perf users, so their deltas are scaled by
+enabled/running time and a warning is logged when they are multiplexed.
+Scheduler startup logs a warning and ignores memory-bandwidth limits if the
+core event cannot run on every online CPU or no node source is available. See
+`examples/membw_limit.json` (pass it as `f:examples/membw_limit.json`).
 
 `scx_layered` can provide performance wins, for certain workloads when
 sufficient tuning on the layer config.

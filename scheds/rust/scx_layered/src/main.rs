@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 mod bpf_skel;
+mod memctl;
 mod stats;
 
 use std::collections::BTreeMap;
@@ -42,6 +43,7 @@ use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::libbpf_sys;
+use memctl::MemCtlCounters;
 use nix::sched::CpuSet;
 use nvml_wrapper::Nvml;
 use nvml_wrapper::error::NvmlError;
@@ -671,6 +673,13 @@ struct Opts {
     #[clap(long)]
     node_membw_capacity_gb: Option<f64>,
 
+    /// Source of per-NUMA-node memory-bandwidth totals. memctl counts DRAM
+    /// reads and writes at the memory controllers (AMD UMC). resctrl uses
+    /// root-group MBM, which counts traffic leaving each L3, including
+    /// remote and cache-to-cache transfers. auto prefers memctl.
+    #[clap(long, value_enum, default_value_t = NodeMembwSourceKind::Auto)]
+    node_membw_source: NodeMembwSourceKind,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     topology: TopologyArgs,
 
@@ -935,6 +944,82 @@ impl<'b> Sub<&'b BpfStats> for &BpfStats {
     }
 }
 
+/// Per-NUMA-node cumulative memory traffic in bytes and the instant it was
+/// read. Rates are computed over the interval between two samples rather
+/// than the stats refresh interval, which can differ by the time spent
+/// reading.
+#[derive(Clone, Debug)]
+struct NodeMembwSample {
+    at: Instant,
+    node_bytes: Vec<u64>,
+}
+
+impl NodeMembwSample {
+    fn zero(nr_nodes: usize) -> Self {
+        Self {
+            at: Instant::now(),
+            node_bytes: vec![0; nr_nodes],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum NodeMembwSourceKind {
+    Auto,
+    Memctl,
+    Resctrl,
+}
+
+/// Reader of per-NUMA-node memory-traffic totals.
+enum NodeMembwSource {
+    MemCtl(MemCtlCounters),
+    Resctrl,
+}
+
+impl NodeMembwSource {
+    fn open(topo: &Topology, kind: NodeMembwSourceKind) -> Result<Self> {
+        let memctl = || MemCtlCounters::open(topo).map(Self::MemCtl);
+        let resctrl = || Stats::resctrl_read_node_membw(topo).map(|_| Self::Resctrl);
+        match kind {
+            NodeMembwSourceKind::Memctl => memctl(),
+            NodeMembwSourceKind::Resctrl => resctrl(),
+            NodeMembwSourceKind::Auto => memctl().or_else(|err| {
+                info!("memory-controller counters unavailable, trying resctrl: {err:#}");
+                resctrl()
+            }),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::MemCtl(_) => "memctl",
+            Self::Resctrl => "resctrl",
+        }
+    }
+
+    fn sample(&mut self, topo: &Topology) -> Result<NodeMembwSample> {
+        let node_bytes = match self {
+            Self::MemCtl(counters) => counters.read_node_bytes()?,
+            Self::Resctrl => Stats::resctrl_read_node_membw(topo)?,
+        };
+        Ok(NodeMembwSample {
+            at: Instant::now(),
+            node_bytes,
+        })
+    }
+}
+
+/// Sample node memory traffic, or return zeros when tracking is disabled.
+fn sample_node_membw(
+    source: &mut Option<NodeMembwSource>,
+    topo: &Topology,
+) -> Result<NodeMembwSample> {
+    match source {
+        Some(source) => source.sample(topo),
+        None => Ok(NodeMembwSample::zero(topo.nodes.len())),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Stats {
     at: Instant,
@@ -957,8 +1042,7 @@ struct Stats {
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
     layer_node_membws: Vec<Vec<f64>>, // PSS-attributed per-layer/node bandwidth in GiB/s
     prev_layer_node_membw_agg: Vec<Vec<u64>>, // Previous per-layer/node PMU proxies
-    prev_resctrl_node_membw: Vec<u64>, // Previous per-node resctrl byte counters
-    membw_tracking: bool,
+    prev_node_membw: NodeMembwSample, // Previous per-node memory traffic counters
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
@@ -1177,7 +1261,7 @@ impl Stats {
         topo: Arc<Topology>,
         gpu_task_affinitizer: &GpuTaskAffinitizer,
         util_compensation: bool,
-        membw_tracking: bool,
+        node_membw: NodeMembwSample,
     ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
         let nr_nodes = topo.nodes.len();
@@ -1189,12 +1273,7 @@ impl Stats {
             .map(|membw| membw[LAYER_USAGE_OPEN] + membw[LAYER_USAGE_OWNED])
             .sum();
         let layer_node_membw = Self::read_layer_node_membw_agg(&cpu_ctxs, &topo, nr_layers);
-        let resctrl_node_membw = if membw_tracking {
-            Self::resctrl_read_node_membw(&topo)?
-        } else {
-            vec![0; nr_nodes]
-        };
-        let resctrl_total = resctrl_node_membw.iter().sum();
+        let resctrl_total = node_membw.node_bytes.iter().sum();
 
         Ok(Self {
             at: Instant::now(),
@@ -1226,9 +1305,8 @@ impl Stats {
             prev_layer_membw_agg: pmu_membw,
             layer_node_membws: vec![vec![0.0; nr_nodes]; nr_layers],
             prev_layer_node_membw_agg: layer_node_membw,
-            prev_resctrl_node_membw: resctrl_node_membw,
+            prev_node_membw: node_membw,
             prev_pmu_resctrl_membw: (pmu_total, resctrl_total),
-            membw_tracking,
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
@@ -1258,10 +1336,17 @@ impl Stats {
         now: Instant,
         cur_processing_dur: Duration,
         gpu_task_affinitizer: &GpuTaskAffinitizer,
+        node_membw: &NodeMembwSample,
     ) -> Result<()> {
         let elapsed = now.duration_since(self.at);
         let elapsed_f64 = elapsed.as_secs_f64();
+        // The scheduler samples node traffic immediately before this so the
+        // node totals and the PMU proxies below cover the same window.
         let cpu_ctxs = read_cpu_ctxs(skel)?;
+        let membw_secs = node_membw
+            .at
+            .saturating_duration_since(self.prev_node_membw.at)
+            .as_secs_f64();
 
         let layers = &skel.maps.bss_data.as_ref().unwrap().layers;
         let nr_layer_tasks: Vec<usize> = layers
@@ -1319,12 +1404,7 @@ impl Stats {
             .iter()
             .map(|membw_agg| membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED])
             .sum();
-        let resctrl_node_cur = if self.membw_tracking {
-            Self::resctrl_read_node_membw(&self.topo)?
-        } else {
-            self.prev_resctrl_node_membw.clone()
-        };
-        let resctrl_cur: u64 = resctrl_node_cur.iter().sum();
+        let resctrl_cur: u64 = node_membw.node_bytes.iter().sum();
         let pmu_delta = pmu_cur.saturating_sub(pmu_prev);
         let resctrl_delta = resctrl_cur.saturating_sub(resctrl_prev);
         let factor = if pmu_delta > 0 {
@@ -1347,7 +1427,7 @@ impl Stats {
                 .collect()
         };
 
-        // Compute memory traffic rates since the last sample in GiB/s.
+        // Compute memory traffic rates since the last node sample in GiB/s.
         let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
                 .iter()
@@ -1355,7 +1435,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| c.saturating_sub(*p) as f64 / 1024_f64.powi(3) / elapsed_f64)
+                        .map(|(c, p)| c.saturating_sub(*p) as f64 / 1024_f64.powi(3) / membw_secs)
                         .collect()
                 })
                 .collect()
@@ -1370,7 +1450,7 @@ impl Stats {
             .map(|x| x.iter().map(|x| *x * factor).collect())
             .collect();
 
-        // Attribute each node's resctrl bandwidth among all layers in
+        // Attribute each node's bandwidth among all layers in
         // proportion to their task-attributed PMU proxy deltas. This is the
         // bandwidth analogue of proportional set size: each shared node total
         // is accounted exactly once instead of being charged in full to every
@@ -1378,9 +1458,9 @@ impl Stats {
         let layer_node_membws = pss_membw_rates(
             &cur_layer_node_membw_agg,
             &self.prev_layer_node_membw_agg,
-            &resctrl_node_cur,
-            &self.prev_resctrl_node_membw,
-            elapsed_f64,
+            &node_membw.node_bytes,
+            &self.prev_node_membw.node_bytes,
+            membw_secs,
         );
 
         let metric_decay =
@@ -1418,9 +1498,47 @@ impl Stats {
         let layer_node_duty_sums: Vec<Vec<f64>> =
             metric_decay(cur_node_duty, &self.layer_node_duty_sums, *USAGE_DECAY);
 
-        let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
-        let layer_node_membws =
-            metric_decay(layer_node_membws, &self.layer_node_membws, *USAGE_DECAY);
+        // Without a newer node sample there is no bandwidth delta. Keep the
+        // previous rates and baselines so the next sample covers the whole
+        // window for both the PMU proxies and the node totals.
+        let membw_fresh = membw_secs > 0.0;
+        let (
+            layer_membws,
+            layer_node_membws,
+            prev_layer_membw_agg,
+            prev_layer_node_membw_agg,
+            prev_pmu_resctrl_membw,
+            prev_node_membw,
+        ) = if membw_fresh {
+            let node_decay = USAGE_DECAY.powf(membw_secs);
+            (
+                // A decay rate of 0.0 keeps only the latest sample.
+                cur_layer_membw,
+                layer_node_membws
+                    .iter()
+                    .zip(self.layer_node_membws.iter())
+                    .map(|(cur, prev)| {
+                        cur.iter()
+                            .zip(prev.iter())
+                            .map(|(c, p)| p * node_decay + c * (1.0 - node_decay))
+                            .collect()
+                    })
+                    .collect(),
+                cur_layer_membw_agg,
+                cur_layer_node_membw_agg,
+                (pmu_cur, resctrl_cur),
+                node_membw.clone(),
+            )
+        } else {
+            (
+                self.layer_membws.clone(),
+                self.layer_node_membws.clone(),
+                self.prev_layer_membw_agg.clone(),
+                self.prev_layer_node_membw_agg.clone(),
+                self.prev_pmu_resctrl_membw,
+                self.prev_node_membw.clone(),
+            )
+        };
 
         let proc_stat = proc_reader
             .read_stat()
@@ -1585,13 +1703,12 @@ impl Stats {
             prev_layer_node_duty_raw: cur_layer_node_duty_raw,
 
             layer_membws,
-            prev_layer_membw_agg: cur_layer_membw_agg,
+            prev_layer_membw_agg,
             layer_node_membws,
-            prev_layer_node_membw_agg: cur_layer_node_membw_agg,
-            prev_resctrl_node_membw: resctrl_node_cur,
-            membw_tracking: self.membw_tracking,
+            prev_layer_node_membw_agg,
+            prev_node_membw,
             // Was updated during normalization.
-            prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
+            prev_pmu_resctrl_membw,
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
@@ -2026,6 +2143,7 @@ struct Scheduler<'a> {
     xnuma_mig_src: Vec<Vec<bool>>,
     growth_denied: Vec<Vec<bool>>,
     node_membw_capacity: Vec<f64>,
+    node_membw_source: Option<NodeMembwSource>,
     layer_node_membw_pressured: Vec<Vec<bool>>,
     processing_dur: Duration,
 
@@ -3072,11 +3190,24 @@ impl<'a> Scheduler<'a> {
         if membw_limit_enabled && node_membw_capacity.is_empty() && !membw_gb_enabled {
             membw_tracking = false;
         }
-        if membw_tracking && let Err(err) = Stats::resctrl_read_node_membw(&topo) {
-            warn!("memory-bandwidth limits disabled: resctrl MBM is unavailable: {err:#}");
-            membw_tracking = false;
-            node_membw_capacity.clear();
-        }
+        let mut node_membw_source = if membw_tracking {
+            match NodeMembwSource::open(&topo, opts.node_membw_source) {
+                Ok(source) => {
+                    info!("node memory-bandwidth source: {}", source.name());
+                    Some(source)
+                }
+                Err(err) => {
+                    warn!(
+                        "memory-bandwidth limits disabled: no node bandwidth source is available: {err:#}"
+                    );
+                    membw_tracking = false;
+                    node_membw_capacity.clear();
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Check kernel features
         init_libbpf_logging(None);
@@ -3311,6 +3442,10 @@ impl<'a> Scheduler<'a> {
             membw_tracking = false;
             node_membw_capacity.clear();
         }
+        if !membw_tracking {
+            node_membw_source = None;
+        }
+        let initial_node_membw = sample_node_membw(&mut node_membw_source, &topo)?;
 
         let mut layers = vec![];
         let layer_growth_orders =
@@ -3402,7 +3537,7 @@ impl<'a> Scheduler<'a> {
                 topo.clone(),
                 &gpu_task_handler,
                 opts.util_compensation,
-                membw_tracking,
+                initial_node_membw,
             )?,
             layer_peak_utils: vec![0.0; nr_layers],
 
@@ -3411,6 +3546,7 @@ impl<'a> Scheduler<'a> {
             xnuma_mig_src: vec![vec![false; topo.nodes.len()]; nr_layers],
             growth_denied: vec![vec![false; topo.nodes.len()]; nr_layers],
             node_membw_capacity,
+            node_membw_source,
             layer_node_membw_pressured: vec![vec![false; nr_nodes]; nr_layers],
             processing_dur: Default::default(),
 
@@ -4600,12 +4736,14 @@ impl<'a> Scheduler<'a> {
 
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
+        let node_membw = sample_node_membw(&mut self.node_membw_source, &self.topo)?;
         self.sched_stats.refresh(
             &mut self.skel,
             &self.proc_reader,
             started_at,
             self.processing_dur,
             &self.gpu_task_handler,
+            &node_membw,
         )?;
 
         // Update BPF with EWMA values
@@ -4983,7 +5121,7 @@ impl<'a> Scheduler<'a> {
                             self.topo.clone(),
                             &self.gpu_task_handler,
                             self.sched_stats.util_compensation,
-                            self.sched_stats.membw_tracking,
+                            self.sched_stats.prev_node_membw.clone(),
                         )?;
                         res_ch.send(StatsRes::Hello(Box::new(stats)))?;
                     }
@@ -5006,6 +5144,9 @@ impl<'a> Scheduler<'a> {
                             now,
                             self.processing_dur,
                             &self.gpu_task_handler,
+                            // Reuse the scheduler's latest node sample rather
+                            // than reading the counters again on this thread.
+                            &self.sched_stats.prev_node_membw,
                         )?;
                         let sys_stats =
                             self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
