@@ -773,6 +773,8 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 	 * ask the task for this CPU again, see keep_running().
 	 */
 	has_prev = prev && is_task_queued(prev);
+	if (!has_prev)
+		active_balance_drop(cid);
 	if (READ_ONCE(cid_ctx(cid)->active_balance_pending) == 2 &&
 	    __sync_val_compare_and_swap(&cid_ctx(cid)->active_balance_pending,
 					    2, 0) == 2) {
@@ -881,8 +883,16 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 			active_balance_complete(cid, ACTIVE_BALANCE_MOVED);
 		return;
 	}
+	/*
+	 * The pick may leave an all-ineligible queue alone only for a @prev
+	 * that stays. One handed off or out of bandwidth leaves the CPU, and
+	 * a pinned task queued behind it would be left there with the CPU
+	 * idle and nothing to kick it.
+	 */
 	if (!keep && ((!no_eligible_scan && !no_eligibility) ?
-		     move_first_eligible_to_local(cid, tnow, has_prev) :
+		     move_first_eligible_to_local(cid, tnow, has_prev &&
+						  migrate_cid < 0 &&
+						  !prev_throttled) :
 		     cid_queue_move_head_to_local(cid))) {
 		cid_queued_check(cid);
 		if (active_balance)

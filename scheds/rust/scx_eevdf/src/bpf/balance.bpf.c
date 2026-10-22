@@ -595,6 +595,7 @@ static bool request_active_balance(s32 dst_cid, u64 now)
 		active_balance_complete(dst_cid, detach);
 		return false;
 	}
+	cid_note_active_balance();
 	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
 
 	return false;
@@ -626,6 +627,7 @@ __noinline int newidle_active_balance(s32 dst_cid, u64 now)
 	    __sync_val_compare_and_swap(&cid_ctx(best)->active_balance_cid, -1,
 					dst_cid) != -1)
 		return 0;
+	cid_note_active_balance();
 	scx_bpf_kick_cid(best, SCX_KICK_PREEMPT);
 
 	return 1;
@@ -703,6 +705,33 @@ out:
 		outcome = ACTIVE_BALANCE_MOVED;
 	active_balance_complete(dst_cid, outcome);
 	return target;
+}
+
+/*
+ * @src_cid dispatches and the task it was running is gone: drop a request
+ * for it, as the stopper fair.c queues on the source finds nothing to move
+ * and completes. Otherwise the request outlives the task it was made for,
+ * keeps other destinations off the source and is later applied to whatever
+ * the source runs next. A global function, see newidle_active_balance().
+ */
+__noinline int active_balance_drop(s32 src_cid)
+{
+	struct cid_ctx __arena *cctx;
+	s32 dst_cid;
+
+	TOUCH_ARENA();
+
+	if (!cid_valid(src_cid))
+		return 0;
+	cctx = cid_ctx(src_cid);
+	dst_cid = READ_ONCE(cctx->active_balance_cid);
+	if (dst_cid < 0 ||
+	    __sync_val_compare_and_swap(&cctx->active_balance_cid, dst_cid,
+					 -1) != dst_cid)
+		return 0;
+	active_balance_complete(dst_cid, ACTIVE_BALANCE_MISS);
+
+	return 1;
 }
 
 /*
@@ -1583,12 +1612,18 @@ void BPF_STRUCT_OPS(eevdf_tick, struct task_struct *p)
 	 */
 	if (scx_cid_idle_empty(&eevdf_idle))
 		return;
+	/*
+	 * The lookup returns an RCU pointer, and the idle search takes a
+	 * trusted task: hold a reference across it.
+	 */
 	tid = cid_edq_peek_tid_owned(cid);
 	head = tid ? scx_bpf_tid_to_task(tid) : NULL;
+	head = head ? bpf_task_acquire(head) : NULL;
 	if (!head)
 		return;
 
 	peer = idle_peer_cid(head, cid);
+	bpf_task_release(head);
 	if (peer >= 0 && peer != cid) {
 		/*
 		 * If the ordinary head pull fails, let the idle cid walk past a
