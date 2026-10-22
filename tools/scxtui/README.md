@@ -314,6 +314,19 @@ in-memory stub.
 - `scxtop` integration depends on a separately installed executable.
 - Controlling the unit requires running `scxtui` as root.
 
+## Credits and provenance
+
+`scxtui` originated in the [`scx_loader`](https://github.com/sched-ext/scx-loader)
+project, alongside [`scxctl`](https://github.com/sched-ext/scx-loader/tree/main/crates/scxctl).
+We thank **Vladislav Nepogodin** and all other contributors to `scx_loader` and
+`scxctl` for their work. The profile configuration schema and built-in profile
+tables in `scxtui` come from `scx_loader`, and its CLI intentionally follows
+the commands and conventions established by `scxctl`.
+
+The version of `scxtui` maintained here uses `scx.service` directly, without
+the `scx_loader` D-Bus backend. This change in architecture does not diminish
+the contributions of the original projects and their authors.
+
 ## License
 
 `scxtui` is distributed under the terms of the
