@@ -708,6 +708,33 @@ out:
 }
 
 /*
+ * @src_cid dispatches and the task it was running is gone: drop a request
+ * for it, as the stopper fair.c queues on the source finds nothing to move
+ * and completes. Otherwise the request outlives the task it was made for,
+ * keeps other destinations off the source and is later applied to whatever
+ * the source runs next. A global function, see newidle_active_balance().
+ */
+__noinline int active_balance_drop(s32 src_cid)
+{
+	struct cid_ctx __arena *cctx;
+	s32 dst_cid;
+
+	TOUCH_ARENA();
+
+	if (!cid_valid(src_cid))
+		return 0;
+	cctx = cid_ctx(src_cid);
+	dst_cid = READ_ONCE(cctx->active_balance_cid);
+	if (dst_cid < 0 ||
+	    __sync_val_compare_and_swap(&cctx->active_balance_cid, dst_cid,
+					 -1) != dst_cid)
+		return 0;
+	active_balance_complete(dst_cid, ACTIVE_BALANCE_MISS);
+
+	return 1;
+}
+
+/*
  * Periodic busy load balancing, corresponding to fair.c's rebalance_domains().
  *
  * There is one interval for each sched-domain-like range scx_eevdf represents:

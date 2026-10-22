@@ -773,6 +773,8 @@ void BPF_STRUCT_OPS(eevdf_dispatch, s32 cid, struct task_struct *prev)
 	 * ask the task for this CPU again, see keep_running().
 	 */
 	has_prev = prev && is_task_queued(prev);
+	if (!has_prev)
+		active_balance_drop(cid);
 	if (READ_ONCE(cid_ctx(cid)->active_balance_pending) == 2 &&
 	    __sync_val_compare_and_swap(&cid_ctx(cid)->active_balance_pending,
 					    2, 0) == 2) {
