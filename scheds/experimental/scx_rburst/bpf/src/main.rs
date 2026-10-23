@@ -479,7 +479,7 @@ static NR_LONG: Var<u64> = Var::new(0);
 fn long_running(here: CidCtx, request: u64) {
     if !NO_VTIME_BORROWING.get() && request >= SLICE_NS.get() && !here.long().get() {
         here.long().set(true);
-        NR_LONG.fetch_add(1);
+        NR_LONG.add(1);
     }
 }
 
@@ -488,7 +488,7 @@ fn long_running(here: CidCtx, request: u64) {
 fn long_stopping(here: CidCtx) {
     if here.long().get() {
         here.long().set(false);
-        NR_LONG.fetch_add(u64::MAX);
+        NR_LONG.add(u64::MAX);
     }
 }
 

@@ -236,7 +236,7 @@ pub fn set_class(cid: Cid, idle: bool, sched_idle: bool) {
         pack(cid).curr_sched_idle().set(u64::from(sched_idle));
         SCHED_IDLE_CIDS
             .count
-            .fetch_add(if sched_idle { 1 } else { u64::MAX });
+            .add(if sched_idle { 1 } else { u64::MAX });
     }
 }
 

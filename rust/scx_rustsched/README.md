@@ -163,7 +163,8 @@ on the dispatch paths it knows leave the CID busy.
 Callbacks run on every CPU at once, so nothing they share is handed out as
 `&mut`. A `Var<T>` is read with `get()` and written with `set()` or
 `update()` through a shared reference, each one load or store, as
-READ_ONCE() and WRITE_ONCE() are in C. `fetch_add()` is the atomic one.
+READ_ONCE() and WRITE_ONCE() are in C. `add()` and `fetch_add()` are the
+atomic ones.
 
 ```rust
 static VTIME_NOW: Var<u64> = Var::new(0);
@@ -456,6 +457,18 @@ values use the unstable atomic intrinsics, and arena updates the accessors
 of `mem`. A compare and exchange is tested by comparing the returned value
 with the expected one: rustc 1.98 emits invalid bitcode for a branch on
 the success flag. The arena takes only the non-fetching bitwise atomics.
+
+An atomic whose result is used is never Relaxed. LLVM 21 to 23 lower a
+relaxed add or sub, and a relaxed 32-bit and, or or xor, to the
+non-fetching `lock` instruction even when the result is used, and the
+result is then the operand, not the old value. On BPF v3 they do so
+without a diagnostic. llvm/llvm-project#210371 fixes it, first in LLVM 24.
+A BPF fetching atomic has no ordering field, so any stronger ordering emits
+the same `atomic_fetch_add` a correct relaxed one would.
+
+An atomic whose result is discarded is Relaxed, as in `Var::add()` and
+`pool::add()`. It is then the `lock` instruction, which the arm64 JIT
+emits as `stadd` and not the fully ordered `ldaddal` of a fetching one.
 
 **Arithmetic.** BPF v3 has no signed division, so signed quotients divide
 magnitudes, and every divisor is checked so that no panic path reaches the
