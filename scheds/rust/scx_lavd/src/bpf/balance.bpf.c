@@ -598,11 +598,27 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
+	u64 now, next;
+
+	/* Sweep at most once per LAVD_FORCE_STEAL_BACKOFF_NS per domain. */
+	now = scx_bpf_now();
+	next = READ_ONCE(cpdomc->next_steal_probe_clk);
+
+	if (time_before(now, next))
+		return false;
+
+	if (!__sync_bool_compare_and_swap(&cpdomc->next_steal_probe_clk, next,
+					  now + LAVD_FORCE_STEAL_BACKOFF_NS))
+		return false;
 
 	/*
 	 * Traverse neighbor compute domains in distance order.
+	 *
+	 * Unlike try_to_steal_task(), force stealing has no probabilistic
+	 * break, so scan only the nearest distance. Farther domains are left
+	 * to the load balancer.
 	 */
-	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
+	for (int i = 0; i < LAVD_LB_NEAR_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
@@ -626,6 +642,10 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			}
 
 			if (!cpdomc_pick->is_valid)
+				continue;
+
+			/* Never steal across NUMA nodes. */
+			if (cpdomc_pick->numa_id != cpdomc->numa_id)
 				continue;
 
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
@@ -657,6 +677,8 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 				debugln("migrate: force_steal stealer=cpdom%llu stealee=cpdom%llu load=%llu cpu=%d",
 					cpdomc->id, cpdomc_pick->id, task_load,
 					bpf_get_smp_processor_id());
+				/* Stealing works, so lift the rate limit. */
+				WRITE_ONCE(cpdomc->next_steal_probe_clk, 0);
 				return true;
 			}
 		}

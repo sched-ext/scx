@@ -1434,6 +1434,55 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 	return false;
 }
 
+/*
+ * The function prepares the set of CPUs that are eligible to work. The design
+ * is the core idea of core compaction, which includes active and overflow that
+ * needs to be woken.
+ */
+static __always_inline const struct cpumask *build_usable_mask(struct cpu_ctx *cpuc_cur)
+{
+	struct bpf_cpumask *um = cpuc_cur->ia_mask;
+
+	if (!um)
+		return NULL;
+
+	if (use_full_cpus()) {
+		bpf_cpumask_setall(um);
+	} else {
+		struct bpf_cpumask *active = active_cpumask, *ovrflw = ovrflw_cpumask;
+
+		if (!active || !ovrflw)
+			return NULL;
+		bpf_cpumask_or(um, cast_mask(active), cast_mask(ovrflw));
+	}
+	return cast_mask(um);
+}
+
+/*
+ * If this domain still has queued work and one of its own CPUs is idle, wake
+ * it.
+ */
+static __always_inline bool kick_idle_cpu_in_domain(struct cpu_ctx *cpuc,
+						    struct cpu_ctx *cpuc_cur,
+						    const struct cpumask *usable)
+{
+	struct bpf_cpumask *own, *scratch = cpuc_cur->i_mask;
+	s32 cpu;
+
+	own = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	if (!own || !scratch)
+		return false;
+
+	bpf_cpumask_and(scratch, cast_mask(own), usable);
+
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(scratch), 0);
+	if (cpu < 0)
+		return false;
+
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	return true;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct bpf_cpumask *active, *ovrflw;
@@ -1591,8 +1640,27 @@ consume_out:
 	/*
 	 * Otherwise, consume a task.
 	 */
-	if (consume_task(cpuc->cpdom_id))
+	if (consume_task(cpuc->cpdom_id)) {
+		struct cpdom_ctx *cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+
+		/*
+		 * Work still queued here? Wake one of our own idle CPUs within
+		 * the same domain so it can consume queued tasks from the same
+		 * DSQ.
+		 */
+		if (cpdomc && READ_ONCE(cpdomc->qload_invr)) {
+			struct cpu_ctx *cpuc_cur = get_cpu_ctx();
+			const struct cpumask *usable;
+
+			if (cpuc_cur) {
+				usable = build_usable_mask(cpuc_cur);
+				if (usable)
+					kick_idle_cpu_in_domain(cpuc, cpuc_cur,
+								usable);
+			}
+		}
 		return;
+	}
 
 	/*
 	 * If nothing to run, continue running the previous task.
