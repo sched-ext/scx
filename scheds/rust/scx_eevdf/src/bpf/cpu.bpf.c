@@ -102,8 +102,10 @@
  * contiguous. Walking the cid space backwards means the highest cid of a
  * range is visited first, which is enough to derive the length of the range
  * from its base, the cid scx_bpf_cid_topo() reports for the domain.
+ * Keep the range builder's stack frame separate from the allocator calls
+ * in eevdf_init().
  */
-static void init_topology(void)
+static __noinline void init_topology(void)
 {
 	struct scx_cid_range_builder builder = SCX_CID_RANGE_BUILDER_INIT;
 	u32 i;
@@ -228,8 +230,9 @@ static void __arena *arena_carve(u64 bytes, u64 align)
 SEC("syscall")
 int eevdf_arena_init(struct eevdf_arena_args *args)
 {
-	u64 nr = args->nr_cpus, mask, bytes, pages;
-	int ret;
+	u64 nr = args->nr_cpus, mask, bytes;
+
+	TOUCH_ARENA();
 
 	if (!nr || !args->nr_place_tiers || !args->nr_capacity_tiers)
 		return -EINVAL;
@@ -244,12 +247,10 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 		nr * (sizeof(struct core_sched_state) + sizeof(struct newidle_stats) +
 		      sizeof(u64) +
 		      6 * sizeof(u32)) + ARENA_CARVES * 64;
-	pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-
-	arena_base = bpf_arena_alloc_pages(&arena, NULL, pages, NUMA_NO_NODE, 0);
+	arena_base = arena_calloc(1, bytes);
 	if (!arena_base)
 		return -ENOMEM;
-	arena_size = pages * PAGE_SIZE;
+	arena_size = bytes;
 	arena_off = 0;
 
 	topos = arena_carve(nr * sizeof(struct cid_topo), 64);
@@ -275,10 +276,6 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)
 		return -ENOMEM;
-	ret = scx_alloc_init(&task_ctx_allocator, sizeof(struct task_ctx),
-			     __alignof__(struct task_ctx));
-	if (ret)
-		return ret;
 
 	nr_cids_max = nr;
 	nr_place_tiers = args->nr_place_tiers;
