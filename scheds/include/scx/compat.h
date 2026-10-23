@@ -143,7 +143,11 @@ static inline bool __COMPAT_read_enum(const char *type, const char *name, u64 *v
 				if (t->size == 8 && !strncmp(type, "scx_", 4))
 					return __COMPAT_recover_truncated_enum64(type, name,
 										 (u32)e[i].val, v);
-				*v = e[i].val;
+				/* kflag marks a signed enum */
+				if (btf_kflag(t))
+					*v = (s64)e[i].val;
+				else
+					*v = (u32)e[i].val;
 				return true;
 			}
 		}
