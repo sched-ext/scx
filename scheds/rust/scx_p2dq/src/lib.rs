@@ -423,7 +423,10 @@ macro_rules! init_open_skel {
 
             // topo config
             let rodata = skel.maps.rodata_data.as_mut().unwrap();
+            // nr_cpus is an ID span. Keep online membership and count
+            // separate because possible CPU IDs may contain offline holes.
             rodata.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
+            rodata.topo_config.nr_online_cpus = $topo.all_cpus.len() as u32;
             rodata.topo_config.nr_llcs = $topo.all_llcs.clone().keys().len() as u32;
             rodata.topo_config.nr_nodes = $topo.nodes.clone().keys().len() as u32;
             rodata.topo_config.smt_enabled = MaybeUninit::new($topo.smt_enabled);
@@ -516,6 +519,7 @@ macro_rules! init_skel {
         });
 
         for cpu in $topo.all_cpus.values() {
+            $skel.maps.bss_data.as_mut().unwrap().cpu_online[cpu.id] = 1;
             $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
                     1
