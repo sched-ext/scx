@@ -606,6 +606,12 @@ that has not been done.
 
 ## Source layout
 
+`scx_arena` supplies the shared CID topology and idle helpers, eligible
+deadline queue, and running averages through its packaged BPF assets. The
+libarena buddy allocator backs task contexts, CID tables, and cgroup queues.
+Userspace reserves the arena prefix before initializing the allocator and
+keeps `ScxLibArena` alive until shutdown to watch the BPF streams.
+
 The BPF side is split by component. A `*.bpf.h` holds what the rest of the
 scheduler needs from that component inline, on the switch and wakeup paths; the
 `*.bpf.c` beside it holds what only that component and its own callbacks reach.
