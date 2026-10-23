@@ -88,7 +88,12 @@ impl Var<u64> {
     /// Add `value` atomically, and return the value before.
     #[inline(always)]
     pub fn fetch_add(&self, value: u64) -> u64 {
-        unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(self.0.get(), value) }
+        // Not Relaxed: LLVM's BPF backend lowers a relaxed atomicrmw add to
+        // the non-fetching `lock +=`, whose result register is `value`
+        // itself, even when the result is used, and on BPF v3 it says
+        // nothing. Any stronger ordering emits atomic_fetch_add, which on
+        // BPF is the same instruction whatever the ordering.
+        unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::SeqCst }>(self.0.get(), value) }
     }
 
     /// Store `new` if the value is `old`, atomically, and return what it

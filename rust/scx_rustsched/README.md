@@ -455,6 +455,13 @@ values use the unstable atomic intrinsics, and arena updates the accessors
 of `mem`. A compare and exchange is tested by comparing the returned value
 with the expected one: rustc 1.98 emits invalid bitcode for a branch on
 the success flag. The arena takes only the non-fetching bitwise atomics.
+An atomic whose result is used is never Relaxed: LLVM lowers a relaxed
+add or sub, and a relaxed 32-bit and, or or xor, to the non-fetching
+`lock` instruction even when the result is used, and the result is then
+the operand, not the old value. On BPF v3 it does so without a diagnostic.
+A BPF fetching atomic has no ordering field, so any stronger ordering emits
+the same `atomic_fetch_add` and costs nothing. A relaxed atomic is right
+only when its result is discarded, as in `pool::add()`.
 
 **Arithmetic.** BPF v3 has no signed division, so signed quotients divide
 magnitudes, and every divisor is checked so that no panic path reaches the
