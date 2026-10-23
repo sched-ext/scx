@@ -39,6 +39,7 @@ members = [
     "scheds/experimental/scx_rlocal",
     "scheds/experimental/scx_rvtime",
     "tools/scx_characterize",
+    "tools/scxcli",
     "tools/scxtop",
     "tools/scxtui",
     "tools/scx_forge_agent",
