@@ -63,7 +63,8 @@ const MIN_ELIGIBILITY: u64 = 5;
 const SLICE: u64 = 6;
 const MIN_SLICE: u64 = 7;
 const SEQ: u64 = 8;
-const HEIGHT: u64 = 9;
+const COLOR: u64 = 9;
+const BLACK: u64 = 1;
 
 struct Fixture {
     heap: Heap,
@@ -107,6 +108,7 @@ impl Fixture {
         let mut order = Vec::new();
         if root != 0 {
             assert_eq!(self.word(root, PARENT), 0);
+            assert_eq!(self.word(root, COLOR), BLACK, "red root");
             self.walk(root, &mut order);
         }
         assert_eq!(order.len(), model.len());
@@ -131,9 +133,11 @@ impl Fixture {
         order
     }
 
-    /// Check a subtree; returns its height, min eligibility and min slice.
+    /// Check a subtree; returns its black height, min eligibility and min
+    /// slice.
     fn walk(&self, node: u64, order: &mut Vec<u64>) -> (u64, u64, u64) {
-        let mut height = (0, 0);
+        let red = self.word(node, COLOR) != BLACK;
+        let mut black_height = (1, 1);
         let mut min_eligibility = self.word(node, ELIGIBILITY);
         let mut min_slice = self.word(node, SLICE);
         for (side, child) in [(0, self.word(node, LEFT)), (1, self.word(node, RIGHT))] {
@@ -144,26 +148,22 @@ impl Fixture {
                 continue;
             }
             assert_eq!(self.word(child, PARENT), node);
+            assert!(!red || self.word(child, COLOR) == BLACK, "red under red");
             let (h, e, s) = self.walk(child, order);
             if side == 0 {
-                height.0 = h
+                black_height.0 = h
             } else {
-                height.1 = h
+                black_height.1 = h
             }
             if (e.wrapping_sub(min_eligibility) as i64) < 0 {
                 min_eligibility = e;
             }
             min_slice = min_slice.min(s);
         }
-        assert!(
-            (height.0 as i64 - height.1 as i64).abs() <= 1,
-            "AVL balance lost"
-        );
-        let h = height.0.max(height.1) + 1;
-        assert_eq!(self.word(node, HEIGHT), h);
+        assert_eq!(black_height.0, black_height.1, "black heights differ");
         assert_eq!(self.word(node, MIN_ELIGIBILITY), min_eligibility);
         assert_eq!(self.word(node, MIN_SLICE), min_slice);
-        (h, min_eligibility, min_slice)
+        (black_height.0 + u64::from(!red), min_eligibility, min_slice)
     }
 }
 
