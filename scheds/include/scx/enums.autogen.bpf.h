@@ -13,6 +13,9 @@ const volatile u64 __SCX_SLICE_DFL __weak;
 const volatile u64 __SCX_SLICE_INF __weak;
 #define SCX_SLICE_INF __SCX_SLICE_INF
 
+const volatile u64 __SCX_RESCUE_DISABLE __weak;
+#define SCX_RESCUE_DISABLE __SCX_RESCUE_DISABLE
+
 const volatile u64 __SCX_RQ_ONLINE __weak;
 #define SCX_RQ_ONLINE __SCX_RQ_ONLINE
 
