@@ -13,6 +13,14 @@
 struct scx_cgroup_bw_config {
 	/* verbose level */
 	int		verbose;
+
+	/*
+	 * Id of the library's root cgroup, 0 for the root of the cgroup v2
+	 * hierarchy. Only the cgroups below it are throttled: its own cpu.max
+	 * is left to whoever schedules it, and a cgroup outside its subtree is
+	 * never throttled.
+	 */
+	u64		root_cgrp_id;
 };
 
 /**
@@ -239,7 +247,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 /**
  * scx_cgroup_bw_dump - Dump the cgroup status
  *
- * @cgrp_id: cgroup id
+ * @cgrp_id: cgroup id, 0 for the library's root
  * @descendent: If true, dump the cgroup and its descendent in preorder.
  * Otherwise, dump only itself.
  * @accurate: If true, update runtime total before dumping the status to

@@ -229,7 +229,6 @@ SEC("syscall")
 int eevdf_arena_init(struct eevdf_arena_args *args)
 {
 	u64 nr = args->nr_cpus, mask, bytes, pages;
-	int ret;
 
 	if (!nr || !args->nr_place_tiers || !args->nr_capacity_tiers)
 		return -EINVAL;
@@ -275,10 +274,6 @@ int eevdf_arena_init(struct eevdf_arena_args *args)
 	    !cpu_place_tier_in || !cpu_capacity_tier_in || !cpu_smt_asym_in ||
 	    !cpu_fork_span_in || !cpu_wake_span_in || !cpu_asym_span_in)
 		return -ENOMEM;
-	ret = scx_alloc_init(&task_ctx_allocator, sizeof(struct task_ctx),
-			     __alignof__(struct task_ctx));
-	if (ret)
-		return ret;
 
 	nr_cids_max = nr;
 	nr_place_tiers = args->nr_place_tiers;

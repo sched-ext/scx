@@ -323,8 +323,8 @@ UEI_DEFINE(uei);
 
 /*
  * Arena pages in use, counted where they are handed out. Every allocator
- * the BPF side uses, the tables carved at init, the library's static and
- * task context pools, ends in bpf_arena_alloc_pages(), and the kernel only
+ * the BPF side uses, the tables carved at init and libarena's task context
+ * allocations, ends in bpf_arena_alloc_pages(), and the kernel only
  * started to account arena pages in the map's memlock in 7.3. Loaded and
  * attached only when the usage is reported, --stats: user space turns
  * them on before load, sets @arena_map_id before the first allocation and
@@ -334,6 +334,8 @@ UEI_DEFINE(uei);
 u32 arena_map_id;
 u64 arena_pages_allocated;
 u64 arena_pages_freed;
+u64 arena_active_allocs;
+u64 arena_alloc_failures;
 
 /*
  * Cids whose current task counts as SCHED_IDLE work, kept by ops.running()
