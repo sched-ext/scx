@@ -137,10 +137,13 @@ one kernel patch then copies it into the kernel tree.
    since a lookup under a type the running kernel lacks yields zero without
    an error. The kernel's copy is where kernel changes add their
    enumerators, but its types can go stale, as its task state lookups did
-   after the kernel folded the states into scx_ent_flags. Keep our entries
-   for enumerators the kernel removed, which zero-fill at load. Enumerators
-   in table-covered types that neither copy lists, such as rq and entity
-   internals, stay out unless a scheduler needs them.
+   after the kernel folded the states into scx_ent_flags. When the kernel
+   removes an enumerator, drop its entry from both copies, together with its
+   enums.rs field and its key in the veristat rodata dumps, once no
+   scheduler reads it, so that the two copies stay identical. Until then it
+   stays in both copies and zero-fills at load. Enumerators in table-covered
+   types that neither copy lists, such as rq and entity internals, stay out
+   unless a scheduler needs them.
 7. Build, then run `cargo test` and `make -C lib/selftests/compat test`.
    Commit the sync as `scheds/include: Sync with kernel sched_ext/for-X.Y
    (<sha12>)`, with the vmlinux.h update and the caller fixes in commits of
