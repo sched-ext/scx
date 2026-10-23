@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
  *
- * Eligible Deadline Queue: an arena-backed intrusive augmented AVL tree.
+ * Eligible Deadline Queue: an arena-backed intrusive augmented red-black tree.
  */
 #include <scx/common.bpf.h>
 #include <lib/edq.h>
@@ -13,9 +13,12 @@ static __always_inline scx_edq_task_t *node_task(scx_edq_node_t *node)
 				   offsetof(struct scx_edq_task, node));
 }
 
-static __always_inline u32 node_height(scx_edq_node_t *node)
+#define EDQ_RED		0U
+#define EDQ_BLACK	1U
+
+static __always_inline bool node_red(scx_edq_node_t *node)
 {
-	return node ? node->height : 0;
+	return node && node->color == EDQ_RED;
 }
 
 static __always_inline bool node_less(scx_edq_node_t *a,
@@ -48,11 +51,9 @@ static __always_inline void node_clear_links(scx_edq_node_t *node)
 
 static __always_inline void node_update(scx_edq_node_t *node)
 {
-	u32 lh = node_height(node->left), rh = node_height(node->right);
 	u64 min_eligibility = node->eligibility;
 	u64 min_slice = node->slice;
 
-	node->height = (lh > rh ? lh : rh) + 1;
 	if (node->left && time_before(node->left->min_eligibility, min_eligibility))
 		min_eligibility = node->left->min_eligibility;
 	if (node->right && time_before(node->right->min_eligibility, min_eligibility))
@@ -65,9 +66,13 @@ static __always_inline void node_update(scx_edq_node_t *node)
 	node->min_slice = min_slice;
 }
 
-static __always_inline s32 node_balance(scx_edq_node_t *node)
+/* The pivot takes over @node's subtree, and with it its minimums. */
+static __always_inline void rotate_aug(scx_edq_node_t *node,
+				       scx_edq_node_t *pivot)
 {
-	return (s32)node_height(node->left) - (s32)node_height(node->right);
+	pivot->min_eligibility = node->min_eligibility;
+	pivot->min_slice = node->min_slice;
+	node_update(node);
 }
 
 static __always_inline void replace_child(scx_edq_t *edq,
@@ -97,8 +102,7 @@ static __always_inline scx_edq_node_t *rotate_left(scx_edq_t *edq,
 		node->right->parent = node;
 	pivot->left = node;
 	node->parent = pivot;
-	node_update(node);
-	node_update(pivot);
+	rotate_aug(node, pivot);
 	return pivot;
 }
 
@@ -114,51 +118,162 @@ static __always_inline scx_edq_node_t *rotate_right(scx_edq_t *edq,
 		node->left->parent = node;
 	pivot->right = node;
 	node->parent = pivot;
-	node_update(node);
-	node_update(pivot);
+	rotate_aug(node, pivot);
 	return pivot;
 }
 
 /*
- * Recompute the cached height and minimum eligibility from @node up to the
- * root, rotating where the AVL balance is lost. With @may_exit the walk
- * stops at the first node whose cached values did not change and that was
- * not rotated: nothing above it can change either. That holds only when
- * the cached values of every node on the path are the pre-change ones, so a
- * caller that has already refreshed a node on the path passes false.
+ * Recompute the cached minimums from @node up to, not including, @stop. The
+ * walk stops at the first node whose minimums did not change: nothing above
+ * it can change either.
  */
-static __noinline int rebalance_from(scx_edq_t __arg_arena *edq,
-				     scx_edq_node_t __arg_arena *node,
-				     bool may_exit)
+static __noinline int propagate(scx_edq_node_t __arg_arena *node,
+				scx_edq_node_t __arg_arena *stop)
 {
-	while (node && can_loop) {
-		scx_edq_node_t *root = node;
+	while (node && node != stop && can_loop) {
 		u64 old_min_eligibility = node->min_eligibility;
 		u64 old_min_slice = node->min_slice;
-		u32 old_height = node->height;
-		s32 balance;
-		bool rotated = false;
 
 		node_update(node);
-		balance = node_balance(node);
-		if (balance > 1) {
-			if (node_balance(node->left) < 0)
-				rotate_left(edq, node->left);
-			root = rotate_right(edq, node);
-			rotated = true;
-		} else if (balance < -1) {
-			if (node_balance(node->right) > 0)
-				rotate_right(edq, node->right);
-			root = rotate_left(edq, node);
-			rotated = true;
-		}
-		if (may_exit && !rotated && node->height == old_height &&
-		    node->min_eligibility == old_min_eligibility &&
+		if (node->min_eligibility == old_min_eligibility &&
 		    node->min_slice == old_min_slice)
 			return 0;
-		node = root->parent;
+		node = node->parent;
 	}
-	return node ? -E2BIG : 0;
+	return node && node != stop ? -E2BIG : 0;
+}
+
+/* Restore the red-black properties after linking the red leaf @node. */
+static __noinline int insert_fixup(scx_edq_t __arg_arena *edq,
+				   scx_edq_node_t __arg_arena *node)
+{
+	while (can_loop) {
+		scx_edq_node_t *parent = node->parent, *gparent, *uncle;
+
+		if (!parent) {
+			node->color = EDQ_BLACK;
+			return 0;
+		}
+		if (parent->color == EDQ_BLACK)
+			return 0;
+		/* A red parent is never the root. */
+		gparent = parent->parent;
+		if (!gparent)
+			return -EINVAL;
+		if (parent == gparent->left) {
+			uncle = gparent->right;
+			if (node_red(uncle)) {
+				uncle->color = EDQ_BLACK;
+				parent->color = EDQ_BLACK;
+				gparent->color = EDQ_RED;
+				node = gparent;
+				continue;
+			}
+			if (node == parent->right) {
+				rotate_left(edq, parent);
+				parent = node;
+			}
+			parent->color = EDQ_BLACK;
+			gparent->color = EDQ_RED;
+			rotate_right(edq, gparent);
+		} else {
+			uncle = gparent->left;
+			if (node_red(uncle)) {
+				uncle->color = EDQ_BLACK;
+				parent->color = EDQ_BLACK;
+				gparent->color = EDQ_RED;
+				node = gparent;
+				continue;
+			}
+			if (node == parent->left) {
+				rotate_right(edq, parent);
+				parent = node;
+			}
+			parent->color = EDQ_BLACK;
+			gparent->color = EDQ_RED;
+			rotate_left(edq, gparent);
+		}
+		return 0;
+	}
+	return -E2BIG;
+}
+
+/*
+ * Restore the red-black properties after a black node left the child slot of
+ * @parent that is now empty: that side is one black node short.
+ */
+static __noinline int erase_fixup(scx_edq_t __arg_arena *edq,
+				  scx_edq_node_t __arg_arena *parent)
+{
+	scx_edq_node_t *node = NULL, *sibling;
+
+	while (parent && can_loop) {
+		if (node == parent->left) {
+			sibling = parent->right;
+			if (!sibling)
+				return -EINVAL;
+			if (node_red(sibling)) {
+				sibling->color = EDQ_BLACK;
+				parent->color = EDQ_RED;
+				rotate_left(edq, parent);
+				sibling = parent->right;
+				if (!sibling)
+					return -EINVAL;
+			}
+			if (!node_red(sibling->left) && !node_red(sibling->right)) {
+				sibling->color = EDQ_RED;
+				if (parent->color == EDQ_RED) {
+					parent->color = EDQ_BLACK;
+					return 0;
+				}
+				node = parent;
+				parent = node->parent;
+				continue;
+			}
+			if (!node_red(sibling->right)) {
+				sibling->left->color = EDQ_BLACK;
+				sibling->color = EDQ_RED;
+				sibling = rotate_right(edq, sibling);
+			}
+			sibling->color = parent->color;
+			parent->color = EDQ_BLACK;
+			sibling->right->color = EDQ_BLACK;
+			rotate_left(edq, parent);
+		} else {
+			sibling = parent->left;
+			if (!sibling)
+				return -EINVAL;
+			if (node_red(sibling)) {
+				sibling->color = EDQ_BLACK;
+				parent->color = EDQ_RED;
+				rotate_right(edq, parent);
+				sibling = parent->left;
+				if (!sibling)
+					return -EINVAL;
+			}
+			if (!node_red(sibling->left) && !node_red(sibling->right)) {
+				sibling->color = EDQ_RED;
+				if (parent->color == EDQ_RED) {
+					parent->color = EDQ_BLACK;
+					return 0;
+				}
+				node = parent;
+				parent = node->parent;
+				continue;
+			}
+			if (!node_red(sibling->left)) {
+				sibling->right->color = EDQ_BLACK;
+				sibling->color = EDQ_RED;
+				sibling = rotate_left(edq, sibling);
+			}
+			sibling->color = parent->color;
+			parent->color = EDQ_BLACK;
+			sibling->left->color = EDQ_BLACK;
+			rotate_right(edq, parent);
+		}
+		return 0;
+	}
+	return parent ? -E2BIG : 0;
 }
 
 static __noinline scx_edq_node_t *leftmost(scx_edq_node_t __arg_arena *node)
@@ -184,8 +299,7 @@ static __noinline int remove_locked(scx_edq_t __arg_arena *edq,
 {
 	scx_edq_node_t *node = &task->node;
 	scx_edq_node_t *next_first = NULL;
-	scx_edq_node_t *rebalance;
-	bool may_exit = true;
+	scx_edq_node_t *rebalance = NULL, *propagate_from;
 	int ret;
 
 	if (task->edq != edq)
@@ -204,37 +318,54 @@ static __noinline int remove_locked(scx_edq_t __arg_arena *edq,
 	if (!node->left || !node->right) {
 		scx_edq_node_t *child = node->left ? node->left : node->right;
 
-		rebalance = node->parent;
+		/* A lone child is red under a black @node and takes its color. */
+		if (child)
+			child->color = node->color;
+		else if (node->color == EDQ_BLACK)
+			rebalance = node->parent;
+		propagate_from = node->parent;
 		replace_child(edq, node->parent, node, child);
 	} else {
-		scx_edq_node_t *successor = leftmost(node->right);
-		scx_edq_node_t *old_parent;
+		scx_edq_node_t *successor = node->right;
+		scx_edq_node_t *parent, *child;
+		u32 color = node->color;
 
-		if (!successor)
-			return -E2BIG;
-		old_parent = successor->parent;
-		if (old_parent != node) {
-			replace_child(edq, old_parent, successor, successor->right);
+		if (!successor->left) {
+			parent = successor;
+			child = successor->right;
+		} else {
+			successor = leftmost(successor);
+			if (!successor)
+				return -E2BIG;
+			parent = successor->parent;
+			child = successor->right;
+			parent->left = child;
+			if (child)
+				child->parent = parent;
 			successor->right = node->right;
 			successor->right->parent = successor;
-			rebalance = old_parent;
-		} else {
-			rebalance = successor;
 		}
-		replace_child(edq, node->parent, node, successor);
+		/*
+		 * The successor takes over @node's subtree, so @node's minimums
+		 * are what the nodes above have seen. Refresh the path from the
+		 * successor's old parent up to the successor's new place first.
+		 */
+		successor->min_eligibility = node->min_eligibility;
+		successor->min_slice = node->min_slice;
+		if (parent != successor) {
+			ret = propagate(parent, successor);
+			if (ret)
+				return ret;
+		}
 		successor->left = node->left;
 		successor->left->parent = successor;
-		/*
-		 * The successor now stands where @node stood, with a height and
-		 * a minimum of its own that @node's parent has not seen, and
-		 * the nodes between its old parent and here have cached values
-		 * that still count it below them. The walk has to update every
-		 * one of them: its early exit compares against cached values
-		 * and would stop at the successor, whose cache is refreshed
-		 * here, or below it, and leave the parent with @node's minimum.
-		 */
-		node_update(successor);
-		may_exit = false;
+		replace_child(edq, node->parent, node, successor);
+		if (child)
+			child->color = EDQ_BLACK;
+		else if (successor->color == EDQ_BLACK)
+			rebalance = parent;
+		successor->color = color;
+		propagate_from = successor;
 	}
 
 	edq->nr--;
@@ -243,11 +374,13 @@ static __noinline int remove_locked(scx_edq_t __arg_arena *edq,
 		edq->first_deadline = next_first ? next_first->deadline : 0;
 	}
 	node_clear_links(node);
-	node->height = 1;
+	node->color = EDQ_RED;
 	node->min_eligibility = node->eligibility;
 	node->min_slice = node->slice;
 
-	ret = rebalance_from(edq, rebalance, may_exit);
+	ret = propagate(propagate_from, NULL);
+	if (!ret && rebalance)
+		ret = erase_fixup(edq, rebalance);
 	WRITE_ONCE(edq->min_slice,
 		   edq->root ? edq->root->min_slice : 0);
 	/*
@@ -288,7 +421,7 @@ int scx_edq_insert(scx_edq_t __arg_arena *edq,
 	node->slice = slice;
 	node->min_slice = slice;
 	node->seq = edq->seq++;
-	node->height = 1;
+	node->color = EDQ_RED;
 
 	cur = edq->root;
 	while (cur && can_loop) {
@@ -314,7 +447,9 @@ int scx_edq_insert(scx_edq_t __arg_arena *edq,
 	}
 	edq->nr++;
 
-	ret = rebalance_from(edq, parent, true);
+	ret = propagate(parent, NULL);
+	if (!ret)
+		ret = insert_fixup(edq, node);
 	WRITE_ONCE(edq->min_slice,
 		   edq->root ? edq->root->min_slice : 0);
 	scx_edq_unlock(edq);
@@ -639,7 +774,7 @@ int scx_edq_task_init(scx_edq_task_t __arg_arena *task)
 	WRITE_ONCE(task->node.slice, 0);
 	WRITE_ONCE(task->node.min_slice, 0);
 	WRITE_ONCE(task->node.seq, 0);
-	WRITE_ONCE(task->node.height, 0);
+	WRITE_ONCE(task->node.color, 0);
 	WRITE_ONCE(task->holdcnt, 0);
 	WRITE_ONCE(task->edq, NULL);
 	return 0;
