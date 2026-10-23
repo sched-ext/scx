@@ -1,3 +1,0 @@
-SCX_PROFILE=custom
-SCX_SCHEDULER=/usr/bin/scx_rusty
-SCX_FLAGS="-v"

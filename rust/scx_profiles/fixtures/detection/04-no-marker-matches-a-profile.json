@@ -1,0 +1,49 @@
+{
+  "unit": "active",
+  "manager": [],
+  "files": {
+    "env": "SCX_SCHEDULER=scx_bpfland\nSCX_FLAGS=\"-m performance -w\"\n"
+  },
+  "cmdline": [
+    "scx_bpfland",
+    "-m",
+    "performance",
+    "-w"
+  ],
+  "sysfs": {
+    "state": "enabled",
+    "ops": "bpfland_1.1.2_x86_64_unknown_linux_gnu"
+  },
+  "expected": {
+    "version": 1,
+    "profile": "lowlatency",
+    "applied": null,
+    "custom": false,
+    "unit": {
+      "active": true,
+      "enabled": true
+    },
+    "running": {
+      "sched": "scx_bpfland",
+      "args": [
+        "-m",
+        "performance",
+        "-w"
+      ]
+    },
+    "next": {
+      "sched": "scx_bpfland",
+      "args": [
+        "-m",
+        "performance",
+        "-w"
+      ],
+      "override": false
+    },
+    "kernel": {
+      "state": "enabled",
+      "ops": "bpfland_1.1.2_x86_64_unknown_linux_gnu"
+    },
+    "failure": null
+  }
+}

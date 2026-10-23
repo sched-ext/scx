@@ -210,10 +210,16 @@ mod tests {
     #[test]
     fn the_shared_fixtures_round_trip_through_these_types() {
         let mut seen = 0;
-        for dir in fs::read_dir(fixtures().join("detection")).unwrap() {
-            let path = dir.unwrap().path().join("expected.json");
+        for entry in fs::read_dir(fixtures().join("detection")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "json")
+                || path.file_name() == Some("profiles.json".as_ref())
+            {
+                continue;
+            }
             let text = fs::read_to_string(&path).unwrap();
-            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let case: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let value = case["expected"].clone();
             let current: Current = serde_json::from_value(value.clone())
                 .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
             assert_eq!(current.version, OUTPUT_VERSION);

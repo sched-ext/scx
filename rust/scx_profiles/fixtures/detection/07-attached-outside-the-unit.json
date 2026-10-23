@@ -1,0 +1,37 @@
+{
+  "unit": "inactive",
+  "manager": [],
+  "files": {
+    "env": "# scx.service\nSCX_SCHEDULER=/usr/bin/scx_lavd\nSCX_FLAGS=\"--performance --pinned-slice-us 500\"\nSCX_PROFILE=gaming\n"
+  },
+  "cmdline": null,
+  "sysfs": {
+    "state": "enabled",
+    "ops": "lavd"
+  },
+  "expected": {
+    "version": 1,
+    "profile": null,
+    "applied": "gaming",
+    "custom": true,
+    "unit": {
+      "active": false,
+      "enabled": false
+    },
+    "running": null,
+    "next": {
+      "sched": "/usr/bin/scx_lavd",
+      "args": [
+        "--performance",
+        "--pinned-slice-us",
+        "500"
+      ],
+      "override": false
+    },
+    "kernel": {
+      "state": "enabled",
+      "ops": "lavd"
+    },
+    "failure": null
+  }
+}

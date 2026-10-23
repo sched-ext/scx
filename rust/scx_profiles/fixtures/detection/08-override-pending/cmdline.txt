@@ -1,4 +1,0 @@
-/usr/bin/scx_lavd
---performance
---pinned-slice-us
-500
