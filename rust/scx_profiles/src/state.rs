@@ -9,8 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::envfile::{
-    CUSTOM_MARKER, FLAGS_KEY, FLAGS_OVERRIDE_KEY, PROFILE_KEY, SCHEDULER_KEY,
-    SCHEDULER_OVERRIDE_KEY, split_flags,
+    FLAGS_KEY, FLAGS_OVERRIDE_KEY, PROFILE_KEY, SCHEDULER_KEY, SCHEDULER_OVERRIDE_KEY, split_flags,
 };
 use crate::kernel::KernelState;
 use crate::profile::{DEFAULT_ID, Profiles, sched_name};
@@ -95,13 +94,17 @@ pub fn detect(
     failure: Option<Failure>,
 ) -> Current {
     let marker = env.non_empty(PROFILE_KEY);
-    // `run` leaves the reserved marker: a scheduler started on purpose
-    // outside the profiles, never matched against them. A file without
-    // any marker was written by an older tool and is matched.
-    let deliberate_custom = marker == Some(CUSTOM_MARKER);
     let applied = marker
         .filter(|id| profiles.get(id).is_some())
         .map(str::to_owned);
+    // Only a file without any marker, written by an older tool, is
+    // matched against the list by scheduler and options. A marker that
+    // names no profile is never a reason to guess: `custom` is a
+    // scheduler started on purpose outside the profiles, and any other
+    // name is a profile that has since been deleted or renamed, whose
+    // scheduler keeps running as Custom rather than as whichever
+    // profile happens to share its command line.
+    let unmatched_marker = marker.is_some() && applied.is_none();
     let running = process.filter(|_| info.active).map(|p| Running {
         sched: p.sched,
         args: p.args,
@@ -119,7 +122,7 @@ pub fn detect(
                 .get(id)
                 .filter(|p| p.sched_name().as_deref() == Some(r.sched.as_str()) && p.args == r.args)
                 .map(|p| p.id.clone()),
-            None if deliberate_custom => None,
+            None if unmatched_marker => None,
             None => profiles.matching(&r.sched, &r.args).map(|p| p.id.clone()),
         },
         None => {

@@ -103,17 +103,22 @@ systemd manager environment (`systemctl unset-environment`), and runs
 `reset-failed` so that a start limit hit by an earlier profile does not
 refuse this one.
 
-Applying `default` removes all three keys and runs
-`systemctl disable --now`. Nothing of the previous profile is left
-behind: a later `systemctl start scx.service` by hand has no scheduler
-to run and fails, rather than silently bringing the old one back.
+Applying `default` runs `systemctl disable --now` first, then removes
+all three keys. Stopping does not depend on the cleanup: a
+configuration that cannot be rewritten (a later file sets the keys,
+say) leaves the unit stopped and reports the cleanup failure. After a
+successful cleanup nothing of the previous profile is left behind: a
+later `systemctl start scx.service` by hand has no scheduler to run and
+fails, rather than silently bringing the old one back.
 
 `scxcli run SCHED [ARGS...]` writes `SCX_SCHEDULER` and `SCX_FLAGS` and
 sets `SCX_PROFILE=custom`, the reserved marker. A scheduler started this
 way reports as Custom in every client even when its scheduler and
 options equal a profile's: the marker says the choice was deliberate.
 Only a file with no marker at all (one an older tool wrote) is matched
-against the list by scheduler and options.
+against the list by scheduler and options. A marker that names no
+profile in the list (one deleted or renamed since it was applied) is
+never a reason to guess either: its scheduler keeps running as Custom.
 
 Writing:
 
@@ -194,14 +199,16 @@ kernel (`/sys/kernel/sched_ext/state` and `root/ops`).
     `args`;
   - the first profile in the list with the same scheduler and arguments,
     when a scheduler is running and the file has no marker at all (a
-    file written by an older tool); never when the marker is `custom`;
+    file written by an older tool); never when there is a marker, be it
+    `custom` or the id of a profile no longer in the list;
   - `default`, when no scheduler is attached, the unit is inactive, and
     `applied` is null or `default`;
   - null otherwise.
 - `custom` is true when a scheduler is attached and `profile` is null:
   it was started by `run`, or matches no profile, or the applied
-  profile's scheduler or arguments no longer match what runs, or a
-  scheduler is attached outside the unit's control.
+  profile's scheduler or arguments no longer match what runs, or the
+  applied profile has been deleted, or a scheduler is attached outside
+  the unit's control.
 - `profile` null and `custom` false together mean that nothing runs and
   something other than `default` was applied: the scheduler failed to
   start or was stopped. `failure` then says why, when the journal says.

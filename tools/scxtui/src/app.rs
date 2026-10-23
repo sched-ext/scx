@@ -413,9 +413,10 @@ scxtop, or your distro's scx tools package)",
                 profiles.profiles.push(Profile {
                     id: id.clone(),
                     label: label_from_id(&id),
-                    description: format!("{} {}", sched, args.join(" "))
-                        .trim_end()
-                        .to_owned(),
+                    // The scheduler and options are shown under every
+                    // profile anyway; a generated description from them
+                    // could run past the contract's 256 characters.
+                    description: SAVED_DESCRIPTION.to_owned(),
                     action: None,
                     sched: Some(sched),
                     args,
@@ -769,6 +770,10 @@ fn step(idx: usize, len: usize, forward: bool) -> usize {
         (idx + len - 1) % len
     }
 }
+
+/// The description a profile saved from what runs gets; short and fixed,
+/// since the backing is shown under it and the user can edit it later.
+const SAVED_DESCRIPTION: &str = "Saved from the running scheduler.";
 
 /// `low-latency2` -> `Low latency2`.
 fn label_from_id(id: &str) -> String {

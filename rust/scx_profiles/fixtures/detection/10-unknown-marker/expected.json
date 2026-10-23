@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "profile": "gaming",
+  "profile": null,
   "applied": null,
-  "custom": false,
+  "custom": true,
   "unit": {
     "active": true,
     "enabled": true

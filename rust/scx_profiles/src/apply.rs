@@ -32,17 +32,26 @@ pub fn apply_from(profiles: &Profiles, id: &str) -> Result<Applied> {
     let info = systemd::unit_info()?;
     match (&profile.action, &profile.sched) {
         (Some(Action::Stop), _) => {
-            // Nothing of the previous profile is left behind: a later
-            // `systemctl start` by hand finds no scheduler to run.
-            systemd::write_config(
+            // Stopping comes first and does not depend on the cleanup:
+            // the point of Default is that no scheduler runs, and a
+            // configuration that cannot be rewritten (a later file sets
+            // the keys, say) must not leave one running. The cleanup
+            // then removes every managed key, so a later `systemctl
+            // start` by hand finds no scheduler to run; if it fails the
+            // error says the unit is already stopped.
+            systemd::systemctl(&["disable", "--now"])?;
+            let cleanup = systemd::write_config(
                 &info,
                 &Written {
                     profile: None,
                     launch: Launch::Remove,
                 },
+            )
+            .and_then(|()| systemd::clear_overrides());
+            cleanup.context(
+                "scx.service is stopped and disabled, but its configuration could not be \
+cleaned; a later start by hand would run the previous scheduler",
             )?;
-            systemd::clear_overrides()?;
-            systemd::systemctl(&["disable", "--now"])?;
             Ok(Applied {
                 id: profile.id.clone(),
                 launch: None,
