@@ -183,7 +183,9 @@ scripts and other front ends; its keys are what is available here.
 `--format toml` writes the profiles file's own schema instead, with every
 row spelled out, and covers the built-in table as well, since a file is
 configuration rather than inventory. Its header names the file it came
-from. The output loads back as a profiles file that resolves every
+from, and when no default scheduler is configured, `default_sched` and
+`default_mode` appear as a commented template to uncomment. The output
+loads back as a profiles file that resolves every
 scheduler and mode to the same flags: a starting point to edit, or a
 record of what is in effect. `--builtin` exports the built-in table
 alone, ignoring any profiles file and without consulting systemd, so it
@@ -311,6 +313,19 @@ in-memory stub.
   new entries continuously.
 - `scxtop` integration depends on a separately installed executable.
 - Controlling the unit requires running `scxtui` as root.
+
+## Credits and provenance
+
+`scxtui` originated in the [`scx_loader`](https://github.com/sched-ext/scx-loader)
+project, alongside [`scxctl`](https://github.com/sched-ext/scx-loader/tree/main/crates/scxctl).
+We thank **Vladislav Nepogodin** and all other contributors to `scx_loader` and
+`scxctl` for their work. The profile configuration schema and built-in profile
+tables in `scxtui` come from `scx_loader`, and its CLI intentionally follows
+the commands and conventions established by `scxctl`.
+
+The version of `scxtui` maintained here uses `scx.service` directly, without
+the `scx_loader` D-Bus backend. This change in architecture does not diminish
+the contributions of the original projects and their authors.
 
 ## License
 

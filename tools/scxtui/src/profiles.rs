@@ -282,12 +282,44 @@ impl Profiles {
                 (sched, table)
             })
             .collect();
+        // The default is spelled out like the rows: a configured
+        // scheduler gets its mode written even when the file left it to
+        // the Auto fallback. Without one, the two keys go in as
+        // comments, as a template to uncomment, so the output shows
+        // where `restore` and the TUI's `d` key would take their target
+        // from. The example is the first installed scheduler, so that
+        // uncommenting it as is works on this system; only when nothing
+        // is installed (--builtin, or no scheduler at all) the first of
+        // the table stands in.
+        let default = self.default_launch();
         let config = Config {
-            default_sched: self.config.default_sched.clone(),
-            default_mode: self.config.default_mode,
+            default_sched: default.map(|(sched, _)| sched.to_owned()),
+            default_mode: default.map(|(_, mode)| mode),
             scheds,
         };
         let body = toml::to_string(&config).context("cannot serialise the profiles")?;
+        let mut installed: Vec<&String> = installed.iter().collect();
+        installed.sort_unstable();
+        let example = installed
+            .first()
+            .map(|s| s.as_str())
+            .or_else(|| config.scheds.keys().next().map(String::as_str));
+        // The example is escaped as a one-line TOML string rather than
+        // quoted by hand: the discovered names are plain, but a file row
+        // can be keyed by anything, and a name with a newline in it
+        // would otherwise turn the comment into a live key. (toml's own
+        // Display picks a multi-line literal for such a string, which
+        // breaks out of the comment just the same.)
+        let template = match (default, example) {
+            (None, Some(example)) => format!(
+                "\n# No default scheduler is configured. Uncomment to give `restore` and\n\
+# the TUI's `d` key a target:\n\
+#default_sched = {}\n\
+#default_mode = \"Auto\"      # Auto | Gaming | PowerSave | LowLatency | Server\n",
+                toml_basic_string(example)
+            ),
+            _ => String::new(),
+        };
         let origin = match &self.source {
             Some(path) => format!("{} over the built-in defaults", path.display()),
             None => "the built-in defaults".to_owned(),
@@ -295,7 +327,7 @@ impl Profiles {
         Ok(format!(
             "# scxtui profiles, resolved from {origin}.\n\
 # Every row is spelled out; a row left out of a file keeps the\n\
-# built-in default for that scheduler and mode.\n\n{body}"
+# built-in default for that scheduler and mode.\n{template}\n{body}"
         ))
     }
 
@@ -331,6 +363,26 @@ impl Profiles {
             "schedulers": scheds,
         })
     }
+}
+
+/// `text` as a TOML basic string on one line: quoted, with the quote,
+/// the backslash and every control character escaped.
+fn toml_basic_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The schedulers [`builtin_flags`] has rows for, in table order. Kept
@@ -525,6 +577,39 @@ auto_mode = []
             }
         }
         assert_eq!(reloaded.default_launch(), None);
+        // No default: the keys are there as a commented template, which
+        // the reload ignores, and no live default_* key appears.
+        assert!(
+            text.contains("#default_sched = \"scx_bpfland\"\n"),
+            "{text}"
+        );
+        // With schedulers installed, the example is one of them, so the
+        // template works as is on this system.
+        let with_installed = builtin
+            .export_toml(&strs(&["scx_rusty", "scx_flash"]))
+            .unwrap();
+        assert!(
+            with_installed.contains("#default_sched = \"scx_flash\"\n"),
+            "{with_installed}"
+        );
+        assert!(text.contains("#default_mode = \"Auto\""), "{text}");
+        assert!(!text.contains("\ndefault_sched"), "{text}");
+        // A name that would break out of the comment is escaped, so the
+        // template stays a comment and the reload still sees no default.
+        let hostile = builtin
+            .export_toml(&strs(&["scx_a\ndefault_sched = \"scx_evil\""]))
+            .unwrap();
+        assert!(!hostile.contains("\ndefault_sched"), "{hostile}");
+        let hostile_reloaded = Profiles {
+            config: Profiles::parse(&hostile).unwrap(),
+            source: None,
+        };
+        assert_eq!(hostile_reloaded.default_launch(), None);
+        // The escaped form is what TOML reads back as the same string.
+        let quoted = toml_basic_string("a\"b\\c\nd\u{1}");
+        assert_eq!(quoted, "\"a\\\"b\\\\c\\nd\\u0001\"");
+        let parsed: toml::Table = toml::from_str(&format!("x = {quoted}")).unwrap();
+        assert_eq!(parsed["x"].as_str(), Some("a\"b\\c\nd\u{1}"));
         // Same source on both sides, so here the text itself is a fixed
         // point. With a file the header names it, so only the flags are
         // promised to come back; see below.
@@ -554,6 +639,20 @@ auto_mode = []
         assert_eq!(
             reloaded.default_launch(),
             Some(("scx_flash", Mode::PowerSave))
+        );
+        assert!(
+            !text.contains("#default_sched"),
+            "no template with a default set"
+        );
+        // A default scheduler without a mode is Auto; the export says so.
+        let only_sched = Profiles {
+            config: Profiles::parse("default_sched = \"scx_lavd\"\n").unwrap(),
+            source: None,
+        };
+        let auto = only_sched.export_toml(&[]).unwrap();
+        assert!(
+            auto.contains("default_sched = \"scx_lavd\"\ndefault_mode = \"Auto\"\n"),
+            "{auto}"
         );
         for sched in profiles.export_names(&installed, true) {
             for mode in MODES {
