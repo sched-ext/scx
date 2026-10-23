@@ -16,12 +16,11 @@
 #pragma once
 
 #include <scx/common.bpf.h>
-#include <lib/arena_map.h>
+#include <libarena/common.h>
 #include <lib/cid_topology.h>
 #include <lib/cid_idle.h>
 #include <lib/edq.h>
 #include <lib/ravg.h>
-#include <lib/sdt_alloc.h>
 #include "intf.h"
 
 #ifndef __BPF_FEATURE_ADDR_SPACE_CAST
@@ -91,6 +90,8 @@ extern const volatile bool proxy_exec;
 extern const volatile bool no_hrtick;
 
 extern u32 nr_sched_idle_curr;
+extern u64 arena_active_allocs;
+extern u64 arena_alloc_failures;
 extern volatile u64 nr_sis_updates;
 extern volatile u64 sis_scan_sum;
 
@@ -201,8 +202,6 @@ struct task_ctx {
 };
 
 typedef struct task_ctx __arena task_ctx_t;
-
-static struct scx_allocator task_ctx_allocator;
 
 struct task_ctx_ref {
 	task_ctx_t *tctx;

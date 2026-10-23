@@ -38,7 +38,7 @@ use libbpf_rs::ProgramType;
 use libbpf_rs::skel::Skel;
 use log::debug;
 use log::warn;
-use scx_arena::ArenaLib;
+use scx_arena::ScxLibArena;
 use scx_stats::prelude::*;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::NR_CPUS_POSSIBLE;
@@ -97,9 +97,13 @@ fn warn_on_old_kernel() {
 /// a syscall program from userspace.
 fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result<()> {
     let input = ProgramInput {
-        context_in: Some(unsafe {
-            std::slice::from_raw_parts_mut(args as *mut T as *mut u8, std::mem::size_of::<T>())
-        }),
+        context_in: if std::mem::size_of::<T>() == 0 {
+            None
+        } else {
+            Some(unsafe {
+                std::slice::from_raw_parts_mut(args as *mut T as *mut u8, std::mem::size_of::<T>())
+            })
+        },
         ..Default::default()
     };
 
@@ -689,11 +693,10 @@ fn arena_usage(skel: &BpfSkel, counted: bool) -> (Option<u64>, u64) {
 }
 
 struct Scheduler<'a> {
-    /// The arena's user-space services. Nothing here needs reclaiming, the
-    /// arena is carved once at start, but the stream watcher turns an arena
+    /// The arena's user-space services. The stream watcher turns an arena
     /// fault in a BPF program, which the kernel would otherwise fix up
     /// silently by dropping the access, into a report and an abort.
-    _arenalib: ArenaLib,
+    _arenalib: ScxLibArena,
     /// The page counters of eevdf_arena_alloc_pages(), attached to the
     /// kernel's arena allocator for the life of the scheduler.
     _arena_links: Vec<libbpf_rs::Link>,
@@ -1371,6 +1374,8 @@ impl<'a> Scheduler<'a> {
         // only known once the kernel has built it, at attach, so this is in
         // cpu space and ops.init() translates. It has to happen between
         // load and attach: the tables must be in place before ops.init().
+        run_syscall_prog(&skel.progs.arena_buddy_reset, &mut ())
+            .context("initializing libarena buddy allocator")?;
         let mut args = types::eevdf_arena_args {
             nr_cpus: nr_cpus as u64,
             nr_place_tiers,
@@ -1410,7 +1415,7 @@ impl<'a> Scheduler<'a> {
         // Watch the BPF streams: an arena fault is reported and fatal rather
         // than silently fixed up.
         let arenalib =
-            ArenaLib::start(skel.object_mut()).context("starting arena userspace services")?;
+            ScxLibArena::start(skel.object_mut()).context("starting arena userspace services")?;
 
         // Attach the scheduler.
         let struct_ops = Some(if cgroup_names {
@@ -1457,8 +1462,8 @@ impl<'a> Scheduler<'a> {
             arena_bytes: arena_bytes.unwrap_or(0),
             arena_max_bytes,
             arena_counted: arena_bytes.is_some() as u64,
-            arena_active_allocs: bss_data.alloc_stats.active_allocs,
-            arena_alloc_failures: bss_data.alloc_stats.alloc_nomem,
+            arena_active_allocs: bss_data.arena_active_allocs,
+            arena_alloc_failures: bss_data.arena_alloc_failures,
             ..Default::default()
         };
         m.ops = self.ops_profiler.sample(&self.skel);
