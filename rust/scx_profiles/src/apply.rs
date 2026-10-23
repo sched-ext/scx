@@ -49,8 +49,8 @@ pub fn apply_from(profiles: &Profiles, id: &str) -> Result<Applied> {
             )
             .and_then(|()| systemd::clear_overrides());
             cleanup.context(
-                "scx.service is stopped and disabled, but its configuration could not be \
-cleaned; a later start by hand would run the previous scheduler",
+                "scx.service is stopped and disabled, but the configuration cleanup is \
+incomplete; a start by hand may reuse the stale configuration or overrides",
             )?;
             Ok(Applied {
                 id: profile.id.clone(),

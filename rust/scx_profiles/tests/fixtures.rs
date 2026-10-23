@@ -101,8 +101,9 @@ struct Sysfs {
     ops: Option<String>,
 }
 
-/// Materialises a case's inputs in `dir` and returns what [`detect`]
-/// makes of them.
+/// Materialises a case's inputs in `dir`, the sysfs view included so
+/// that the production reader (`kernel::read_at`) is what reads it,
+/// and returns what [`detect`] makes of them.
 fn detect_case(case: &Case, shared: &Profiles, dir: &Path) -> Current {
     let fixtures = fixtures().join("detection");
     for (name, content) in &case.files {
@@ -121,13 +122,15 @@ fn detect_case(case: &Case, shared: &Profiles, dir: &Path) -> Current {
             args: args.to_vec(),
         }
     });
-    let kernel = case
-        .sysfs
-        .as_ref()
-        .map(|s| scx_profiles::kernel::KernelState {
-            state: s.state.clone(),
-            ops: s.ops.clone(),
-        });
+    let sysfs = dir.join("sysfs");
+    if let Some(s) = &case.sysfs {
+        fs::create_dir_all(sysfs.join("root")).unwrap();
+        fs::write(sysfs.join("state"), format!("{}\n", s.state)).unwrap();
+        if let Some(ops) = &s.ops {
+            fs::write(sysfs.join("root/ops"), format!("{ops}\n")).unwrap();
+        }
+    }
+    let kernel = scx_profiles::kernel::read_at(&sysfs).unwrap();
     let profiles = case.profiles.as_ref().unwrap_or(shared);
     detect(profiles, &info, &env, process, kernel, verdict(&info))
 }
@@ -137,7 +140,7 @@ fn detection_fixtures_match_their_expected_output() {
     let detection = fixtures().join("detection");
     let shared =
         Profiles::parse(&fs::read_to_string(detection.join("profiles.json")).unwrap()).unwrap();
-    let scratch = std::env::temp_dir().join(format!("scx_profiles-detect-{}", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
     let mut cases: Vec<PathBuf> = fs::read_dir(&detection)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -151,8 +154,7 @@ fn detection_fixtures_match_their_expected_output() {
     for path in cases {
         let case: Case = serde_json::from_str(&fs::read_to_string(&path).unwrap())
             .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-        let dir = scratch.join(path.file_stem().unwrap());
-        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch.path().join(path.file_stem().unwrap());
         fs::create_dir_all(&dir).unwrap();
         let current = detect_case(&case, &shared, &dir);
         let got = serde_json::to_value(&current).unwrap();
@@ -168,5 +170,4 @@ fn detection_fixtures_match_their_expected_output() {
         let parsed: Current = serde_json::from_value(got).unwrap();
         assert_eq!(parsed, current);
     }
-    let _ = fs::remove_dir_all(&scratch);
 }
