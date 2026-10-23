@@ -88,17 +88,83 @@ impl ScxLibArena {
         Ok(output.return_value as i32)
     }
 
-    /// Set up basic library state.
-    fn setup_arena(obj: &Object, task_size: usize, task_align: usize) -> Result<()> {
-        let input = ProgramInput {
-            context_in: None,
-            ..Default::default()
+    /// Initialize the buddy allocator before allocating any arena objects.
+    /// Pass the address of the loaded skeleton's arena globals.
+    pub fn init_buddy(obj: &Object, arena_globals: usize) -> Result<()> {
+        const CHUNK_BYTES: usize = 1 << 20;
+
+        // SAFETY: The object owns the map, and sysconf takes no pointers.
+        let (map, page_size) = unsafe {
+            (
+                libbpf_sys::bpf_object__find_map_by_name(
+                    obj.as_libbpf_object().as_ptr(),
+                    c"arena".as_ptr(),
+                ),
+                usize::try_from(libc::sysconf(libc::_SC_PAGESIZE))?,
+            )
         };
-        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
+        if map.is_null() || page_size == 0 || !CHUNK_BYTES.is_multiple_of(page_size) {
+            bail!("Missing libarena map or unsupported page size: {page_size}");
+        }
+        let mut globals_size = 0;
+        // SAFETY: The map belongs to obj and globals_size is writable.
+        let (base, map_pages) = unsafe {
+            (
+                libbpf_sys::bpf_map__initial_value(map, &mut globals_size).cast::<u8>(),
+                libbpf_sys::bpf_map__max_entries(map) as usize,
+            )
+        };
+        if base.is_null() {
+            bail!("Missing libarena mapping");
+        }
+        let globals_pages = usize::try_from(globals_size)?.div_ceil(page_size);
+        let chunk_pages = CHUNK_BYTES / page_size;
+        if globals_pages > map_pages || chunk_pages > map_pages - globals_pages {
+            bail!("Libarena globals and reserved prefix exceed the arena");
+        }
+        // libbpf places globals at the end when the kernel supports it.
+        // On older kernels pad the globals to the next chunk boundary.
+        let (first_page, prefix_pages) = if arena_globals == base.addr() {
+            (globals_pages, globals_pages.next_multiple_of(chunk_pages))
+        } else if arena_globals == base.addr() + (map_pages - globals_pages) * page_size {
+            (0, chunk_pages)
+        } else {
+            bail!("Unexpected placement of libarena globals");
+        };
+        let nr_pages = prefix_pages - first_page;
+        if nr_pages != 0 {
+            let mut args = [0_u8; 16];
+            args[..8].copy_from_slice(&(first_page as u64).to_ne_bytes());
+            args[8..].copy_from_slice(&(nr_pages as u64).to_ne_bytes());
+            let ret = Self::run_prog_by_name(
+                obj,
+                "arena_alloc_reserve",
+                ProgramInput {
+                    context_in: Some(&mut args),
+                    ..Default::default()
+                },
+            )?;
+            if ret == -libc::EOPNOTSUPP {
+                // SAFETY: The prefix is inside the arena mapping and excludes
+                // all globals. No allocation can be live before buddy init.
+                unsafe {
+                    base.add(first_page * page_size)
+                        .write_bytes(0, nr_pages * page_size)
+                };
+            } else if ret != 0 {
+                bail!("Could not reserve libarena prefix: {ret}");
+            }
+        }
+
+        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", ProgramInput::default())?;
         if ret != 0 {
             bail!("Could not initialize libarena buddy allocator: {}", ret);
         }
+        Ok(())
+    }
 
+    /// Set up basic library state after initializing the buddy allocator.
+    fn setup_arena(obj: &Object, task_size: usize, task_align: usize) -> Result<()> {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
@@ -296,10 +362,12 @@ impl ScxLibArena {
     /// @task_align: task ctx element alignment, 0 for word alignment.
     pub fn setup(
         obj: &Object,
+        arena_globals: usize,
         task_size: usize,
         task_align: usize,
         nr_cpus: usize,
     ) -> Result<ScxLibArena> {
+        Self::init_buddy(obj, arena_globals)?;
         Self::setup_arena(obj, task_size, task_align)?;
         Self::setup_topology(obj, nr_cpus)?;
 

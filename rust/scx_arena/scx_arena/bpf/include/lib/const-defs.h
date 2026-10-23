@@ -2,18 +2,5 @@
 /* Copyright (c) 2026 Tejun Heo <tj@kernel.org> */
 #pragma once
 
-/*
- * Constants shared across the lib and the schedulers. Freestanding so that
- * scheduler interface headers consumed by bindgen can include it. Rust code
- * cannot; rust/scx_arena/scx_arena/src/lib.rs mirrors the values, keep in sync.
- */
-enum scx_const_defs {
-	/* mirrors the kernel's per-arch L1_CACHE_SHIFT */
-#if defined(__TARGET_ARCH_s390) || defined(__s390x__)
-	SCX_CACHELINE_SIZE	= 256,
-#elif defined(__TARGET_ARCH_powerpc) || defined(__powerpc64__)
-	SCX_CACHELINE_SIZE	= 128,
-#else
-	SCX_CACHELINE_SIZE	= 64,
-#endif
-};
+/* the definitions moved to the shared scx/const-defs.h, kept for includers */
+#include <scx/const-defs.h>

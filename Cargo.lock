@@ -3834,9 +3834,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libarena-rs"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e11d4b9f729be8abf10ed8b7e309afe3ca128db6b954f9eb7137df64af89bd1"
+checksum = "9124583075fddc6ec76f675a3a804eb802c342b5d8225d45b831dd7e859375fd"
 dependencies = [
  "tar",
 ]
