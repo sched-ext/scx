@@ -56,9 +56,7 @@ pub struct Metrics {
     #[stat(desc = "Size of the arena map in bytes")]
     pub arena_max_bytes: u64,
 
-    #[stat(
-        desc = "Arena usage is known (1): counted at the allocator with --stats, or by the kernel"
-    )]
+    #[stat(desc = "Kernel arena memory usage is available (1) or unavailable (0)")]
     pub arena_counted: u64,
 
     #[stat(desc = "Arena allocator objects currently allocated, task contexts mostly")]
@@ -352,7 +350,7 @@ impl Dashboard {
         } else {
             writeln!(
                 w,
-                "BPF arena memory {} reserved, usage counted with --stats   active allocations {}   failed allocations {}",
+                "BPF arena memory usage unavailable (capacity {})   active allocations {}   failed allocations {}",
                 human_bytes(m.arena_max_bytes),
                 m.arena_active_allocs,
                 m.arena_alloc_failures,

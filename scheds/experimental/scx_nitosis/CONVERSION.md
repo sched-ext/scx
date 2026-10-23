@@ -527,6 +527,7 @@ metal.
 - Restoring the idle bit of an abandoned claim, which the builtin idle
   picker did.
 - Whether idle tracking should move onto the shared cid idle helpers in
-  scheds/include/lib/cid_idle.h, which arrived after the conversion.
+  rust/scx_arena/scx_arena/bpf/include/lib/cid_idle.h, which arrived after
+  the conversion.
 - Bringing back the subcell scheme and virtual LLCs through a cid topology
   override.
