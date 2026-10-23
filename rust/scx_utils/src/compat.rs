@@ -82,6 +82,10 @@ fn btf_vlen(t: &btf_type) -> u32 {
     t.info & 0xffff
 }
 
+fn btf_kflag(t: &btf_type) -> bool {
+    (t.info >> 31) != 0
+}
+
 fn btf_type_plus_1(t: &btf_type) -> *const c_void {
     let ptr_val = t as *const btf_type as usize;
     (ptr_val + size_of::<btf_type>()) as *const c_void
@@ -227,7 +231,11 @@ pub fn read_enum(type_name: &str, name: &str) -> Result<u64> {
                     if unsafe { t.__bindgen_anon_1.size } == 8 && type_name.starts_with("scx_") {
                         return recover_truncated_enum64(type_name, name, e.val as u32);
                     }
-                    return Ok(e.val as u64);
+                    return Ok(if btf_kflag(t) {
+                        e.val as i64 as u64
+                    } else {
+                        e.val as u32 as u64
+                    });
                 }
             }
         }

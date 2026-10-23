@@ -9,6 +9,7 @@
 	SCX_ENUM_SET(skel, scx_public_consts, SCX_OPS_NAME_LEN); \
 	SCX_ENUM_SET(skel, scx_public_consts, SCX_SLICE_DFL); \
 	SCX_ENUM_SET(skel, scx_public_consts, SCX_SLICE_INF); \
+	SCX_ENUM_SET(skel, scx_consts, SCX_RESCUE_DISABLE); \
 	SCX_ENUM_SET(skel, scx_rq_flags, SCX_RQ_ONLINE); \
 	SCX_ENUM_SET(skel, scx_rq_flags, SCX_RQ_CAN_STOP_TICK); \
 	SCX_ENUM_SET(skel, scx_rq_flags, SCX_RQ_BAL_PENDING); \

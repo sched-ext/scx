@@ -8,6 +8,7 @@ pub struct Enums {
     pub SCX_OPS_NAME_LEN: u64,
     pub SCX_SLICE_DFL: u64,
     pub SCX_SLICE_INF: u64,
+    pub SCX_RESCUE_DISABLE: u64,
     pub SCX_RQ_ONLINE: u64,
     pub SCX_RQ_CAN_STOP_TICK: u64,
     pub SCX_RQ_BAL_PENDING: u64,
@@ -64,6 +65,7 @@ lazy_static::lazy_static! {
         SCX_OPS_NAME_LEN: read_enum("scx_public_consts","SCX_OPS_NAME_LEN").unwrap_or(0),
         SCX_SLICE_DFL: read_enum("scx_public_consts","SCX_SLICE_DFL").unwrap_or(0),
         SCX_SLICE_INF: read_enum("scx_public_consts","SCX_SLICE_INF").unwrap_or(0),
+        SCX_RESCUE_DISABLE: read_enum("scx_consts","SCX_RESCUE_DISABLE").unwrap_or(0),
         SCX_RQ_ONLINE: read_enum("scx_rq_flags","SCX_RQ_ONLINE").unwrap_or(0),
         SCX_RQ_CAN_STOP_TICK: read_enum("scx_rq_flags","SCX_RQ_CAN_STOP_TICK").unwrap_or(0),
         SCX_RQ_BAL_PENDING: read_enum("scx_rq_flags","SCX_RQ_BAL_PENDING").unwrap_or(0),
@@ -124,6 +126,7 @@ macro_rules! import_enums {
         rodata.__SCX_OPS_NAME_LEN = $crate::scx_enums.SCX_OPS_NAME_LEN;
         rodata.__SCX_SLICE_DFL = $crate::scx_enums.SCX_SLICE_DFL;
         rodata.__SCX_SLICE_INF = $crate::scx_enums.SCX_SLICE_INF;
+        rodata.__SCX_RESCUE_DISABLE = $crate::scx_enums.SCX_RESCUE_DISABLE;
         rodata.__SCX_RQ_ONLINE = $crate::scx_enums.SCX_RQ_ONLINE;
         rodata.__SCX_RQ_CAN_STOP_TICK = $crate::scx_enums.SCX_RQ_CAN_STOP_TICK;
         rodata.__SCX_RQ_BAL_PENDING = $crate::scx_enums.SCX_RQ_BAL_PENDING;
