@@ -141,7 +141,6 @@ enum consts_internal {
  * before the task migrates. Full heat is LAVD_SCALE.
  */
 enum consts_cpu_warmth {
-	LAVD_CPU_ID_NONE		= 0xffff, /* no warm CPU, for introspection */
 	LAVD_CPU_WARM_SAT_NS		= (500ULL * NSEC_PER_USEC), /* residence to full heat */
 	LAVD_CPU_WARM_LIFETIME_NS	= (5ULL * NSEC_PER_MSEC), /* linear decay to 0 once away */
 };
@@ -177,6 +176,19 @@ enum consts_flags {
  *  - _wwgt: weighted wall clock time scaled by task's weight
  *  - _iwgt: weighted invariant time scaled by task's weight
  */
+
+/*
+ * A running average on one CPU's clock_pelt time base. clock_pelt is per-rq,
+ * so @anchor_cpu records whose clock @rd's timestamps belong to and a
+ * migrating entity re-anchors. @val_at_wall pairs rd.val_at with wall time so
+ * an off-rq update can extrapolate the anchor's clock, see
+ * ravg_invr_extrapolate().
+ */
+struct ravg_data_invr {
+	struct ravg_data	rd;
+	u64			val_at_wall;	/* wall time of rd.val_at; 0 = unpaired */
+	u16			anchor_cpu;	/* LAVD_CPU_ID_NONE = unanchored */
+};
 
 /*
  * Task context
@@ -258,12 +270,13 @@ struct task_ctx {
 	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 
 	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
 	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
 					/* Estimated task util using ravg duty cycle */
-	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
-	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
+	struct ravg_data_invr avg_util_ravg;
+					/* Running average of task utilization using ravg */
 
 	/* --- per-CPU warmth (cache/TLB state) --- */
 	u64	last_stopping_clk;	/* when cpu_heat was last integrated (task stopped) */
@@ -517,12 +530,11 @@ struct cpu_ctx {
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
 	/*
 	 * Exponential weighted moving average of the observed performance
-	 * factor (delta_pelt / task_wall) in LAVD_SHIFT fixed-point format.
-	 * Updated each collect_sys_stat() interval when task_wall > 0. Used
-	 * as a fallback for conv_wall_to_invr_obs() when the CPU has no active
-	 * time in the current interval (e.g., mostly idle with only IRQ
-	 * traffic), so that irq_steal_invr is estimated from recent history
-	 * rather than defaulting to zero or assuming max frequency.
+	 * factor (SCX tasks' invariant time over their wall time) in
+	 * LAVD_SHIFT fixed-point format. Updated each collect_sys_stat()
+	 * interval in which an SCX task ran, and used in its place when none
+	 * did (e.g., mostly idle with only IRQ traffic), so that the steal is
+	 * scaled by recent history rather than assuming max frequency.
 	 * Initialized to LAVD_SCALE at init_per_cpu_ctx() and
 	 * cpu_ctx_init_online().
 	 */
@@ -530,33 +542,6 @@ struct cpu_ctx {
 	volatile u32	max_freq_observed; /* maximum CPU frequency observed within an interval scaled to 1024 */
 	volatile u32	max_freq;	/* maximum CPU frequency averaged across multiple intervals */
 	u32		__pad2;
-	/*
-	 * Snapshot of scx_clock_task() taken at the end of the last
-	 * collect_sys_stat() interval. scx_clock_task() advances during tasks
-	 * (SCX, RT/DL, idle) but is frozen during IRQ and hypervisor steal.
-	 * With NO_HZ_IDLE, rq->clock_task is only updated at scheduling
-	 * events; it is stale for a currently-idle remote CPU. When a CPU
-	 * wakes from idle, rq->clock_task catches up to include the elapsed
-	 * idle duration. See collect_sys_stat() for how task_wall and
-	 * irq_steal_wall are correctly derived from delta_task.
-	 * Initialized at init_per_cpu_ctx() and cpu_ctx_init_online(),
-	 * updated each collect_sys_stat().
-	 */
-	u64		prev_task_clk;
-	/*
-	 * Snapshot of scx_clock_pelt() taken at the end of the last
-	 * collect_sys_stat() interval. scx_clock_pelt() advances only during
-	 * active execution (SCX + RT/DL), normalized by CPU capacity and
-	 * frequency. It is frozen during IRQ, steal, and idle.
-	 * The delta over an interval satisfies:
-	 *   delta_pelt = scx_task_time_invr + rt_dl_time_invr
-	 * so subtracting tot_task_time_invr gives rt_dl_time_invr exactly, and
-	 * the ratio delta_pelt / task_wall is the observed performance factor
-	 * used by conv_wall_to_invr_obs().
-	 * Initialized at init_per_cpu_ctx() and cpu_ctx_init_online(),
-	 * updated each collect_sys_stat().
-	 */
-	u64		prev_pelt_clk;
 
 	/* --- cacheline 4 boundary (256 bytes): cpumask scratch --- */
 	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
@@ -568,7 +553,8 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
-	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
+	struct ravg_data_invr avg_util_ravg;
+				/* Running average of CPU utilization using ravg */
 	volatile u32	util_est;	/* Estimated CPU utilization from ravg tracking */
 
 	/* --- cacheline 7 boundary (448 bytes): cross-CPU write-heavy accumulator --- */
@@ -858,8 +844,9 @@ bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 
 /*
  * Return the task's load contribution for queued load tracking.
- * Uses RAVG util_est: [0, 1024], 128ms half-life, tracks duty cycle.
- * Updated in lavd_runnable/lavd_quiescent — active under sched_ext.
+ * Uses RAVG util_est: [0, 1024], 128ms half-life, tracks the runnable
+ * duty cycle (running + queued), so contention shows in the sum.
+ * Updated in lavd_running/lavd_stopping — active under sched_ext.
  *
  * Note: kernel PELT p->se.avg.util_avg is NOT updated when sched_ext
  * is enabled (tasks bypass CFS), so it cannot be used here.

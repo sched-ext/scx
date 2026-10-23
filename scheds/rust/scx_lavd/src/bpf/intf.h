@@ -32,6 +32,7 @@ enum {
  */
 enum {
 	LAVD_CPU_ID_MAX			= 8192,
+	LAVD_CPU_ID_NONE		= 0xffff, /* no CPU: beyond LAVD_CPU_ID_MAX */
 
 	LAVD_CPDOM_MAX_NR		= 128, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 3,  /* maximum distance from one compute domain to another */
