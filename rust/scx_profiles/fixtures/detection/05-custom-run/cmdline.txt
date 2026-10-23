@@ -1,0 +1,2 @@
+/usr/bin/scx_rusty
+-v

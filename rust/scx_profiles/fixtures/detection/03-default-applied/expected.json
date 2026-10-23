@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "profile": "default",
+  "applied": null,
+  "custom": false,
+  "unit": {
+    "active": false,
+    "enabled": false
+  },
+  "running": null,
+  "next": null,
+  "kernel": {
+    "state": "disabled",
+    "ops": null
+  },
+  "failure": null
+}

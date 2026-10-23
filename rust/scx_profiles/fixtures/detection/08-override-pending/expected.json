@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "profile": "gaming",
+  "applied": "gaming",
+  "custom": false,
+  "unit": {
+    "active": true,
+    "enabled": true
+  },
+  "running": {
+    "sched": "scx_lavd",
+    "args": [
+      "--performance",
+      "--pinned-slice-us",
+      "500"
+    ]
+  },
+  "next": {
+    "sched": "scx_rusty",
+    "args": [
+      "-s",
+      "10000"
+    ],
+    "override": true
+  },
+  "kernel": {
+    "state": "enabled",
+    "ops": "lavd"
+  },
+  "failure": null
+}

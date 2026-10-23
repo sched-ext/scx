@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "profiles": [
+    {
+      "id": "default",
+      "label": "Default",
+      "action": "stop",
+      "mode": "auto",
+      "description": "Use the kernel's default scheduler."
+    }
+  ]
+}

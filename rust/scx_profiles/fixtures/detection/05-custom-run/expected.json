@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "profile": null,
+  "applied": null,
+  "custom": true,
+  "unit": {
+    "active": true,
+    "enabled": true
+  },
+  "running": {
+    "sched": "scx_rusty",
+    "args": [
+      "-v"
+    ]
+  },
+  "next": {
+    "sched": "/usr/bin/scx_rusty",
+    "args": [
+      "-v"
+    ],
+    "override": false
+  },
+  "kernel": {
+    "state": "enabled",
+    "ops": "rusty"
+  },
+  "failure": null
+}

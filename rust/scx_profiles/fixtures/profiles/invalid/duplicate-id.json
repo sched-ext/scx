@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "profiles": [
+    {
+      "id": "default",
+      "label": "Default",
+      "action": "stop",
+      "description": "Use the kernel's default scheduler."
+    },
+    {
+      "id": "a",
+      "label": "A",
+      "sched": "scx_lavd"
+    },
+    {
+      "id": "a",
+      "label": "A",
+      "sched": "scx_rusty"
+    }
+  ]
+}

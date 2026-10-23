@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "profile": null,
+  "applied": "gaming",
+  "custom": true,
+  "unit": {
+    "active": false,
+    "enabled": false
+  },
+  "running": null,
+  "next": {
+    "sched": "/usr/bin/scx_lavd",
+    "args": [
+      "--performance",
+      "--pinned-slice-us",
+      "500"
+    ],
+    "override": false
+  },
+  "kernel": {
+    "state": "enabled",
+    "ops": "lavd"
+  },
+  "failure": null
+}

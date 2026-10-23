@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "profiles": [
+    {
+      "id": "default",
+      "label": "Default",
+      "action": "stop",
+      "description": "Use the kernel's default scheduler."
+    },
+    {
+      "id": "g",
+      "label": "G",
+      "sched": "/tmp/scx_evil"
+    }
+  ]
+}

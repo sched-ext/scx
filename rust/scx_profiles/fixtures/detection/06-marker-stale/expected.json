@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "profile": null,
+  "applied": "gaming",
+  "custom": true,
+  "unit": {
+    "active": true,
+    "enabled": true
+  },
+  "running": {
+    "sched": "scx_cosmos",
+    "args": []
+  },
+  "next": {
+    "sched": "/usr/bin/scx_cosmos",
+    "args": [],
+    "override": false
+  },
+  "kernel": {
+    "state": "enabled",
+    "ops": "cosmos"
+  },
+  "failure": null
+}

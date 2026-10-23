@@ -1,0 +1,3 @@
+SCX_PROFILE=gaming
+SCX_SCHEDULER=/usr/bin/scx_cosmos
+SCX_FLAGS=""

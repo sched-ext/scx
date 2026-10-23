@@ -7,6 +7,7 @@ members = [
     "rust/scx_rustsched_build",
     "rust/scx_rustsched_loader",
     "rust/scx_cargo",
+    "rust/scx_profiles",
     "rust/scx_raw_pmu",
     "rust/scx_rustland_core",
     "rust/scx_stats",

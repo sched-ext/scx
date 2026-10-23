@@ -1,0 +1,4 @@
+# scx.service
+SCX_SCHEDULER=/usr/bin/scx_lavd
+SCX_FLAGS="--performance --pinned-slice-us 500"
+SCX_PROFILE=nope

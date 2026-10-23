@@ -1,0 +1,2 @@
+SCX_SCHEDULER=scx_bpfland
+SCX_FLAGS="-m performance -w"
