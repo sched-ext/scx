@@ -91,3 +91,15 @@ scheduler next to what the next start would run, including any
 cargo build --release -p scxtui
 sudo ./target/release/scxtui
 ```
+
+## Profiles
+
+[`scxcli`](../tools/scxcli/README.md) manages the unit through
+high-level profiles (Default, Desktop, Gaming, Low latency, Power saver,
+Server), each backed by a scheduler and options the scx maintainers
+chose. `scxcli apply gaming` writes `SCX_PROFILE`, `SCX_SCHEDULER` and
+`SCX_FLAGS` to `/etc/default/scx` and restarts the unit; `scxcli get`
+says which profile is running. The list ships as
+`/usr/share/scx/profiles.json` (`profiles.json` here) and an
+administrator overrides it with `/etc/scx/profiles.json`. The contract is
+in [PROFILES.md](PROFILES.md).
