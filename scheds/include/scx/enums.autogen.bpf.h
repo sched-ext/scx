@@ -22,23 +22,11 @@ const volatile u64 __SCX_RQ_ONLINE __weak;
 const volatile u64 __SCX_RQ_CAN_STOP_TICK __weak;
 #define SCX_RQ_CAN_STOP_TICK __SCX_RQ_CAN_STOP_TICK
 
-const volatile u64 __SCX_RQ_BAL_PENDING __weak;
-#define SCX_RQ_BAL_PENDING __SCX_RQ_BAL_PENDING
-
-const volatile u64 __SCX_RQ_BAL_KEEP __weak;
-#define SCX_RQ_BAL_KEEP __SCX_RQ_BAL_KEEP
-
-const volatile u64 __SCX_RQ_BYPASSING __weak;
-#define SCX_RQ_BYPASSING __SCX_RQ_BYPASSING
-
 const volatile u64 __SCX_RQ_CLK_VALID __weak;
 #define SCX_RQ_CLK_VALID __SCX_RQ_CLK_VALID
 
 const volatile u64 __SCX_RQ_IN_WAKEUP __weak;
 #define SCX_RQ_IN_WAKEUP __SCX_RQ_IN_WAKEUP
-
-const volatile u64 __SCX_RQ_IN_BALANCE __weak;
-#define SCX_RQ_IN_BALANCE __SCX_RQ_IN_BALANCE
 
 const volatile u64 __SCX_RQ_IN_DISPATCH __weak;
 #define SCX_RQ_IN_DISPATCH __SCX_RQ_IN_DISPATCH
@@ -102,9 +90,6 @@ const volatile u64 __SCX_TASK_READY __weak;
 
 const volatile u64 __SCX_TASK_ENABLED __weak;
 #define SCX_TASK_ENABLED __SCX_TASK_ENABLED
-
-const volatile u64 __SCX_TASK_NR_STATES __weak;
-#define SCX_TASK_NR_STATES __SCX_TASK_NR_STATES
 
 const volatile u64 __SCX_TASK_DSQ_ON_PRIQ __weak;
 #define SCX_TASK_DSQ_ON_PRIQ __SCX_TASK_DSQ_ON_PRIQ

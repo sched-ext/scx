@@ -13,17 +13,9 @@
                 },{
                     "__SCX_RQ_CAN_STOP_TICK": 0
                 },{
-                    "__SCX_RQ_BAL_PENDING": 0
-                },{
-                    "__SCX_RQ_BAL_KEEP": 0
-                },{
-                    "__SCX_RQ_BYPASSING": 0
-                },{
                     "__SCX_RQ_CLK_VALID": 0
                 },{
                     "__SCX_RQ_IN_WAKEUP": 0
-                },{
-                    "__SCX_RQ_IN_BALANCE": 0
                 },{
                     "__SCX_DSQ_FLAG_BUILTIN": 9223372036854775808
                 },{
@@ -60,8 +52,6 @@
                     "__SCX_TASK_READY": 0
                 },{
                     "__SCX_TASK_ENABLED": 0
-                },{
-                    "__SCX_TASK_NR_STATES": 0
                 },{
                     "__SCX_TASK_DSQ_ON_PRIQ": 0
                 },{
