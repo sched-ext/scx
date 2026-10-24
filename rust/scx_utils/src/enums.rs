@@ -11,12 +11,8 @@ pub struct Enums {
     pub SCX_RESCUE_DISABLE: u64,
     pub SCX_RQ_ONLINE: u64,
     pub SCX_RQ_CAN_STOP_TICK: u64,
-    pub SCX_RQ_BAL_PENDING: u64,
-    pub SCX_RQ_BAL_KEEP: u64,
-    pub SCX_RQ_BYPASSING: u64,
     pub SCX_RQ_CLK_VALID: u64,
     pub SCX_RQ_IN_WAKEUP: u64,
-    pub SCX_RQ_IN_BALANCE: u64,
     pub SCX_RQ_IN_DISPATCH: u64,
     pub SCX_DSQ_FLAG_BUILTIN: u64,
     pub SCX_DSQ_FLAG_LOCAL_ON: u64,
@@ -38,7 +34,6 @@ pub struct Enums {
     pub SCX_TASK_INIT: u64,
     pub SCX_TASK_READY: u64,
     pub SCX_TASK_ENABLED: u64,
-    pub SCX_TASK_NR_STATES: u64,
     pub SCX_TASK_DSQ_ON_PRIQ: u64,
     pub SCX_KICK_IDLE: u64,
     pub SCX_KICK_PREEMPT: u64,
@@ -68,12 +63,8 @@ lazy_static::lazy_static! {
         SCX_RESCUE_DISABLE: read_enum("scx_consts","SCX_RESCUE_DISABLE").unwrap_or(0),
         SCX_RQ_ONLINE: read_enum("scx_rq_flags","SCX_RQ_ONLINE").unwrap_or(0),
         SCX_RQ_CAN_STOP_TICK: read_enum("scx_rq_flags","SCX_RQ_CAN_STOP_TICK").unwrap_or(0),
-        SCX_RQ_BAL_PENDING: read_enum("scx_rq_flags","SCX_RQ_BAL_PENDING").unwrap_or(0),
-        SCX_RQ_BAL_KEEP: read_enum("scx_rq_flags","SCX_RQ_BAL_KEEP").unwrap_or(0),
-        SCX_RQ_BYPASSING: read_enum("scx_rq_flags","SCX_RQ_BYPASSING").unwrap_or(0),
         SCX_RQ_CLK_VALID: read_enum("scx_rq_flags","SCX_RQ_CLK_VALID").unwrap_or(0),
         SCX_RQ_IN_WAKEUP: read_enum("scx_rq_flags","SCX_RQ_IN_WAKEUP").unwrap_or(0),
-        SCX_RQ_IN_BALANCE: read_enum("scx_rq_flags","SCX_RQ_IN_BALANCE").unwrap_or(0),
         SCX_RQ_IN_DISPATCH: read_enum("scx_rq_flags","SCX_RQ_IN_DISPATCH").unwrap_or(0),
         SCX_DSQ_FLAG_BUILTIN: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_BUILTIN").unwrap_or(0),
         SCX_DSQ_FLAG_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_LOCAL_ON").unwrap_or(0),
@@ -95,7 +86,6 @@ lazy_static::lazy_static! {
         SCX_TASK_INIT: read_enum_any(&["scx_ent_flags", "scx_task_state"],"SCX_TASK_INIT").unwrap_or(0),
         SCX_TASK_READY: read_enum_any(&["scx_ent_flags", "scx_task_state"],"SCX_TASK_READY").unwrap_or(0),
         SCX_TASK_ENABLED: read_enum_any(&["scx_ent_flags", "scx_task_state"],"SCX_TASK_ENABLED").unwrap_or(0),
-        SCX_TASK_NR_STATES: read_enum_any(&["scx_ent_flags", "scx_task_state"],"SCX_TASK_NR_STATES").unwrap_or(0),
         SCX_TASK_DSQ_ON_PRIQ: read_enum("scx_ent_dsq_flags","SCX_TASK_DSQ_ON_PRIQ").unwrap_or(0),
         SCX_KICK_IDLE: read_enum("scx_kick_flags","SCX_KICK_IDLE").unwrap_or(0),
         SCX_KICK_PREEMPT: read_enum("scx_kick_flags","SCX_KICK_PREEMPT").unwrap_or(0),
@@ -129,12 +119,8 @@ macro_rules! import_enums {
         rodata.__SCX_RESCUE_DISABLE = $crate::scx_enums.SCX_RESCUE_DISABLE;
         rodata.__SCX_RQ_ONLINE = $crate::scx_enums.SCX_RQ_ONLINE;
         rodata.__SCX_RQ_CAN_STOP_TICK = $crate::scx_enums.SCX_RQ_CAN_STOP_TICK;
-        rodata.__SCX_RQ_BAL_PENDING = $crate::scx_enums.SCX_RQ_BAL_PENDING;
-        rodata.__SCX_RQ_BAL_KEEP = $crate::scx_enums.SCX_RQ_BAL_KEEP;
-        rodata.__SCX_RQ_BYPASSING = $crate::scx_enums.SCX_RQ_BYPASSING;
         rodata.__SCX_RQ_CLK_VALID = $crate::scx_enums.SCX_RQ_CLK_VALID;
         rodata.__SCX_RQ_IN_WAKEUP = $crate::scx_enums.SCX_RQ_IN_WAKEUP;
-        rodata.__SCX_RQ_IN_BALANCE = $crate::scx_enums.SCX_RQ_IN_BALANCE;
         rodata.__SCX_RQ_IN_DISPATCH = $crate::scx_enums.SCX_RQ_IN_DISPATCH;
         rodata.__SCX_DSQ_FLAG_BUILTIN = $crate::scx_enums.SCX_DSQ_FLAG_BUILTIN;
         rodata.__SCX_DSQ_FLAG_LOCAL_ON = $crate::scx_enums.SCX_DSQ_FLAG_LOCAL_ON;
@@ -156,7 +142,6 @@ macro_rules! import_enums {
         rodata.__SCX_TASK_INIT = $crate::scx_enums.SCX_TASK_INIT;
         rodata.__SCX_TASK_READY = $crate::scx_enums.SCX_TASK_READY;
         rodata.__SCX_TASK_ENABLED = $crate::scx_enums.SCX_TASK_ENABLED;
-        rodata.__SCX_TASK_NR_STATES = $crate::scx_enums.SCX_TASK_NR_STATES;
         rodata.__SCX_TASK_DSQ_ON_PRIQ = $crate::scx_enums.SCX_TASK_DSQ_ON_PRIQ;
         rodata.__SCX_KICK_IDLE = $crate::scx_enums.SCX_KICK_IDLE;
         rodata.__SCX_KICK_PREEMPT = $crate::scx_enums.SCX_KICK_PREEMPT;
