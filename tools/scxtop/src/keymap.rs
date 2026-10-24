@@ -387,6 +387,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "AppStateNode" | "SetState(Node)" => Ok(Action::SetState(AppState::Node)),
         "AppStateScheduler" | "SetState(Scheduler)" => Ok(Action::SetState(AppState::Scheduler)),
         "AppStateNetwork" | "SetState(Network)" => Ok(Action::SetState(AppState::Network)),
+        "AppStatePower" | "SetState(Power)" => Ok(Action::SetState(AppState::Power)),
         "SaveConfig" => Ok(Action::SaveConfig),
         "RequestTrace" => Ok(Action::RequestTrace),
         "ClearEvent" => Ok(Action::ClearEvent),
