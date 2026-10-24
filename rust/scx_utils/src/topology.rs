@@ -237,9 +237,6 @@ pub struct Node {
     /// Skip indices to access lower level members easily.
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
-
-    #[cfg(feature = "gpu-topology")]
-    pub gpus: BTreeMap<GpuIndex, Gpu>,
 }
 
 /// Source used to reconstruct scheduler-domain policy.
@@ -285,6 +282,9 @@ pub struct Topology {
     // reconstructed from these live masks and the same topology inputs used
     // by the kernel. If schedstat is unavailable, topology masks are used.
     sched_domains: OnceLock<Option<BTreeMap<usize, Vec<Cpumask>>>>,
+
+    #[cfg(feature = "gpu-topology")]
+    gpus: OnceLock<BTreeMap<GpuIndex, Gpu>>,
 }
 
 impl Topology {
@@ -348,6 +348,8 @@ impl Topology {
             all_cores: topo_cores,
             all_cpus: topo_cpus,
             sched_domains: OnceLock::new(),
+            #[cfg(feature = "gpu-topology")]
+            gpus: OnceLock::new(),
         })
     }
 
@@ -422,16 +424,25 @@ impl Topology {
         Self::with_virt_llcs(nr_cores_per_vllc)
     }
 
-    /// Get a vec of all GPUs on the hosts.
+    /// Get all GPUs on the nodes of this topology, keyed by `GpuIndex`.
+    ///
+    /// GPUs are probed on the first call and cached. Probing initializes
+    /// NVML, which can wake a runtime-suspended dGPU, so only call this
+    /// when GPU information
     #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
-        let mut gpus = BTreeMap::new();
-        for node in self.nodes.values() {
-            for (idx, gpu) in &node.gpus {
-                gpus.insert(*idx, gpu);
-            }
-        }
-        gpus
+        self.gpus
+            .get_or_init(|| {
+                create_gpus()
+                    .into_iter()
+                    .filter(|(node_id, _)| self.nodes.contains_key(node_id))
+                    .flat_map(|(_, gpus)| gpus)
+                    .map(|gpu| (gpu.index, gpu))
+                    .collect()
+            })
+            .iter()
+            .map(|(idx, gpu)| (*idx, gpu))
+            .collect()
     }
 
     /// Returns whether the Topology has a hybrid architecture of big and little cores.
@@ -1228,21 +1239,9 @@ fn create_default_node(
         distance: vec![],
         llcs: BTreeMap::new(),
         span: Cpumask::new(),
-        #[cfg(feature = "gpu-topology")]
-        gpus: BTreeMap::new(),
         all_cores: BTreeMap::new(),
         all_cpus: BTreeMap::new(),
     };
-
-    #[cfg(feature = "gpu-topology")]
-    {
-        let system_gpus = create_gpus();
-        if let Some(gpus) = system_gpus.get(&0) {
-            for gpu in gpus {
-                node.gpus.insert(gpu.index, gpu.clone());
-            }
-        }
-    }
 
     let path = format!("{}/sys/devices/system/cpu", *ROOT_PREFIX);
     if !Path::new(&path).exists() {
@@ -1271,9 +1270,6 @@ fn create_numa_nodes(
 ) -> Result<BTreeMap<usize, Node>> {
     let mut nodes = BTreeMap::<usize, Node>::new();
     let mut next_virt_llc_id = 0;
-
-    #[cfg(feature = "gpu-topology")]
-    let system_gpus = create_gpus();
 
     let path = format!("{}/sys/devices/system/node/node*", *ROOT_PREFIX);
     let numa_paths = glob(&path)?;
@@ -1310,19 +1306,7 @@ fn create_numa_nodes(
 
             all_cores: BTreeMap::new(),
             all_cpus: BTreeMap::new(),
-
-            #[cfg(feature = "gpu-topology")]
-            gpus: BTreeMap::new(),
         };
-
-        #[cfg(feature = "gpu-topology")]
-        {
-            if let Some(gpus) = system_gpus.get(&node_id) {
-                for gpu in gpus {
-                    node.gpus.insert(gpu.index, gpu.clone());
-                }
-            }
-        }
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
@@ -1459,8 +1443,6 @@ pub mod testutils {
             span,
             all_cores: BTreeMap::new(), // filled by instantiate()
             all_cpus: BTreeMap::new(),  // filled by instantiate()
-            #[cfg(feature = "gpu-topology")]
-            gpus: BTreeMap::new(),
         }
     }
 
