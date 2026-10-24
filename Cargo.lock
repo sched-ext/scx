@@ -6110,6 +6110,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_intent"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs 0.27.2",
+ "log",
+ "scx_cargo",
+ "scx_utils",
+ "serde",
+ "serde_json",
+ "simplelog",
+]
+
+[[package]]
 name = "scx_lavd"
 version = "1.1.4"
 dependencies = [

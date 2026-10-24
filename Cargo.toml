@@ -37,6 +37,7 @@ members = [
     "scheds/experimental/scx_rburst",
     "scheds/experimental/scx_rlocal",
     "scheds/experimental/scx_rvtime",
+    "scheds/experimental/scx_intent",
     "tools/scx_characterize",
     "tools/scxtop",
     "tools/scxtui",
