@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
 //! Application state and event loop.
+//!
+//! Everything that reads or changes the profiles and `scx.service` goes
+//! through the backend, which is `scxcli`. The app holds the last
+//! listing it got back, the kernel's own view read every tick, and the
+//! selections and fields of the three views.
 
 use std::time::{Duration, Instant};
 
@@ -8,54 +13,53 @@ use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::backend::service::{system_command, validate_value};
-use crate::backend::{SchedulerBackend, Status};
+use crate::backend::ProfileBackend;
 use crate::kernel::{self, KernelState};
 use crate::logs::{self, LogLine};
-use crate::profiles::{MODES, Mode, Profiles};
+use crate::model::{
+    DEFAULT_ID, Entry, FORMAT_VERSION, Listing, Profile, ProfilesFile, validate_arg, validate_id,
+};
+use crate::system::system_command;
 use crate::ui;
+use crate::watch::Watcher;
 
 /// How often the input poll wakes up to redraw / refresh.
 const TICK: Duration = Duration::from_millis(250);
-/// Status poll cadence. systemd has no cheap push channel for unit state
-/// that is worth a D-Bus dependency here, so the view is polled; the
-/// kernel sysfs read rides every tick regardless.
+/// Slow poll for what inotify cannot see: the unit's state and the
+/// process behind it. The profile and environment files are refreshed
+/// on inotify events instead.
 const REFRESH_EVERY: Duration = Duration::from_secs(5);
-/// Minimum spacing between two scheduler-affecting actions. Linux terminals
-/// deliver key autorepeat as plain `Press` events (no kitty protocol), so
-/// without this, holding `r` would fire one restart per repeat.
+/// Minimum spacing between two scheduler-affecting actions. Linux
+/// terminals deliver key autorepeat as plain `Press` events, so without
+/// this, holding Enter would fire one apply per repeat.
 const ACTION_DEBOUNCE: Duration = Duration::from_millis(500);
-/// How long informational messages stay in the message bar. Without a
-/// TTL, a stale "refreshed" from minutes ago reads as fresh feedback.
-/// Errors are exempt: they are actionable and stay until replaced.
+/// How long informational messages stay in the message bar. Errors are
+/// exempt: they are actionable and stay until replaced.
 const MESSAGE_TTL: Duration = Duration::from_secs(8);
 
 /// Deferred user actions: queued by key handlers, executed by the event
-/// loop right after the frame announcing them has been drawn. Backend
-/// calls block (a `systemctl restart` waits for the unit to come up), so
-/// the UI must show feedback *before* making them.
+/// loop right after the frame announcing them has been drawn. scxcli
+/// blocks (a restart waits for the unit to come up, pkexec may prompt),
+/// so the UI must show feedback before the call starts.
 #[derive(Clone, Debug, PartialEq)]
 enum PendingAction {
-    StartOrSwitch,
-    /// Validated field content; see [`App::submit_args`].
-    StartOrSwitchWithArgs(Vec<String>),
-    Stop,
-    Restart,
-    RestoreDefault,
+    Apply(String),
+    Run(String, Vec<String>),
+    SaveList(ProfilesFile, String),
+    Reset,
     Monitor,
 }
 
-/// State of the own-arguments field. The cursor is counted in
-/// characters, not bytes, so editing multi-byte input stays sound; the UI
-/// derives its cursor block from the same count.
-#[derive(Default)]
-pub struct ArgsInput {
+/// A single-line text field. The cursor is counted in characters, so
+/// editing multi-byte input stays sound; the UI derives its cursor
+/// block from the same count.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct Input {
     pub buffer: String,
     pub cursor: usize,
 }
 
-impl ArgsInput {
-    /// Byte offset of the character cursor, for `String` edits.
+impl Input {
     fn byte_cursor(&self) -> usize {
         self.buffer
             .char_indices()
@@ -87,131 +91,129 @@ impl ArgsInput {
             self.buffer.remove(at);
         }
     }
+
+    fn edit(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => self.insert(c),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.len_chars()),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.len_chars(),
+            _ => {}
+        }
+    }
 }
 
-/// Which screen is currently shown.
-#[derive(Clone, Copy, PartialEq)]
+/// What an open text field is for. While one is open it owns every key
+/// press, so global shortcuts cannot fire from typed text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Field {
+    /// Advanced view: options for the selected scheduler, run on Enter.
+    Args,
+    /// Profiles view: the id of a new profile made from what runs now.
+    SaveAs { sched: String, args: Vec<String> },
+    /// Profiles view: `y` deletes the named profile.
+    ConfirmDelete(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenField {
+    pub field: Field,
+    pub input: Input,
+}
+
+/// Which screen is shown.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum View {
-    Schedulers,
+    Profiles,
+    Advanced,
     Logs,
 }
 
 pub struct Message {
     pub text: String,
     pub is_error: bool,
-    /// When the message was posted; drives [`MESSAGE_TTL`] expiry.
     shown_at: Instant,
 }
 
 pub struct App {
-    backend: Box<dyn SchedulerBackend>,
-    pub profiles: Profiles,
-    pub schedulers: Vec<String>,
-    pub selected: usize,
-    pub mode_idx: usize,
-    /// Last successful status read. Stays `None` after a failed read,
-    /// with the failure in `status_error`, so the panel shows "unknown"
-    /// plus the reason instead of a stale snapshot.
-    pub status: Option<Status>,
-    pub status_error: Option<String>,
-    /// The kernel's own view of `sched_ext`, refreshed alongside `status`.
-    /// `None` = kernel without `sched_ext` support, or unreadable.
+    backend: Box<dyn ProfileBackend>,
+    /// Last successful listing. Stays `None` after a failed read, with
+    /// the failure in `listing_error`, so the panel shows "unknown" plus
+    /// the reason instead of a stale snapshot.
+    pub listing: Option<Listing>,
+    pub listing_error: Option<String>,
+    /// The kernel's own view, re-read every tick.
     pub kernel: Option<KernelState>,
-    /// Where `kernel` comes from: sysfs in the binary, a stub in tests.
-    /// Reading the host's real sysfs from a unit test made the outcome
-    /// depend on whether the test machine's kernel has sched_ext.
     read_kernel: Box<dyn Fn() -> Option<KernelState>>,
-    /// Previous tick's dispute bit; makes the tripwire edge-triggered.
     kernel_disputed: bool,
-    /// Own-arguments field; `Some` while the user is typing. While open
-    /// it owns every key press.
-    pub args_input: Option<ArgsInput>,
+    watcher: Option<Watcher>,
+    pub selected: usize,
+    pub sched_selected: usize,
+    pub field: Option<OpenField>,
+    /// The advanced view's warning is shown once per session.
+    pub advanced_warned: bool,
     pub message: Option<Message>,
-    /// Timestamp of the last scheduler-affecting action, for debouncing.
     last_action: Option<Instant>,
     pub view: View,
-    /// `false` = current boot, `true` = previous boot (`journalctl -b -1`).
     pub log_previous_boot: bool,
-    /// Flattened journal lines, oldest first.
     pub log_lines: Vec<LogLine>,
-    /// Scroll offset counted from the bottom; 0 sticks to the newest line.
     pub log_scroll: usize,
-    /// Last known height of the log viewport, written back by the UI so
-    /// `PgUp`/`PgDn` can page by exactly one screen.
     pub log_page: usize,
-    /// Queued by key handlers, executed by the event loop after the next
-    /// draw; see [`PendingAction`].
     pending_action: Option<PendingAction>,
     should_quit: bool,
 }
 
 impl App {
-    pub fn new(backend: Box<dyn SchedulerBackend>, profiles: Profiles) -> Result<Self> {
-        let schedulers = backend.supported_schedulers()?;
-        // No initial status fetch here: `run` draws the first frame with
-        // the scheduler list alone and fetches right after, so the UI
-        // appears immediately instead of waiting on systemctl round-trips.
-        Ok(Self {
+    pub fn new(backend: Box<dyn ProfileBackend>) -> Self {
+        Self {
             backend,
-            profiles,
-            schedulers,
-            selected: 0,
-            mode_idx: 0,
-            status: None,
-            status_error: None,
+            listing: None,
+            listing_error: None,
             kernel: None,
             read_kernel: Box::new(|| kernel::read().unwrap_or(None)),
             kernel_disputed: false,
-            args_input: None,
+            watcher: None,
+            selected: 0,
+            sched_selected: 0,
+            field: None,
+            advanced_warned: false,
             message: None,
             last_action: None,
-            view: View::Schedulers,
+            view: View::Profiles,
             log_previous_boot: false,
             log_lines: Vec::new(),
             log_scroll: 0,
             log_page: 20,
             pending_action: None,
             should_quit: false,
-        })
+        }
     }
 
     pub fn backend_label(&self) -> String {
         self.backend.label()
     }
 
+    pub fn profiles(&self) -> &[Entry] {
+        self.listing.as_ref().map_or(&[], |l| l.profiles.as_slice())
+    }
+
+    pub fn installed(&self) -> &[String] {
+        self.listing
+            .as_ref()
+            .map_or(&[], |l| l.installed.as_slice())
+    }
+
+    pub fn selected_profile(&self) -> Option<&Entry> {
+        self.profiles().get(self.selected)
+    }
+
     pub fn selected_scheduler(&self) -> Option<&str> {
-        self.schedulers.get(self.selected).map(String::as_str)
-    }
-
-    pub fn selected_mode(&self) -> Mode {
-        MODES[self.mode_idx]
-    }
-
-    /// Flags the selected scheduler would be started with in the selected
-    /// mode: what `Enter` writes to `SCX_FLAGS`.
-    pub fn selected_flags(&self) -> Vec<String> {
-        self.selected_scheduler()
-            .map(|sched| self.profiles.flags(sched, self.selected_mode()))
-            .unwrap_or_default()
-    }
-
-    /// The modes the running process' arguments correspond to: every
-    /// row of the table for that scheduler with exactly these flags.
-    /// Empty when none matches (custom flags). More than one when rows
-    /// share a flag set; argv cannot say which the user meant.
-    pub fn running_modes(&self) -> Vec<Mode> {
-        let Some(status) = self.status.as_ref() else {
-            return Vec::new();
-        };
-        let Some(process) = status.process.as_ref().filter(|_| status.active) else {
-            return Vec::new();
-        };
-        self.profiles.modes_for(&process.sched, &process.args)
-    }
-
-    /// First of [`Self::running_modes`], for the selector.
-    pub fn running_mode(&self) -> Option<Mode> {
-        self.running_modes().first().copied()
+        self.installed()
+            .get(self.sched_selected)
+            .map(String::as_str)
     }
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> Result<()> {
@@ -220,19 +222,17 @@ impl App {
         while !self.should_quit {
             terminal.draw(|frame| ui::draw(frame, self))?;
 
-            // First frame is a skeleton: scheduler list only, status panel
-            // in its "unknown" placeholder. The initial fetch happens right
+            // First frame is a skeleton; the initial fetch happens right
             // after it is on screen and the immediate redraw fills it in.
             if !primed {
                 primed = true;
-                self.refresh_status();
+                self.refresh();
                 self.sync_selection_to_running();
+                self.start_watching();
                 last_refresh = Instant::now();
                 continue;
             }
 
-            // Informational messages expire so stale feedback never reads
-            // as fresh; errors stay until replaced (see MESSAGE_TTL).
             if self
                 .message
                 .as_ref()
@@ -241,9 +241,6 @@ impl App {
                 self.message = None;
             }
 
-            // Execute a queued action only after the frame announcing it
-            // ("working…") has been drawn, then redraw immediately so the
-            // result replaces the notice.
             if let Some(action) = self.pending_action.take() {
                 self.run_action(action, &mut terminal)?;
                 last_refresh = Instant::now();
@@ -257,35 +254,34 @@ impl App {
                 self.on_key(key);
             }
 
-            // Sysfs can change with no service involved; rides every tick.
             self.kernel = (self.read_kernel)();
 
-            if self.reconcile_kernel_dispute() {
-                last_refresh = Instant::now();
-            }
-            if last_refresh.elapsed() >= REFRESH_EVERY {
-                self.refresh_status();
+            let files_changed = self.watcher.as_mut().is_some_and(Watcher::changed);
+            if files_changed
+                || self.reconcile_kernel_dispute()
+                || last_refresh.elapsed() >= REFRESH_EVERY
+            {
+                self.refresh();
                 last_refresh = Instant::now();
             }
         }
         Ok(())
     }
 
-    /// Hands the terminal over to `scxtop` and takes it back afterwards —
-    /// the lazygit-spawns-an-editor pattern. Restoring the terminal to
-    /// cooked mode first lets scxtop own the alternate screen and raw mode
-    /// itself; a fresh `ratatui::init()` afterwards re-enters ours, and the
-    /// explicit clear forces a full repaint of a screen scxtop scribbled
-    /// over. Keeping scxtop out-of-process also keeps its heavyweight BPF
-    /// dependency chain out of this binary.
+    fn start_watching(&mut self) {
+        let config = self.listing.as_ref().and_then(|l| l.config.clone());
+        match Watcher::new(&Watcher::files_for(config.as_deref())) {
+            Ok(watcher) => self.watcher = Some(watcher),
+            Err(err) => self.error(&format!("file watching unavailable ({err:#}); polling")),
+        }
+    }
+
+    /// Hands the terminal over to `scxtop` and takes it back afterwards.
     fn run_monitor(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        // Resolved like every other helper: in systemd's default search
-        // path, not scxtui's, since it runs with scxtui's privileges.
-        let command = system_command("scxtop");
-        let Ok(mut command) = command else {
+        let Ok(mut command) = system_command("scxtop") else {
             self.error(
-                "scxtop not found in systemd's default search path — install \
-it (cargo install scxtop, or your distro's scx tools package)",
+                "scxtop not found in systemd's default search path; install it (cargo install \
+scxtop, or your distro's scx tools package)",
             );
             return Ok(());
         };
@@ -293,150 +289,232 @@ it (cargo install scxtop, or your distro's scx tools package)",
         let result = command.status();
         *terminal = ratatui::init();
         terminal.clear()?;
-
         match result {
             Ok(status) if status.success() => self.info("scxtop exited"),
             Ok(status) => self.error(&format!(
-                "scxtop exited with {status} — it needs root/CAP_BPF; \
-try running scxtui as root or granting scxtop capabilities"
+                "scxtop exited with {status}; it needs root/CAP_BPF"
             )),
             Err(err) => self.error(&format!("failed to launch scxtop: {err}")),
         }
         Ok(())
     }
 
-    /// Queues a scheduler-affecting action behind a "working…" notice, so
-    /// the notice renders before the blocking backend call starts.
     fn queue(&mut self, action: PendingAction) {
-        self.info("working…");
+        self.info("working...");
         self.pending_action = Some(action);
     }
 
-    fn run_action(&mut self, action: PendingAction, terminal: &mut DefaultTerminal) -> Result<()> {
-        match action {
-            PendingAction::StartOrSwitch => self.start_or_switch(),
-            PendingAction::StartOrSwitchWithArgs(args) => self.start_or_switch_with_args(&args),
-            PendingAction::Stop => self.act("stop accepted", |b| b.stop()),
-            PendingAction::Restart => self.act("restart accepted", |b| b.restart()),
-            PendingAction::RestoreDefault => self.restore_default(),
-            PendingAction::Monitor => self.run_monitor(terminal)?,
+    /// Runs a privileged scxcli command. When it goes through pkexec
+    /// the terminal is handed over for the duration, because pkexec may
+    /// prompt for a password on it (a text agent when the session has
+    /// no graphical one); with the shipped policy applying a profile
+    /// prompts for nothing and the hand-over is a flicker.
+    fn privileged(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        call: impl FnOnce(&dyn ProfileBackend) -> Result<String>,
+    ) -> Result<Result<String>> {
+        if !self.backend.escalates() {
+            return Ok(call(self.backend.as_ref()));
         }
+        ratatui::restore();
+        let result = call(self.backend.as_ref());
+        *terminal = ratatui::init();
+        terminal.clear()?;
+        Ok(result)
+    }
+
+    fn run_action(&mut self, action: PendingAction, terminal: &mut DefaultTerminal) -> Result<()> {
+        let outcome = match action {
+            PendingAction::Apply(id) => self
+                .privileged(terminal, |b| b.apply(&id))?
+                .map(|report| format!("{report}; see State and Kernel for what attached")),
+            PendingAction::Run(sched, args) => {
+                self.privileged(terminal, |b| b.run(&sched, &args))?
+            }
+            PendingAction::SaveList(profiles, what) => self
+                .privileged(terminal, |b| b.save(&profiles))?
+                .map(|report| format!("{what}: {report}")),
+            PendingAction::Reset => self.privileged(terminal, |b| b.reset())?,
+            PendingAction::Monitor => return self.run_monitor(terminal),
+        };
+        match outcome {
+            Ok(text) => self.info(&text),
+            Err(err) => self.error(&format!("{err:#}")),
+        }
+        self.refresh();
         Ok(())
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        if self.view == View::Schedulers && self.args_input.is_some() {
-            self.on_key_args(key);
+        if self.field.is_some() {
+            self.on_key_field(key);
             return;
         }
         match self.view {
-            View::Schedulers => self.on_key_schedulers(key),
+            View::Profiles => self.on_key_profiles(key),
+            View::Advanced => self.on_key_advanced(key),
             View::Logs => self.on_key_logs(key),
         }
     }
 
-    /// Key handling while the own-arguments field is open. The field owns
-    /// every key press: global shortcuts must not fire while the user is
-    /// typing text that may well contain their letters, which also means
-    /// `Esc` closes the field here instead of quitting.
-    fn on_key_args(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.args_input = None,
-            KeyCode::Enter => self.submit_args(),
-            code => {
-                let Some(input) = self.args_input.as_mut() else {
-                    return;
-                };
-                match code {
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        input.insert(c);
-                    }
-                    KeyCode::Backspace => input.backspace(),
-                    KeyCode::Delete => input.delete(),
-                    KeyCode::Left => input.cursor = input.cursor.saturating_sub(1),
-                    KeyCode::Right => input.cursor = (input.cursor + 1).min(input.len_chars()),
-                    KeyCode::Home => input.cursor = 0,
-                    KeyCode::End => input.cursor = input.len_chars(),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    /// `Enter` in the field: split on whitespace, exactly as the unit's
-    /// unquoted `$SCX_FLAGS` expansion will, and refuse any token the
-    /// file or the shell would reinterpret (quotes, globs). Errors keep
-    /// the field open with the message bar explaining what to fix; only
-    /// a successfully queued action closes it.
-    fn submit_args(&mut self) {
-        let Some(buffer) = self.args_input.as_ref().map(|input| input.buffer.clone()) else {
+    fn on_key_field(&mut self, key: KeyEvent) {
+        let Some(open) = self.field.as_mut() else {
             return;
         };
-        let args: Vec<String> = buffer.split_whitespace().map(str::to_owned).collect();
-        if args.is_empty() {
-            self.error(
-                "no arguments typed — to run with scheduler defaults, press Esc and use the \
-auto profile instead",
-            );
-            return;
-        }
-        if let Some(err) = args
-            .iter()
-            .find_map(|arg| validate_value("flag", arg).err())
-        {
-            self.error(&format!("{err:#}"));
-            return;
-        }
-        if self.action_allowed() {
-            self.args_input = None;
-            self.queue(PendingAction::StartOrSwitchWithArgs(args));
+        match (&open.field, key.code) {
+            (_, KeyCode::Esc) => self.field = None,
+            (Field::ConfirmDelete(id), KeyCode::Char('y' | 'Y')) => {
+                let id = id.clone();
+                self.field = None;
+                self.delete_profile(&id);
+            }
+            (Field::ConfirmDelete(_), _) => self.field = None,
+            (_, KeyCode::Enter) => self.submit_field(),
+            _ => open.input.edit(key),
         }
     }
 
-    fn on_key_schedulers(&mut self, key: KeyEvent) {
+    fn submit_field(&mut self) {
+        let Some(open) = self.field.clone() else {
+            return;
+        };
+        match open.field {
+            Field::Args => {
+                let args: Vec<String> = open
+                    .input
+                    .buffer
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect();
+                if let Some(err) = args.iter().find_map(|arg| validate_arg(arg).err()) {
+                    self.error(&format!("{err:#}"));
+                    return;
+                }
+                let Some(sched) = self.selected_scheduler().map(str::to_owned) else {
+                    return;
+                };
+                if self.action_allowed() {
+                    self.field = None;
+                    self.queue(PendingAction::Run(sched, args));
+                }
+            }
+            Field::SaveAs { sched, args } => {
+                let id = open.input.buffer.trim().to_owned();
+                if let Err(err) = validate_id(&id) {
+                    self.error(&format!("{err:#}"));
+                    return;
+                }
+                if self.profiles().iter().any(|p| p.id == id) {
+                    self.error(&format!("a profile {id:?} already exists"));
+                    return;
+                }
+                let mut profiles = self.current_profiles();
+                profiles.profiles.push(Profile {
+                    id: id.clone(),
+                    label: label_from_id(&id),
+                    // The scheduler and options are shown under every
+                    // profile anyway; a generated description from them
+                    // could run past the contract's 256 characters.
+                    description: SAVED_DESCRIPTION.to_owned(),
+                    action: None,
+                    sched: Some(sched),
+                    args,
+                });
+                if self.action_allowed() {
+                    self.field = None;
+                    self.queue(PendingAction::SaveList(profiles, format!("saved {id}")));
+                }
+            }
+            Field::ConfirmDelete(_) => self.field = None,
+        }
+    }
+
+    fn on_key_profiles(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('l') => self.open_logs(),
+            KeyCode::Char('A') => self.open_advanced(),
+            KeyCode::Char('t') => {
+                if self.action_allowed() {
+                    self.pending_action = Some(PendingAction::Monitor);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = step(self.selected, self.profiles().len(), true);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = step(self.selected, self.profiles().len(), false);
+            }
+            KeyCode::Enter => self.apply_selected(),
+            KeyCode::Char('J') => self.move_selected(true),
+            KeyCode::Char('K') => self.move_selected(false),
+            KeyCode::Char('x') => {
+                if let Some(p) = self.selected_profile() {
+                    if p.id == DEFAULT_ID {
+                        self.error("the default profile cannot be deleted");
+                    } else {
+                        self.field = Some(OpenField {
+                            field: Field::ConfirmDelete(p.id.clone()),
+                            input: Input::default(),
+                        });
+                    }
+                }
+            }
+            KeyCode::Char('S') => self.save_running_as_profile(),
+            KeyCode::Char('D') => {
+                if self.listing.as_ref().is_some_and(|l| l.customized) {
+                    if self.action_allowed() {
+                        self.queue(PendingAction::Reset);
+                    }
+                } else {
+                    self.info("the shipped list is already in use");
+                }
+            }
+            KeyCode::Char('R') => {
+                self.refresh();
+                if self.listing.is_some() {
+                    self.info("refreshed");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key_advanced(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('A') => self.view = View::Profiles,
             KeyCode::Char('l') => self.open_logs(),
             KeyCode::Char('t') => {
                 if self.action_allowed() {
                     self.pending_action = Some(PendingAction::Monitor);
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
-            KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.sched_selected = step(self.sched_selected, self.installed().len(), true);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.sched_selected = step(self.sched_selected, self.installed().len(), false);
+            }
             KeyCode::Char('a') => {
                 if self.selected_scheduler().is_some() {
-                    self.args_input = Some(ArgsInput::default());
+                    self.field = Some(OpenField {
+                        field: Field::Args,
+                        input: Input::default(),
+                    });
                 }
             }
-            KeyCode::Tab | KeyCode::Char('m') => self.cycle_mode(true),
-            KeyCode::BackTab | KeyCode::Char('M') => self.cycle_mode(false),
             KeyCode::Enter => {
-                if self.action_allowed() {
-                    self.queue(PendingAction::StartOrSwitch);
+                if let Some(sched) = self.selected_scheduler().map(str::to_owned)
+                    && self.action_allowed()
+                {
+                    self.queue(PendingAction::Run(sched, Vec::new()));
                 }
             }
-            KeyCode::Char('s') => {
-                if self.action_allowed() {
-                    self.queue(PendingAction::Stop);
-                }
-            }
-            KeyCode::Char('r') => {
-                if self.action_allowed() {
-                    self.queue(PendingAction::Restart);
-                }
-            }
-            KeyCode::Char('d') => {
-                if self.action_allowed() {
-                    self.queue(PendingAction::RestoreDefault);
-                }
-            }
+            KeyCode::Char('S') => self.save_running_as_profile(),
             KeyCode::Char('R') => {
-                // The success notice must not clobber a list-refresh error,
-                // same rule as refresh_status not touching the message bar.
-                let list_ok = self.refresh_schedulers();
-                self.refresh_status();
-                if list_ok {
+                self.refresh();
+                if self.listing.is_some() {
                     self.info("refreshed");
                 }
             }
@@ -446,14 +524,14 @@ auto profile instead",
 
     fn on_key_logs(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q' | 'l') | KeyCode::Esc => {
-                self.view = View::Schedulers;
+            KeyCode::Char('q' | 'l') | KeyCode::Esc => self.view = View::Profiles,
+            KeyCode::Up | KeyCode::Char('k') => self.log_scroll = self.log_scroll.saturating_add(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.log_scroll = self.log_scroll.saturating_sub(1);
             }
-            KeyCode::Up | KeyCode::Char('k') => self.log_scroll_up(1),
-            KeyCode::Down | KeyCode::Char('j') => self.log_scroll_down(1),
-            KeyCode::PageUp => self.log_scroll_up(self.log_page),
-            KeyCode::PageDown => self.log_scroll_down(self.log_page),
-            KeyCode::Char('g') => self.log_scroll = usize::MAX, // clamped by the UI
+            KeyCode::PageUp => self.log_scroll = self.log_scroll.saturating_add(self.log_page),
+            KeyCode::PageDown => self.log_scroll = self.log_scroll.saturating_sub(self.log_page),
+            KeyCode::Char('g') => self.log_scroll = usize::MAX,
             KeyCode::Char('G') => self.log_scroll = 0,
             KeyCode::Char('b') => {
                 self.log_previous_boot = !self.log_previous_boot;
@@ -461,6 +539,17 @@ auto profile instead",
             }
             KeyCode::Char('R') => self.reload_logs(),
             _ => {}
+        }
+    }
+
+    fn open_advanced(&mut self) {
+        self.view = View::Advanced;
+        if !self.advanced_warned {
+            self.advanced_warned = true;
+            self.info(
+                "advanced: a scheduler unsuited to the workload can perform worse than the \
+kernel's default; what you start here shows as Custom everywhere",
+            );
         }
     }
 
@@ -474,7 +563,7 @@ auto profile instead",
             Ok(fetch) => {
                 let boot = if self.log_previous_boot { "-1" } else { "0" };
                 let tail_note = if fetch.truncated {
-                    " — older entries omitted, see journalctl for the full log"
+                    "; older entries omitted, see journalctl for the full log"
                 } else {
                     ""
                 };
@@ -493,69 +582,25 @@ auto profile instead",
         }
     }
 
-    /// The upper bound is clamped against the viewport in the UI, which
-    /// knows the current height; only the zero bound is handled here.
-    fn log_scroll_up(&mut self, lines: usize) {
-        self.log_scroll = self.log_scroll.saturating_add(lines);
-    }
-
-    fn log_scroll_down(&mut self, lines: usize) {
-        self.log_scroll = self.log_scroll.saturating_sub(lines);
-    }
-
-    fn select_next(&mut self) {
-        if !self.schedulers.is_empty() {
-            self.selected = (self.selected + 1) % self.schedulers.len();
-        }
-    }
-
-    fn select_prev(&mut self) {
-        if !self.schedulers.is_empty() {
-            self.selected = (self.selected + self.schedulers.len() - 1) % self.schedulers.len();
-        }
-    }
-
-    fn cycle_mode(&mut self, forward: bool) {
-        let len = MODES.len();
-        self.mode_idx = if forward {
-            (self.mode_idx + 1) % len
-        } else {
-            (self.mode_idx + len - 1) % len
-        };
-    }
-
-    /// Aligns the selection and the mode selector with what is actually
-    /// running, so the first `Enter` after startup acts on what the user
-    /// sees instead of on `schedulers[0]` + `auto`. Only called on
-    /// startup — never on the periodic refresh, which must not fight the
-    /// user's own selection.
-    ///
-    /// A running scheduler outside the list (hand-launched, or an override
-    /// naming a binary PATH does not have) leaves both selectors alone,
-    /// and flags matching no profile row leave the mode alone: no
-    /// selector position represents "custom".
+    /// Aligns the profile selection with what runs, so the first Enter
+    /// acts on what the user sees. Only on startup, never on a refresh,
+    /// which must not fight the user's own selection.
     fn sync_selection_to_running(&mut self) {
-        let Some(idx) = self
-            .status
-            .as_ref()
-            .and_then(Status::running)
-            .and_then(|current| self.schedulers.iter().position(|s| s == current))
-        else {
+        let Some(listing) = &self.listing else {
             return;
         };
-        self.selected = idx;
-        if let Some(idx) = self
-            .running_mode()
-            .and_then(|mode| MODES.iter().position(|m| *m == mode))
+        if let Some(id) = &listing.current.profile
+            && let Some(idx) = listing.profiles.iter().position(|p| p.id == *id)
         {
-            self.mode_idx = idx;
+            self.selected = idx;
+        }
+        if let Some(running) = &listing.current.running
+            && let Some(idx) = listing.installed.iter().position(|s| *s == running.sched)
+        {
+            self.sched_selected = idx;
         }
     }
 
-    /// Debounce gate for scheduler-affecting actions (Enter/s/r/d/t).
-    /// Returns `true` and arms the timer when enough time has passed since
-    /// the last action; swallows the event otherwise. See
-    /// [`ACTION_DEBOUNCE`].
     fn action_allowed(&mut self) -> bool {
         let now = Instant::now();
         if self
@@ -568,130 +613,95 @@ auto profile instead",
         true
     }
 
-    /// `Enter`: start the selected scheduler in the selected mode, or
-    /// switch to it when the unit is active (config rewrite plus
-    /// restart). Pressing it on the running scheduler is a restart that
-    /// also pins the configuration, which is how a mode change applies.
-    fn start_or_switch(&mut self) {
-        let Some(sched) = self.selected_scheduler().map(str::to_owned) else {
+    fn apply_selected(&mut self) {
+        let Some(profile) = self.selected_profile() else {
             return;
         };
-        let mode = self.selected_mode();
-        let flags = self.profiles.flags(&sched, mode);
-        self.launch(&sched, &format!("{} profile", mode.label()), &flags);
-    }
-
-    /// The own-arguments sibling of [`Self::start_or_switch`]: the typed
-    /// flags go to `SCX_FLAGS` instead of a profile's. They persist in
-    /// the file like any other write; the panel will show them as custom
-    /// flags since they match no profile row.
-    fn start_or_switch_with_args(&mut self, args: &[String]) {
-        let Some(sched) = self.selected_scheduler().map(str::to_owned) else {
-            return;
-        };
-        self.launch(&sched, "custom flags", args);
-    }
-
-    /// `d`: start or switch to the profile file's `default_sched` in its
-    /// `default_mode`.
-    fn restore_default(&mut self) {
-        let Some((sched, mode)) = self
-            .profiles
-            .default_launch()
-            .map(|(sched, mode)| (sched.to_owned(), mode))
-        else {
-            self.error("no default_sched in the profiles file — nothing to restore");
-            return;
-        };
-        let flags = self.profiles.flags(&sched, mode);
-        self.launch(&sched, &format!("{} profile", mode.label()), &flags);
-    }
-
-    /// Writes `sched`/`flags` and starts or restarts the unit. The notice
-    /// reports what systemd *accepted*; what actually attached is read
-    /// back right after and shown in the State and Kernel lines, since
-    /// under `Type=simple` a successful start says nothing about the
-    /// scheduler attaching.
-    fn launch(&mut self, sched: &str, how: &str, flags: &[String]) {
-        // Re-read the unit state right before deciding start vs switch:
-        // the cached status can be up to REFRESH_EVERY old, and someone
-        // may have started the unit by hand in that window.
-        self.refresh_status();
-        // Unknown is not inactive. Treating a failed read as "nothing
-        // running" would pick `start`, which leaves an already running
-        // unit untouched: the file would name the new scheduler while the
-        // old one keeps running.
-        let Some(status) = self.status.as_ref() else {
-            let why = self.status_error.clone().unwrap_or_default();
+        if !profile.available {
             self.error(&format!(
-                "not touching {sched}: the unit's state could not be read ({why})"
+                "{} is not installed; the profile cannot be applied here",
+                profile.sched.as_deref().unwrap_or("its scheduler")
             ));
             return;
-        };
-        let active = status.active;
-        let overrides: Vec<&str> = [
-            status
-                .override_sched
-                .as_ref()
-                .map(|_| "SCX_SCHEDULER_OVERRIDE"),
-            status.override_flags.as_ref().map(|_| "SCX_FLAGS_OVERRIDE"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
-        let result = if active {
-            self.backend.switch(sched, flags)
-        } else {
-            self.backend.start(sched, flags)
-        };
-
-        match result {
-            Ok(()) => {
-                let verb = if active { "restart" } else { "start" };
-                let mut text = format!(
-                    "{verb} accepted: {sched} with {how} — see State and Kernel for what attached"
-                );
-                // The file now names `sched` and the profile's flags, but
-                // an override still wins in the unit's ExecStart: say so
-                // instead of letting the next poll look like a failed
-                // switch or a wrong profile.
-                if !overrides.is_empty() {
-                    text.push_str(&format!(
-                        "; {} in effect and takes precedence (systemctl unset-environment, \
-or the file that sets it)",
-                        overrides.join(" and ")
-                    ));
-                }
-                self.info(&text);
-            }
-            Err(err) => {
-                let verb = if active { "switch to" } else { "start" };
-                self.error(&format!("{verb} {sched} failed: {err:#}"));
-            }
         }
-        self.refresh_status();
+        let id = profile.id.clone();
+        if self.action_allowed() {
+            self.queue(PendingAction::Apply(id));
+        }
     }
 
-    fn act(&mut self, ok_text: &str, op: impl FnOnce(&dyn SchedulerBackend) -> Result<()>) {
-        match op(self.backend.as_ref()) {
-            Ok(()) => self.info(ok_text),
-            Err(err) => self.error(&format!("{err:#}")),
+    /// The listing's profiles as a file, for an edit.
+    fn current_profiles(&self) -> ProfilesFile {
+        ProfilesFile {
+            version: FORMAT_VERSION,
+            profiles: self.profiles().iter().map(Entry::to_profile).collect(),
         }
-        self.refresh_status();
     }
 
-    /// A failed read clears the snapshot and records why: the panel must
-    /// not keep showing a state the backend can no longer vouch for.
-    fn refresh_status(&mut self) {
-        match self.backend.status() {
-            Ok(status) => {
-                self.status = Some(status);
-                self.status_error = None;
+    fn move_selected(&mut self, down: bool) {
+        let len = self.profiles().len();
+        let from = self.selected;
+        let to = if down { from + 1 } else { from.wrapping_sub(1) };
+        // `default` stays first: neither it nor the one below it moves up.
+        if from == 0 || to == 0 || to >= len {
+            return;
+        }
+        let mut profiles = self.current_profiles();
+        profiles.profiles.swap(from, to);
+        let id = profiles.profiles[to].id.clone();
+        if self.action_allowed() {
+            self.selected = to;
+            self.queue(PendingAction::SaveList(profiles, format!("moved {id}")));
+        }
+    }
+
+    fn delete_profile(&mut self, id: &str) {
+        let mut profiles = self.current_profiles();
+        profiles.profiles.retain(|p| p.id != id);
+        if self.action_allowed() {
+            self.selected = self.selected.min(profiles.profiles.len().saturating_sub(1));
+            self.queue(PendingAction::SaveList(profiles, format!("deleted {id}")));
+        }
+    }
+
+    /// `S`: the running scheduler and its options become a named
+    /// profile, after a prompt for the id.
+    fn save_running_as_profile(&mut self) {
+        let Some(running) = self
+            .listing
+            .as_ref()
+            .and_then(|l| l.current.running.clone())
+        else {
+            self.error("nothing is running; start a scheduler first");
+            return;
+        };
+        if let Some(err) = running.args.iter().find_map(|a| validate_arg(a).err()) {
+            self.error(&format!("the running options cannot be a profile: {err:#}"));
+            return;
+        }
+        self.field = Some(OpenField {
+            field: Field::SaveAs {
+                sched: running.sched,
+                args: running.args,
+            },
+            input: Input::default(),
+        });
+    }
+
+    /// A failed read clears the snapshot and records why.
+    fn refresh(&mut self) {
+        match self.backend.list() {
+            Ok(listing) => {
+                self.selected = self.selected.min(listing.profiles.len().saturating_sub(1));
+                self.sched_selected = self
+                    .sched_selected
+                    .min(listing.installed.len().saturating_sub(1));
+                self.listing = Some(listing);
+                self.listing_error = None;
             }
             Err(err) => {
-                self.status = None;
-                self.status_error = Some(format!("{err:#}"));
+                self.listing = None;
+                self.listing_error = Some(format!("{err:#}"));
             }
         }
         self.kernel = (self.read_kernel)();
@@ -700,19 +710,16 @@ or the file that sets it)",
     /// The panel's warning; the event loop reuses it as a tripwire.
     pub fn kernel_warning(&self) -> Option<String> {
         let kernel = self.kernel.as_ref()?;
-        let status = self.status.as_ref()?;
-        match (status.active, status.running(), kernel.enabled()) {
-            // Unit inactive, kernel disagrees: started behind its back.
+        let current = &self.listing.as_ref()?.current;
+        let running = current.running.as_ref().map(|r| r.sched.as_str());
+        match (current.unit.active, running, kernel.enabled()) {
             (false, _, true) => {
                 Some("a scheduler is attached outside of scx.service's control".to_owned())
             }
-            // Unit active, kernel disagrees: still loading, crashed, or
-            // ejected and not yet restarted (or Restart= gave up).
             (true, running, false) => Some(format!(
                 "scx.service is active ({}), but the kernel shows no attached scheduler",
                 running.unwrap_or("process unknown")
             )),
-            // Both agree something runs — but is it the same something?
             (true, Some(sched), true) if !kernel.matches(sched) => {
                 let ops = kernel.ops.as_deref().unwrap_or("?");
                 Some(format!(
@@ -723,38 +730,18 @@ or the file that sets it)",
         }
     }
 
-    /// Edge-triggered: re-asks once per new dispute; returns whether it refreshed.
+    /// Edge-triggered: re-asks once per new dispute.
     fn reconcile_kernel_dispute(&mut self) -> bool {
         let disputed = self.kernel_warning().is_some();
         let fire = disputed && !self.kernel_disputed;
-        if fire {
-            self.refresh_status();
-        }
-        // Post-refresh truth: unresolved disputes stand without re-triggering.
-        self.kernel_disputed = self.kernel_warning().is_some();
+        self.kernel_disputed = disputed;
         fire
     }
 
-    /// Re-enumerates the scheduler list. The list is otherwise fetched
-    /// once at startup, so without this a scheduler package installed
-    /// later would stay invisible until scxtui itself restarts. The
-    /// selection survives by name where possible; on a failed query the
-    /// old list stays — a stale list beats an empty one.
-    fn refresh_schedulers(&mut self) -> bool {
-        match self.backend.supported_schedulers() {
-            Ok(schedulers) => {
-                let previous = self.selected_scheduler().map(str::to_owned);
-                self.selected = previous
-                    .and_then(|name| schedulers.iter().position(|s| *s == name))
-                    .unwrap_or(0);
-                self.schedulers = schedulers;
-                true
-            }
-            Err(err) => {
-                self.error(&format!("scheduler list refresh failed: {err:#}"));
-                false
-            }
-        }
+    /// An error-styled message that stays until replaced, for a
+    /// condition found before the loop starts.
+    pub fn warn(&mut self, text: &str) {
+        self.error(text);
     }
 
     fn info(&mut self, text: &str) {
@@ -774,461 +761,405 @@ or the file that sets it)",
     }
 }
 
+fn step(idx: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        0
+    } else if forward {
+        (idx + 1) % len
+    } else {
+        (idx + len - 1) % len
+    }
+}
+
+/// The description a profile saved from what runs gets; short and fixed,
+/// since the backing is shown under it and the user can edit it later.
+const SAVED_DESCRIPTION: &str = "Saved from the running scheduler.";
+
+/// `low-latency2` -> `Low latency2`.
+fn label_from_id(id: &str) -> String {
+    let mut label = id.replace('-', " ");
+    if let Some(first) = label.get(..1) {
+        let upper = first.to_ascii_uppercase();
+        label.replace_range(..1, &upper);
+    }
+    label
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use crate::model::{Action, Current, Running, Unit};
     use anyhow::anyhow;
 
     use super::*;
-    use crate::backend::Process;
 
-    /// What the stub was asked to do, in order.
     #[derive(Debug, PartialEq)]
     enum Call {
-        Start(String, Vec<String>),
-        Switch(String, Vec<String>),
-        Stop,
-        Restart,
+        Apply(String),
+        Run(String, Vec<String>),
+        Save(Vec<String>),
+        Reset,
     }
 
-    /// Minimal in-memory backend: enough for exercising selection and
-    /// refresh logic without systemd.
-    struct StubBackend {
-        schedulers: Rc<RefCell<Vec<String>>>,
-        /// The authoritative answer `status` returns.
-        truth: Rc<RefCell<Status>>,
-        /// When set, `status` errors after counting the attempt.
-        status_broken: Rc<RefCell<bool>>,
-        /// How many times `status` reached the backend.
-        status_queries: Rc<RefCell<usize>>,
+    struct Stub {
+        listing: Rc<RefCell<Listing>>,
+        broken: Rc<RefCell<bool>>,
         calls: Rc<RefCell<Vec<Call>>>,
     }
 
-    impl StubBackend {
-        fn new() -> Self {
-            Self {
-                schedulers: Rc::new(RefCell::new(vec![
-                    "scx_bpfland".into(),
-                    "scx_lavd".into(),
-                    "scx_cake".into(),
-                ])),
-                truth: Rc::new(RefCell::new(Status::default())),
-                status_broken: Rc::new(RefCell::new(false)),
-                status_queries: Rc::new(RefCell::new(0)),
-                calls: Rc::new(RefCell::new(Vec::new())),
-            }
+    fn entry(id: &str, sched: Option<&str>, args: &[&str], available: bool) -> Entry {
+        Entry {
+            id: id.into(),
+            label: id.into(),
+            description: String::new(),
+            action: sched.is_none().then_some(Action::Stop),
+            sched: sched.map(str::to_owned),
+            path: None,
+            args: args.iter().map(|s| (*s).to_owned()).collect(),
+            available,
         }
     }
 
-    impl SchedulerBackend for StubBackend {
+    fn listing() -> Listing {
+        Listing {
+            version: crate::model::OUTPUT_VERSION,
+            source: "/usr/share/scx/profiles.json".into(),
+            customized: false,
+            profiles: vec![
+                entry("default", None, &[], true),
+                entry("gaming", Some("scx_lavd"), &["--performance"], true),
+                entry("server", Some("scx_rusty"), &[], false),
+            ],
+            installed: vec!["scx_bpfland".into(), "scx_lavd".into()],
+            config: Some("/etc/default/scx".into()),
+            current: Current {
+                version: crate::model::OUTPUT_VERSION,
+                profile: Some("gaming".into()),
+                applied: Some("gaming".into()),
+                custom: false,
+                unit: Unit {
+                    active: true,
+                    enabled: true,
+                },
+                running: Some(Running {
+                    sched: "scx_lavd".into(),
+                    args: vec!["--performance".into()],
+                }),
+                next: None,
+                kernel: None,
+                failure: None,
+                config_error: None,
+            },
+        }
+    }
+
+    impl ProfileBackend for Stub {
         fn label(&self) -> String {
             "stub".into()
         }
-        fn status(&self) -> Result<Status> {
-            *self.status_queries.borrow_mut() += 1;
-            if *self.status_broken.borrow() {
-                return Err(anyhow!("status broken"));
+        fn list(&self) -> Result<Listing> {
+            if *self.broken.borrow() {
+                return Err(anyhow!("list broken"));
             }
-            Ok(self.truth.borrow().clone())
+            Ok(self.listing.borrow().clone())
         }
-        fn supported_schedulers(&self) -> Result<Vec<String>> {
-            let scheds = self.schedulers.borrow().clone();
-            if scheds.is_empty() {
-                return Err(anyhow!("no schedulers"));
-            }
-            Ok(scheds)
+        fn apply(&self, id: &str) -> Result<String> {
+            self.calls.borrow_mut().push(Call::Apply(id.into()));
+            Ok(format!("applied {id}"))
         }
-        fn start(&self, sched: &str, flags: &[String]) -> Result<()> {
+        fn run(&self, sched: &str, args: &[String]) -> Result<String> {
             self.calls
                 .borrow_mut()
-                .push(Call::Start(sched.into(), flags.to_vec()));
-            Ok(())
+                .push(Call::Run(sched.into(), args.to_vec()));
+            Ok("running".into())
         }
-        fn switch(&self, sched: &str, flags: &[String]) -> Result<()> {
-            self.calls
-                .borrow_mut()
-                .push(Call::Switch(sched.into(), flags.to_vec()));
-            Ok(())
+        fn save(&self, profiles: &ProfilesFile) -> Result<String> {
+            self.calls.borrow_mut().push(Call::Save(
+                profiles.profiles.iter().map(|p| p.id.clone()).collect(),
+            ));
+            Ok("saved".into())
         }
-        fn stop(&self) -> Result<()> {
-            self.calls.borrow_mut().push(Call::Stop);
-            Ok(())
+        fn reset(&self) -> Result<String> {
+            self.calls.borrow_mut().push(Call::Reset);
+            Ok("reset".into())
         }
-        fn restart(&self) -> Result<()> {
-            self.calls.borrow_mut().push(Call::Restart);
-            Ok(())
+        fn escalates(&self) -> bool {
+            false
         }
     }
 
-    /// An app on the stub, with the kernel probe stubbed out too: no
-    /// test here may depend on whether the machine running it has
-    /// sched_ext.
-    fn app_with_backend(backend: StubBackend) -> App {
-        let mut app = App::new(Box::new(backend), Profiles::default()).unwrap();
+    struct Harness {
+        app: App,
+        calls: Rc<RefCell<Vec<Call>>>,
+        listing: Rc<RefCell<Listing>>,
+        broken: Rc<RefCell<bool>>,
+    }
+
+    fn app() -> Harness {
+        let listing = Rc::new(RefCell::new(listing()));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let broken = Rc::new(RefCell::new(false));
+        let stub = Stub {
+            listing: listing.clone(),
+            broken: broken.clone(),
+            calls: calls.clone(),
+        };
+        let mut app = App::new(Box::new(stub));
         app.read_kernel = Box::new(|| None);
-        app
-    }
-
-    fn strs(flags: &[&str]) -> Vec<String> {
-        flags.iter().map(|s| (*s).to_owned()).collect()
-    }
-
-    /// An active unit whose process is `sched` with `args`, and whose
-    /// file says `configured` (which may differ: edited under the unit).
-    fn running(sched: &str, args: &[&str], configured: &str) -> Status {
-        Status {
-            active: true,
-            process: Some(Process {
-                sched: sched.into(),
-                args: strs(args),
-            }),
-            next_sched: Some(configured.into()),
-            configured: Some(configured.into()),
-            ..Status::default()
+        app.refresh();
+        app.sync_selection_to_running();
+        Harness {
+            app,
+            calls,
+            listing,
+            broken,
         }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    #[test]
-    fn sync_aligns_selection_and_mode_with_the_process_not_the_file() {
-        // The file was edited to scx_cake under a running scx_lavd: the
-        // selection must follow the process. Its arguments match the
-        // built-in gaming row, so the mode selector follows too.
-        let mut app = app_with_backend(StubBackend::new());
-        app.status = Some(running(
-            "scx_lavd",
-            &["--performance", "--pinned-slice-us", "500"],
-            "scx_cake",
-        ));
-        app.sync_selection_to_running();
-        assert_eq!(app.selected_scheduler(), Some("scx_lavd"));
-        assert_eq!(app.selected_mode(), Mode::Gaming);
-        assert_eq!(app.running_mode(), Some(Mode::Gaming));
-    }
-
-    #[test]
-    fn sync_with_custom_flags_or_unknown_scheduler_leaves_selectors_alone() {
-        let mut app = app_with_backend(StubBackend::new());
-        app.selected = 2;
-        app.mode_idx = 3;
-
-        app.status = Some(running("scx_homebrew", &[], "scx_homebrew"));
-        app.sync_selection_to_running();
-        assert_eq!(app.selected_scheduler(), Some("scx_cake"));
-        assert_eq!(app.selected_mode(), Mode::LowLatency);
-
-        // Known scheduler, flags matching no row: selection follows,
-        // mode stays (no selector position means "custom").
-        app.status = Some(running("scx_bpfland", &["-k"], "scx_bpfland"));
-        app.sync_selection_to_running();
-        assert_eq!(app.selected_scheduler(), Some("scx_bpfland"));
-        assert_eq!(app.selected_mode(), Mode::LowLatency);
-        assert_eq!(app.running_mode(), None);
-
-        // Inactive unit: nothing to follow.
-        app.selected = 2;
-        app.status = Some(Status::default());
-        app.sync_selection_to_running();
-        assert_eq!(app.selected_scheduler(), Some("scx_cake"));
-    }
-
-    #[test]
-    fn enter_starts_when_inactive_and_switches_when_active_with_mode_flags() {
-        let backend = StubBackend::new();
-        let truth = Rc::clone(&backend.truth);
-        let calls = Rc::clone(&backend.calls);
-        let mut app = app_with_backend(backend);
-        app.selected = 0; // scx_bpfland
-        app.mode_idx = MODES.iter().position(|m| *m == Mode::Gaming).unwrap();
-
-        app.start_or_switch();
-        assert_eq!(
-            *calls.borrow(),
-            [Call::Start("scx_bpfland".into(), strs(&["-m", "all"]))]
-        );
-        let message = app.message.as_ref().unwrap();
-        assert!(!message.is_error);
-        assert!(message.text.starts_with("start accepted"));
-
-        // The decision is made against freshly polled truth, not the
-        // cached panel state; the mode comes from the selector.
-        *truth.borrow_mut() = running("scx_cake", &[], "scx_cake");
-        app.selected = 1; // scx_lavd
-        app.mode_idx = MODES.iter().position(|m| *m == Mode::PowerSave).unwrap();
-        app.start_or_switch();
-        assert_eq!(
-            calls.borrow().last(),
-            Some(&Call::Switch(
-                "scx_lavd".into(),
-                strs(&["--powersave", "--pinned-slice-us", "500"])
-            ))
-        );
-    }
-
-    #[test]
-    fn switch_under_an_override_warns_in_the_notice() {
-        let backend = StubBackend::new();
-        let truth = Rc::clone(&backend.truth);
-        let mut app = app_with_backend(backend);
-        *truth.borrow_mut() = Status {
-            override_sched: Some("scx_rustland".into()),
-            ..running("scx_rustland", &[], "scx_lavd")
-        };
-
-        app.start_or_switch();
-        let message = app.message.as_ref().unwrap();
-        assert!(!message.is_error);
-        assert!(message.text.contains("SCX_SCHEDULER_OVERRIDE"));
-    }
-
-    #[test]
-    fn unknown_unit_state_aborts_the_action() {
-        // scx_lavd runs, `systemctl show` fails for a moment, the user
-        // presses Enter on another scheduler: nothing may reach systemd,
-        // since `start` would leave the running unit on the old scheduler
-        // with the file already naming the new one.
-        let backend = StubBackend::new();
-        let broken = Rc::clone(&backend.status_broken);
-        let calls = Rc::clone(&backend.calls);
-        let mut app = app_with_backend(backend);
-        *broken.borrow_mut() = true;
-        app.selected = 1;
-
-        app.start_or_switch();
-        assert!(calls.borrow().is_empty(), "no start or switch issued");
-        let message = app.message.as_ref().unwrap();
-        assert!(message.is_error);
-        assert!(message.text.contains("could not be read"));
-
-        app.restore_default();
-        assert!(calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn flags_override_is_named_in_the_notice_too() {
-        let backend = StubBackend::new();
-        let truth = Rc::clone(&backend.truth);
-        let mut app = app_with_backend(backend);
-        *truth.borrow_mut() = Status {
-            override_flags: Some(strs(&["-s", "1"])),
-            ..running("scx_lavd", &[], "scx_lavd")
-        };
-
-        app.start_or_switch();
-        let message = app.message.as_ref().unwrap();
-        assert!(!message.is_error);
-        assert!(message.text.contains("SCX_FLAGS_OVERRIDE"));
-        assert!(!message.text.contains("SCX_SCHEDULER_OVERRIDE"));
-    }
-
-    fn type_str(app: &mut App, text: &str) {
-        for c in text.chars() {
-            app.on_key(key(KeyCode::Char(c)));
+    fn drain(app: &mut App) {
+        // The event loop would run it after a draw; tests run the
+        // backend call directly.
+        if let Some(action) = app.pending_action.take() {
+            let outcome = match action {
+                PendingAction::Apply(id) => app.backend.apply(&id),
+                PendingAction::Run(s, a) => app.backend.run(&s, &a),
+                PendingAction::SaveList(p, _) => app.backend.save(&p),
+                PendingAction::Reset => app.backend.reset(),
+                PendingAction::Monitor => Ok(String::new()),
+            };
+            assert!(outcome.is_ok());
+            app.refresh();
         }
     }
 
     #[test]
-    fn args_field_owns_keys_and_queues_validated_flags() {
-        let backend = StubBackend::new();
-        let calls = Rc::clone(&backend.calls);
-        let mut app = app_with_backend(backend);
-        app.on_key(key(KeyCode::Char('a')));
-        assert!(app.args_input.is_some());
+    fn startup_selects_the_running_profile_and_scheduler() {
+        let Harness { app, .. } = app();
+        assert_eq!(app.selected_profile().unwrap().id, "gaming");
+        assert_eq!(app.selected_scheduler(), Some("scx_lavd"));
+    }
 
-        // 'q' quits globally, but inside the field it is just a letter;
-        // Esc closes the field instead of quitting the app.
+    #[test]
+    fn enter_applies_the_selected_profile_but_not_an_unavailable_one() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(*calls.borrow(), vec![Call::Apply("gaming".into())]);
+
+        app.last_action = None;
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected_profile().unwrap().id, "server");
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.pending_action.is_none());
+        assert!(app.message.as_ref().unwrap().is_error);
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn apply_is_debounced() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        app.on_key(key(KeyCode::Enter));
+        assert!(
+            app.pending_action.is_none(),
+            "second press within the window is swallowed"
+        );
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn advanced_view_runs_the_selected_scheduler_with_typed_options() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Char('A')));
+        assert_eq!(app.view, View::Advanced);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.selected_scheduler(), Some("scx_bpfland"));
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "-m performance".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(
+            *calls.borrow(),
+            vec![Call::Run(
+                "scx_bpfland".into(),
+                vec!["-m".into(), "performance".into()]
+            )]
+        );
+        assert!(app.field.is_none());
+    }
+
+    #[test]
+    fn typed_options_are_validated_before_anything_runs() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Char('A')));
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "$(id)".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.field.is_some(), "the field stays open to fix");
+        assert!(app.message.as_ref().unwrap().is_error);
+        assert!(calls.borrow().is_empty());
+        // Global shortcuts do not fire from inside the field.
         app.on_key(key(KeyCode::Char('q')));
         assert!(!app.should_quit);
         app.on_key(key(KeyCode::Esc));
-        assert!(app.args_input.is_none() && !app.should_quit);
-
-        // A glob is refused and the field stays open to be fixed.
-        app.on_key(key(KeyCode::Char('a')));
-        type_str(&mut app, "--path=*");
-        app.on_key(key(KeyCode::Enter));
-        assert!(app.args_input.is_some());
-        assert!(app.message.as_ref().unwrap().is_error);
-        assert_eq!(app.pending_action, None);
-
-        // Valid input: whitespace-split, queued, field closed, and the
-        // queued action reaches the backend as custom flags.
-        app.args_input = Some(ArgsInput::default());
-        type_str(&mut app, "  -s 20000   --verbose ");
-        app.last_action = None;
-        app.on_key(key(KeyCode::Enter));
-        assert!(app.args_input.is_none());
-        let Some(PendingAction::StartOrSwitchWithArgs(args)) = app.pending_action.take() else {
-            panic!("expected a queued with-args action");
-        };
-        assert_eq!(args, strs(&["-s", "20000", "--verbose"]));
-        app.start_or_switch_with_args(&args);
-        assert_eq!(
-            calls.borrow().last(),
-            Some(&Call::Start(
-                "scx_bpfland".into(),
-                strs(&["-s", "20000", "--verbose"])
-            ))
-        );
-        assert!(app.message.as_ref().unwrap().text.contains("custom flags"));
+        assert!(app.field.is_none());
     }
 
     #[test]
-    fn restore_default_needs_a_configured_default() {
-        let backend = StubBackend::new();
-        let calls = Rc::clone(&backend.calls);
-        let mut app = app_with_backend(backend);
-
-        app.restore_default();
-        assert!(app.message.as_ref().unwrap().is_error);
-        assert!(calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn status_read_failure_is_surfaced_not_swallowed() {
-        let backend = StubBackend::new();
-        let truth = Rc::clone(&backend.truth);
-        let broken = Rc::clone(&backend.status_broken);
-        let mut app = app_with_backend(backend);
-
-        *truth.borrow_mut() = running("scx_lavd", &[], "scx_lavd");
-        app.refresh_status();
-        assert!(app.status.is_some());
-        assert_eq!(app.status_error, None);
-
-        *broken.borrow_mut() = true;
-        app.refresh_status();
-        assert_eq!(app.status, None, "a stale snapshot must not survive");
+    fn save_as_profile_appends_a_validated_id() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Char('S')));
+        for c in "Mine".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
         assert!(
-            app.status_error
-                .as_deref()
-                .unwrap()
-                .contains("status broken")
+            app.message.as_ref().unwrap().is_error,
+            "uppercase id refused"
         );
+        app.field.as_mut().unwrap().input = Input::default();
+        for c in "gaming".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(
+            app.message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("already exists")
+        );
+        app.field.as_mut().unwrap().input = Input::default();
+        for c in "my-lavd".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(
+            *calls.borrow(),
+            vec![Call::Save(vec![
+                "default".into(),
+                "gaming".into(),
+                "server".into(),
+                "my-lavd".into()
+            ])]
+        );
+        assert_eq!(label_from_id("low-latency2"), "Low latency2");
     }
 
     #[test]
-    fn actions_are_debounced() {
-        let mut app = app_with_backend(StubBackend::new());
-        app.on_key(key(KeyCode::Char('s')));
-        assert_eq!(app.pending_action, Some(PendingAction::Stop));
-        app.pending_action = None;
-        // A second press inside the debounce window is swallowed.
-        app.on_key(key(KeyCode::Char('r')));
-        assert_eq!(app.pending_action, None);
-    }
+    fn delete_asks_first_and_never_touches_default() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(matches!(
+            app.field.as_ref().unwrap().field,
+            Field::ConfirmDelete(ref id) if id == "gaming"
+        ));
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(app.field.is_none());
+        assert!(calls.borrow().is_empty());
 
-    #[test]
-    fn refresh_keeps_the_selection_by_name() {
-        let backend = StubBackend::new();
-        let schedulers = Rc::clone(&backend.schedulers);
-        let mut app = app_with_backend(backend);
-        app.selected = 2; // scx_cake
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Char('y')));
+        drain(&mut app);
+        assert_eq!(
+            *calls.borrow(),
+            vec![Call::Save(vec!["default".into(), "server".into()])]
+        );
 
-        *schedulers.borrow_mut() = vec!["scx_cake".into(), "scx_flash".into()];
-        app.on_key(key(KeyCode::Char('R')));
-        assert_eq!(app.selected_scheduler(), Some("scx_cake"));
-        assert!(!app.message.as_ref().unwrap().is_error);
-
-        // A failed query keeps the old list and reports the error.
-        schedulers.borrow_mut().clear();
-        app.on_key(key(KeyCode::Char('R')));
-        assert_eq!(app.schedulers.len(), 2);
+        app.selected = 0;
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.field.is_none());
         assert!(app.message.as_ref().unwrap().is_error);
     }
 
-    fn disabled_kernel() -> KernelState {
-        KernelState {
+    #[test]
+    fn reorder_keeps_default_first() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Char('K')));
+        assert!(calls.borrow().is_empty(), "nothing moves above default");
+        app.on_key(key(KeyCode::Char('J')));
+        drain(&mut app);
+        assert_eq!(
+            *calls.borrow(),
+            vec![Call::Save(vec![
+                "default".into(),
+                "server".into(),
+                "gaming".into()
+            ])]
+        );
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn reset_only_when_a_custom_list_is_in_use() {
+        let Harness {
+            mut app,
+            calls,
+            listing,
+            ..
+        } = app();
+        app.on_key(key(KeyCode::Char('D')));
+        assert!(app.pending_action.is_none());
+        listing.borrow_mut().customized = true;
+        app.refresh();
+        app.on_key(key(KeyCode::Char('D')));
+        drain(&mut app);
+        assert_eq!(*calls.borrow(), vec![Call::Reset]);
+    }
+
+    #[test]
+    fn a_failed_listing_clears_the_snapshot_and_keeps_selection_sane() {
+        let Harness {
+            mut app,
+            listing,
+            broken,
+            ..
+        } = app();
+        *broken.borrow_mut() = true;
+        app.refresh();
+        assert!(app.listing.is_none());
+        assert!(app.listing_error.is_some());
+        assert!(app.selected_profile().is_none());
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.pending_action.is_none());
+
+        *broken.borrow_mut() = false;
+        listing.borrow_mut().profiles.truncate(1);
+        app.selected = 2;
+        app.refresh();
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn kernel_warnings_follow_the_unit_and_the_kernel() {
+        let Harness { mut app, .. } = app();
+        app.kernel = Some(KernelState {
+            state: "enabled".into(),
+            ops: Some("rusty".into()),
+        });
+        assert!(app.kernel_warning().unwrap().contains("ops name"));
+        app.kernel = Some(KernelState {
             state: "disabled".into(),
             ops: None,
-        }
-    }
-
-    fn enabled_kernel(ops: &str) -> KernelState {
-        KernelState {
-            state: "enabled".into(),
-            ops: Some(ops.into()),
-        }
-    }
-
-    #[test]
-    fn kernel_dispute_is_edge_triggered_and_rearms_after_refresh() {
-        let backend = StubBackend::new();
-        let truth = Rc::clone(&backend.truth);
-        let queries = Rc::clone(&backend.status_queries);
-        let mut app = app_with_backend(backend);
-        *truth.borrow_mut() = running("scx_cake", &[], "scx_cake");
-        // The kernel the refresh will see, under the test's control
-        // rather than the test machine's.
-        let kernel = Rc::new(RefCell::new(Some(disabled_kernel())));
-        let probe = Rc::clone(&kernel);
-        app.read_kernel = Box::new(move || probe.borrow().clone());
-
-        // A standing dispute is not an edge; no hammering every tick.
-        app.status = Some(running("scx_cake", &[], "scx_cake"));
-        app.kernel = Some(disabled_kernel());
-        app.kernel_disputed = true;
-        assert!(!app.reconcile_kernel_dispute());
-        assert_eq!(*queries.borrow(), 0);
-
-        // Arm the edge: one refresh. The dispute stands after it (the
-        // kernel still says disabled), so the bit stays set and the next
-        // tick must not fire again.
-        app.kernel_disputed = false;
-        assert!(app.reconcile_kernel_dispute());
-        assert_eq!(*queries.borrow(), 1);
-        assert!(app.kernel_disputed);
-        assert!(!app.reconcile_kernel_dispute());
-        assert_eq!(*queries.borrow(), 1);
-
-        // The kernel catches up: the dispute clears without a refresh.
-        *kernel.borrow_mut() = Some(enabled_kernel("cake"));
-        app.kernel = Some(enabled_kernel("cake"));
-        assert!(!app.reconcile_kernel_dispute());
-        assert!(!app.kernel_disputed);
-        assert_eq!(*queries.borrow(), 1);
-
-        // A new disagreement is a new edge with its own immediate refresh;
-        // this one resolves on the refresh itself.
-        app.kernel = Some(disabled_kernel());
-        assert!(app.reconcile_kernel_dispute());
-        assert_eq!(*queries.borrow(), 2);
-        assert!(!app.kernel_disputed, "the refresh saw the kernel agree");
-    }
-
-    #[test]
-    fn kernel_warning_judges_the_process_not_the_file() {
-        let mut app = app_with_backend(StubBackend::new());
-
-        app.status = Some(Status::default());
-        app.kernel = Some(enabled_kernel("lavd"));
-        assert!(app.kernel_warning().unwrap().contains("outside"));
-
-        app.status = Some(running("scx_lavd", &[], "scx_lavd"));
-        app.kernel = Some(disabled_kernel());
-        assert!(app.kernel_warning().unwrap().contains("no attached"));
-
-        // File edited to scx_cake under a running scx_lavd: the kernel
-        // runs lavd, which agrees with the process, so no warning.
-        app.status = Some(running("scx_lavd", &[], "scx_cake"));
-        app.kernel = Some(enabled_kernel("lavd"));
-        assert_eq!(app.kernel_warning(), None);
-
-        app.kernel = Some(enabled_kernel("bpfland_1.1.4"));
-        assert!(app.kernel_warning().unwrap().contains("ops name"));
-
-        // Active unit with an unreadable process: nothing to compare the
-        // ops name against, so no mismatch is claimed.
-        app.status = Some(Status {
-            active: true,
-            ..Status::default()
         });
-        assert_eq!(app.kernel_warning(), None);
-        app.kernel = Some(disabled_kernel());
-        assert!(app.kernel_warning().unwrap().contains("process unknown"));
+        assert!(
+            app.kernel_warning()
+                .unwrap()
+                .contains("no attached scheduler")
+        );
+        assert!(app.reconcile_kernel_dispute());
+        assert!(!app.reconcile_kernel_dispute(), "edge-triggered");
     }
 }

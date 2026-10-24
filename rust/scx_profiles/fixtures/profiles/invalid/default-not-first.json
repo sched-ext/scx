@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "profiles": [
+    {
+      "id": "gaming",
+      "label": "G",
+      "sched": "scx_lavd"
+    },
+    {
+      "id": "default",
+      "label": "Default",
+      "action": "stop",
+      "description": "Use the kernel's default scheduler."
+    }
+  ]
+}

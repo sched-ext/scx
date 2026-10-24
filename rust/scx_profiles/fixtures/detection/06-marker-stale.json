@@ -1,0 +1,38 @@
+{
+  "unit": "active",
+  "manager": [],
+  "files": {
+    "env": "SCX_PROFILE=gaming\nSCX_SCHEDULER=/usr/bin/scx_cosmos\nSCX_FLAGS=\"\"\n"
+  },
+  "cmdline": [
+    "/usr/bin/scx_cosmos"
+  ],
+  "sysfs": {
+    "state": "enabled",
+    "ops": "cosmos"
+  },
+  "expected": {
+    "version": 1,
+    "profile": null,
+    "applied": "gaming",
+    "custom": true,
+    "unit": {
+      "active": true,
+      "enabled": true
+    },
+    "running": {
+      "sched": "scx_cosmos",
+      "args": []
+    },
+    "next": {
+      "sched": "/usr/bin/scx_cosmos",
+      "args": [],
+      "override": false
+    },
+    "kernel": {
+      "state": "enabled",
+      "ops": "cosmos"
+    },
+    "failure": null
+  }
+}

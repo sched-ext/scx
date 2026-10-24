@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rendering. Almost a pure function of the [`App`] state — the one
-//! exception is the log view writing its viewport height and clamped scroll
-//! offset back into the app, so paging and bounds always match the actual
-//! terminal size.
+//! Rendering. Almost a pure function of the [`App`] state; the one
+//! exception is the log view writing its viewport height and clamped
+//! scroll offset back into the app.
 
+use crate::model::{Current, DEFAULT_ID, Entry};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, ArgsInput, View};
+use crate::app::{App, Field, Input, View};
 use crate::logs;
 
 const SCHED_PREFIX: &str = "scx_";
@@ -30,13 +30,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, app, header);
 
     match app.view {
-        View::Schedulers => {
+        View::Profiles | View::Advanced => {
             let [left, right] = Layout::new(
                 Direction::Horizontal,
-                [Constraint::Percentage(40), Constraint::Percentage(60)],
+                [Constraint::Percentage(45), Constraint::Percentage(55)],
             )
             .areas(body);
-            draw_scheduler_list(frame, app, left);
+            if app.view == View::Profiles {
+                draw_profile_list(frame, app, left);
+            } else {
+                draw_scheduler_list(frame, app, left);
+            }
             draw_status_panel(frame, app, right);
         }
         View::Logs => draw_logs(frame, app, body),
@@ -54,23 +58,100 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" backend: "),
+        Span::raw(" via "),
         Span::styled(app.backend_label(), Style::default().fg(Color::Cyan)),
+        Span::raw(if app.view == View::Advanced {
+            "  advanced"
+        } else {
+            ""
+        }),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_scheduler_list(frame: &mut Frame, app: &App, area: Rect) {
-    let current = app
-        .status
-        .as_ref()
-        .and_then(crate::backend::Status::running);
+fn backing(entry: &Entry) -> String {
+    match (&entry.action, &entry.sched) {
+        (Some(_), _) => "kernel default".to_owned(),
+        (None, Some(sched)) if entry.args.is_empty() => strip_prefix(sched).to_owned(),
+        (None, Some(sched)) => format!("{} {}", strip_prefix(sched), entry.args.join(" ")),
+        _ => String::new(),
+    }
+}
 
+fn draw_profile_list(frame: &mut Frame, app: &App, area: Rect) {
+    let running = app
+        .listing
+        .as_ref()
+        .and_then(|l| l.current.profile.as_deref());
     let items: Vec<ListItem> = app
-        .schedulers
+        .profiles()
+        .iter()
+        .map(|entry| {
+            let is_running = Some(entry.id.as_str()) == running;
+            let marker = if is_running { "● " } else { "  " };
+            let style = if is_running {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else if !entry.available {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            let mut lines = vec![Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Green)),
+                Span::styled(entry.label.clone(), style),
+                Span::styled(
+                    if entry.available {
+                        String::new()
+                    } else {
+                        "  (not installed)".to_owned()
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])];
+            lines.push(Line::from(Span::styled(
+                format!("    {}", backing(entry)),
+                Style::default().fg(Color::DarkGray),
+            )));
+            if !entry.description.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", entry.description),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            ListItem::new(lines)
+        })
+        .collect();
+
+    let title = match &app.listing {
+        Some(l) if l.customized => " Profiles (administrator's list) ",
+        _ => " Profiles ",
+    };
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = ListState::default().with_selected(Some(app.selected));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_scheduler_list(frame: &mut Frame, app: &App, area: Rect) {
+    let running = app
+        .listing
+        .as_ref()
+        .and_then(|l| l.current.running.as_ref())
+        .map(|r| r.sched.as_str());
+    let items: Vec<ListItem> = app
+        .installed()
         .iter()
         .map(|sched| {
-            let is_running = Some(sched.as_str()) == current;
+            let is_running = Some(sched.as_str()) == running;
             let marker = if is_running { "● " } else { "  " };
             let style = if is_running {
                 Style::default()
@@ -87,7 +168,11 @@ fn draw_scheduler_list(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Schedulers "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Schedulers (advanced) "),
+        )
         .highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
@@ -95,95 +180,99 @@ fn draw_scheduler_list(frame: &mut Frame, app: &App, area: Rect) {
         )
         .highlight_symbol("▶ ");
 
-    let mut state = ListState::default().with_selected(Some(app.selected));
+    let mut state = ListState::default().with_selected(Some(app.sched_selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn state_line(current: &Current) -> (String, Color) {
+    match (&current.profile, current.custom, &current.applied) {
+        (Some(id), _, _) if id == DEFAULT_ID => {
+            ("default: the kernel's scheduler".to_owned(), Color::White)
+        }
+        (Some(id), _, _) => (format!("profile {id} running"), Color::Green),
+        (None, true, _) => (
+            "custom: no profile matches what runs".to_owned(),
+            Color::Yellow,
+        ),
+        (None, false, Some(id)) => (format!("profile {id} applied but not running"), Color::Red),
+        (None, false, None) => ("nothing applied".to_owned(), Color::Yellow),
+    }
 }
 
 fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
-    match &app.status {
-        Some(status) => {
-            // What runs now: the unit's process, never the file.
-            match (status.active, &status.process) {
-                (true, Some(process)) => {
-                    lines.push(kv("State", "running", Color::Green));
-                    lines.push(kv("Scheduler", strip_prefix(&process.sched), Color::White));
-                    let modes = app.running_modes();
-                    let mode = match modes.as_slice() {
-                        [] if process.args.is_empty() => "no flags".to_owned(),
-                        [] => "custom flags".to_owned(),
-                        [mode] => format!("{} profile", mode.label()),
-                        // Shared flag set: argv cannot say which was meant.
-                        many => format!(
-                            "{} profile",
-                            many.iter()
-                                .map(|m| m.label())
-                                .collect::<Vec<_>>()
-                                .join(" or ")
-                        ),
-                    };
-                    let args = if process.args.is_empty() {
-                        mode
-                    } else {
-                        format!("{mode}: {}", format_flags(&process.args))
-                    };
-                    lines.push(kv("Running with", &args, Color::White));
+    match &app.listing {
+        Some(listing) => {
+            let current = &listing.current;
+            let (state, color) = state_line(current);
+            lines.push(kv("State", &state, color));
+            match &current.running {
+                Some(r) if r.args.is_empty() => {
+                    lines.push(kv("Running", strip_prefix(&r.sched), Color::White));
                 }
-                (true, None) => lines.push(kv(
-                    "State",
+                Some(r) => lines.push(kv(
+                    "Running",
+                    &format!("{} {}", strip_prefix(&r.sched), format_flags(&r.args)),
+                    Color::White,
+                )),
+                None if current.unit.active => lines.push(kv(
+                    "Running",
                     "scx.service active, process not readable",
                     Color::Yellow,
                 )),
-                (false, _) => lines.push(kv("State", "scx.service inactive", Color::Yellow)),
+                None => lines.push(kv(
+                    "Running",
+                    "nothing (scx.service inactive)",
+                    Color::White,
+                )),
             }
-
-            // What the next start would run: file plus overrides.
-            // An incompletely resolved environment is not shown as a
-            // hypothesis: a partial answer reads as a fact.
-            if let Some(err) = &status.config_error {
+            if let Some(err) = &current.config_error {
                 lines.push(kv("Next start", "unknown", Color::Red));
                 lines.push(Line::from(Span::styled(
                     format!("  ⚠ {err}"),
                     Style::default().fg(Color::Red),
                 )));
             } else {
-                let next = match &status.next_sched {
-                    Some(sched) if status.next_flags.is_empty() => strip_prefix(sched).to_owned(),
-                    Some(sched) => format!(
-                        "{} {}",
-                        strip_prefix(sched),
-                        format_flags(&status.next_flags)
-                    ),
-                    None => "nothing configured".to_owned(),
-                };
-                let next_color = match (status.running(), status.next_sched.as_deref()) {
-                    // Config edited under the unit: a restart changes things.
-                    (Some(running), Some(next)) if running != next => Color::Yellow,
-                    _ => Color::White,
-                };
-                lines.push(kv("Next start", &next, next_color));
+                match &current.next {
+                    Some(next) => {
+                        let text = format!(
+                            "{} {}{}",
+                            strip_prefix(next.name()),
+                            format_flags(&next.args),
+                            if next.overridden {
+                                " (SCX_*_OVERRIDE in effect)"
+                            } else {
+                                ""
+                            }
+                        );
+                        let changed = current
+                            .running
+                            .as_ref()
+                            .is_some_and(|r| r.sched != next.name() || r.args != next.args);
+                        let color = if next.overridden || changed {
+                            Color::Yellow
+                        } else {
+                            Color::White
+                        };
+                        lines.push(kv("Next start", text.trim_end(), color));
+                    }
+                    None => lines.push(kv("Next start", "nothing configured", Color::White)),
+                }
             }
-            if let Some(sched) = &status.override_sched {
+            if let Some(f) = &current.failure {
                 lines.push(kv(
-                    "Override",
-                    &format!("SCX_SCHEDULER_OVERRIDE={}", strip_prefix(sched)),
-                    Color::Yellow,
-                ));
-            }
-            if let Some(flags) = &status.override_flags {
-                lines.push(kv(
-                    "Override",
-                    &format!("SCX_FLAGS_OVERRIDE={}", format_flags(flags)),
-                    Color::Yellow,
+                    "Last start",
+                    &format!("failed ({}): {}", f.status, f.message),
+                    Color::Red,
                 ));
             }
         }
         None => {
             let reason = app
-                .status_error
+                .listing_error
                 .as_deref()
-                .map_or_else(|| "unknown".to_owned(), |err| format!("unknown — {err}"));
+                .map_or_else(|| "unknown".to_owned(), |err| format!("unknown; {err}"));
             lines.push(kv("State", &reason, Color::Red));
         }
     }
@@ -192,44 +281,79 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
     draw_kernel_section(app, &mut lines);
 
     lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("Profile: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(
-            format!("◀ {} ▶", app.selected_mode().label()),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw("  (Tab to cycle)"),
-    ]));
-    // Preview of what Enter would write to SCX_FLAGS for this selection.
-    let flags = app.selected_flags();
-    let preview = if flags.is_empty() {
-        "  no flags — scheduler defaults".to_owned()
-    } else {
-        format!("  {}", format_flags(&flags))
-    };
-    lines.push(Line::from(Span::styled(
-        preview,
-        Style::default().fg(Color::Gray),
-    )));
-    let source = app.profiles.source.as_deref().map_or_else(
-        || "built-in defaults".to_owned(),
-        |path| path.display().to_string(),
-    );
-    lines.push(Line::from(Span::styled(
-        format!("  profiles from {source}"),
-        Style::default().fg(Color::DarkGray),
-    )));
+    match app.view {
+        View::Profiles => {
+            if let Some(entry) = app.selected_profile() {
+                lines.push(Line::from(vec![
+                    Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(entry.label.clone(), Style::default().fg(Color::Cyan)),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", backing(entry)),
+                    Style::default().fg(Color::Gray),
+                )));
+                if let Some(path) = &entry.path {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {path}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            if let Some(listing) = &app.listing {
+                lines.push(Line::from(Span::styled(
+                    format!("  profiles from {}", listing.source.display()),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        View::Advanced => {
+            if let Some(sched) = app.selected_scheduler() {
+                lines.push(Line::from(vec![
+                    Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        strip_prefix(sched).to_owned(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw("  (Enter runs it with its own defaults)"),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(
+                "  a scheduler unsuited to the workload can perform worse than the kernel's \
+default; what starts here shows as Custom in every client",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        View::Logs => {}
+    }
 
-    if let Some(input) = &app.args_input {
+    if let Some(open) = &app.field {
         lines.push(Line::default());
+        let (label, hint) = match &open.field {
+            Field::Args => (
+                "Args: ",
+                "run the selected scheduler with these options; Esc cancels",
+            ),
+            Field::SaveAs { .. } => (
+                "Profile id: ",
+                "lowercase letters, digits and '-'; saves what runs now as a profile",
+            ),
+            Field::ConfirmDelete(_) => (
+                "Delete? ",
+                "y deletes the selected profile, anything else cancels",
+            ),
+        };
         let mut spans = vec![Span::styled(
-            "Args: ",
+            label,
             Style::default().add_modifier(Modifier::BOLD),
         )];
-        spans.extend(input_spans(input));
+        if let Field::ConfirmDelete(id) = &open.field {
+            spans.push(Span::styled(id.clone(), Style::default().fg(Color::Red)));
+        } else {
+            spans.extend(input_spans(&open.input));
+        }
         lines.push(Line::from(spans));
         lines.push(Line::from(Span::styled(
-            "  written to SCX_FLAGS as typed, whitespace-separated; replaces the profile's flags",
+            format!("  {hint}"),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -246,8 +370,6 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let total = app.log_lines.len();
     let max_scroll = total.saturating_sub(height);
-    // Clamp and write back, so `g` (jump to top, scroll = MAX) and paging
-    // past the ends settle on real bounds.
     if app.log_scroll > max_scroll {
         app.log_scroll = max_scroll;
     }
@@ -279,7 +401,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         "0 (current)"
     };
-    let title = format!(" Logs — {} · boot {} · {} lines ", logs::UNIT, boot, total);
+    let title = format!(" Logs: {} · boot {} · {} lines ", logs::UNIT, boot, total);
 
     let panel = Paragraph::new(lines).block(
         Block::default()
@@ -290,10 +412,6 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(panel, area);
 }
 
-/// The kernel-truth section: what `sched_ext` itself reports, plus soft
-/// warnings whenever it disagrees with what the unit state implies. The
-/// service only knows whether its unit is active; the kernel knows what
-/// is actually attached.
 fn draw_kernel_section(app: &App, lines: &mut Vec<Line>) {
     let Some(kernel) = &app.kernel else {
         lines.push(kv(
@@ -303,7 +421,6 @@ fn draw_kernel_section(app: &App, lines: &mut Vec<Line>) {
         ));
         return;
     };
-
     let ops_suffix = kernel
         .ops
         .as_deref()
@@ -319,9 +436,6 @@ fn draw_kernel_section(app: &App, lines: &mut Vec<Line>) {
         &format!("sched_ext {}{}", kernel.state, ops_suffix),
         color,
     ));
-
-    // Classification lives on App (`kernel_warning`), shared with the
-    // event loop's dispute tripwire.
     if let Some(text) = app.kernel_warning() {
         lines.push(Line::from(Span::styled(
             format!("  ⚠ {text}"),
@@ -346,14 +460,19 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     )
     .areas(area);
 
-    let key_help = match app.view {
-        View::Schedulers if app.args_input.is_some() => {
-            " type arguments · Enter start/switch · Esc cancel"
+    let key_help = match (app.view, &app.field) {
+        (_, Some(open)) => match open.field {
+            Field::Args => " type options · Enter run · Esc cancel",
+            Field::SaveAs { .. } => " type a profile id · Enter save · Esc cancel",
+            Field::ConfirmDelete(_) => " y delete · any other key cancels",
+        },
+        (View::Profiles, None) => {
+            " ↑/↓ select · Enter apply · S save running as profile · J/K move · x delete · D restore shipped · A advanced · l logs · t monitor · R refresh · q quit"
         }
-        View::Schedulers => {
-            " ↑/↓ select · Tab profile · Enter start/switch · a args · s stop · r restart · d default · l logs · t monitor · R refresh · q quit"
+        (View::Advanced, None) => {
+            " ↑/↓ select · Enter run · a options · S save running as profile · l logs · t monitor · R refresh · A/Esc back"
         }
-        View::Logs => {
+        (View::Logs, None) => {
             " ↑/↓ scroll · PgUp/PgDn page · g/G top/bottom · b boot · R reload · q/Esc back"
         }
     };
@@ -393,10 +512,7 @@ fn strip_prefix(sched: &str) -> &str {
 }
 
 /// Renders the field content with a reversed-video block as the cursor.
-/// A styled span instead of the real terminal cursor keeps the position
-/// correct under the paragraph's wrapping without any coordinate math;
-/// at the end of the buffer the block sits on a synthetic space.
-fn input_spans(input: &ArgsInput) -> Vec<Span<'static>> {
+fn input_spans(input: &Input) -> Vec<Span<'static>> {
     let mut before = String::new();
     let mut at = None;
     let mut after = String::new();
@@ -415,8 +531,7 @@ fn input_spans(input: &ArgsInput) -> Vec<Span<'static>> {
     ]
 }
 
-/// Renders the flag vector so token boundaries survive spaces and quotes:
-/// `shell_words::join`, whose output parses back into the same vector.
+/// Renders a flag vector so token boundaries survive: `shell_words::join`.
 fn format_flags(flags: &[String]) -> String {
     shell_words::join(flags)
 }

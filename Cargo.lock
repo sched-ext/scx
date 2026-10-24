@@ -6332,6 +6332,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_profiles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "xattr",
+]
+
+[[package]]
 name = "scx_raw_pmu"
 version = "1.1.4"
 dependencies = [
@@ -6577,6 +6588,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scxcli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "scx_profiles",
+ "serde_json",
+]
+
+[[package]]
 name = "scxtop"
 version = "1.1.4"
 dependencies = [
@@ -6621,17 +6641,15 @@ dependencies = [
 
 [[package]]
 name = "scxtui"
-version = "1.1.4"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "inotify",
  "ratatui",
  "serde",
  "serde_json",
  "shell-words",
- "tempfile",
- "toml",
- "xattr",
 ]
 
 [[package]]

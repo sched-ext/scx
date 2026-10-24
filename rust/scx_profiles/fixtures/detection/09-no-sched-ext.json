@@ -1,0 +1,23 @@
+{
+  "unit": "inactive",
+  "manager": [],
+  "files": {
+    "env": ""
+  },
+  "cmdline": null,
+  "sysfs": null,
+  "expected": {
+    "version": 1,
+    "profile": "default",
+    "applied": null,
+    "custom": false,
+    "unit": {
+      "active": false,
+      "enabled": false
+    },
+    "running": null,
+    "next": null,
+    "kernel": null,
+    "failure": null
+  }
+}
