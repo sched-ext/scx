@@ -53,8 +53,7 @@ struct grp_hdr {
 	u64 nr_throttled;	/* how often it has run out */
 	u64 bw_gen;		/* bumped when cpu.max changes, see grp_bw_charge() */
 	u64 bw_slot;		/* its index in @bw_hdrs, BW_MAX_LIMITED for none */
-	u64 nr_parked;		/* tasks waiting in @bq */
-	struct scx_edq bq;	/* them, see cid_park() */
+	u64 nr_parked;		/* tasks waiting in its queues' backlogs, see cid_park() */
 
 	/*
 	 * Moved by every cid as its queue's averages drift, see
@@ -81,6 +80,8 @@ struct grp_q {
 	u64 shares_at;		/* when @shares was last computed */
 	s64 runtime_remaining;	/* what the cid holds of the group's bandwidth */
 	u64 bw_gen;		/* the cpu.max @runtime_remaining was taken under */
+	u64 nr_parked;		/* tasks waiting in @bq */
+	struct scx_edq bq;	/* them, the group's backlog on this cid, see cid_park() */
 	u32 cid;
 	u32 avg_lock;		/* serializes the averages, see grp_avg_trylock() */
 };
@@ -338,6 +339,8 @@ static __always_inline bool bw_pool_is_gen(u64 word, u64 gen)
  */
 #define BW_ASSIGN_TRIES		64
 
+static int bw_distribute(struct grp_hdr __arena *hdr);
+
 static void grp_bw_refill(struct grp_hdr __arena *hdr, u64 now)
 {
 	u64 gen = READ_ONCE(hdr->bw_gen);
@@ -369,6 +372,8 @@ static void grp_bw_refill(struct grp_hdr __arena *hdr, u64 now)
 	}
 
 	grp_bw_unthrottle(hdr, now);
+	if (READ_ONCE(hdr->nr_parked))
+		bw_distribute(hdr);
 }
 
 static void grp_bw_sync_gen(grp_q_t *gq, struct grp_hdr __arena *hdr);
@@ -547,6 +552,8 @@ static void task_bw_unparked(task_ctx_t *tctx)
 		return;
 
 	tctx->bw_hdr = NULL;
+	__sync_fetch_and_sub(&tctx->bw_q->nr_parked, 1);
+	tctx->bw_q = NULL;
 	__sync_fetch_and_sub(&hdr->nr_parked, 1);
 	__sync_fetch_and_sub(&bw_nr_parked, 1);
 }

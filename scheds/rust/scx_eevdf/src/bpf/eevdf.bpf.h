@@ -185,6 +185,7 @@ struct task_ctx {
 	u64 delay_w;		/* its weight without the task */
 	u64 delay_gen;		/* its @empty_gen then */
 	struct grp_hdr __arena *bw_hdr;	/* the cgroup it waits on, see cid_park() */
+	struct grp_q __arena *bw_q;	/* the backlog it waits in */
 	struct grp_q __arena *grp;	/* its cgroup's queues, NULL at the root */
 	struct grp_q __arena *gq;	/* the one it is a member of, see grp_contrib_sync() */
 	u64 gw;				/* the weight it is a member with */
