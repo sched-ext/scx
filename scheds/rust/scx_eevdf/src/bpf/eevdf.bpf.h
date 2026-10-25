@@ -174,6 +174,7 @@ struct grp_hdr;
 struct task_ctx {
 	struct sched_ent se;	/* first, EDQ pops return its address */
 	u64 last_run_at;
+	u64 charged;		/* se.sum_exec_runtime at the last charge, see task_run_delta() */
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	u64 util_est;		/* what the last activation used */

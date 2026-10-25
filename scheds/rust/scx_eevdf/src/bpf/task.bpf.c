@@ -377,7 +377,7 @@ void BPF_STRUCT_OPS(eevdf_stopping, struct task_struct *p, bool runnable)
 	tctx->last_stop_at = scx_bpf_now();
 	tnow = cid_valid(cid) ? cid_clock_task_owned(cid, tctx->last_stop_at) :
 			       tctx->last_stop_at;
-	slice = tnow - tctx->last_run_at;
+	slice = task_run_delta(p, tctx);
 	util_set_running(tctx, false, tctx->last_stop_at);
 	cid_util_set_running(cid, false, tctx->last_stop_at);
 	cid_demand_set(cid, runnable ||
@@ -566,6 +566,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(eevdf_init_task, struct task_struct *p,
 	WRITE_ONCE(tctx->grp, NULL);
 	WRITE_ONCE(tctx->gq, NULL);
 	tctx->se.vw = task_nice_weight(p);
+	/* What it ran before it came under this scheduler is not charged. */
+	tctx->charged = p->se.sum_exec_runtime;
 
 	/*
 	 * @fork tells a task that is being created apart from one that was
