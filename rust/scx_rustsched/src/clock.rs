@@ -45,6 +45,10 @@ fn enabled() -> bool {
 }
 
 /// rq_clock_task() of `cid`'s CPU, read in the raw, `now` if unreadable.
+/// A clock ahead of `now` is still the task clock: `now` can be another
+/// CPU's rq clock, or older than the runqueue's last update, and falling
+/// back to it would mix the rq clock into a stamp the task clock is
+/// charged against, by all the IRQ and steal time the CPU has lost.
 #[inline(always)]
 unsafe fn read(cid: Cid, now: u64) -> u64 {
     unsafe {
@@ -58,7 +62,7 @@ unsafe fn read(cid: Cid, now: u64) -> u64 {
             return now;
         }
         let clock = read_volatile(runqueue.add(offset).cast::<u64>());
-        if clock == 0 || clock > now {
+        if clock == 0 {
             return now;
         }
         clock
@@ -75,7 +79,11 @@ pub fn owned(cid: Cid, now: u64) -> u64 {
     }
     unsafe {
         let clock = read(cid, now);
-        cids::set(cid, cids::CLOCK_OFF, now - clock);
+        // Only a clock behind `now` gives an offset; one ahead of it would
+        // wrap, and at() would then hand out zero.
+        if clock <= now {
+            cids::set(cid, cids::CLOCK_OFF, now - clock);
+        }
         if enabled() { clock } else { now }
     }
 }
