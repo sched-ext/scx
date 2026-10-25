@@ -542,7 +542,13 @@ static u64 cid_clock_task_owned(s32 cid, u64 now)
 	if (no_task_clock)
 		return now;
 	tnow = scx_clock_task(cid_topo(cid)->cpu);
-	cctx->clock_off = now - tnow;
+	/*
+	 * @now can be another CPU's rq clock, or older than this runqueue's
+	 * last update. Only a task clock behind it gives an offset: one ahead
+	 * of it would wrap, and cid_clock_task_at() would then hand out zero.
+	 */
+	if (tnow <= now)
+		cctx->clock_off = now - tnow;
 
 	return tnow;
 }
