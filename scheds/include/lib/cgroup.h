@@ -182,6 +182,25 @@ enum scx_cgroup_bw_cancel_flags {
 int scx_cgroup_bw_cancel(u64 taskc, u64 flags);
 
 /**
+ * scx_cgroup_bw_pressure - Return the scheduling pressure of a task's billing
+ * cgroup.
+ * @p: the task, with its rq lock held (it need not be the current op's subject,
+ *     e.g. the prev task of ops.dispatch()), or NULL to use only the cached
+ *     billing.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
+ *
+ * Returns a 1024-scale pressure value computed at the last replenishment
+ * boundary.  The BPF scheduler should scale a task's time slice as:
+ *
+ *   slice = (base_slice * 1024) / pressure
+ *
+ * Return 1024 when the billing cgroup cannot be resolved, is the root, or no
+ * throttle applies.
+ */
+int scx_cgroup_bw_pressure(struct task_struct *p __arg_trusted __arg_nullable,
+			   u64 taskc);
+
+/**
  * REGISTER_SCX_CGROUP_BW_ENQUEUE_CB - Register an enqueue callback.
  * @eqcb: A function name with a prototype of
  *        'int fn(struct task_struct * __arg_trusted, u64)'.
