@@ -218,13 +218,13 @@ fn should_migrate(task: &Task, cid: Cid, enq_flags: EnqFlags) -> bool {
     !enq_flags.cid_selected() && !task.running()
 }
 
-/// Charge the service `task` has taken on `cid` since it started running or
-/// was last charged, as update_curr() does, and fold it into its pack and
-/// its cgroups' cpu.max. `tnow` is the CID's task clock, see clock.rs.
+/// Charge the service `task` has taken since it was last charged, as
+/// update_curr() does, and fold it into its pack and its cgroups' cpu.max.
+/// `cid` is the CID the task is on.
 #[inline(always)]
-pub(crate) fn charge(task: &Task, state: &taskctx::Context, cid: Cid, tnow: u64) {
-    let now = tnow;
-    let delta = now.wrapping_sub(state.last_run_at().get()) as i64;
+pub(crate) fn charge(task: &Task, state: &taskctx::Context, cid: Cid) {
+    let total = runtime(task);
+    let delta = total.wrapping_sub(state.charged().get()) as i64;
     if delta > 0 {
         let service = (delta as u64 * accounting::NICE_0_WEIGHT)
             .checked_div(effective_weight(task, state))
@@ -232,8 +232,24 @@ pub(crate) fn charge(task: &Task, state: &taskctx::Context, cid: Cid, tnow: u64)
         state.vtime().set(state.vtime().get().wrapping_add(service));
         pack::charge(state);
         bandwidth::charge(state, cid, delta as u64);
+        state.charged().set(total);
     }
-    state.last_run_at().set(now);
+}
+
+/// The runtime the kernel has accounted to `task`. update_curr_scx() brings
+/// it up to date before every op that charges, ops.tick(), ops.stopping(),
+/// ops.dispatch() and the dequeue of a running task, which leaves out only
+/// ops.yield(), whose shortfall the next charge picks up. Charging the
+/// difference from what was charged before is exact whatever the kernel
+/// skips: it can start a task on a CPU without ops.running(), when a
+/// property change catches it while dispatch_one() has the runqueue
+/// unlocked, see dequeue_task_scx(), and a stamp of our own taken on
+/// another CPU is in a clock that is seconds apart, by the IRQ and steal
+/// time each has lost. Each delta the kernel adds is measured on one
+/// runqueue.
+#[inline(always)]
+fn runtime(task: &Task) -> u64 {
+    task.sum_exec_runtime()
 }
 
 /// ops.select_cid(): where a waking or forked task goes, see idle.rs. A
@@ -795,7 +811,6 @@ fn running(task: &Task) {
             idle || (state.group().get().is_some() && cgroup::in_idle_group(&state)),
         );
         prepare_request(task, &state);
-        state.last_run_at().set(tnow);
         pressure::resumed(cid, tnow);
         pressure::demand(cid, true, now);
         load::task_running(&state, true, now);
@@ -820,7 +835,7 @@ fn stopping(task: &Task, runnable: bool) {
     let now = time::now();
     let cid = task.cid();
     let tnow = clock::owned(cid, now);
-    charge(task, &state, cid, tnow);
+    charge(task, &state, cid);
     pack::unpublish(cid);
     load::task_running(&state, false, now);
     load::cid_running(cid, false, now);
@@ -988,7 +1003,7 @@ fn quiescent(task: &Task, deq_flags: DeqFlags) {
         // the CID's running task, which ops.stopping() has withdrawn.
         let member = state.member().get();
         if member != 0 && (member >> 32) as i64 - 1 == i64::from(cid.raw()) && task.running() {
-            charge(task, &state, cid, clock::owned(cid, now));
+            charge(task, &state, cid);
         }
         load::task_quiesce(&state, sleep, now);
         pack::quiesce(&state, lag_request(task), now, sleep);
@@ -1056,6 +1071,8 @@ fn init_task(task: &Task, args: &InitTaskArgs) {
     if let Some(state) = taskctx::lookup(task) {
         // A forked task's first request is halved.
         state.initial().set(args.fork());
+        // What it ran before it came under this scheduler is not charged.
+        state.charged().set(runtime(task));
     }
 }
 

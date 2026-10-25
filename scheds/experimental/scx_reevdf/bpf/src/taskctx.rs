@@ -40,8 +40,8 @@ scx_rustsched::arena_struct! {
         joined: u64,
         /// The lag saved when the task last left a pack.
         lag: i64,
-        /// When the task started running or was last charged, time::now().
-        last_run_at: u64,
+        /// se.sum_exec_runtime at the last charge, see charge().
+        charged: u64,
         /// Set until a forked task's first deadline has been issued.
         initial: bool,
         /// A debt to the pack the task blocked in, see pack::quiesce(): that
@@ -94,7 +94,7 @@ impl slots::TaskSlot for Context {
         self.member().set(0);
         self.joined().set(0);
         self.lag().set(0);
-        self.last_run_at().set(0);
+        self.charged().set(0);
         self.initial().set(false);
         self.last_stop_at().set(0);
         self.group().set(None);
