@@ -139,6 +139,8 @@ pub enum Powermode {
 /// - [`Powermode::Performance`]: all big cores
 /// - [`Powermode::Powersave`]: only little cores
 /// - [`Powermode::Any`]: all CPUs
+///
+/// Fall back to all CPUs if the requested core class is unavailable.
 pub fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
     let topo = Topology::new().unwrap();
 
@@ -155,7 +157,11 @@ pub fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
         })
         .collect();
 
-    Ok(cpus)
+    if cpus.is_empty() {
+        Ok(topo.all_cpus.keys().copied().collect())
+    } else {
+        Ok(cpus)
+    }
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
