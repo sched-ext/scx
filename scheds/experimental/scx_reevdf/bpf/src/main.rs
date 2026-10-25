@@ -404,7 +404,7 @@ fn enqueue(task: &Task, enq_flags: EnqFlags) {
     // next period instead of being queued, before every shortcut below,
     // which all put the task somewhere it would run from.
     if let Some(out) = bandwidth::throttled(&state, cid, now, true)
-        && bandwidth::park(task, &state, out, now)
+        && bandwidth::park(task, &state, out, cid, now)
     {
         let _ = state.take_migrate();
         if !enq_flags.contains(EnqFlags::WAKEUP) && task.running() {

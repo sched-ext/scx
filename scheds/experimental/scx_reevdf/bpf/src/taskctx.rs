@@ -76,9 +76,9 @@ scx_rustsched::arena_struct! {
         /// The weight the task last joined a pack at, its share of its cgroup
         /// hierarchy then.
         joined_weight: u64,
-        /// The cgroup whose backlog the task waits in for cpu.max, see
+        /// The cgroup queue whose backlog the task waits in for cpu.max, see
         /// bandwidth.rs.
-        parked_on: Option<Group>,
+        parked_in: Option<Queue>,
     }
 }
 
@@ -101,7 +101,7 @@ impl slots::TaskSlot for Context {
         self.group_queue().set(None);
         self.group_weight().set(0);
         self.joined_weight().set(0);
-        self.parked_on().set(None);
+        self.parked_in().set(None);
         self.set_delay([0; 4]);
         self.set_request(crate::accounting::Request::default());
         self.set_run_avg(&crate::ravg::Ravg::default());
