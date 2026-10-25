@@ -177,12 +177,14 @@ static __always_inline void mlfq_rtdl_drain(s32 cpu, u64 now)
 	/*
 	 * Nonempty gate: when every DSQ this CPU owns is empty there is
 	 * nothing to evacuate, so the pass is skipped without consuming
-	 * the rate-limit window.
+	 * the rate-limit window. The hook is attached before ops.init()
+	 * creates the queue DSQs, and nr_queued returns -ENOENT for a DSQ
+	 * that does not exist yet, so only a positive count means work.
 	 */
-	if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | (u64)cpu) &&
-	    !scx_bpf_dsq_nr_queued(mlfq_dsq_id(1, cpu)) &&
-	    !scx_bpf_dsq_nr_queued(mlfq_dsq_id(2, cpu)) &&
-	    !scx_bpf_dsq_nr_queued(mlfq_dsq_id(3, cpu)))
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | (u64)cpu) <= 0 &&
+	    scx_bpf_dsq_nr_queued(mlfq_dsq_id(1, cpu)) <= 0 &&
+	    scx_bpf_dsq_nr_queued(mlfq_dsq_id(2, cpu)) <= 0 &&
+	    scx_bpf_dsq_nr_queued(mlfq_dsq_id(3, cpu)) <= 0)
 		return;
 
 	/*
@@ -209,11 +211,11 @@ static __always_inline void mlfq_rtdl_drain(s32 cpu, u64 now)
 		evacuated = true;
 	}
 	if (__COMPAT_has_generic_reenq()) {
-		if (scx_bpf_dsq_nr_queued(mlfq_dsq_id(1, cpu)))
+		if (scx_bpf_dsq_nr_queued(mlfq_dsq_id(1, cpu)) > 0)
 			scx_bpf_dsq_reenq(mlfq_dsq_id(1, cpu), 0);
-		if (scx_bpf_dsq_nr_queued(mlfq_dsq_id(2, cpu)))
+		if (scx_bpf_dsq_nr_queued(mlfq_dsq_id(2, cpu)) > 0)
 			scx_bpf_dsq_reenq(mlfq_dsq_id(2, cpu), 0);
-		if (scx_bpf_dsq_nr_queued(mlfq_dsq_id(3, cpu)))
+		if (scx_bpf_dsq_nr_queued(mlfq_dsq_id(3, cpu)) > 0)
 			scx_bpf_dsq_reenq(mlfq_dsq_id(3, cpu), 0);
 		evacuated = true;
 	}
