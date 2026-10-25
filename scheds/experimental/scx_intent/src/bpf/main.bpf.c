@@ -19,8 +19,18 @@ const volatile u32 starvation_threshold = STARVATION_THRESHOLD;
 /* Global statistics shared with userspace */
 struct intent_stats stats = {};
 
-/* Multi-tier starvation counters per intent queue (updated atomically) */
-static u32 starvation_counters[INTENT_COUNT] = {};
+/*
+ * Per-CPU multi-tier starvation counters per intent queue.
+ * Each CPU maintains its own local dispatch starvation counters within ops.dispatch().
+ * This guarantees the threshold check, local queue drain, and reset occur strictly
+ * within the local CPU dispatch context without inter-core erasure or cacheline contention.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct intent_starvation);
+} pcpu_starvation SEC(".maps");
 
 /*
  * Dynamic classification map populated by userspace presets / rules.
@@ -103,23 +113,45 @@ void BPF_STRUCT_OPS(intent_enqueue, struct task_struct *p, u64 enq_flags)
 
 	scx_bpf_dsq_insert(p, dsq_id, slice, enq_flags);
 	__sync_fetch_and_add(&stats.enqueued[intent], 1);
+
+	/*
+	 * Kick CPU to ensure tasks are not left stalled in the shared DSQ
+	 * under SCX_OPS_ENQ_LAST. If high-priority audit or interactive work
+	 * arrives while CPUs may be busy running longer compute slices, request
+	 * preemption to maintain deterministic UI/audio latency.
+	 */
+	s32 cpu = scx_bpf_task_cpu(p);
+	if (cpu >= 0) {
+		if (intent == INTENT_AUDIT || intent == INTENT_INTERACTIVE)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		else
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
 }
 
 void BPF_STRUCT_OPS(intent_dispatch, s32 cpu, struct task_struct *prev)
 {
+	u32 zero = 0;
+	struct intent_starvation *starv = bpf_map_lookup_elem(&pcpu_starvation, &zero);
+	if (!starv)
+		return;
+
 	int i, j;
+	u32 thresh = starvation_threshold;
+	if (thresh == 0)
+		thresh = 1;
 
 	/*
 	 * 1. Multi-Tier Anti-Starvation Pass:
 	 * Examine lower queues in reverse priority order (Compute -> Network -> IO -> Interactive).
-	 * If any lower-priority tier has been starved past starvation_threshold due to sustained
-	 * higher-tier saturation, grant it an immediate guaranteed dispatch slot.
+	 * If any lower-priority tier has been starved past starvation_threshold on this CPU,
+	 * grant it an immediate guaranteed dispatch slot.
 	 */
 	bpf_for(i, 0, INTENT_COUNT - 1) {
 		int q = (INTENT_COUNT - 1) - i;
-		if (starvation_counters[q] >= starvation_threshold) {
+		if (q >= 0 && q < INTENT_COUNT && starv->counters[q] >= thresh) {
 			if (scx_bpf_dsq_move_to_local((u64)q, 0)) {
-				__sync_lock_test_and_set(&starvation_counters[q], 0);
+				starv->counters[q] = 0;
 				__sync_fetch_and_add(&stats.starved_dispatches[q], 1);
 				__sync_fetch_and_add(&stats.dispatched[q], 1);
 				return;
@@ -132,14 +164,14 @@ void BPF_STRUCT_OPS(intent_dispatch, s32 cpu, struct task_struct *prev)
 	 * Audit -> Interactive -> IO -> Network -> Compute
 	 */
 	bpf_for(i, 0, INTENT_COUNT) {
-		if (scx_bpf_dsq_move_to_local((u64)i, 0)) {
-			__sync_lock_test_and_set(&starvation_counters[i], 0);
+		if (i >= 0 && i < INTENT_COUNT && scx_bpf_dsq_move_to_local((u64)i, 0)) {
+			starv->counters[i] = 0;
 			__sync_fetch_and_add(&stats.dispatched[i], 1);
 
-			/* Advance starvation counters for all waiting lower queues */
+			/* Advance starvation counters for all waiting lower queues on this CPU */
 			bpf_for(j, 0, INTENT_COUNT) {
-				if (j > i)
-					__sync_fetch_and_add(&starvation_counters[j], 1);
+				if (j >= 0 && j < INTENT_COUNT && j > i)
+					starv->counters[j]++;
 			}
 			return;
 		}

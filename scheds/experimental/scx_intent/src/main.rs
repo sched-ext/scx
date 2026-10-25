@@ -60,17 +60,19 @@ impl IntentConfig {
         Self {
             audit: vec![
                 "auditd".into(),
-                "systemd-journ".into(),
                 "pipewire".into(),
                 "wireplumber".into(),
                 "pulseaudio".into(),
+                "pipewire-pulse".into(),
             ],
             interactive: vec![
-                "wayland".into(),
+                "kwin_wayland".into(),
+                "kwin_x11".into(),
+                "gnome-shell".into(),
+                "mutter".into(),
                 "hyprland".into(),
                 "sway".into(),
-                "kwin".into(),
-                "gnome-shell".into(),
+                "weston".into(),
                 "Xorg".into(),
                 "alacritty".into(),
                 "kitty".into(),
@@ -80,7 +82,8 @@ impl IntentConfig {
                 "discord".into(),
             ],
             io: vec![
-                "systemd-resolved".into(),
+                "systemd-journal".into(),
+                "systemd-resolve".into(),
                 "dbus-broker".into(),
                 "dbus-daemon".into(),
             ],
@@ -105,16 +108,20 @@ impl IntentConfig {
 
     pub fn gaming() -> Self {
         Self {
-            audit: vec!["pipewire".into(), "wireplumber".into()],
+            audit: vec![
+                "pipewire".into(),
+                "wireplumber".into(),
+                "pipewire-pulse".into(),
+            ],
             interactive: vec![
                 "steam".into(),
                 "wine".into(),
                 "proton".into(),
                 "gamescope".into(),
-                "vulkan".into(),
-                "wayland".into(),
-                "kwin".into(),
+                "kwin_wayland".into(),
+                "kwin_x11".into(),
                 "hyprland".into(),
+                "sway".into(),
                 "gamemoded".into(),
                 "mangohud".into(),
             ],
@@ -133,6 +140,7 @@ impl IntentConfig {
                 "mysqld".into(),
                 "redis-server".into(),
                 "etcd".into(),
+                "systemd-journal".into(),
             ],
             network: vec![
                 "nginx".into(),
@@ -200,6 +208,10 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.intent_ops_mut().exit_dump_len = opts.exit_dump_len;
 
+        if opts.starvation_threshold == 0 {
+            anyhow::bail!("--starvation-threshold must be at least 1 to prevent starvation priority inversion");
+        }
+
         // Configure BPF tunables
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.debug = opts.debug;
@@ -224,24 +236,57 @@ impl<'a> Scheduler<'a> {
             }
         };
 
-        // Populate dynamic BPF intent_map
+        // Populate dynamic BPF intent_map with collision validation and error propagation
         let intent_map = &skel.maps.intent_map;
         let entries = [
-            (config.audit, 0u32),       // INTENT_AUDIT
-            (config.interactive, 1u32), // INTENT_INTERACTIVE
-            (config.io, 2u32),          // INTENT_IO
-            (config.network, 3u32),     // INTENT_NETWORK
-            (config.compute, 4u32),     // INTENT_COMPUTE
+            (config.audit, 0u32, "audit"),
+            (config.interactive, 1u32, "interactive"),
+            (config.io, 2u32, "io"),
+            (config.network, 3u32, "network"),
+            (config.compute, 4u32, "compute"),
         ];
 
-        for (names, intent_val) in entries {
+        let mut registered_rules: std::collections::HashMap<[u8; 16], (String, u32, &'static str)> =
+            std::collections::HashMap::new();
+
+        for (names, intent_val, class_name) in entries {
             for name in names {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
                 let mut key = [0u8; 16];
-                let bytes = name.as_bytes();
+                let bytes = trimmed.as_bytes();
                 let len = bytes.len().min(15);
                 key[..len].copy_from_slice(&bytes[..len]);
+
+                if let Some((prev_name, prev_val, prev_class)) = registered_rules.get(&key) {
+                    if *prev_val != intent_val {
+                        anyhow::bail!(
+                            "Intent rule collision: task '{}' (truncated key '{:?}') in class '{}' collides with previously assigned task '{}' in class '{}'",
+                            trimmed,
+                            std::str::from_utf8(&key[..len]).unwrap_or("<invalid utf8>"),
+                            class_name,
+                            prev_name,
+                            prev_class
+                        );
+                    } else {
+                        continue;
+                    }
+                }
+
+                if registered_rules.len() >= 256 {
+                    anyhow::bail!(
+                        "Too many intent rules ({}): exceeds BPF map capacity limit of 256",
+                        registered_rules.len() + 1
+                    );
+                }
+
+                registered_rules.insert(key, (trimmed.to_string(), intent_val, class_name));
                 let val_bytes = intent_val.to_ne_bytes();
-                let _ = intent_map.update(&key, &val_bytes, libbpf_rs::MapFlags::ANY);
+                intent_map
+                    .update(&key, &val_bytes, libbpf_rs::MapFlags::ANY)
+                    .map_err(|e| anyhow::anyhow!("Failed to populate intent_map for '{}': {}", trimmed, e))?;
             }
         }
 
@@ -335,5 +380,46 @@ mod tests {
         assert_eq!(intent_type_INTENT_IO, 2);
         assert_eq!(intent_type_INTENT_NETWORK, 3);
         assert_eq!(intent_type_INTENT_COMPUTE, 4);
+    }
+
+    #[test]
+    fn test_default_presets_no_collisions_and_within_capacity() {
+        for (preset_name, config) in [
+            ("desktop", IntentConfig::desktop()),
+            ("gaming", IntentConfig::gaming()),
+            ("server", IntentConfig::server()),
+        ] {
+            let mut seen: std::collections::HashMap<[u8; 16], (String, u32)> =
+                std::collections::HashMap::new();
+            let entries = [
+                (config.audit, 0u32),
+                (config.interactive, 1u32),
+                (config.io, 2u32),
+                (config.network, 3u32),
+                (config.compute, 4u32),
+            ];
+            for (names, val) in entries {
+                for name in names {
+                    let mut key = [0u8; 16];
+                    let bytes = name.trim().as_bytes();
+                    let len = bytes.len().min(15);
+                    key[..len].copy_from_slice(&bytes[..len]);
+                    if let Some((prev_name, prev_val)) = seen.get(&key) {
+                        assert_eq!(
+                            *prev_val, val,
+                            "Preset '{}' has collision between '{}' and '{}'",
+                            preset_name, prev_name, name
+                        );
+                    }
+                    seen.insert(key, (name, val));
+                }
+            }
+            assert!(
+                seen.len() <= 256,
+                "Preset '{}' exceeds 256 entries ({})",
+                preset_name,
+                seen.len()
+            );
+        }
     }
 }
