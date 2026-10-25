@@ -54,6 +54,10 @@ enum intent_type {
 #define MAX_INTENT_RULES 256
 #define TASK_COMM_LEN 16
 
+struct intent_starvation {
+	u32 counters[INTENT_COUNT];
+};
+
 struct intent_stats {
 	u64 enqueued[INTENT_COUNT];
 	u64 dispatched[INTENT_COUNT];
