@@ -1,0 +1,26 @@
+[package]
+name = "scx_reevdf"
+version = "1.1.4"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "An EEVDF sched_ext scheduler completely written in Rust, after scx_eevdf"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+libbpf-rs = "=0.27.2"
+log = "0.4"
+scx_rustsched_abi = { path = "../../../rust/scx_rustsched_abi", version = "1.1.4" }
+scx_rustsched_loader = { path = "../../../rust/scx_rustsched_loader", version = "1.1.4" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.4" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.4" }
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+scx_rustsched_build = { path = "../../../rust/scx_rustsched_build", version = "1.1.4" }
+
+# CI has no Rust BPF toolchain, and builds scx_reevdf without its BPF
+# objects.
+[package.metadata.veristat]
+disable = true
