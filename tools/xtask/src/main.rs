@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use once_cell::sync::OnceCell;
 
 mod bump_versions;
+mod install;
 mod versions;
 
 #[derive(Parser)]
@@ -48,6 +49,9 @@ enum Commands {
         )]
         min_version: Option<String>,
     },
+    /// Install scx.service, /etc/default/scx, the shipped scheduling
+    /// profiles and the scxcli polkit policy; copies files only, no binaries
+    Install(install::InstallArgs),
 }
 
 fn main() {
@@ -73,6 +77,7 @@ fn main() {
             target,
             min_version,
         } => bump_versions::bump_versions_command(target.packages, target.all, min_version),
+        Commands::Install(args) => install::install_command(args),
     };
 
     if let Err(e) = res {
@@ -81,7 +86,7 @@ fn main() {
     }
 }
 
-fn get_cargo_metadata() -> Result<&'static Metadata> {
+pub fn get_cargo_metadata() -> Result<&'static Metadata> {
     static CARGO_METADATA: OnceCell<Metadata> = OnceCell::new();
 
     CARGO_METADATA.get_or_try_init(|| {

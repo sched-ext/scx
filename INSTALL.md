@@ -157,9 +157,7 @@ No additional steps needed here other than what is mentioned in the main README.
 
 ## Scheduling profiles (scxcli and scxtui)
 
-The repository has no install step of its own for the profile tools;
-distribution packages ship them. A package must deliver these together,
-since each depends on the others:
+A package must deliver these together, since each depends on the others:
 
 - `scxcli` at `/usr/bin/scxcli`, the path the polkit policy names;
 - `services/profiles.json` as `/usr/share/scx/profiles.json`;
@@ -167,6 +165,8 @@ since each depends on the others:
   `/usr/share/polkit-1/actions/org.sched_ext.scxcli.policy`;
 - `scxtui`, with a runtime dependency on the package that ships `scxcli`
   (it exits at startup when `scxcli` is missing).
+
+By hand:
 
 ```
 cargo build --release -p scxcli -p scxtui
@@ -176,5 +176,46 @@ install -Dm644 services/profiles.json /usr/share/scx/profiles.json
 install -Dm644 tools/scxcli/org.sched_ext.scxcli.policy \
     /usr/share/polkit-1/actions/org.sched_ext.scxcli.policy
 ```
+
+Or, for the data files, `xtask install`. It puts `scx.service`,
+`/etc/default/scx`, `/usr/share/scx/profiles.json` and the polkit policy
+in place and nothing else: it installs no binaries (the package does
+that; note that `cargo install scxcli` on its own lands in
+`~/.cargo/bin`, not at the `/usr/bin/scxcli` the policy names), does
+not build, does not call `systemctl`,
+and on a live system leaves an existing `/etc/default/scx` alone. The
+paths are the ones the tools are built with and do not move; only the
+unit directory and the polkit actions directory can be set, since those
+differ between distributions. The policy is installed as shipped, after
+a check that every action in it names `/usr/bin/scxcli`.
+
+Build xtask once, then install from the built binary with
+`--source-dir`, so the install step neither compiles nor runs cargo
+(`cargo xtask …` is `cargo run`, which would build on demand, and
+without `--source-dir` xtask asks `cargo metadata --no-deps` for the
+checkout, which `sudo` may not find on its PATH):
+
+```
+cargo build --release -p xtask
+sudo target/release/xtask install --source-dir .
+```
+
+For a package build, stage into `DESTDIR` and let the package manager
+own the files:
+
+```
+# build()
+cargo build --release -p xtask -p scxcli -p scxtui
+
+# package()
+target/release/xtask install --source-dir . --destdir "$pkgdir"
+install -Dm755 target/release/scxcli "$pkgdir/usr/bin/scxcli"
+install -Dm755 target/release/scxtui "$pkgdir/usr/bin/scxtui"
+```
+
+`--unitdir` (default `/usr/lib/systemd/system`) and `--polkitdir`
+(default `/usr/share/polkit-1/actions`) set the two directories that
+vary. Directories the install creates are 0755 whatever the umask;
+directories that exist keep their mode.
 
 See [services/PROFILES.md](services/PROFILES.md) for the contract.
