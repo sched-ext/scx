@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core at 4.8.14.
+ * Flow scheduler BPF core.
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
@@ -112,7 +112,8 @@ volatile u64 nr_node_ids;
  * Creates one local queue per CPU plus one node queue per node plus
  * one machine queue plus one value ordered reject queue. Seeds per CPU
  * state plus capacity rows, then derives the node count from the seeded
- * view.
+ * view. Topology rows seed once from userspace at attach with the
+ * resume refresh in the userspace loop, so init keeps no topo reseed.
  * Fails loudly on over bound counts with no partial attach.
  *
  * Returns: 0 on success, negative errno on failure.
