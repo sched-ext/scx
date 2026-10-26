@@ -58,6 +58,11 @@ install -Dm644 tools/scxcli/org.sched_ext.scxcli.policy \
 install -Dm644 services/catalog.json /usr/share/scx/catalog.json
 ```
 
+The data files (this policy, the catalog, `scx.service` and
+`/etc/default/scx`) can also go in with `xtask install`, which copies
+them and nothing else; the binary is still installed as above. See
+[`INSTALL.md`](../../INSTALL.md).
+
 ## Scripting
 
 ```sh
