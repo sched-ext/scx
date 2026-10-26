@@ -44,7 +44,7 @@ fn cli_pointer(args: &[String]) -> String {
         "start" | "switch" => {
             "scxcli apply ID, or scxcli run SCHED [ARGS...] for a scheduler outside a profile"
         }
-        "stop" => "scxcli apply default",
+        "stop" => "scxcli stop (keeps the applied profile), or scxcli apply default",
         "restart" => {
             "scxcli apply ID (applying restarts the unit), or systemctl restart scx.service"
         }

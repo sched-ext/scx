@@ -159,6 +159,14 @@ impl ProfileBackend for ScxcliBackend {
         self.write(&["profiles", "reset"], None)
     }
 
+    fn stop(&self) -> Result<Report> {
+        self.write(&["stop"], None)
+    }
+
+    fn start(&self) -> Result<Report> {
+        self.write(&["start"], None)
+    }
+
     fn escalates(&self) -> bool {
         !self.root
     }

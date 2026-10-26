@@ -24,9 +24,16 @@ const USAGE: &str = "\
 scxcli - sched_ext scheduling profiles through scx.service
 
 USAGE:
-    scxcli list [--json]           List the profiles and the current state
+    scxcli list [--json]           List the profiles, the installed
+                                   schedulers and the current state
+    scxcli list profiles [--json]  The profiles and the current state only
+    scxcli list scheds [--json]    The installed schedulers only
     scxcli get [--json]            Show which profile is running
     scxcli apply ID                Apply a profile (root, or pkexec)
+    scxcli stop                    Stop the scheduler, keep the applied
+                                   profile for the next start (root, or pkexec)
+    scxcli start                   Start the applied profile again (root,
+                                   or pkexec)
     scxcli profiles save           Replace the profile list with the JSON
                                    on stdin (root, or pkexec)
     scxcli profiles reset          Remove the administrator's list, so the
@@ -47,14 +54,24 @@ const EXIT_PERMISSION: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    List { json: bool },
+    List { what: ListWhat, json: bool },
     Get { json: bool },
     Apply { id: String },
+    Stop,
+    Start,
     ProfilesSave,
     ProfilesReset,
     Run { sched: String, args: Vec<String> },
     Help,
     Version,
+}
+
+/// What `list` shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListWhat {
+    All,
+    Profiles,
+    Scheds,
 }
 
 /// A usage error: wrong arguments, exit code 2.
@@ -86,12 +103,28 @@ fn parse(args: &[String]) -> Result<Command> {
         }
     };
     match command.as_str() {
-        "list" => Ok(Command::List {
-            json: only_json(rest)?,
-        }),
+        "list" => {
+            let (what, rest) = match rest.split_first() {
+                Some((word, tail)) if word == "profiles" => (ListWhat::Profiles, tail),
+                Some((word, tail)) if word == "scheds" => (ListWhat::Scheds, tail),
+                _ => (ListWhat::All, rest),
+            };
+            Ok(Command::List {
+                what,
+                json: only_json(rest)?,
+            })
+        }
         "get" => Ok(Command::Get {
             json: only_json(rest)?,
         }),
+        "stop" => match rest {
+            [] => Ok(Command::Stop),
+            _ => usage("stop takes no arguments"),
+        },
+        "start" => match rest {
+            [] => Ok(Command::Start),
+            _ => usage("start takes no arguments"),
+        },
         "apply" => match rest {
             [id] => {
                 validate_id(id).map_err(|err| Usage(format!("{err:#}")))?;
@@ -151,14 +184,38 @@ fn execute(command: Command) -> Result<()> {
     match command {
         Command::Help => write!(out, "{USAGE}")?,
         Command::Version => writeln!(out, "scxcli {}", env!("CARGO_PKG_VERSION"))?,
-        Command::List { json } => {
-            let listing = scx_profiles::list()?;
-            if json {
-                writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
-            } else {
-                write!(out, "{}", render_list(&listing))?;
+        Command::List { what, json } => match what {
+            ListWhat::Scheds => {
+                let scheds = scx_profiles::installed()?;
+                if json {
+                    let value: Vec<serde_json::Value> = scheds
+                        .iter()
+                        .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
+                        .collect();
+                    writeln!(
+                        out,
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "version": scx_profiles::OUTPUT_VERSION,
+                            "schedulers": value,
+                        }))?
+                    )?;
+                } else {
+                    write!(out, "{}", render_scheds(&scheds))?;
+                }
             }
-        }
+            ListWhat::All | ListWhat::Profiles => {
+                let (listing, scheds) = scx_profiles::list_with_paths()?;
+                if json {
+                    writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
+                } else {
+                    write!(out, "{}", render_list(&listing))?;
+                    if what == ListWhat::All {
+                        write!(out, "\ninstalled schedulers:\n{}", render_scheds(&scheds))?;
+                    }
+                }
+            }
+        },
         Command::Get { json } => {
             let current = scx_profiles::current()?;
             if json {
@@ -166,6 +223,17 @@ fn execute(command: Command) -> Result<()> {
             } else {
                 write!(out, "{}", render_current(&current))?;
             }
+        }
+        Command::Stop => {
+            scx_profiles::stop()?;
+            writeln!(
+                out,
+                "scx.service stopped; the applied profile is kept for the next start"
+            )?;
+        }
+        Command::Start => {
+            let id = scx_profiles::start()?;
+            writeln!(out, "scx.service started with the applied profile {id}")?;
         }
         Command::Apply { id } => {
             let applied = scx_profiles::apply(&id)?;
@@ -257,6 +325,16 @@ fn render_current(current: &Current) -> String {
     text
 }
 
+fn render_scheds(scheds: &[(String, std::path::PathBuf)]) -> String {
+    if scheds.is_empty() {
+        return "  none in systemd's default search path\n".to_owned();
+    }
+    scheds
+        .iter()
+        .map(|(name, path)| format!("  {name:<20} {}\n", path.display()))
+        .collect()
+}
+
 fn render_list(listing: &Listing) -> String {
     let mut text = String::new();
     let running = listing.current.profile.as_deref();
@@ -307,12 +385,24 @@ mod tests {
 
     #[test]
     fn reads_and_help_parse() {
-        assert_eq!(p(&["list"]).unwrap(), Command::List { json: false });
+        let list = |what, json| Command::List { what, json };
+        assert_eq!(p(&["list"]).unwrap(), list(ListWhat::All, false));
+        assert_eq!(p(&["list", "--json"]).unwrap(), list(ListWhat::All, true));
         assert_eq!(
-            p(&["list", "--json"]).unwrap(),
-            Command::List { json: true }
+            p(&["list", "profiles"]).unwrap(),
+            list(ListWhat::Profiles, false)
         );
+        assert_eq!(
+            p(&["list", "scheds", "--json"]).unwrap(),
+            list(ListWhat::Scheds, true)
+        );
+        assert!(is_usage(p(&["list", "modes"])));
+        assert!(is_usage(p(&["list", "scheds", "x"])));
         assert_eq!(p(&["get", "--json"]).unwrap(), Command::Get { json: true });
+        assert_eq!(p(&["stop"]).unwrap(), Command::Stop);
+        assert_eq!(p(&["start"]).unwrap(), Command::Start);
+        assert!(is_usage(p(&["stop", "now"])));
+        assert!(is_usage(p(&["start", "gaming"])));
         assert_eq!(p(&["--help"]).unwrap(), Command::Help);
         assert_eq!(p(&["-V"]).unwrap(), Command::Version);
         assert!(is_usage(p(&[])));

@@ -11,9 +11,14 @@ changes what `scx.service` runs: scxtui, desktop widgets and scripts all
 go through it.
 
 ```
-scxcli list [--json]           List the profiles and the current state
+scxcli list [--json]           List the profiles, the installed schedulers and
+                               the current state
+scxcli list profiles [--json]  The profiles and the current state only
+scxcli list scheds [--json]    The installed schedulers only
 scxcli get [--json]            Show which profile is running
 scxcli apply ID                Apply a profile
+scxcli stop                    Stop the scheduler, keep the applied profile
+scxcli start                   Start the applied profile again
 scxcli profiles save           Replace the profile list with the JSON on stdin
 scxcli profiles reset          Remove the administrator's list
 scxcli run SCHED [ARGS...]     Start a scheduler with these options, outside
@@ -22,9 +27,10 @@ scxcli run SCHED [ARGS...]     Start a scheduler with these options, outside
 
 `list` and `get` work for any user. The rest need root, or polkit through
 `pkexec scxcli apply ID`; scxcli does not escalate on its own. With the
-shipped policy (`org.sched_ext.scxcli.policy`), applying a profile needs
-no password for a user at the console, and editing the list or running an
-arbitrary scheduler asks for an administrator's.
+shipped policy (`org.sched_ext.scxcli.policy`), applying a profile and
+stopping or starting the applied one need no password for a user at the
+console, and editing the list or running an arbitrary scheduler asks for
+an administrator's.
 
 The contract (file format, applied state, how the running profile is
 detected, the JSON output, exit codes) is in

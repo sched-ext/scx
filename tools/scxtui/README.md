@@ -24,9 +24,11 @@ configuration. There is no daemon and no D-Bus; the backend is
 - **Profiles view (default):** the profile list with descriptions and the
   scheduler and options behind each, the running one marked, profiles
   whose scheduler is not installed shown disabled. Enter applies the
-  selected profile; with the shipped polkit policy that asks for no
-  password.
-- **Editing the list:** `S` saves what runs now as a named profile, `x`
+  selected profile, or resumes it when it is the applied one and the
+  unit is stopped; `s` stops the unit and keeps the applied profile for
+  the next start or boot. With the shipped polkit policy none of that
+  asks for a password.
+- **Editing the list:** `w` saves what runs now as a named profile, `x`
   deletes the selected profile (after a confirmation), `J`/`K` move it,
   `D` restores the shipped list. Each edit is saved through
   `scxcli profiles save` and asks for an administrator's password.

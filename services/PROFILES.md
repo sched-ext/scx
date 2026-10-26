@@ -216,9 +216,11 @@ kernel (`/sys/kernel/sched_ext/state` and `root/ops`).
 ## scxcli
 
 ```
-scxcli list [--json]          # any user
-scxcli get [--json]           # any user
+scxcli list [profiles|scheds] [--json]   # any user
+scxcli get [--json]                      # any user
 scxcli apply ID               # root, or polkit: allow_active=yes
+scxcli stop                   # root, or polkit: allow_active=yes
+scxcli start                  # root, or polkit: allow_active=yes
 scxcli profiles save          # root, or polkit: auth_admin_keep (list on stdin)
 scxcli profiles reset         # root, or polkit: auth_admin_keep
 scxcli run SCHED [ARGS...]    # root, or polkit: auth_admin_keep
@@ -233,7 +235,33 @@ Clients that are not root run the privileged commands as
   profile file on stdin, validates it, and writes it to
   `/etc/scx/profiles.json`. `reset` removes that file.
 - `run` validates the scheduler and each option by the profile rules.
-- `list` and `get` take only `--json`.
+- `list` shows the profiles with the current state and the installed
+  schedulers; `list profiles` and `list scheds` show one or the other.
+  `list`, `list profiles` and `get` take only `--json`.
+- `stop` stops the unit and changes nothing else: the applied profile
+  stays in the file, `get` reports it as applied and not running, and
+  the next boot or `start` brings it back. It is the counterpart of
+  `start`, for a baseline measurement or a test; "no scheduler at all"
+  is `apply default`, which also removes the choice.
+- `start` starts the unit again after `stop`. Because the shipped
+  policy lets it run without a password, it starts only what `apply
+  ID` could have started without one: the file must name a profile in
+  the list by `SCX_PROFILE` (not `custom`, not `default`, not a profile
+  since deleted); `SCX_SCHEDULER` must resolve, through the same rules
+  `apply` uses, to the very executable the profile's scheduler resolves
+  to (a different file with the same basename, in another directory on
+  the search path or off it, is not the profile); `SCX_FLAGS` must be
+  the profile's options; no `SCX_*_OVERRIDE` may be in effect; and the
+  environment must have resolved. Anything else is refused, with the
+  command that does it with the right authority: `apply ID`, which
+  rewrites the file and clears overrides, or `run` as an administrator
+  for a configuration outside the profiles. A hand-written file with a
+  scheduler and no marker is refused for the same reason. `reset-failed`
+  precedes the start, as with `apply`.
+- There is no `restart`: `apply ID` restarts the unit with the profile,
+  and `systemctl restart scx.service` restarts it with the file as it
+  is. A `restart` of its own would have to choose between the running
+  process and the file, which differ after a hand edit.
 
 Exit codes: 0 success, 1 failure, 2 usage error (unknown command or
 argument, invalid id), 3 permission denied (the write or `systemctl`
@@ -284,7 +312,19 @@ not know.
   be fully resolved (a required file missing or unreadable); `next` is
   then incomplete.
 
-`scxcli list --json`:
+`scxcli list scheds --json`:
+
+```json
+{
+  "version": 1,
+  "schedulers": [
+    { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland" },
+    { "name": "scx_lavd", "path": "/usr/bin/scx_lavd" }
+  ]
+}
+```
+
+`scxcli list --json` (and `list profiles --json`, the same object):
 
 ```json
 {
@@ -328,11 +368,16 @@ by the `org.freedesktop.policykit.exec.argv1` annotation:
 | action                          | argv1      | default           |
 |---------------------------------|------------|-------------------|
 | `org.sched_ext.scxcli.apply`    | `apply`    | `allow_active=yes`|
+| `org.sched_ext.scxcli.stop`     | `stop`     | `allow_active=yes`|
+| `org.sched_ext.scxcli.start`    | `start`    | `allow_active=yes`|
 | `org.sched_ext.scxcli.profiles` | `profiles` | `auth_admin_keep` |
 | `org.sched_ext.scxcli.run`      | `run`      | `auth_admin_keep` |
 
 Choosing a profile needs no password because the caller passes only an
-id from a list that an administrator controls. Changing that list, or
+id from a list that an administrator controls. Stopping changes nothing
+about what runs as root. Starting is password-free only because it
+starts nothing but a profile from that list, exactly as applied
+(above); a file that says anything else is refused. Changing that list, or
 starting a scheduler with arbitrary options, changes what runs as root
 and needs an administrator. The policy is a separate file: a
 distribution that wants every action to need a password ships a stricter

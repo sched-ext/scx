@@ -47,6 +47,8 @@ enum PendingAction {
     Run(String, Vec<String>),
     SaveList(ProfilesFile, String),
     Reset,
+    Stop,
+    Start,
     Monitor,
 }
 
@@ -336,6 +338,8 @@ scxtop, or your distro's scx tools package)",
                 .privileged(terminal, |b| b.save(&profiles))?
                 .map(|report| format!("{what}: {report}")),
             PendingAction::Reset => self.privileged(terminal, |b| b.reset())?,
+            PendingAction::Stop => self.privileged(terminal, |b| b.stop())?,
+            PendingAction::Start => self.privileged(terminal, |b| b.start())?,
             PendingAction::Monitor => return self.run_monitor(terminal),
         };
         match outcome {
@@ -447,6 +451,7 @@ scxtop, or your distro's scx tools package)",
                 self.selected = step(self.selected, self.profiles().len(), false);
             }
             KeyCode::Enter => self.apply_selected(),
+            KeyCode::Char('s') => self.stop_running(),
             KeyCode::Char('J') => self.move_selected(true),
             KeyCode::Char('K') => self.move_selected(false),
             KeyCode::Char('x') => {
@@ -461,7 +466,7 @@ scxtop, or your distro's scx tools package)",
                     }
                 }
             }
-            KeyCode::Char('S') => self.save_running_as_profile(),
+            KeyCode::Char('w') => self.save_running_as_profile(),
             KeyCode::Char('D') => {
                 if self.listing.as_ref().is_some_and(|l| l.customized) {
                     if self.action_allowed() {
@@ -511,7 +516,8 @@ scxtop, or your distro's scx tools package)",
                     self.queue(PendingAction::Run(sched, Vec::new()));
                 }
             }
-            KeyCode::Char('S') => self.save_running_as_profile(),
+            KeyCode::Char('s') => self.stop_running(),
+            KeyCode::Char('w') => self.save_running_as_profile(),
             KeyCode::Char('R') => {
                 self.refresh();
                 if self.listing.is_some() {
@@ -625,8 +631,48 @@ kernel's default; what you start here shows as Custom everywhere",
             return;
         }
         let id = profile.id.clone();
+        // Enter on the profile that is applied but stopped resumes it
+        // with `start` rather than re-applying, when what the next start
+        // would run is exactly this profile: the file names it, the
+        // scheduler and options match, no override is in effect and the
+        // environment resolved. That mirrors scxcli's own rule for a
+        // password-free start; anything less goes through `apply`,
+        // which rewrites the file and so cannot run anything else.
+        let resume = self.listing.as_ref().is_some_and(|l| {
+            let c = &l.current;
+            c.applied.as_deref() == Some(id.as_str())
+                && !c.unit.active
+                && id != DEFAULT_ID
+                && c.config_error.is_none()
+                && c.next.as_ref().is_some_and(|next| {
+                    // `path` is the profile's scheduler as scxcli
+                    // resolved it, and apply writes exactly that into
+                    // the file, so the two are equal when the file is
+                    // the profile's; a name or another path is not.
+                    !next.overridden
+                        && profile.path.as_deref() == Some(next.sched.as_str())
+                        && next.args == profile.args
+                })
+        });
         if self.action_allowed() {
-            self.queue(PendingAction::Apply(id));
+            self.queue(if resume {
+                PendingAction::Start
+            } else {
+                PendingAction::Apply(id)
+            });
+        }
+    }
+
+    /// `s`: stop the unit and keep the applied profile, so it comes back
+    /// on the next start or boot. Not `apply default`, which forgets it.
+    fn stop_running(&mut self) {
+        let active = self.listing.as_ref().is_some_and(|l| l.current.unit.active);
+        if !active {
+            self.info("nothing is running");
+            return;
+        }
+        if self.action_allowed() {
+            self.queue(PendingAction::Stop);
         }
     }
 
@@ -801,6 +847,8 @@ mod tests {
         Run(String, Vec<String>),
         Save(Vec<String>),
         Reset,
+        Stop,
+        Start,
     }
 
     struct Stub {
@@ -816,7 +864,7 @@ mod tests {
             description: String::new(),
             action: sched.is_none().then_some(Action::Stop),
             sched: sched.map(str::to_owned),
-            path: None,
+            path: sched.filter(|_| available).map(|s| format!("/usr/bin/{s}")),
             args: args.iter().map(|s| (*s).to_owned()).collect(),
             available,
         }
@@ -847,7 +895,11 @@ mod tests {
                     sched: "scx_lavd".into(),
                     args: vec!["--performance".into()],
                 }),
-                next: None,
+                next: Some(crate::model::Next {
+                    sched: "/usr/bin/scx_lavd".into(),
+                    args: vec!["--performance".into()],
+                    overridden: false,
+                }),
                 kernel: None,
                 failure: None,
                 config_error: None,
@@ -884,6 +936,18 @@ mod tests {
         fn reset(&self) -> Result<String> {
             self.calls.borrow_mut().push(Call::Reset);
             Ok("reset".into())
+        }
+        fn stop(&self) -> Result<String> {
+            self.calls.borrow_mut().push(Call::Stop);
+            self.listing.borrow_mut().current.unit.active = false;
+            self.listing.borrow_mut().current.running = None;
+            self.listing.borrow_mut().current.profile = None;
+            Ok("stopped".into())
+        }
+        fn start(&self) -> Result<String> {
+            self.calls.borrow_mut().push(Call::Start);
+            self.listing.borrow_mut().current.unit.active = true;
+            Ok("started".into())
         }
         fn escalates(&self) -> bool {
             false
@@ -931,6 +995,8 @@ mod tests {
                 PendingAction::Run(s, a) => app.backend.run(&s, &a),
                 PendingAction::SaveList(p, _) => app.backend.save(&p),
                 PendingAction::Reset => app.backend.reset(),
+                PendingAction::Stop => app.backend.stop(),
+                PendingAction::Start => app.backend.start(),
                 PendingAction::Monitor => Ok(String::new()),
             };
             assert!(outcome.is_ok());
@@ -972,6 +1038,85 @@ mod tests {
             "second press within the window is swallowed"
         );
         assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn stop_keeps_the_profile_and_enter_on_it_resumes_instead_of_reapplying() {
+        let Harness { mut app, calls, .. } = app();
+        app.on_key(key(KeyCode::Char('s')));
+        drain(&mut app);
+        assert_eq!(*calls.borrow(), vec![Call::Stop]);
+        let current = &app.listing.as_ref().unwrap().current;
+        assert_eq!(current.applied.as_deref(), Some("gaming"));
+        assert!(!current.unit.active);
+
+        // The selection is still on gaming, which is applied but stopped.
+        app.last_action = None;
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(*calls.borrow(), vec![Call::Stop, Call::Start]);
+
+        // Stopping with nothing running is a message, not a call.
+        app.last_action = None;
+        app.listing.as_mut().unwrap().current.unit.active = false;
+        app.on_key(key(KeyCode::Char('s')));
+        assert!(app.pending_action.is_none());
+        assert!(!app.message.as_ref().unwrap().is_error);
+        assert_eq!(calls.borrow().len(), 2);
+    }
+
+    /// The marker still says gaming, but the file was edited under it:
+    /// Enter must apply, never start what the file now holds.
+    #[test]
+    fn enter_on_an_edited_applied_profile_applies_instead_of_resuming() {
+        let Harness {
+            mut app,
+            calls,
+            listing,
+            ..
+        } = app();
+        {
+            let mut l = listing.borrow_mut();
+            l.current.unit.active = false;
+            l.current.running = None;
+            l.current.profile = None;
+            l.current.next = Some(crate::model::Next {
+                sched: "/usr/bin/scx_bpfland".into(),
+                args: vec!["--performance".into()],
+                overridden: false,
+            });
+        }
+        app.refresh();
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(*calls.borrow(), vec![Call::Apply("gaming".into())]);
+
+        // Same with the right scheduler but an override in effect, and
+        // with an environment that did not resolve.
+        for (overridden, error) in [(true, None), (false, Some("x is unreadable"))] {
+            {
+                let mut l = listing.borrow_mut();
+                l.current.next = Some(crate::model::Next {
+                    sched: "/usr/bin/scx_lavd".into(),
+                    args: vec!["--performance".into()],
+                    overridden,
+                });
+                l.current.config_error = error.map(str::to_owned);
+            }
+            app.refresh();
+            app.last_action = None;
+            app.on_key(key(KeyCode::Enter));
+            drain(&mut app);
+        }
+        assert_eq!(
+            *calls.borrow(),
+            vec![
+                Call::Apply("gaming".into()),
+                Call::Apply("gaming".into()),
+                Call::Apply("gaming".into())
+            ]
+        );
+        assert!(!calls.borrow().contains(&Call::Start));
     }
 
     #[test]
@@ -1019,7 +1164,7 @@ mod tests {
     #[test]
     fn save_as_profile_appends_a_validated_id() {
         let Harness { mut app, calls, .. } = app();
-        app.on_key(key(KeyCode::Char('S')));
+        app.on_key(key(KeyCode::Char('w')));
         for c in "Mine".chars() {
             app.on_key(key(KeyCode::Char(c)));
         }

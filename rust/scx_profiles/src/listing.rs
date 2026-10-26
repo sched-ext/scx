@@ -73,23 +73,32 @@ fn entry(profile: &Profile, dirs: &[PathBuf]) -> Entry {
 
 /// The listing of the live system.
 pub fn list() -> Result<Listing> {
+    Ok(list_with_paths()?.0)
+}
+
+/// The listing together with the installed schedulers' paths, from the
+/// same scan, so a caller that shows both cannot show two different
+/// sets.
+pub fn list_with_paths() -> Result<(Listing, Vec<(String, PathBuf)>)> {
     let loaded = crate::profile::load()?;
     list_from(&loaded)
 }
 
-pub fn list_from(loaded: &Loaded) -> Result<Listing> {
+pub fn list_from(loaded: &Loaded) -> Result<(Listing, Vec<(String, PathBuf)>)> {
     let dirs = systemd::system_binary_dirs()?;
     let config = systemd::unit_info()
         .ok()
         .and_then(|info| systemd::config_path(&info).ok());
     let current = crate::state::current_with(&loaded.profiles)?;
-    Ok(Listing {
+    let installed = systemd::scan_dirs_with_paths(dirs.clone());
+    let listing = Listing {
         version: OUTPUT_VERSION,
         source: loaded.source.clone(),
         customized: crate::profile::is_customized(),
         profiles: entries(&loaded.profiles, &dirs),
-        installed: systemd::scan_dirs(dirs),
+        installed: installed.iter().map(|(name, _)| name.clone()).collect(),
         config,
         current,
-    })
+    };
+    Ok((listing, installed))
 }

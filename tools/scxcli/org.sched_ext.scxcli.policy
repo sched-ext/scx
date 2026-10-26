@@ -28,6 +28,30 @@
     <annotate key="org.freedesktop.policykit.exec.argv1">apply</annotate>
   </action>
 
+  <action id="org.sched_ext.scxcli.stop">
+    <description>Stop the sched_ext scheduler, keeping the applied profile</description>
+    <message>Authentication is required to stop the scheduler</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">stop</annotate>
+  </action>
+
+  <action id="org.sched_ext.scxcli.start">
+    <description>Start the applied sched_ext scheduling profile</description>
+    <message>Authentication is required to start the scheduler</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">start</annotate>
+  </action>
+
   <action id="org.sched_ext.scxcli.profiles">
     <description>Change the sched_ext scheduling profile list</description>
     <message>Authentication is required to change the scheduling profiles</message>

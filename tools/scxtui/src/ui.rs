@@ -467,10 +467,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Field::ConfirmDelete(_) => " y delete · any other key cancels",
         },
         (View::Profiles, None) => {
-            " ↑/↓ select · Enter apply · S save running as profile · J/K move · x delete · D restore shipped · A advanced · l logs · t monitor · R refresh · q quit"
+            " ↑/↓ select · Enter apply/resume · s stop · w save running as profile · J/K move · x delete · D restore shipped · A advanced · l logs · t monitor · R refresh · q quit"
         }
         (View::Advanced, None) => {
-            " ↑/↓ select · Enter run · a options · S save running as profile · l logs · t monitor · R refresh · A/Esc back"
+            " ↑/↓ select · Enter run · a options · s stop · w save running as profile · l logs · t monitor · R refresh · A/Esc back"
         }
         (View::Logs, None) => {
             " ↑/↓ scroll · PgUp/PgDn page · g/G top/bottom · b boot · R reload · q/Esc back"

@@ -9,7 +9,7 @@
 //! the unit need root. Both fail with errors that say so, mapped to
 //! [`crate::Error::Permission`] by the callers.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
@@ -571,7 +571,17 @@ pub fn parse_search_path(text: &str) -> Result<Vec<PathBuf>> {
 /// beyond the prefix they are restricted to a conservative character
 /// set.
 pub fn scan_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
-    let mut found = BTreeSet::new();
+    scan_dirs_with_paths(dirs)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// [`scan_dirs`] with the path each name resolves to: the first
+/// directory in order that holds it, as the shell would pick. One scan
+/// serves both the names and the paths, so the two never disagree.
+pub fn scan_dirs_with_paths(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<(String, PathBuf)> {
+    let mut found: std::collections::BTreeMap<String, PathBuf> = Default::default();
     for dir in dirs {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -582,7 +592,7 @@ pub fn scan_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
                 && !NOT_SCHEDULERS.contains(&name.as_str())
                 && is_executable_file(&entry.path())
             {
-                found.insert(name);
+                found.entry(name).or_insert_with(|| entry.path());
             }
         }
     }
@@ -954,6 +964,18 @@ UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
         fs::write(bin.join("scx_notexec"), "").unwrap();
         let dirs = vec![bin.clone()];
         assert_eq!(scan_dirs(dirs.clone()), strs(&["scx_lavd"]));
+        assert_eq!(
+            scan_dirs_with_paths(dirs.clone()),
+            vec![("scx_lavd".to_owned(), bin.join("scx_lavd"))]
+        );
+        // The first directory in order wins for a name in two of them.
+        let dup = other.join("scx_lavd");
+        fs::write(&dup, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&dup, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            scan_dirs_with_paths(vec![other.clone(), bin.clone()])[0].1,
+            dup
+        );
         assert_eq!(
             resolve_scheduler("scx_lavd", &dirs).unwrap(),
             bin.join("scx_lavd")

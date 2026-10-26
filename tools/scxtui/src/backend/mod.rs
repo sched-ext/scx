@@ -37,6 +37,12 @@ pub trait ProfileBackend {
     /// `scxcli profiles reset`.
     fn reset(&self) -> Result<Report>;
 
+    /// `scxcli stop`: the unit stops, the applied profile stays.
+    fn stop(&self) -> Result<Report>;
+
+    /// `scxcli start`: the applied profile runs again.
+    fn start(&self) -> Result<Report>;
+
     /// Whether the privileged commands go through `pkexec`, which may
     /// prompt on the terminal and so needs it handed over.
     fn escalates(&self) -> bool;

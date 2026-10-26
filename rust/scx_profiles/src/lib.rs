@@ -25,8 +25,8 @@ pub mod profile;
 pub mod state;
 pub mod systemd;
 
-pub use apply::{Applied, apply, run, stop};
-pub use listing::{Entry, Listing, list};
+pub use apply::{Applied, apply, installed, resumable, run, start, stop, stop_and_forget};
+pub use listing::{Entry, Listing, list, list_with_paths};
 pub use profile::{
     Action, DEFAULT_ID, FORMAT_VERSION, Loaded, Profile, Profiles, is_customized, load,
     load_shipped, reset, save,
