@@ -1441,6 +1441,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	struct bpf_cpumask *active, *ovrflw;
 	task_ctx *taskc_prev = NULL;
 	bool try_consume = false;
+	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *cpuc;
 	int ret;
 
@@ -1579,6 +1580,26 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		try_consume = scan_dsq_for_ovflw_ext(
 				cpdom_to_turb_dsq(cpuc->cpdom_id),
 				cpu, cpuc, active, ovrflw);
+	}
+
+	/*
+	 * Only the domain's own CPUs consume its turbulent queue, and other
+	 * domains steal from its steady queue only while one of their CPUs
+	 * dispatches. So when none of this domain's CPUs is in either set,
+	 * tasks queued in it wait for nobody. Extend the overflow set with
+	 * this CPU to drain them.
+	 *
+	 * A single domain needs no check: core compaction keeps the active
+	 * set non-empty, and all of it lies in that domain.
+	 */
+	if (!try_consume && nr_cpdoms > 1 &&
+	    (cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])) &&
+	    !READ_ONCE(cpdomc->nr_active_cpus) &&
+	    !READ_ONCE(cpdomc->nr_overflow_cpus) &&
+	    (scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id)) ||
+	     scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id)))) {
+		ovrflw_test_and_set(ovrflw, cpu);
+		try_consume = true;
 	}
 
 	bpf_rcu_read_unlock();
