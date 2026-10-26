@@ -470,7 +470,7 @@ fn join(state: &Context, cid: Cid, weight: u64) {
         Some(joined) => joined,
         None => stored,
     };
-    pack(Cid(cid.raw() as i32)).reference().fetch_add(
+    pack(Cid(cid.raw() as i32)).reference().add(
         reference
             .wrapping_sub(stored)
             .wrapping_add(join_delta(reference, sum, vtime, weight)),
@@ -509,10 +509,10 @@ fn leave_pack(state: &Context, emptied: bool) {
         let reference = pack(Cid(cid.raw() as i32)).reference().get();
         let delta = leave_delta(reference, sum, state.joined().get(), weight);
         if delta != 0 {
-            pack(Cid(cid.raw() as i32)).reference().fetch_add(delta);
+            pack(Cid(cid.raw() as i32)).reference().add(delta);
         }
     } else if emptied {
-        pack(Cid(cid.raw() as i32)).empty_generation().fetch_add(1);
+        pack(Cid(cid.raw() as i32)).empty_generation().add(1);
     }
     state.member().set(0);
 }
@@ -747,6 +747,6 @@ pub fn charge(state: &Context) {
     );
     pack(Cid(cid.raw() as i32)).remainder().set(rest);
     if advance != 0 {
-        pack(Cid(cid.raw() as i32)).reference().fetch_add(advance);
+        pack(Cid(cid.raw() as i32)).reference().add(advance);
     }
 }

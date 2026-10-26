@@ -208,8 +208,8 @@ fn rehome(ctx: TaskCtx, to: Cid) {
     ctx.vtime().set(new.clock().get().wrapping_sub(lag));
     let weight = ctx.counted().get();
     if weight != 0 {
-        old.load().fetch_add(weight.wrapping_neg());
-        new.load().fetch_add(weight);
+        old.load().add(weight.wrapping_neg());
+        new.load().add(weight);
     }
     ctx.home().set(to.raw() as u64);
 }
@@ -941,7 +941,7 @@ impl Deadline {
             rehome(ctx, task.cid());
         }
         ctx.counted().set(task.weight());
-        home.load().fetch_add(task.weight());
+        home.load().add(task.weight());
     }
 
     fn running(task: &Task) {
@@ -998,7 +998,7 @@ impl Deadline {
         ctx.vlag().set(clock.wrapping_sub(ctx.vtime().get()));
         let weight = ctx.counted().get();
         if weight != 0 {
-            home.load().fetch_add(weight.wrapping_neg());
+            home.load().add(weight.wrapping_neg());
             ctx.counted().set(0);
         }
     }
@@ -1021,7 +1021,7 @@ impl Deadline {
             return;
         };
         let clock = advance(home, time::now());
-        home.load().fetch_add(new.wrapping_sub(old));
+        home.load().add(new.wrapping_sub(old));
         ctx.counted().set(new);
         // The lag is signed, and BPF divides only unsigned: scale its
         // magnitude. The lag bound keeps it far from overflowing.
