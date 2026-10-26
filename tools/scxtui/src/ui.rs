@@ -314,7 +314,7 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
                         strip_prefix(sched).to_owned(),
                         Style::default().fg(Color::Cyan),
                     ),
-                    Span::raw("  (Enter runs it with its own defaults)"),
+                    Span::raw("  (Enter runs it with its own defaults, a with arguments you type)"),
                 ]));
             }
             lines.push(Line::from(Span::styled(
@@ -331,7 +331,8 @@ default; what starts here shows as Custom in every client",
         let (label, hint) = match &open.field {
             Field::Args => (
                 "Args: ",
-                "run the selected scheduler with these options; Esc cancels",
+                "the selected scheduler's own command-line arguments, as to `scxcli run`; \
+Enter runs it with them, Esc cancels",
             ),
             Field::SaveAs { .. } => (
                 "Profile id: ",
@@ -462,7 +463,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     let key_help = match (app.view, &app.field) {
         (_, Some(open)) => match open.field {
-            Field::Args => " type options · Enter run · Esc cancel",
+            Field::Args => " type scheduler arguments · Enter run with them · Esc cancel",
             Field::SaveAs { .. } => " type a profile id · Enter save · Esc cancel",
             Field::ConfirmDelete(_) => " y delete · any other key cancels",
         },
@@ -470,7 +471,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " ↑/↓ select · Enter apply/resume · s stop · w save running as profile · J/K move · x delete · D restore shipped · A advanced · l logs · t monitor · R refresh · q quit"
         }
         (View::Advanced, None) => {
-            " ↑/↓ select · Enter run · a options · s stop · w save running as profile · l logs · t monitor · R refresh · A/Esc back"
+            " ↑/↓ select · Enter run with defaults · a run with args · s stop · w save running as profile · l logs · t monitor · R refresh · A/Esc back"
         }
         (View::Logs, None) => {
             " ↑/↓ scroll · PgUp/PgDn page · g/G top/bottom · b boot · R reload · q/Esc back"

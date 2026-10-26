@@ -33,9 +33,10 @@ configuration. There is no daemon and no D-Bus; the backend is
   `D` restores the shipped list. Each edit is saved through
   `scxcli profiles save` and asks for an administrator's password.
 - **Advanced view (`A`):** every `scx_*` scheduler installed in systemd's
-  default search path, with free-form options (`a`). Enter starts the
-  selected scheduler through `scxcli run`, outside any profile, so every
-  client shows Custom. The view opens with a warning that a scheduler
+  default search path. Enter starts the selected scheduler with its own
+  defaults, `a` asks for its command-line arguments first; both go
+  through `scxcli run`, outside any profile, so every client shows
+  Custom. The view opens with a warning that a scheduler
   unsuited to the workload can perform worse than the kernel's default.
 - **Status panel:** what runs now (the unit's process), what the next
   start would run (the file plus any `SCX_SCHEDULER_OVERRIDE` /
