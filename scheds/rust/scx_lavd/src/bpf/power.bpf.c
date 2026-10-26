@@ -46,6 +46,16 @@ struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 /* online CPU mask for each compute domain */
 private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 
+/*
+ * Per-domain idle hints reduce cross-LLC sharing.
+ * Wakers reserve CPUs by atomically clearing their bits.
+ */
+/* idle CPUs in each compute domain */
+private(LAVD) struct bpf_cpumask cpdom_idle_cpumask[LAVD_CPDOM_MAX_NR];
+
+/* fully idle cores in each compute domain */
+private(LAVD) struct bpf_cpumask cpdom_idle_smtmask[LAVD_CPDOM_MAX_NR];
+
 
 /*
  * Performance vs. CPU order (PCO) table

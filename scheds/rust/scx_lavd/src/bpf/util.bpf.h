@@ -55,6 +55,12 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
 	return curr && rt_or_dl_task(curr);
 }
 
+static __always_inline bool is_cpu_idle_now(s32 cpu)
+{
+	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	return curr && curr->pid == 0;
+}
+
 /*
  * Two lookups, chosen by which task a program is asking about.
  *
