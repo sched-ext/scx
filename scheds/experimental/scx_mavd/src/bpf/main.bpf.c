@@ -1272,12 +1272,6 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	}
 
 	/*
-	 * Note that we don't need to calculate p->scx.dsq_vtime again
-	 * since it was already calculated and assigned to p->scx.dsq_vtime
-	 * before the task was throttled.
-	 */
-
-	/*
 	 * Validate the cached CPU choice before dispatch.
 	 *
 	 * sched_setaffinity() on a runnable SCX task runs a four-step
@@ -1339,6 +1333,15 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 
 	/*
 	 * Enqueue the task to a DSQ.
+	 *
+	 * Note that we don't need to calculate p->scx.dsq_vtime again. It is
+	 * safe to trust the value, since lavd set it before the task was put
+	 * aside: ops.enqueue() computes it with calc_when_to_run() before
+	 * checking the throttle, and the REENQ path puts the task aside with
+	 * the vtime of its last enqueue, or the one lavd_enable() set if lavd
+	 * has not enqueued it yet. While the task is put aside, nothing else
+	 * writes it: the kernel lets only the scheduler that owns the task
+	 * change its vtime, and moving the task to another cgroup keeps it.
 	 */
 	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
@@ -1937,18 +1940,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	unaccount_queued_load_pcpu(taskc);
 
 	/*
-	 * If the sched_ext core directly dispatched a task, calculating the
-	 * task's deadline and time slice was also skipped. In this case, we
-	 * set the deadline to the current logical lock.
-	 *
-	 * Note that this is necessary when the kernel does not support
-	 * SCX_OPS_ENQ_MIGRATION_DISABLED or SCX_OPS_ENQ_MIGRATION_DISABLED
-	 * is not turned on.
-	 */
-	if (p->scx.slice == SCX_SLICE_DFL)
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cur_logical_clk));
-
-	/*
 	 * Calculate the task's time slice here,
 	 * as it depends on the system load.
 	 */
@@ -2441,6 +2432,37 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 	}
 
 	taskc->svc_time_iwgt = READ_ONCE(cur_svc_time_iwgt);
+
+	/*
+	 * Overwrite the task's vtime with the current logical clock, so that
+	 * a garbage vtime cannot creep into lavd.
+	 *
+	 * A task can run before lavd enqueues it. While lavd attaches, the
+	 * kernel is in bypass mode and queues runnable tasks by itself
+	 * without calling ops.enqueue(), and a task already on a CPU is
+	 * switched over and reaches ops.running() with no enqueue at all.
+	 * Such a task still holds whatever vtime it had before.
+	 *
+	 * Before v7.2, the kernel keeps dsq_vtime when a task leaves a
+	 * scheduler, so that value comes from the previous scheduler and can
+	 * be close to U64_MAX. advance_cur_logical_clk() then moves the clock
+	 * up to it, where the clock freezes. From v7.2, the kernel resets
+	 * dsq_vtime to 0 instead. That cannot move the clock, but a task
+	 * ordered by it before lavd computes a deadline (e.g., put aside on
+	 * the cpu.max REENQ path and later inserted by enqueue_cb()) would
+	 * run ahead of every queued task.
+	 *
+	 * Note that this cannot be done in ops.init_task(): from v7.1, the
+	 * task is not yet attached to this scheduler there, and
+	 * scx_bpf_task_set_dsq_vtime() does nothing.
+	 *
+	 * This is fine for a task that is not queued by the kernel in bypass
+	 * mode. It goes through ops.enqueue() or a direct dispatch from
+	 * ops.select_cpu(), and both still overwrite its vtime with
+	 * calc_when_to_run(). A task that runs before that cannot move the
+	 * clock with this value, since the clock never goes backward.
+	 */
+	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cur_logical_clk));
 }
 
 
