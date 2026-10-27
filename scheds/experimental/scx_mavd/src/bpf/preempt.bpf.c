@@ -418,7 +418,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 		 * the currently running task on the preferred CPU is
 		 * scheduled out, just like other regular tasks.
 		 */
-		if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED)) {
+		if (is_affinitized(p, taskc)) {
 			if (sys_stat.slice_wall > duration_wall) {
 				new_slice_wall = time_delta(
 							sys_stat.slice_wall,

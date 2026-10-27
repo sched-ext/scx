@@ -252,12 +252,17 @@ void scx_cgroup_bw_kick_idle_cb(void)
 }
 
 static __always_inline
-void init_ao_masks(struct pick_ctx *ctx)
+void init_ao_masks(struct pick_ctx *ctx, struct task_struct *p)
 {
 	ctx->cpuc_cur = get_cpu_ctx();
 	ctx->temp_mask = ctx->cpuc_cur->temp_mask;
 
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
+	/*
+	 * Evaluate the affinity once per pick, so that this function and
+	 * the later can_run_on_cpu() and can_run_on_domain() calls agree.
+	 */
+	ctx->affinitized = is_affinitized(p, ctx->taskc);
+	if (!ctx->affinitized) {
 		ctx->a_mask = active_cmask;
 		ctx->o_mask = ovrflw_cmask;
 		ctx->a_empty = ctx->o_empty = false;
@@ -306,7 +311,7 @@ void repartition_masks_for_latency(struct pick_ctx *ctx)
 	 */
 	cmask_or(steady_set, active_cmask, ovrflw_cmask);
 
-	if (test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+	if (ctx->affinitized)
 		cmask_and(steady_set, steady_set, &ctx->taskc->allowed);
 
 	ctx->a_mask = steady_set;
@@ -519,7 +524,7 @@ bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 	struct scx_cmask *o_mask;
 
 	/* unpinned tasks run anywhere in root mode, on held cids in sub mode */
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+	if (!ctx->affinitized)
 		return !sub_mode || cmask_test(cpu, online_cmask);
 
 	if (!cmask_test(cpu, &ctx->taskc->allowed))
@@ -539,7 +544,7 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 	struct cpdom_ctx *cpdc;
 	struct scx_cmask *cpd_mask, *a_mask, *o_mask;
 
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+	if (!ctx->affinitized)
 		return true;
 
 	cpd_mask = get_cpdom_mask(cpdom);
@@ -988,7 +993,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrfl
 	 * If @p cannot run on either active or overflow set, extend the
 	 * overflow set, respecting the cpu preference order.
 	 */
-	init_ao_masks(ctx);
+	init_ao_masks(ctx, p);
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(&ctx->taskc->allowed, ctx->cpuc_cur);
 		if (cpu >= 0) {

@@ -1500,7 +1500,7 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 		 * no context to tell, try another task.
 		 */
 		taskc = find_task_ctx(p);
-		if (!taskc || !test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		if (!taskc || !is_affinitized(p, taskc) ||
 		    cmask_intersects(active, &taskc->allowed) ||
 		    cmask_intersects(ovrflw, &taskc->allowed)) {
 			bpf_task_release(p);
@@ -1720,7 +1720,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		taskc_prev = get_task_ctx(prev);
 		if (taskc_prev &&
-		    test_task_flag(taskc_prev, LAVD_FLAG_IS_AFFINITIZED) &&
+		    is_affinitized(prev, taskc_prev) &&
 		    cmask_test(cpu, &taskc_prev->allowed) &&
 		    !cmask_intersects(active, &taskc_prev->allowed) &&
 		    !cmask_intersects(ovrflw, &taskc_prev->allowed)) {

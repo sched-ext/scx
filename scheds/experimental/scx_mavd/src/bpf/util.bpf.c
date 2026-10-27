@@ -315,11 +315,6 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 			break;
 	}
 
-	if (is_affinitized)
-		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-
 	if (on_big)
 		set_task_flag(taskc, LAVD_FLAG_ON_BIG);
 	else
