@@ -12,11 +12,11 @@
 use anyhow::{Context, Result, bail};
 use chrono::TimeZone;
 
-use crate::backend::service::system_command;
+use crate::system::system_command;
 
 /// The unit the log view inspects: the scheduler runs as its main process,
 /// so its stdout/stderr land in the unit's journal.
-pub const UNIT: &str = crate::backend::service::UNIT;
+pub const UNIT: &str = "scx.service";
 
 /// One display line of the log view.
 pub struct LogLine {

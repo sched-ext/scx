@@ -6657,17 +6657,15 @@ dependencies = [
 
 [[package]]
 name = "scxtui"
-version = "1.1.4"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "inotify",
  "ratatui",
  "serde",
  "serde_json",
  "shell-words",
- "tempfile",
- "toml",
- "xattr",
 ]
 
 [[package]]
