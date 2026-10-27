@@ -5958,6 +5958,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_catalog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "xattr",
+]
+
+[[package]]
 name = "scx_chaos"
 version = "1.1.4"
 dependencies = [

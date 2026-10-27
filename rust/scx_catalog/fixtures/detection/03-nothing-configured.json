@@ -1,0 +1,27 @@
+{
+  "unit": "inactive",
+  "manager": [],
+  "files": {
+    "env": "# scx.service\n"
+  },
+  "cmdline": null,
+  "sysfs": {
+    "state": "disabled",
+    "ops": null
+  },
+  "expected": {
+    "version": 2,
+    "scheduler": "default",
+    "unit": {
+      "active": false,
+      "enabled": false
+    },
+    "running": null,
+    "next": null,
+    "kernel": {
+      "state": "disabled",
+      "ops": null
+    },
+    "failure": null
+  }
+}

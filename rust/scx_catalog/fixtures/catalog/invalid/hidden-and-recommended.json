@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    },
+    {
+      "id": "scx_lavd",
+      "label": "L"
+    }
+  ],
+  "hidden": [
+    "scx_lavd"
+  ]
+}

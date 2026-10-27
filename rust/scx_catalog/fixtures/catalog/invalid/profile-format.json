@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "profiles": [
+    {
+      "id": "default",
+      "label": "Default",
+      "action": "stop"
+    }
+  ]
+}

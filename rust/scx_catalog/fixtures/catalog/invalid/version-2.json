@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    }
+  ]
+}

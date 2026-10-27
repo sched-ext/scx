@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    }
+  ],
+  "hidden": [
+    "/usr/bin/scx_layered"
+  ]
+}

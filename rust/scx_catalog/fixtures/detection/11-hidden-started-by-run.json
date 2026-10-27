@@ -1,0 +1,44 @@
+{
+  "unit": "active",
+  "manager": [],
+  "files": {
+    "env": "SCX_SCHEDULER=/usr/bin/scx_layered\nSCX_FLAGS=\"-s /etc/scx/layers.json\"\n"
+  },
+  "cmdline": [
+    "/usr/bin/scx_layered",
+    "-s",
+    "/etc/scx/layers.json"
+  ],
+  "sysfs": {
+    "state": "enabled",
+    "ops": "layered"
+  },
+  "expected": {
+    "version": 2,
+    "scheduler": "scx_layered",
+    "unit": {
+      "active": true,
+      "enabled": true
+    },
+    "running": {
+      "sched": "scx_layered",
+      "args": [
+        "-s",
+        "/etc/scx/layers.json"
+      ]
+    },
+    "next": {
+      "sched": "/usr/bin/scx_layered",
+      "args": [
+        "-s",
+        "/etc/scx/layers.json"
+      ],
+      "override": false
+    },
+    "kernel": {
+      "state": "enabled",
+      "ops": "layered"
+    },
+    "failure": null
+  }
+}
