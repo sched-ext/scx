@@ -44,6 +44,22 @@ bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
 u32 get_sibling_cpu(u32 cpu);
 
+/*
+ * Check if @p is restricted to a subset of CPUs. Read the kernel's own
+ * fields rather than caching the answer, so that it is never stale.
+ *
+ * - nr_cpus_allowed covers p->cpus_mask, the configured affinity.
+ * - p->cpus_ptr points away from p->cpus_mask only while the kernel
+ *   narrows the effective mask to one CPU for a migration-disabled task.
+ * - is_migration_disabled() catches such a task before it is narrowed.
+ */
+static __always_inline bool is_affinitized(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed != nr_cpu_ids ||
+	       p->cpus_ptr != &p->cpus_mask ||
+	       is_migration_disabled(p);
+}
+
 static inline bool rt_or_dl_task(struct task_struct *p)
 {
 	return unlikely(p->prio < MAX_RT_PRIO);

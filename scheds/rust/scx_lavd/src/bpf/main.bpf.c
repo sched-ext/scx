@@ -1340,7 +1340,6 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 			    struct bpf_cpumask *ovrflw)
 {
 	struct task_struct *p;
-	task_ctx *taskc;
 	s32 new_cpu;
 
 	/*
@@ -1406,11 +1405,9 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 		 * if the task can run on either active or overflow set,
 		 * try another task.
 		 */
-		taskc = find_task_ctx(p);
-		if(taskc &&
-		(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
-		bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+		if (!is_affinitized(p) ||
+		    bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
 			bpf_task_release(p);
 			continue;
 		}
@@ -1537,7 +1534,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		taskc_prev = get_task_ctx(prev);
 		if (taskc_prev &&
-		    test_task_flag(taskc_prev, LAVD_FLAG_IS_AFFINITIZED) &&
+		    is_affinitized(prev) &&
 		    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {

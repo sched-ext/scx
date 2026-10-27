@@ -280,7 +280,12 @@ bool init_ao_masks(struct pick_ctx *ctx)
 	if (!ctx->temp_mask)
 		return false;
 
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
+	/*
+	 * Evaluate the affinity once per pick, so that this function and
+	 * the later can_run_on_cpu() and can_run_on_domain() calls agree.
+	 */
+	ctx->affinitized = is_affinitized(ctx->p);
+	if (!ctx->affinitized) {
 		ctx->a_mask = ctx->active;
 		ctx->o_mask = ctx->ovrflw;
 		ctx->a_empty = ctx->o_empty = false;
@@ -342,7 +347,7 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 	 */
 	bpf_cpumask_or(steady_set, cast_mask(ctx->active), cast_mask(ctx->ovrflw));
 
-	if (test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+	if (ctx->affinitized)
 		bpf_cpumask_and(steady_set, ctx->p->cpus_ptr, cast_mask(steady_set));
 
 	bpf_cpumask_copy(turb_set, cast_mask(steady_set));
@@ -579,7 +584,7 @@ bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 	struct bpf_cpumask *a_mask;
 	struct bpf_cpumask *o_mask;
 
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+	if (!ctx->affinitized)
 		return true;
 
 	if (!bpf_cpumask_test_cpu(cpu, ctx->p->cpus_ptr))
@@ -600,7 +605,7 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 	struct cpdom_ctx *cpdc;
 	struct bpf_cpumask *cpd_mask, *a_mask, *o_mask;
 
-	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+	if (!ctx->affinitized)
 		return true;
 
 	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
