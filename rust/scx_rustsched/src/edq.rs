@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 
-//! Eligible Deadline Queue: an intrusive AVL tree, a port of scx_eevdf's
+//! Eligible Deadline Queue: an intrusive red-black tree, a port of scx_eevdf's
 //! lib/edq.bpf.c.
 //!
 //! The tree is ordered by deadline, ties broken by insertion order, and every
@@ -41,7 +41,7 @@ const MIN_ELIGIBILITY: u64 = 5;
 const SLICE: u64 = 6;
 const MIN_SLICE: u64 = 7;
 const SEQ: u64 = 8;
-const HEIGHT: u64 = 9;
+const COLOR: u64 = 9;
 // Task words, after the node.
 const HOLD: u64 = 10;
 const MEMBER: u64 = 11;
@@ -62,9 +62,11 @@ pub const QUEUE_WORDS: u64 = 7;
 pub const QUEUE_BYTES: u64 = 64;
 const _: () = assert!(QUEUE_WORDS * 8 <= QUEUE_BYTES);
 
-/// Bound on a walk from the root to a leaf. An AVL tree of 2^40 nodes is
-/// shallower than this.
+/// Bound on a walk from the root to a leaf. A red-black tree of 2^31 nodes
+/// is no deeper than this.
 const MAX_DEPTH: u32 = 64;
+const RED: u64 = 0;
+const BLACK: u64 = 1;
 /// Spinning for a queue lock, or for holders to drop a task, is bounded by
 /// can_loop alone, as lib/edq's is. On JITs with timed may_goto, x86 and
 /// arm64 among them, that is a quarter of a second per program run, not
@@ -199,8 +201,13 @@ fn put<M: Memory + Copy>(m: M, base: u64, word: u64, value: u64) {
 }
 
 #[inline(always)]
-fn height<M: Memory + Copy>(m: M, node: u64) -> u64 {
-    if node == 0 { 0 } else { get(m, node, HEIGHT) }
+fn red<M: Memory + Copy>(m: M, node: u64) -> bool {
+    node != 0 && get(m, node, COLOR) == RED
+}
+
+#[inline(always)]
+fn opposite(side: u64) -> u64 {
+    if side == LEFT { RIGHT } else { LEFT }
 }
 
 #[inline(always)]
@@ -218,11 +225,10 @@ fn eligible(eligibility: u64, cutoff: u64) -> bool {
     !time_before(cutoff, eligibility)
 }
 
-/// Refresh the cached height and subtree minima of `node`.
+/// Refresh the cached subtree minima of `node`.
 #[inline(always)]
 fn update<M: Memory + Copy>(m: M, node: u64) {
     let (left, right) = (get(m, node, LEFT), get(m, node, RIGHT));
-    put(m, node, HEIGHT, height(m, left).max(height(m, right)) + 1);
     let mut min_eligibility = get(m, node, ELIGIBILITY);
     let mut min_slice = get(m, node, SLICE);
     for child in [left, right] {
@@ -236,11 +242,6 @@ fn update<M: Memory + Copy>(m: M, node: u64) {
     }
     put(m, node, MIN_ELIGIBILITY, min_eligibility);
     put(m, node, MIN_SLICE, min_slice);
-}
-
-#[inline(always)]
-fn balance<M: Memory + Copy>(m: M, node: u64) -> i64 {
-    height(m, get(m, node, LEFT)) as i64 - height(m, get(m, node, RIGHT)) as i64
 }
 
 #[inline(always)]
@@ -258,10 +259,11 @@ fn replace_child<M: Memory + Copy>(m: M, queue: u64, parent: u64, old: u64, new:
 }
 
 /// Rotate `node` down to the side `down`, raising its child on the other
-/// side, and return that child.
+/// side, and return that child. The child takes over the node's subtree, and
+/// with it its minima.
 #[inline(always)]
 fn rotate<M: Memory + Copy>(m: M, queue: u64, node: u64, down: u64) -> u64 {
-    let up = if down == LEFT { RIGHT } else { LEFT };
+    let up = opposite(down);
     let pivot = get(m, node, up);
     replace_child(m, queue, get(m, node, PARENT), node, pivot);
     let inner = get(m, pivot, down);
@@ -271,60 +273,152 @@ fn rotate<M: Memory + Copy>(m: M, queue: u64, node: u64, down: u64) -> u64 {
     }
     put(m, pivot, down, node);
     put(m, node, PARENT, pivot);
+    put(m, pivot, MIN_ELIGIBILITY, get(m, node, MIN_ELIGIBILITY));
+    put(m, pivot, MIN_SLICE, get(m, node, MIN_SLICE));
     update(m, node);
-    update(m, pivot);
     pivot
 }
 
-/// Recompute the cached values from `node` up to the root, rotating where
-/// the AVL balance is lost. With `may_exit` the walk stops at the first node
-/// whose cached values did not change and that was not rotated: nothing
-/// above it can change either. That holds only while every node on the path
-/// still caches its pre-change values.
+/// Recompute the cached minima from `node` up to the root. The walk stops
+/// at the first node whose minima did not change, since nothing above it
+/// can change either, unless `resume` is further up the path: then it goes
+/// on from `resume`, whose cached minima are not ones the nodes above saw.
 #[inline(never)]
-fn rebalance_from<M: Memory + Copy>(m: M, queue: u64, node: u64, may_exit: bool) -> i32 {
-    let mut node = node;
+fn propagate<M: Memory + Copy>(m: M, node: u64, resume: u64) -> i32 {
+    let (mut node, mut resume) = (node, resume);
     m.repeat(MAX_DEPTH, || {
         if node == 0 {
             return false;
         }
-        let old = (
-            get(m, node, HEIGHT),
-            get(m, node, MIN_ELIGIBILITY),
-            get(m, node, MIN_SLICE),
-        );
+        if node == resume {
+            resume = 0;
+        }
+        let old = (get(m, node, MIN_ELIGIBILITY), get(m, node, MIN_SLICE));
         update(m, node);
-        let skew = balance(m, node);
-        let mut root = node;
-        if skew > 1 {
-            let left = get(m, node, LEFT);
-            if balance(m, left) < 0 {
-                rotate(m, queue, left, LEFT);
-            }
-            root = rotate(m, queue, node, RIGHT);
-        } else if skew < -1 {
-            let right = get(m, node, RIGHT);
-            if balance(m, right) > 0 {
-                rotate(m, queue, right, RIGHT);
-            }
-            root = rotate(m, queue, node, LEFT);
+        if old == (get(m, node, MIN_ELIGIBILITY), get(m, node, MIN_SLICE)) {
+            node = resume;
+            return node != 0;
         }
-        if may_exit
-            && root == node
-            && old
-                == (
-                    get(m, node, HEIGHT),
-                    get(m, node, MIN_ELIGIBILITY),
-                    get(m, node, MIN_SLICE),
-                )
-        {
-            node = 0;
-            return false;
-        }
-        node = get(m, root, PARENT);
+        node = get(m, node, PARENT);
         true
     });
     if node == 0 { 0 } else { E2BIG }
+}
+
+/// Restore the red-black properties after linking the red leaf `node`.
+#[inline(never)]
+fn insert_fixup<M: Memory + Copy>(m: M, queue: u64, node: u64) -> i32 {
+    let mut node = node;
+    let mut result = E2BIG;
+    m.repeat(MAX_DEPTH, || {
+        let mut parent = get(m, node, PARENT);
+        if parent == 0 {
+            put(m, node, COLOR, BLACK);
+            result = 0;
+            return false;
+        }
+        if get(m, parent, COLOR) == BLACK {
+            result = 0;
+            return false;
+        }
+        // A red parent is never the root.
+        let grandparent = get(m, parent, PARENT);
+        if grandparent == 0 {
+            result = EINVAL;
+            return false;
+        }
+        let side = if parent == get(m, grandparent, LEFT) {
+            LEFT
+        } else {
+            RIGHT
+        };
+        let uncle = get(m, grandparent, opposite(side));
+        if red(m, uncle) {
+            put(m, uncle, COLOR, BLACK);
+            put(m, parent, COLOR, BLACK);
+            put(m, grandparent, COLOR, RED);
+            node = grandparent;
+            return true;
+        }
+        if node == get(m, parent, opposite(side)) {
+            rotate(m, queue, parent, side);
+            parent = node;
+        }
+        put(m, parent, COLOR, BLACK);
+        put(m, grandparent, COLOR, RED);
+        rotate(m, queue, grandparent, opposite(side));
+        result = 0;
+        false
+    });
+    result
+}
+
+/// One step of [`erase_fixup`] with the short side, `SIDE`, known at compile
+/// time, as the verifier explores far fewer states through two fixed-side
+/// copies than through one that picks the side at run time. Returns the
+/// result once the properties hold, or `None` to go on one level up.
+#[inline(always)]
+fn erase_step<M: Memory + Copy, const SIDE: u64>(
+    m: M,
+    queue: u64,
+    node: &mut u64,
+    parent: &mut u64,
+) -> Option<i32> {
+    let other = opposite(SIDE);
+    let mut sibling = get(m, *parent, other);
+    if red(m, sibling) {
+        put(m, sibling, COLOR, BLACK);
+        put(m, *parent, COLOR, RED);
+        rotate(m, queue, *parent, SIDE);
+        sibling = get(m, *parent, other);
+    }
+    if sibling == 0 {
+        return Some(EINVAL);
+    }
+    let (near, far) = (get(m, sibling, SIDE), get(m, sibling, other));
+    if !red(m, near) && !red(m, far) {
+        put(m, sibling, COLOR, RED);
+        if get(m, *parent, COLOR) == RED {
+            put(m, *parent, COLOR, BLACK);
+            return Some(0);
+        }
+        *node = *parent;
+        *parent = get(m, *node, PARENT);
+        return if *parent == 0 { Some(0) } else { None };
+    }
+    if !red(m, far) {
+        put(m, near, COLOR, BLACK);
+        put(m, sibling, COLOR, RED);
+        sibling = rotate(m, queue, sibling, other);
+    }
+    put(m, sibling, COLOR, get(m, *parent, COLOR));
+    put(m, *parent, COLOR, BLACK);
+    put(m, get(m, sibling, other), COLOR, BLACK);
+    rotate(m, queue, *parent, SIDE);
+    Some(0)
+}
+
+/// Restore the red-black properties after a black node left the child slot
+/// of `parent` that is now empty: that side is one black node short.
+#[inline(never)]
+fn erase_fixup<M: Memory + Copy>(m: M, queue: u64, parent: u64) -> i32 {
+    let (mut node, mut parent) = (0, parent);
+    let mut result = E2BIG;
+    m.repeat(MAX_DEPTH, || {
+        let step = if node == get(m, parent, LEFT) {
+            erase_step::<M, LEFT>(m, queue, &mut node, &mut parent)
+        } else {
+            erase_step::<M, RIGHT>(m, queue, &mut node, &mut parent)
+        };
+        match step {
+            Some(done) => {
+                result = done;
+                false
+            }
+            None => true,
+        }
+    });
+    result
 }
 
 /// The leftmost node under `node`, or 0 if the walk ran out.
@@ -374,34 +468,54 @@ fn remove_locked<M: Memory + Copy>(m: M, queue: u64, task: u64, dead: bool) -> i
         get(m, node, RIGHT),
         get(m, node, PARENT),
     );
-    let rebalance;
-    let mut may_exit = true;
+    let color = get(m, node, COLOR);
+    let mut rebalance = 0;
+    let (refresh, resume);
     if left == 0 || right == 0 {
-        rebalance = parent;
-        replace_child(m, queue, parent, node, if left != 0 { left } else { right });
-    } else {
-        let successor = leftmost(m, right);
-        if successor == 0 {
-            return E2BIG;
+        let child = if left != 0 { left } else { right };
+        // A lone child is red under a black node and takes its color.
+        if child != 0 {
+            put(m, child, COLOR, color);
+        } else if color == BLACK {
+            rebalance = parent;
         }
-        let old_parent = get(m, successor, PARENT);
-        if old_parent != node {
-            replace_child(m, queue, old_parent, successor, get(m, successor, RIGHT));
+        replace_child(m, queue, parent, node, child);
+        (refresh, resume) = (parent, 0);
+    } else {
+        let mut successor = right;
+        let (old_parent, child);
+        if get(m, right, LEFT) == 0 {
+            old_parent = successor;
+            child = get(m, successor, RIGHT);
+        } else {
+            successor = leftmost(m, right);
+            if successor == 0 {
+                return E2BIG;
+            }
+            old_parent = get(m, successor, PARENT);
+            child = get(m, successor, RIGHT);
+            put(m, old_parent, LEFT, child);
+            if child != 0 {
+                put(m, child, PARENT, old_parent);
+            }
             put(m, successor, RIGHT, right);
             put(m, right, PARENT, successor);
-            rebalance = old_parent;
-        } else {
-            rebalance = successor;
         }
-        replace_child(m, queue, parent, node, successor);
+        // The successor takes over the node's subtree, so the node's minima
+        // are what the nodes above have seen. The walk refreshes the path
+        // from the successor's old parent up, through its new place.
+        put(m, successor, MIN_ELIGIBILITY, get(m, node, MIN_ELIGIBILITY));
+        put(m, successor, MIN_SLICE, get(m, node, MIN_SLICE));
         put(m, successor, LEFT, left);
         put(m, left, PARENT, successor);
-        // The successor stands where the node stood, with cached values
-        // its new parent has not seen, and the nodes between its old
-        // parent and here still count it below them. The early exit
-        // compares cached values and could stop short of them.
-        update(m, successor);
-        may_exit = false;
+        replace_child(m, queue, parent, node, successor);
+        if child != 0 {
+            put(m, child, COLOR, BLACK);
+        } else if get(m, successor, COLOR) == BLACK {
+            rebalance = old_parent;
+        }
+        put(m, successor, COLOR, color);
+        (refresh, resume) = (old_parent, successor);
     }
     put(m, queue, NR, get(m, queue, NR) - 1);
     if first {
@@ -414,10 +528,13 @@ fn remove_locked<M: Memory + Copy>(m: M, queue: u64, task: u64, dead: bool) -> i
         put(m, queue, FIRST_DEADLINE, deadline);
     }
     clear_links(m, node);
-    put(m, node, HEIGHT, 1);
+    put(m, node, COLOR, RED);
     put(m, node, MIN_ELIGIBILITY, get(m, node, ELIGIBILITY));
     put(m, node, MIN_SLICE, get(m, node, SLICE));
-    let result = rebalance_from(m, queue, rebalance, may_exit);
+    let mut result = propagate(m, refresh, resume);
+    if result == 0 && rebalance != 0 {
+        result = erase_fixup(m, queue, rebalance);
+    }
     refresh_min_slice(m, queue);
     // Publish the membership last: an insertion into another queue takes
     // that queue's lock, not this one, and claims a free membership at
@@ -506,7 +623,7 @@ pub fn insert<M: Memory + Copy>(
     let seq = get(m, queue, QUEUE_SEQ);
     put(m, node, SEQ, seq);
     put(m, queue, QUEUE_SEQ, seq + 1);
-    put(m, node, HEIGHT, 1);
+    put(m, node, COLOR, RED);
 
     let mut parent = 0;
     let mut cur = get(m, queue, ROOT);
@@ -537,7 +654,10 @@ pub fn insert<M: Memory + Copy>(
         put(m, queue, FIRST_DEADLINE, deadline);
     }
     put(m, queue, NR, get(m, queue, NR) + 1);
-    let result = rebalance_from(m, queue, parent, true);
+    let mut result = propagate(m, parent, 0);
+    if result == 0 {
+        result = insert_fixup(m, queue, node);
+    }
     refresh_min_slice(m, queue);
     unlock(m, queue);
     result

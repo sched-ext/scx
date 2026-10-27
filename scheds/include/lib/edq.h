@@ -26,7 +26,7 @@ struct scx_edq_node {
 	u64 slice;
 	u64 min_slice;
 	u64 seq;
-	u32 height;
+	u32 color;
 };
 
 struct scx_edq_task {
@@ -50,7 +50,7 @@ struct scx_edq_cursor {
 typedef struct scx_edq_cursor __arena scx_edq_cursor_t;
 
 /*
- * A deadline-ordered intrusive AVL tree augmented with the minimum
+ * A deadline-ordered intrusive red-black tree augmented with the minimum
  * eligibility value and shortest slice of every subtree. The queue itself
  * can be embedded in another arena object, avoiding a per-queue allocation.
  *
