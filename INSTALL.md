@@ -154,3 +154,27 @@ $ sudo scx_rusty
 #### Setting up Dev Environment
 
 No additional steps needed here other than what is mentioned in the main README.md.
+
+## The scheduler catalog (scxcli and scxtui)
+
+The repository has no install step of its own for the catalog tools;
+distribution packages ship them. A package must deliver these together,
+since each depends on the others:
+
+- `scxcli` at `/usr/bin/scxcli`, the path the polkit policy names;
+- `services/catalog.json` as `/usr/share/scx/catalog.json`;
+- `tools/scxcli/org.sched_ext.scxcli.policy` as
+  `/usr/share/polkit-1/actions/org.sched_ext.scxcli.policy`;
+- `scxtui`, with a runtime dependency on the package that ships `scxcli`
+  (it exits at startup when `scxcli` is missing).
+
+```
+cargo build --release -p scxcli -p scxtui
+install -Dm755 target/release/scxcli /usr/bin/scxcli
+install -Dm755 target/release/scxtui /usr/bin/scxtui
+install -Dm644 services/catalog.json /usr/share/scx/catalog.json
+install -Dm644 tools/scxcli/org.sched_ext.scxcli.policy \
+    /usr/share/polkit-1/actions/org.sched_ext.scxcli.policy
+```
+
+See [services/CATALOG.md](services/CATALOG.md) for the contract.
