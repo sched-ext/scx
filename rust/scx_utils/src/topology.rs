@@ -276,6 +276,9 @@ const NUMA_RECLAIM_DISTANCE: usize = 30;
 #[derive(Debug)]
 pub struct Topology {
     pub nodes: BTreeMap<usize, Node>,
+    /// Nodes without online CPUs, such as GPU or CXL memory nodes, that
+    /// split_cpuless_nodes() moved out of `nodes`.
+    pub cpuless_nodes: BTreeMap<usize, Node>,
     /// Cpumask all CPUs in the system.
     pub span: Cpumask,
     /// True if SMT is enabled in the system, false otherwise.
@@ -348,6 +351,7 @@ impl Topology {
 
         Ok(Topology {
             nodes,
+            cpuless_nodes: BTreeMap::new(),
             span,
             smt_enabled: is_smt_active().unwrap_or(false),
             all_llcs: topo_llcs,
@@ -426,6 +430,17 @@ impl Topology {
 
         // Build topology with the specified configuration
         Self::with_virt_llcs(nr_cores_per_vllc)
+    }
+
+    /// Move nodes without online CPUs from `nodes` to `cpuless_nodes`, so
+    /// that schedulers sizing per-node state from `nodes` only see nodes
+    /// that can run tasks.
+    pub fn split_cpuless_nodes(&mut self) {
+        let (cpu_nodes, cpuless_nodes) = std::mem::take(&mut self.nodes)
+            .into_iter()
+            .partition(|(_, node)| !node.all_cpus.is_empty());
+        self.nodes = cpu_nodes;
+        self.cpuless_nodes.extend(cpuless_nodes);
     }
 
     /// Get a vec of all GPUs on the hosts.

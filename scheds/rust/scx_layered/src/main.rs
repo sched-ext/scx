@@ -2569,7 +2569,7 @@ impl<'a> Scheduler<'a> {
                 .distance
                 .iter()
                 .enumerate()
-                .filter(|&(nid, _)| nid != node_id)
+                .filter(|&(nid, _)| nid != node_id && topo.nodes.contains_key(&nid))
                 .map(|(nid, &dist)| (nid, dist))
                 .collect();
             order.sort_by_key(|&(_, dist)| dist);
@@ -2624,13 +2624,25 @@ impl<'a> Scheduler<'a> {
         let nr_layers = layer_specs.len();
         let mut disable_topology = opts.disable_topology.unwrap_or(false);
 
-        let topo = Arc::new(if disable_topology {
+        let mut topo = if disable_topology {
             Topology::with_flattened_llc_node()?
         } else if opts.topology.virt_llc.is_some() {
             Topology::with_args(&opts.topology)?
         } else {
             Topology::new()?
-        });
+        };
+
+        // Memory-only nodes, such as GPU or CXL memory nodes, never run
+        // tasks but would count against MAX_NUMA_NODES.
+        topo.split_cpuless_nodes();
+        if topo.nodes.len() > bpf_intf::consts_MAX_NUMA_NODES as usize {
+            bail!(
+                "{} NUMA nodes exceed the maximum of {}",
+                topo.nodes.len(),
+                bpf_intf::consts_MAX_NUMA_NODES
+            );
+        }
+        let topo = Arc::new(topo);
 
         /*
          * FIXME: scx_layered incorrectly assumes that node, LLC and CPU IDs
