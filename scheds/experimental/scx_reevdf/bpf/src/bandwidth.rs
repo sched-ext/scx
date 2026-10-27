@@ -673,7 +673,7 @@ pub fn unparked(state: &Context) {
     };
     state.parked_on().set(None);
     group.limit().nr_parked().add(u64::MAX);
-    BANDWIDTH.parked.fetch_add(u64::MAX);
+    BANDWIDTH.parked.add(u64::MAX);
 }
 
 /// The tasks parked for the cgroup of `group`.
@@ -709,7 +709,7 @@ pub fn park(task: &Task, state: &Context, group: Group, now: u64) -> bool {
     }
     state.parked_on().set(Some(group));
     group.limit().nr_parked().add(1);
-    BANDWIDTH.parked.fetch_add(1);
+    BANDWIDTH.parked.add(1);
     // Somebody has to come back for it if every CID goes to sleep.
     arm(now);
     true

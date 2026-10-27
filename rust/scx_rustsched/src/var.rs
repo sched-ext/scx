@@ -7,8 +7,8 @@
 //! out as `&mut`. A `Var` is read and written whole through a shared
 //! reference instead, each access one load or one store, as READ_ONCE()
 //! and WRITE_ONCE() are in C. Two CPUs that update the same `Var` race as
-//! they would there: the last store wins. `fetch_add()` is the atomic
-//! update for a counter that must not lose one.
+//! they would there: the last store wins. `add()` and `fetch_add()` are
+//! the atomic updates for a counter that must not lose one.
 //!
 //! ```ignore
 //! static VTIME_NOW: Var<u64> = Var::new(0);
@@ -85,10 +85,27 @@ impl<T: Copy + Default> Default for Var<T> {
 }
 
 impl Var<u64> {
+    /// Add `value` atomically, `fetch_add()` without the fetch.
+    #[inline(always)]
+    pub fn add(&self, value: u64) {
+        // Relaxed, with the result discarded, is the non-fetching
+        // `lock +=`, which the arm64 JIT emits as stadd rather than the
+        // fully ordered ldaddal of atomic_fetch_add.
+        unsafe {
+            atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(self.0.get(), value);
+        }
+    }
+
     /// Add `value` atomically, and return the value before.
     #[inline(always)]
     pub fn fetch_add(&self, value: u64) -> u64 {
-        unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(self.0.get(), value) }
+        // Not Relaxed: LLVM 21 to 23 lower a relaxed atomicrmw add to the
+        // non-fetching `lock +=` even when the result is used, and on BPF
+        // v3 say nothing. Its result register is `value` itself. The fix,
+        // llvm/llvm-project#210371, is first in LLVM 24. Any stronger
+        // ordering emits atomic_fetch_add, which on BPF is the same
+        // instruction whatever the ordering.
+        unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::SeqCst }>(self.0.get(), value) }
     }
 
     /// Store `new` if the value is `old`, atomically, and return what it

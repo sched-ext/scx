@@ -121,8 +121,8 @@ fn update_idle_scan(base: u32, nr: u32, util: u64, asym: bool) {
         return;
     }
     cid_idle::set_llc_budget(base as i32, scan as u32);
-    SIS_STATS.updates.fetch_add(1);
-    SIS_STATS.scanned.fetch_add(scan);
+    SIS_STATS.updates.add(1);
+    SIS_STATS.scanned.add(scan);
 }
 
 /// Run `body` for each of `nr` CIDs from `base`, until it returns false.

@@ -1487,7 +1487,8 @@ static __noinline void cake_probe_run(struct task_struct *p)
 		return;
 	wait = time_delta(now, t->place_ns);
 	if (wait > 10 * NSEC_PER_MSEC) {
-		u32 i = __atomic_fetch_add(&cake_blackbox_n, 1, __ATOMIC_RELAXED) & 3;
+		/* Not relaxed: LLVM 21 to 23 drop the fetch of a relaxed add. */
+		u32 i = __sync_fetch_and_add(&cake_blackbox_n, 1) & 3;
 		struct cake_bb_rec *b = &cake_blackbox[i];
 
 		b->wait_ns = wait; b->place_ns = t->place_ns; b->seats = t->seats;
