@@ -718,13 +718,37 @@ static void vref_charge(sched_ent_t *se)
 }
 
 /*
- * Charge the service @p has taken on @cid since it started running or was
- * last charged, to its vruntime, its pack and its cgroup's bandwidth, the
- * way update_curr() does.
+ * The runtime @p has taken since it was last charged, which the charge
+ * takes off: the growth of se.sum_exec_runtime, which update_curr_scx()
+ * brings up to date before every op that charges, ops.tick(),
+ * ops.stopping(), ops.dispatch() and the dequeue of a running task, and
+ * which is a sum of deltas each measured on one runqueue.
+ *
+ * A stamp of our own would not do. Each CPU's task clock lags its rq clock
+ * by the IRQ and steal time it has lost, so two cids' clocks are seconds
+ * apart over an uptime, and the kernel can start a task on a CPU without
+ * ops.running(), when a property change catches it while dispatch_one()
+ * has the runqueue unlocked, see dequeue_task_scx(): a stamp left on the
+ * cid it ran on before is then charged against the clock of this one.
+ */
+static u64 task_run_delta(struct task_struct *p, task_ctx_t *tctx)
+{
+	u64 runtime = p->se.sum_exec_runtime;
+	u64 delta = runtime > tctx->charged ? runtime - tctx->charged : 0;
+
+	tctx->charged = runtime;
+	return delta;
+}
+
+/*
+ * Charge the service @p has taken since it was last charged, to its
+ * vruntime, its pack and its cgroup's bandwidth, the way update_curr()
+ * does. @now is @cid's task clock, which the projections of its progress
+ * count from, see pack_vref_at().
  */
 static void charge_run(struct task_struct *p, task_ctx_t *tctx, s32 cid, u64 now)
 {
-	u64 delta = now - tctx->last_run_at;
+	u64 delta = task_run_delta(p, tctx);
 
 	task_bw_charge(tctx, cid, delta);
 	tctx->se.vruntime += calc_delta_fair(p, tctx, delta);

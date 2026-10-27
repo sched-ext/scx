@@ -13,10 +13,12 @@
 //! ```text
 //! charge         every level, from the charge -> pool empty -> throttled
 //! enqueue        no runtime on its CID? -> park: the task leaves its pack
-//!                and its group's load and waits in the cgroup's backlog,
-//!                in the order it was put there
-//! period ends    refill -> unpark from the next dispatch, a few tasks at
-//!                a time, and from a timer for when every CPU is asleep
+//!                and its group's load and waits in the cgroup's backlog
+//!                on its CID, in the order it was put there
+//! period ends    refill -> unpark from the next dispatch of each CID with
+//!                tasks waiting, a few at a time, each CID its own under
+//!                its runqueue lock, and a timer that kicks those CIDs for
+//!                when they are all asleep
 //! ```
 //!
 //! A CID runs a group's tasks only while it holds runtime, as a cfs_rq runs
@@ -33,6 +35,7 @@
 use scx_rustsched::arena::{Struct, Words};
 use scx_rustsched::cgroup::{Cgroup, CgroupArgs};
 use scx_rustsched::dsq::{self, Backlog, Edq};
+use scx_rustsched::pool;
 use scx_rustsched::sched::Cid;
 use scx_rustsched::sched::EnqFlags;
 use scx_rustsched::sched::KickFlags;
@@ -72,10 +75,9 @@ scx_rustsched::arena_struct! {
         /// Bumped when cpu.max changes, see bw_charge().
         generation: u64,
         slot: u64,
+        /// Tasks waiting in the backlogs of the group's queues.
         nr_parked: u64,
-        _unused: [u64; 4],
-        /// The backlog EDQ, on a line of its own.
-        backlog: Words<{ Backlog::WORDS as usize }>,
+        _unused: Words<11>,
     }
 }
 
@@ -283,6 +285,30 @@ fn refill(group: Group, now: u64) {
         }
     }
     unthrottle(group, now);
+    if has_parked(group) {
+        bw_distribute(group);
+    }
+}
+
+/// Pay the CIDs that have tasks of `group` waiting their debt from the pool
+/// just refilled, and tell them to let their tasks go, before the CIDs
+/// running the group's other tasks take it all again: distribute_cfs_runtime()
+/// at the period timer, which unthrottles the throttled cfs_rqs first. Each
+/// CID only lets go its own, see park(), and one that is asleep would wake to
+/// an empty pool every period.
+#[scx_rustsched::global]
+pub fn bw_distribute(group: Group) -> u64 {
+    numbers(0, cids(), |index| {
+        let cid = Cid(index as i32);
+        if let Some(queue) = group.queue(cid)
+            && queue.nr_parked().get() != 0
+            && admit(queue, group, true)
+        {
+            cid.kick(KickFlags::IDLE);
+        }
+        true
+    });
+    0
 }
 
 /// Hand `queue`'s CID, which has run out, `want` of the group's pool, and
@@ -668,18 +694,21 @@ pub fn cpuctl_set_bandwidth(cgroup: &Cgroup, period_us: u64, quota_us: u64, burs
 /// there. Whoever took the node out does this, once.
 #[inline(always)]
 pub fn unparked(state: &Context) {
-    let Some(group) = state.parked_on().get() else {
+    let Some(queue) = state.parked_in().get() else {
         return;
     };
-    state.parked_on().set(None);
-    group.limit().nr_parked().add(u64::MAX);
+    state.parked_in().set(None);
+    queue.nr_parked().add(u64::MAX);
+    if let Some(group) = queue.group().get() {
+        group.limit().nr_parked().add(u64::MAX);
+    }
     BANDWIDTH.parked.add(u64::MAX);
 }
 
-/// The tasks parked for the cgroup of `group`.
+/// The tasks parked for the cgroup of `queue` on its CID.
 #[inline(always)]
-fn backlog(group: Group) -> Backlog {
-    Backlog::at(group.limit().backlog().address())
+fn backlog(queue: Queue) -> Backlog {
+    Backlog::at(queue.backlog_words().address())
 }
 
 /// Put `task` aside until the cgroup of `group` has bandwidth again,
@@ -689,6 +718,13 @@ fn backlog(group: Group) -> Backlog {
 /// throttle lasts. A debt to its pack is forgiven. A task on its way out is
 /// not held to a limit.
 ///
+/// The backlog is the group's on `cid`, the CID the kernel has the task on,
+/// as fair.c keeps a throttled task on its own CPU's cfs_rq. Only `cid` lets
+/// it go again, see bw_unpark(): with `cid`'s runqueue locked, nothing can
+/// dequeue or enqueue the task meanwhile. A task the kernel moves to another
+/// runqueue is dequeued first, which takes it out of the backlog, so
+/// whatever waits in a CID's backlog is on that CID.
+///
 /// The backlog is in the order tasks were put in it, as fair.c unthrottles
 /// cfs_rqs in the order they throttled. A refill lets go only as many tasks
 /// as its runtime admits, and one that cannot run on its CID goes to the
@@ -697,17 +733,21 @@ fn backlog(group: Group) -> Backlog {
 /// and the same few would go first while the others waited past the
 /// watchdog.
 #[inline(always)]
-pub fn park(task: &Task, state: &Context, group: Group, now: u64) -> bool {
+pub fn park(task: &Task, state: &Context, group: Group, cid: Cid, now: u64) -> bool {
     if crate::task::exiting(task) {
         return false;
     }
+    let Some(queue) = group.queue(cid) else {
+        return false;
+    };
     pack::quiesce(state, crate::lag_request(task), now, false);
     state.set_delay([0; 4]);
     let slice = crate::task_request(task);
-    if !backlog(group).park(task, time::now(), slice) {
+    if !backlog(queue).park(task, time::now(), slice) {
         return false;
     }
-    state.parked_on().set(Some(group));
+    state.parked_in().set(Some(queue));
+    queue.nr_parked().add(1);
     group.limit().nr_parked().add(1);
     BANDWIDTH.parked.add(1);
     // Somebody has to come back for it if every CID goes to sleep.
@@ -715,12 +755,15 @@ pub fn park(task: &Task, state: &Context, group: Group, now: u64) -> bool {
     true
 }
 
-/// Let one task of `group` run again: out of the backlog and through
-/// placement and the queue of the CID the kernel has it on, as a sleeper,
-/// which is what it was. Returns whether the backlog had anything.
+/// Let one task waiting in the backlog of `queue`, a group's queue on its
+/// CID, run again: out of it and through placement and that CID's queue, as
+/// a sleeper, which is what it was. Only from that CID's own ops.dispatch(),
+/// which holds its runqueue lock: no dequeue or enqueue of the task can come
+/// between the pop and the insert, see park(). Returns whether the backlog
+/// had anything.
 #[scx_rustsched::global]
-pub fn bw_unpark_one(group: Group, now: u64) -> u64 {
-    let Some(parked) = backlog(group).pop::<Context>() else {
+pub fn bw_unpark_one(queue: Queue, now: u64) -> u64 {
+    let Some(parked) = backlog(queue).pop::<Context>() else {
         return 0;
     };
     let state = parked.slot();
@@ -737,7 +780,9 @@ pub fn bw_unpark_one(group: Group, now: u64) -> u64 {
             break 'requeue;
         }
         let cid = task.cid();
-        if !pack::valid(cid) {
+        if cid.raw() as u64 != queue.cid().get() {
+            // Parked on one CID and found on another: what park() rules out.
+            pool::count_error();
             break 'requeue;
         }
         // A group above the one it waited on can have run out since:
@@ -746,7 +791,7 @@ pub fn bw_unpark_one(group: Group, now: u64) -> u64 {
         let out = throttled(&state, cid, now, true);
         drop(parked);
         if let Some(out) = out {
-            park(task, &state, out, now);
+            park(task, &state, out, cid, now);
             return 1;
         }
         pack::place(
@@ -769,23 +814,26 @@ pub fn bw_unpark_one(group: Group, now: u64) -> u64 {
             EnqFlags::NONE,
         ) {
             crate::newidle::note_queued(cid);
-            if cid != Cid::current() {
-                cid.kick(KickFlags::IDLE);
-            }
         }
         return 1;
     }
     1
 }
 
-/// Let go of the tasks of every group with bandwidth again, a few per pass,
-/// from ops.dispatch(). One CID at a time: the walk reads blocks that a
-/// cgroup exit may be freeing, and the sweep lock keeps them alive.
+/// Let go of the tasks waiting on this CID in every group it holds runtime
+/// for again, a few per pass, from ops.dispatch(): each CID lets go only its
+/// own, see park(), and bw_distribute() pays and wakes them when the group
+/// refills. One CID at a time: the walk reads
+/// blocks that a cgroup exit may be freeing, and the sweep lock keeps them
+/// alive. A CID that misses it leaves the work to its next dispatch or to
+/// the timer, which keeps coming back while a group with bandwidth has tasks
+/// waiting, see bw_arm().
 #[scx_rustsched::global]
 pub fn bw_unpark(now: u64) -> u64 {
     if !any_parked() || !sweep_trylock() {
         return 0;
     }
+    let cid = Cid::current();
     let mut count = 0;
     numbers(0, BANDWIDTH.slots_used.get(), |index| {
         if count >= UNPARK_BATCH {
@@ -802,16 +850,18 @@ pub fn bw_unpark(now: u64) -> u64 {
             return true;
         }
         refill(group, now);
-        if group.limit().throttled().get() != 0 {
+        let Some(queue) = group.queue(cid) else {
             return true;
-        }
-        // A task let go onto a CID that cannot get runtime goes back and
-        // throttles the group: stop there rather than pop it again.
+        };
+        // This CID lets its tasks go while it holds runtime for the group,
+        // whatever the other CIDs have left of it. A task let go onto a CID
+        // that cannot get runtime goes back: stop there rather than pop it
+        // again.
         for _ in 0..UNPARK_BATCH {
             if count >= UNPARK_BATCH
-                || !has_parked(group)
-                || group.limit().throttled().get() != 0
-                || bw_unpark_one(group, now) == 0
+                || queue.nr_parked().get() == 0
+                || !may_unpark(queue, group)
+                || bw_unpark_one(queue, now) == 0
             {
                 break;
             }
@@ -868,15 +918,27 @@ fn arm(now: u64) {
     bw_arm(now);
 }
 
-/// Tell one idle CID to go through ops.dispatch(), where tasks that may run
-/// again are let go. With none idle, every CID dispatches by the end of the
-/// slice it runs.
+/// May `queue`'s CID let the tasks waiting on its group go? Always once the
+/// group has no limit any more, else while it holds runtime for it or the
+/// pool has some.
 #[inline(always)]
-fn kick_idle() {
-    numbers(0, cids(), |cid| {
-        if Cid(cid as i32).is_idle() {
-            Cid(cid as i32).kick(KickFlags::IDLE);
-            return false;
+fn may_unpark(queue: Queue, group: Group) -> bool {
+    !limited(group) || !enforced(group) || admit(queue, group, false)
+}
+
+/// Tell the CIDs that have tasks waiting on `group` and runtime for them to
+/// go through ops.dispatch(), where each lets its own go, see bw_unpark().
+/// Only the idle ones need telling: every other CID dispatches by the end of
+/// the slice it runs.
+#[inline(always)]
+fn kick_parked(group: Group) {
+    numbers(0, cids(), |index| {
+        let cid = Cid(index as i32);
+        if group
+            .queue(cid)
+            .is_some_and(|queue| queue.nr_parked().get() != 0 && may_unpark(queue, group))
+        {
+            cid.kick(KickFlags::IDLE);
         }
         true
     });
@@ -890,21 +952,15 @@ fn fire(_key: u32, timer: &Timer) {
         timer.start(TIMER_MIN_NS);
         return;
     }
-    let mut runnable = false;
     numbers(0, BANDWIDTH.slots_used.get(), |index| {
         let Some(group) = limited_group(index).filter(|&group| has_parked(group)) else {
             return true;
         };
         refill(group, now);
-        if group.limit().throttled().get() == 0 {
-            runnable = true;
-        }
+        kick_parked(group);
         true
     });
     sweep_unlock();
-    if runnable {
-        kick_idle();
-    }
     arm(now);
 }
 

@@ -464,6 +464,8 @@ pub fn pop_to_local(queue: u64, cid: Cid, reference: u64, take_head: bool) -> Pi
 /// first deadline, which can be ineligible and so errs toward not
 /// preempting. Without `eligible_scan` the head is the pick, whatever its
 /// eligibility, and nothing bounds the protection.
+// The BPF calling convention cannot return this tuple out of line.
+#[inline(always)]
 pub fn head_deadline(cid: Cid, reference: u64, eligible_scan: bool) -> (Option<u64>, u64) {
     head_deadline_at(queue(cid), reference, eligible_scan)
 }

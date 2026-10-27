@@ -768,6 +768,8 @@ pub fn pop_first<M: Memory + Copy>(m: M, queue: u64, hold: bool) -> u64 {
 /// The deadline of the first eligible task and the shortest queued slice,
 /// without removing anything. [`ENOENT`] when nothing queued is eligible,
 /// [`EBUSY`] when the queue is contended.
+// The BPF calling convention cannot return this tuple out of line.
+#[inline(always)]
 pub fn try_first_eligible_deadline<M: Memory + Copy>(
     m: M,
     queue: u64,
@@ -796,6 +798,8 @@ pub fn try_first_eligible_deadline<M: Memory + Copy>(
 /// Hold the next task in deadline order after `cursor` and advance it, so
 /// that a bounded scan can resume even after the tasks it passed have left.
 /// Returns 0 with no task at the end, [`EBUSY`] when contended.
+// The BPF calling convention cannot return this tuple out of line.
+#[inline(always)]
 pub fn try_peek_next_hold<M: Memory + Copy>(m: M, queue: u64, cursor: &mut Cursor) -> (i32, u64) {
     let result = trylock(m, queue);
     if result != 0 {
@@ -849,6 +853,8 @@ pub fn try_peek_next_hold<M: Memory + Copy>(m: M, queue: u64, cursor: &mut Curso
 
 /// The deadline, eligibility and insertion order a queued task was
 /// keyed with.
+// The BPF calling convention cannot return this tuple out of line.
+#[inline(always)]
 pub fn key<M: View + Copy>(m: M, task: u64) -> (u64, u64, u64) {
     (
         get(m, task, DEADLINE),

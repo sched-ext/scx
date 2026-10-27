@@ -174,6 +174,7 @@ struct grp_hdr;
 struct task_ctx {
 	struct sched_ent se;	/* first, EDQ pops return its address */
 	u64 last_run_at;
+	u64 charged;		/* se.sum_exec_runtime at the last charge, see task_run_delta() */
 	u64 last_stop_at;
 	struct ravg_data run_avg;	/* fraction of wall time spent running */
 	u64 util_est;		/* what the last activation used */
@@ -185,6 +186,7 @@ struct task_ctx {
 	u64 delay_w;		/* its weight without the task */
 	u64 delay_gen;		/* its @empty_gen then */
 	struct grp_hdr __arena *bw_hdr;	/* the cgroup it waits on, see cid_park() */
+	struct grp_q __arena *bw_q;	/* the backlog it waits in */
 	struct grp_q __arena *grp;	/* its cgroup's queues, NULL at the root */
 	struct grp_q __arena *gq;	/* the one it is a member of, see grp_contrib_sync() */
 	u64 gw;				/* the weight it is a member with */
@@ -541,7 +543,13 @@ static u64 cid_clock_task_owned(s32 cid, u64 now)
 	if (no_task_clock)
 		return now;
 	tnow = scx_clock_task(cid_topo(cid)->cpu);
-	cctx->clock_off = now - tnow;
+	/*
+	 * @now can be another CPU's rq clock, or older than this runqueue's
+	 * last update. Only a task clock behind it gives an offset: one ahead
+	 * of it would wrap, and cid_clock_task_at() would then hand out zero.
+	 */
+	if (tnow <= now)
+		cctx->clock_off = now - tnow;
 
 	return tnow;
 }

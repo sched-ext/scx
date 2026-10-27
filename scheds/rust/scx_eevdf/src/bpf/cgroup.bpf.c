@@ -85,12 +85,14 @@
  *                    -> the group throttles
  *   ops.enqueue()    no runtime on its cid? -> cid_park(): the task
  *                    leaves its pack and its group's load and waits in
- *                    the cgroup's own backlog, in the order it was put
- *                    there
+ *                    the cgroup's backlog on its cid, in the order it was
+ *                    put there
  *   period ends      grp_bw_refill() -> bw_unpark() from the next
- *                    ops.dispatch(), a few tasks at a time; and from one
- *                    bpf_timer for the case where every cid is asleep and
- *                    nobody would ever look
+ *                    ops.dispatch() of each cid with tasks waiting, a few
+ *                    at a time, each cid its own under its runqueue lock;
+ *                    and from one bpf_timer that kicks those cids for the
+ *                    case where they are all asleep and nobody would ever
+ *                    look
  *
  * The backlog is a queue of its own because the pick descends an AVL tree
  * by deadline and prunes on eligibility: it has no way to step over a task
@@ -718,24 +720,54 @@ arm:
 }
 
 /*
- * Tell one idle cid to go through ops.dispatch(), where the tasks that may run
- * again are let go. Nothing to do when no cid is idle: every one of them
- * dispatches by the end of the slice it is running.
+ * May the cid of @q let the tasks waiting on @hdr there go? Always once the
+ * group has no limit any more, else while the cid holds runtime for it or
+ * the pool has some.
  */
-static void bw_kick_idle(void)
+static bool bw_may_unpark(grp_q_t *q, struct grp_hdr __arena *hdr)
 {
-	u32 cursor = 0, word;
+	return !grp_bw_limited(hdr) || !grp_bw_enforced(hdr) ||
+	       grp_bw_admit(q, hdr, false);
+}
 
-	while (cursor < nr_cids && can_loop) {
-		u64 w = scx_cid_idle_scan_word(&eevdf_idle, NULL, 0,
-						     nr_cids, &cursor, &word);
+/*
+ * Tell the cids that have tasks waiting on @hdr and runtime for them to go
+ * through ops.dispatch(), where each lets its own go, see bw_unpark(). Only
+ * the idle ones need telling: every other cid dispatches by the end of the
+ * slice it is running.
+ */
+static void bw_kick_parked(struct grp_hdr __arena *hdr)
+{
+	grp_q_t *ents = grp_ents(hdr);
+	u32 cid;
 
-		if (!w)
-			continue;
-		scx_bpf_kick_cid(word * 64 + __builtin_ctzll(w),
-				 SCX_KICK_IDLE);
-		return;
+	bpf_for(cid, 0, nr_cids) {
+		if (READ_ONCE(ents[cid].nr_parked) &&
+		    bw_may_unpark(&ents[cid], hdr))
+			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 	}
+}
+
+/*
+ * Pay the cids that have tasks of @hdr waiting their debt from the pool just
+ * refilled, and tell them to let their tasks go, before the cids running the
+ * group's other tasks take it all again: distribute_cfs_runtime() at the
+ * period timer, which unthrottles the throttled cfs_rqs first. Each cid only
+ * lets go its own, see cid_park(), and one that is asleep would otherwise
+ * wake to an empty pool every period.
+ */
+static __noinline int bw_distribute(struct grp_hdr __arena *hdr)
+{
+	grp_q_t *ents = grp_ents(hdr);
+	u32 cid;
+
+	bpf_for(cid, 0, nr_cids) {
+		if (READ_ONCE(ents[cid].nr_parked) &&
+		    grp_bw_admit(&ents[cid], hdr, true))
+			scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
+	}
+
+	return 0;
 }
 
 /*
@@ -745,7 +777,6 @@ static void bw_kick_idle(void)
 static int bw_timer_fire(void *map, int *key, struct bw_timer *bt)
 {
 	u64 now = scx_bpf_now();
-	bool runnable = false;
 	u32 slot;
 
 	TOUCH_ARENA();
@@ -768,13 +799,10 @@ static int bw_timer_fire(void *map, int *key, struct bw_timer *bt)
 		if (!hdr || !READ_ONCE(hdr->nr_parked))
 			continue;
 		grp_bw_refill(hdr, now);
-		if (!READ_ONCE(hdr->throttled))
-			runnable = true;
+		bw_kick_parked(hdr);
 	}
 	WRITE_ONCE(grp_sweep_lock, 0);
 
-	if (runnable)
-		bw_kick_idle();
 	bw_timer_arm(now);
 
 	return 0;
@@ -795,6 +823,13 @@ static int bw_timer_fire(void *map, int *key, struct bw_timer *bt)
  * a subtree, and has no way to step over a task, so a task that may not run
  * has to be somewhere else.
  *
+ * The backlog is the group's on @cid, the cid the kernel has the task on, as
+ * fair.c keeps a throttled task on its own CPU's cfs_rq. Only @cid lets it go
+ * again, see bw_unpark(): with @cid's runqueue locked, nothing can dequeue or
+ * enqueue the task meanwhile. A task the kernel moves to another runqueue is
+ * dequeued first, which takes it out of the backlog, so whatever waits in a
+ * cid's backlog is on that cid.
+ *
  * The backlog is in the order tasks were put in it, as fair.c unthrottles
  * its cfs_rqs in the order they throttled. A refill lets go only as many tasks
  * as its runtime admits, and one that cannot run on its cid goes to the back,
@@ -806,6 +841,7 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 		     struct grp_hdr __arena *hdr, s32 cid)
 {
 	cid_edq_task_t *at = cid_edq_task(tctx);
+	grp_q_t *q = &grp_ents(hdr)[cid];
 	u64 parked_at;
 	int ret;
 
@@ -837,7 +873,7 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 	at->cid = cid;
 	WRITE_ONCE(at->state, CID_EDQ_PARKED);
 	parked_at = scx_bpf_now();
-	ret = scx_edq_insert(&hdr->bq, &at->common, parked_at, parked_at,
+	ret = scx_edq_insert(&q->bq, &at->common, parked_at, parked_at,
 			      at->slice);
 	if (ret) {
 		__sync_val_compare_and_swap(&at->state, CID_EDQ_PARKED,
@@ -847,6 +883,8 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 	}
 
 	tctx->bw_hdr = hdr;
+	tctx->bw_q = q;
+	__sync_fetch_and_add(&q->nr_parked, 1);
 	__sync_fetch_and_add(&hdr->nr_parked, 1);
 	__sync_fetch_and_add(&bw_nr_parked, 1);
 
@@ -857,24 +895,27 @@ static bool cid_park(struct task_struct *p, task_ctx_t *tctx,
 }
 
 /*
- * Let one task of @hdr run again: take it out of the backlog and put it
- * through placement and the queue of the cid the kernel has it on, the way a
- * task that slept through the throttle would come back. It is placed as a
- * sleeper, since that is what it was: it was out of the pack for the whole
- * period, and the lag it left with is stale by that much.
+ * Let one task waiting in @q, a group's backlog on @cid, run again: take it
+ * out and put it through placement and @cid's queue, the way a task that slept
+ * through the throttle would come back. It is placed as a sleeper, since that
+ * is what it was: it was out of the pack for the whole period, and the lag it
+ * left with is stale by that much.
+ *
+ * Only from @cid's own ops.dispatch(), which holds its runqueue lock: no
+ * dequeue or enqueue of the task can come between the pop and the insert,
+ * see cid_park().
  *
  * Returns whether the backlog had anything, not whether the task was requeued:
  * one that left in the meantime is simply gone from it.
  */
-static __noinline bool bw_unpark_one(struct grp_hdr __arena *hdr, u64 now)
+static __noinline bool bw_unpark_one(grp_q_t *q, s32 cid, u64 now)
 {
 	struct grp_hdr __arena *out;
 	struct task_struct *p;
 	cid_edq_task_t *at;
 	task_ctx_t *tctx;
-	s32 cid;
 
-	at = (cid_edq_task_t *)scx_edq_pop(&hdr->bq, true);
+	at = (cid_edq_task_t *)scx_edq_pop(&q->bq, true);
 	if (!at)
 		return false;
 
@@ -898,9 +939,11 @@ static __noinline bool bw_unpark_one(struct grp_hdr __arena *hdr, u64 now)
 	}
 	if (!is_task_queued(p))
 		goto drop;
-	cid = scx_bpf_task_cid(p);
-	if (!cid_valid(cid))
+	if (scx_bpf_task_cid(p) != cid) {
+		scx_bpf_error("cpu.max parked pid %d on cid %d, found on %d",
+			      p->pid, cid, scx_bpf_task_cid(p));
 		goto drop;
+	}
 
 	/*
 	 * The task waited on the nearest group that had run out, and a group
@@ -924,8 +967,6 @@ static __noinline bool bw_unpark_one(struct grp_hdr __arena *hdr, u64 now)
 		return true;
 	cid_queued_set(cid);
 	cid_note_queued(cid);
-	if (cid != scx_bpf_this_cid())
-		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 
 	return true;
 drop:
@@ -942,15 +983,19 @@ drop:
 #define BW_UNPARK_BATCH		4
 
 /*
- * Give back the tasks of every group that has bandwidth again.
+ * Give back the tasks waiting on this cid in every group it holds runtime for
+ * again: each cid lets go only its own, see cid_park(), and bw_distribute()
+ * pays and wakes them when the group refills.
  *
  * One cid at a time: the walk reads cgroup blocks that ops.cpuctl_exit() may
  * be freeing, and the sweep lock is what keeps a block alive across that, see
  * grp_free_defer(). Whoever does not get it goes on with its own queue and
- * leaves the work to the next dispatch or to the timer.
+ * leaves the work to the next dispatch or to the timer, which keeps coming
+ * back while a group with bandwidth has tasks waiting, see bw_timer_arm().
  */
 __noinline int bw_unpark(u64 now)
 {
+	s32 cid = scx_bpf_this_cid();
 	u32 slot, n = 0;
 
 	TOUCH_ARENA();
@@ -961,6 +1006,7 @@ __noinline int bw_unpark(u64 now)
 
 	bpf_for(slot, 0, bw_hdrs_nr) {
 		struct grp_hdr __arena *hdr;
+		grp_q_t *q;
 
 		if (n >= BW_UNPARK_BATCH)
 			break;
@@ -974,15 +1020,16 @@ __noinline int bw_unpark(u64 now)
 			continue;
 		}
 		grp_bw_refill(hdr, now);
-		if (READ_ONCE(hdr->throttled))
-			continue;
+		q = &grp_ents(hdr)[cid];
 		/*
-		 * A task let go onto a cid that cannot get runtime goes back
-		 * and throttles the group: stop there rather than pop it again.
+		 * This cid lets its tasks go while it holds runtime for the
+		 * group, whatever the other cids have left of it. A task let go
+		 * onto a cid that cannot get runtime goes back: stop there
+		 * rather than pop it again.
 		 */
-		while (READ_ONCE(hdr->nr_parked) && !READ_ONCE(hdr->throttled) &&
+		while (READ_ONCE(q->nr_parked) && bw_may_unpark(q, hdr) &&
 		       n < BW_UNPARK_BATCH && can_loop) {
-			if (!bw_unpark_one(hdr, now))
+			if (!bw_unpark_one(q, cid, now))
 				break;
 			n++;
 		}

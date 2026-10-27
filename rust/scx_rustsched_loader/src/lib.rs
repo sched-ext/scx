@@ -460,6 +460,9 @@ pub fn configuration(dump_len: u32, runtime_options: u64) -> Result<[u64; config
     values[config::DUMP_AT_NS] = member(&btf, dump, "at_ns")?.1;
     values[config::RUNNABLE_AT] = entity_offset + member(&btf, entity, "runnable_at")?.1;
     values[config::PID] = member(&btf, task, "pid")?.1;
+    let (se, se_offset) = member(&btf, task, "se")?;
+    let se = Struct::try_from(se).map_err(|_| anyhow::anyhow!("task_struct.se is not a struct"))?;
+    values[config::SUM_EXEC_RUNTIME] = se_offset + member(&btf, se, "sum_exec_runtime")?.1;
     // The enqueue flags and re-enqueue reasons that say whether
     // ops.select_cid() placed a task and why the kernel handed one back,
     // and the lazy preemption flag, 0 where the kernel has none.

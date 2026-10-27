@@ -103,6 +103,9 @@ pub const IS_BLOCKED: usize = 50;
 /// The ops flags the scheduler was loaded with: those `#[scheduler]`
 /// declares, as its user space changed them.
 pub const OPS_FLAGS: usize = 51;
+/// task_struct.se.sum_exec_runtime: the runtime the kernel has accounted
+/// to a task.
+pub const SUM_EXEC_RUNTIME: usize = 52;
 
 /// The bits of RUNTIME_OPTIONS: what a scheduler asks of the runtime's
 /// topology, idle scans and clock, rather than of its own policy.

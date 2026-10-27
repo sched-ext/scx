@@ -177,7 +177,10 @@ fn dst_whole_core(dst: Cid, newly_idle: bool) -> bool {
 /// moved. Between the threads of one core, only a kernel priority does.
 /// `whole_core` says whether the core of `dst` counts as idle, see
 /// dst_whole_core().
-#[inline(always)]
+///
+/// Verify this once, rather than exploring its branches for every source
+/// in best_source()'s loop.
+#[scx_rustsched::global]
 fn balance_type(dst: Cid, src: Cid, whole_core: bool) -> u32 {
     if dst == src || src.is_idle() {
         return NONE;

@@ -109,13 +109,18 @@ scx_rustsched::arena_struct! {
         load_avg_contrib: u64,
         nr_avg_contrib: u64,
         shares_at: u64,
-        /// cpu.max's, see bandwidth.rs.
+        /// cpu.max's, see bandwidth.rs: what the CID holds of the group's
+        /// bandwidth, and the tasks waiting on it on this CID, the backlog
+        /// on a line of its own.
         held_words: Words<2>,
-        _tail: Words<3>,
+        nr_parked: u64,
+        _tail: Words<2>,
+        backlog_words: Words<{ scx_rustsched::dsq::Backlog::WORDS as usize }>,
+        _pad: u64,
     }
 }
 
-const _: () = assert!(<Group as Struct>::SIZE == 512 && <Queue as Struct>::SIZE == 192);
+const _: () = assert!(<Group as Struct>::SIZE == 512 && <Queue as Struct>::SIZE == 256);
 
 scx_rustsched::arena_struct! {
     /// A word of a group's live bitmap.

@@ -221,6 +221,13 @@ impl Task {
         unsafe { crate::kfuncs::scx_bpf_task_running(self.as_ptr()) }
     }
 
+    /// The runtime the kernel has accounted to the task,
+    /// se.sum_exec_runtime, which update_curr_scx() advances.
+    #[inline(always)]
+    pub fn sum_exec_runtime(&self) -> u64 {
+        unsafe { self.field::<u64>(config::SUM_EXEC_RUNTIME) }
+    }
+
     /// When the task last became runnable, in jiffies.
     #[inline(always)]
     pub fn runnable_at(&self) -> u64 {

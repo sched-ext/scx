@@ -40,8 +40,8 @@ scx_rustsched::arena_struct! {
         joined: u64,
         /// The lag saved when the task last left a pack.
         lag: i64,
-        /// When the task started running or was last charged, time::now().
-        last_run_at: u64,
+        /// se.sum_exec_runtime at the last charge, see charge().
+        charged: u64,
         /// Set until a forked task's first deadline has been issued.
         initial: bool,
         /// A debt to the pack the task blocked in, see pack::quiesce(): that
@@ -76,9 +76,9 @@ scx_rustsched::arena_struct! {
         /// The weight the task last joined a pack at, its share of its cgroup
         /// hierarchy then.
         joined_weight: u64,
-        /// The cgroup whose backlog the task waits in for cpu.max, see
+        /// The cgroup queue whose backlog the task waits in for cpu.max, see
         /// bandwidth.rs.
-        parked_on: Option<Group>,
+        parked_in: Option<Queue>,
     }
 }
 
@@ -94,14 +94,14 @@ impl slots::TaskSlot for Context {
         self.member().set(0);
         self.joined().set(0);
         self.lag().set(0);
-        self.last_run_at().set(0);
+        self.charged().set(0);
         self.initial().set(false);
         self.last_stop_at().set(0);
         self.group().set(None);
         self.group_queue().set(None);
         self.group_weight().set(0);
         self.joined_weight().set(0);
-        self.parked_on().set(None);
+        self.parked_in().set(None);
         self.set_delay([0; 4]);
         self.set_request(crate::accounting::Request::default());
         self.set_run_avg(&crate::ravg::Ravg::default());

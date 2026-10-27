@@ -127,7 +127,8 @@ pub(crate) fn should_preempt(
 #[inline(always)]
 pub(crate) fn keep_charge(task: &Task, state: &taskctx::Context, cid: Cid, now: u64) {
     // keep_charge() runs from ops that hold `cid`'s runqueue lock.
-    charge(task, state, cid, clock::owned(cid, now));
+    clock::owned(cid, now);
+    charge(task, state, cid);
     prepare_request(task, state);
     let request = task_request(task);
     pack::publish(
