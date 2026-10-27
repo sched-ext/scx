@@ -292,8 +292,8 @@ print the same object):
       "available": false }
   ],
   "all": [
-    { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland", "recommended": false },
-    { "name": "scx_cosmos", "path": "/usr/bin/scx_cosmos", "recommended": true }
+    { "name": "scx_cosmos", "path": "/usr/bin/scx_cosmos", "recommended": true },
+    { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland", "recommended": false }
   ],
   "config": "/etc/default/scx",
   "current": { ... the same object as get ... }
@@ -305,7 +305,9 @@ print the same object):
   when it is installed in systemd's default search path, and `path` is
   then the resolved executable.
 - `all` is every `scx_*` scheduler found in that search path, minus the
-  hidden ones, sorted by name, with whether each is recommended.
+  hidden ones, with whether each is recommended: the recommended ones
+  first, in the catalog's order, then the rest by name. Clients show
+  the list in this order.
 - `config` is the unit's environment file, the one starting writes and
   the one clients watch; absent when the unit declares none.
 

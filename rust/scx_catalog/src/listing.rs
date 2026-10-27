@@ -76,9 +76,12 @@ pub fn picks(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Pick> {
         .collect()
 }
 
-/// The installed schedulers minus the hidden ones.
+/// The installed schedulers minus the hidden ones: the recommended ones
+/// first, in the catalog's order, then the rest by name. The full list
+/// is what a user who skipped the recommended view scrolls through, and
+/// the maintainers' picks should be the first thing in it.
 pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installed> {
-    installed
+    let mut shown: Vec<Installed> = installed
         .iter()
         .filter(|(name, _)| !catalog.is_hidden(name))
         .map(|(name, path)| Installed {
@@ -86,7 +89,19 @@ pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installe
             path: path.clone(),
             recommended: catalog.is_recommended(name),
         })
-        .collect()
+        .collect();
+    // By rank and then name, not by rank alone: the scan happens to
+    // come sorted, but the order is this function's contract, not the
+    // scan's.
+    shown.sort_by_cached_key(|s| {
+        let rank = catalog
+            .recommended
+            .iter()
+            .position(|r| r.id == s.name)
+            .unwrap_or(usize::MAX);
+        (rank, s.name.clone())
+    });
+    shown
 }
 
 /// The listing of the live system.
@@ -122,25 +137,21 @@ mod tests {
         let catalog = Catalog::parse(
             r#"{"version":1,"recommended":[
                 {"id":"default","label":"Default"},
-                {"id":"scx_cosmos","label":"Cosmos"},
-                {"id":"scx_eevdf","label":"EEVDF"}
+                {"id":"scx_eevdf","label":"EEVDF"},
+                {"id":"scx_cosmos","label":"Cosmos"}
             ],"hidden":["scx_layered"]}"#,
         )
         .unwrap();
-        let installed = vec![
-            (
-                "scx_bpfland".to_owned(),
-                PathBuf::from("/usr/bin/scx_bpfland"),
-            ),
-            (
-                "scx_cosmos".to_owned(),
-                PathBuf::from("/usr/bin/scx_cosmos"),
-            ),
-            (
-                "scx_layered".to_owned(),
-                PathBuf::from("/usr/bin/scx_layered"),
-            ),
-        ];
+        let installed: Vec<(String, PathBuf)> = [
+            "scx_bpfland",
+            "scx_cosmos",
+            "scx_eevdf",
+            "scx_layered",
+            "scx_rusty",
+        ]
+        .iter()
+        .map(|n| ((*n).to_owned(), PathBuf::from(format!("/usr/bin/{n}"))))
+        .collect();
         let picks = picks(&catalog, &installed);
         assert_eq!(
             picks
@@ -149,17 +160,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("default", true, false),
-                ("scx_cosmos", true, true),
-                ("scx_eevdf", false, false)
+                ("scx_eevdf", true, true),
+                ("scx_cosmos", true, true)
             ]
         );
-        let shown = shown(&catalog, &installed);
+        // Recommended first, in the catalog's order (eevdf before cosmos
+        // although it sorts after it), then the rest by name.
+        let ordered = shown(&catalog, &installed);
         assert_eq!(
-            shown
+            ordered
                 .iter()
                 .map(|s| (s.name.as_str(), s.recommended))
                 .collect::<Vec<_>>(),
-            vec![("scx_bpfland", false), ("scx_cosmos", true)]
+            vec![
+                ("scx_eevdf", true),
+                ("scx_cosmos", true),
+                ("scx_bpfland", false),
+                ("scx_rusty", false)
+            ]
         );
+        // The order does not depend on the scan's: reversed input, same
+        // output.
+        let reversed: Vec<(String, PathBuf)> = installed.iter().rev().cloned().collect();
+        assert_eq!(shown(&catalog, &reversed), ordered);
     }
 }
