@@ -106,6 +106,11 @@ pub const OPS_FLAGS: usize = 51;
 /// task_struct.se.sum_exec_runtime: the runtime the kernel has accounted
 /// to a task.
 pub const SUM_EXEC_RUNTIME: usize = 52;
+/// task_struct.real_parent, compared rather than followed, and
+/// task_struct.prio, the effective priority, which is below MAX_RT_PRIO
+/// for a realtime or deadline task.
+pub const REAL_PARENT: usize = 53;
+pub const PRIO: usize = 54;
 
 /// The bits of RUNTIME_OPTIONS: what a scheduler asks of the runtime's
 /// topology, idle scans and clock, rather than of its own policy.

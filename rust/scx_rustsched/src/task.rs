@@ -38,6 +38,9 @@ pub fn task_policy(task: &Task) -> u32 {
 }
 
 const PF_EXITING: u32 = 0x4;
+const PF_IO_WORKER: u32 = 0x10;
+const PF_WQ_WORKER: u32 = 0x20;
+const PF_KTHREAD: u32 = 0x0020_0000;
 
 /// Is `task` exiting?
 #[inline(always)]
@@ -226,6 +229,43 @@ impl Task {
     #[inline(always)]
     pub fn sum_exec_runtime(&self) -> u64 {
         unsafe { self.field::<u64>(config::SUM_EXEC_RUNTIME) }
+    }
+
+    /// The task's parent, task_struct.real_parent, as an identity: two
+    /// tasks with the same value were forked by the same task, or are
+    /// threads of processes that were. Only compared, never followed.
+    #[inline(always)]
+    pub fn parent_id(&self) -> u64 {
+        unsafe { self.field::<u64>(config::REAL_PARENT) }
+    }
+
+    /// The task's effective priority, task_struct.prio: below MAX_RT_PRIO
+    /// for a realtime or deadline task, including one boosted there by
+    /// priority inheritance.
+    #[inline(always)]
+    pub fn prio(&self) -> i32 {
+        unsafe { self.field::<i32>(config::PRIO) }
+    }
+
+    /// Is the task a realtime or deadline task, rt_or_dl_task()?
+    #[inline(always)]
+    pub fn rt_or_dl(&self) -> bool {
+        self.prio() < MAX_RT_PRIO as i32
+    }
+
+    /// Is the task a kernel thread, PF_KTHREAD?
+    #[inline(always)]
+    pub fn is_kthread(&self) -> bool {
+        let flags = unsafe { self.field::<u32>(config::TASK_FLAGS) };
+        flags & PF_KTHREAD != 0
+    }
+
+    /// Is the task a workqueue or io_uring worker, PF_WQ_WORKER or
+    /// PF_IO_WORKER?
+    #[inline(always)]
+    pub fn is_kworker(&self) -> bool {
+        let flags = unsafe { self.field::<u32>(config::TASK_FLAGS) };
+        flags & (PF_WQ_WORKER | PF_IO_WORKER) != 0
     }
 
     /// When the task last became runnable, in jiffies.
