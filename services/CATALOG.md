@@ -125,6 +125,20 @@ by definition, since `start` never writes any.
 
 Writing:
 
+- The environment files are read line by line, the way systemd reads
+  `KEY=VALUE` lines with `#` and `;` comments and single-line quoting.
+  Four things systemd also accepts are not parsed: a quoted value that
+  continues past the end of its line, a quoted value followed by
+  anything but blanks on its line (systemd lets a closed quote reopen,
+  and the reopened part may run on), a line continued with a trailing
+  backslash, and a bare carriage return as a line end (CRLF is fine). Inside double quotes a backslash escapes the next
+  character; inside single quotes it is an ordinary character, as in
+  systemd. Reading the inside of a multi-line value line by
+  line would take an assignment written in it for a real one, so a file
+  that uses either is reported (`config_error` names the file and the
+  line) and nothing in it is taken for an assignment; while it is, no
+  write goes through. A later file with such syntax blocks the write
+  the same way. A parser for the full syntax is a possible follow-up.
 - The write goes to the unit's first `EnvironmentFile=`. Every line
   other than the two keys is kept. The file is replaced atomically
   through a scratch file and a rename, with the original's owner, mode

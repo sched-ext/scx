@@ -236,7 +236,16 @@ pub fn unit_environment(info: &UnitInfo, manager: Vec<(String, String)>) -> Unit
     env.vars.extend(info.environment.iter().cloned());
     for (idx, file) in info.env_files.iter().enumerate() {
         match fs::read_to_string(&file.path) {
-            Ok(content) => env.vars.extend(envfile::parse(&content)),
+            Ok(content) => match envfile::unsupported(&content) {
+                // Not parsed at all: reading the inside of a multi-line
+                // value as assignments would be a guess, and `error`
+                // keeps every write away until the file is plain.
+                Some(why) => {
+                    env.error
+                        .get_or_insert_with(|| format!("{} {why}", file.path.display()));
+                }
+                None => env.vars.extend(envfile::parse(&content)),
+            },
             Err(err) if err.kind() == ErrorKind::NotFound && (file.optional || idx == 0) => {}
             Err(err) => {
                 let what = if err.kind() == ErrorKind::NotFound {
@@ -305,6 +314,13 @@ pub fn check_write_effective(info: &UnitInfo, launch: &Launch) -> Result<()> {
                 first.display()
             ),
         };
+        if let Some(why) = envfile::unsupported(&content) {
+            bail!(
+                "{} is read by the unit after {} but cannot be checked: {why}",
+                file.path.display(),
+                first.display()
+            );
+        }
         if let Some((key, _)) = envfile::parse(&content)
             .into_iter()
             .find(|(key, _)| MANAGED_KEYS.contains(&key.as_str()))
@@ -853,6 +869,24 @@ UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
         // The first file may be missing: it is the one a write creates.
         let env = unit_environment(&with_files(vec![required(&missing)]), Vec::new());
         assert_eq!(env.error, None);
+        // A file with a multi-line value is an error, and nothing in it
+        // is taken for an assignment, the line inside the value least
+        // of all.
+        let notes = dir.join("notes");
+        fs::write(
+            &notes,
+            "NOTES='Example configuration:\nSCX_SCHEDULER=scx_cosmos\n'\nSCX_SCHEDULER=/usr/bin/scx_cosmos\n",
+        )
+        .unwrap();
+        let env = unit_environment(&with_files(vec![required(&notes)]), Vec::new());
+        assert!(env.error.as_deref().unwrap().contains("multi-line"));
+        assert_eq!(env.get("SCX_SCHEDULER"), None);
+        // As a later file it blocks the write the same way.
+        let info = with_files(vec![required(&good), required(&notes)]);
+        let err =
+            check_write_effective(&info, &Launch::Set("/usr/bin/scx_lavd".into(), Vec::new()))
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be checked"), "{err:#}");
         let _ = fs::remove_dir_all(&dir);
     }
 
