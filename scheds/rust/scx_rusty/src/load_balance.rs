@@ -633,6 +633,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let active_tasks = &mut dom_ctx.active_tasks;
 
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
+        let genn = active_tasks.genn;
         active_tasks.read_idx = active_tasks.write_idx;
         active_tasks.genn += 1;
 
@@ -648,7 +649,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let taskc_p = active_tasks.tasks[(idx % MAX_TPTRS) as usize];
             let taskc = unsafe { &mut *taskc_p };
 
-            if taskc.target_dom as usize != dom.id {
+            // The entry points at the task_ctx slot, which is freed when the
+            // task exits and can be reused by a new task right away. Only
+            // trust it if the slot's current task recorded itself in the
+            // generation being read. exit_task and init_task both set
+            // dom_active_tasks_gen to -1.
+            if taskc.dom_active_tasks_gen != genn || taskc.target_dom as usize != dom.id {
                 continue;
             }
 
