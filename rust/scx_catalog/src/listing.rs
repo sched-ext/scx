@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Catalog, Loaded};
+use crate::catalog::{Catalog, Loaded, Tier};
 use crate::state::{Current, OUTPUT_VERSION};
 use crate::systemd;
 
@@ -35,6 +35,9 @@ pub struct Installed {
     pub name: String,
     pub path: PathBuf,
     pub recommended: bool,
+    /// What the catalog says about it: `stable`, `experimental`, or
+    /// `unknown` when it names the scheduler nowhere.
+    pub tier: Tier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,9 +80,11 @@ pub fn picks(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Pick> {
 }
 
 /// The installed schedulers minus the hidden ones: the recommended ones
-/// first, in the catalog's order, then the rest by name. The full list
-/// is what a user who skipped the recommended view scrolls through, and
-/// the maintainers' picks should be the first thing in it.
+/// first, in the catalog's order, then the other stable ones by name,
+/// then the experimental ones by name, then the ones the catalog does
+/// not name. The full list is what a user who skipped the recommended
+/// view scrolls through: the maintainers' picks should be the first
+/// thing in it and what nobody vouches for the last.
 pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installed> {
     let mut shown: Vec<Installed> = installed
         .iter()
@@ -88,18 +93,19 @@ pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installe
             name: name.clone(),
             path: path.clone(),
             recommended: catalog.is_recommended(name),
+            tier: catalog.tier(name),
         })
         .collect();
-    // By rank and then name, not by rank alone: the scan happens to
-    // come sorted, but the order is this function's contract, not the
-    // scan's.
+    // By tier, rank and then name, not by rank alone: the scan happens
+    // to come sorted, but the order is this function's contract, not
+    // the scan's.
     shown.sort_by_cached_key(|s| {
         let rank = catalog
             .recommended
             .iter()
             .position(|r| r.id == s.name)
             .unwrap_or(usize::MAX);
-        (rank, s.name.clone())
+        (s.tier, rank, s.name.clone())
     });
     shown
 }
@@ -139,14 +145,20 @@ mod tests {
                 {"id":"default","label":"Default"},
                 {"id":"scx_eevdf","label":"EEVDF"},
                 {"id":"scx_cosmos","label":"Cosmos"}
-            ],"hidden":["scx_layered"]}"#,
+            ],"hidden":["scx_layered","scx_nitosis"],
+            "stable":["scx_bpfland","scx_rusty","scx_layered"],
+            "experimental":["scx_flow","scx_nitosis","scx_mlfq"]}"#,
         )
         .unwrap();
         let installed: Vec<(String, PathBuf)> = [
             "scx_bpfland",
             "scx_cosmos",
             "scx_eevdf",
+            "scx_flow",
             "scx_layered",
+            "scx_mlfq",
+            "scx_nitosis",
+            "scx_rake",
             "scx_rusty",
         ]
         .iter()
@@ -165,18 +177,24 @@ mod tests {
             ]
         );
         // Recommended first, in the catalog's order (eevdf before cosmos
-        // although it sorts after it), then the rest by name.
+        // although it sorts after it), then the other stable ones by
+        // name, then the experimental ones by name, then what the catalog
+        // does not name; hidden ones (layered, and nitosis although
+        // experimental too) not at all.
         let ordered = shown(&catalog, &installed);
         assert_eq!(
             ordered
                 .iter()
-                .map(|s| (s.name.as_str(), s.recommended))
+                .map(|s| (s.name.as_str(), s.recommended, s.tier))
                 .collect::<Vec<_>>(),
             vec![
-                ("scx_eevdf", true),
-                ("scx_cosmos", true),
-                ("scx_bpfland", false),
-                ("scx_rusty", false)
+                ("scx_eevdf", true, Tier::Stable),
+                ("scx_cosmos", true, Tier::Stable),
+                ("scx_bpfland", false, Tier::Stable),
+                ("scx_rusty", false, Tier::Stable),
+                ("scx_flow", false, Tier::Experimental),
+                ("scx_mlfq", false, Tier::Experimental),
+                ("scx_rake", false, Tier::Unknown),
             ]
         );
         // The order does not depend on the scan's: reversed input, same

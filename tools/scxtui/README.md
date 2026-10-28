@@ -29,8 +29,11 @@ configuration. There is no daemon and no D-Bus; the backend is
   keeps the selection for the next start or boot. With the shipped
   polkit policy none of that asks for a password.
 - **All schedulers (`A`):** every `scx_*` scheduler installed in
-  systemd's default search path that the catalog does not hide, the
-  recommended ones marked. Enter starts the selected scheduler with its
+  systemd's default search path that the catalog does not hide: the
+  ones the catalog calls stable first, with the recommended ones
+  marked and on top, then the ones it calls experimental under a
+  divider, then anything installed that the catalog does not name, each
+  marked as such. Enter starts the selected scheduler with its
   own defaults, without a password; `a` asks for its command-line
   arguments first and goes through `scxcli run`, which asks for an
   administrator's. The view opens with a warning that a scheduler

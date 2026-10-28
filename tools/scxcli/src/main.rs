@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use scx_catalog::catalog::{DEFAULT_ID, validate_arg, validate_name, validate_sched};
-use scx_catalog::{Current, Listing};
+use scx_catalog::{Current, Listing, Tier};
 
 const USAGE: &str = "\
 scxcli - sched_ext schedulers through scx.service
@@ -317,15 +317,21 @@ fn render_all(listing: &Listing) -> String {
             ' '
         };
         text.push_str(&format!(
-            "{mark} {:<20} {:<12} {}\n",
+            "{mark} {:<20} {:<13} {:<12} {}\n",
             sched.name,
+            match sched.tier {
+                Tier::Stable => "stable",
+                Tier::Experimental => "experimental",
+                Tier::Unknown => "unknown",
+            },
             if sched.recommended { "recommended" } else { "" },
             sched.path.display()
         ));
     }
     text.push_str(&format!(
-        "\n* running; the catalog from {} hides schedulers that need a configuration of their \
-own, which `run` starts\n",
+        "\n* running; stable schedulers first, experimental ones after them, then those the \
+catalog does not name; the catalog from {} hides schedulers that need a configuration of \
+their own, which `run` starts\n",
         listing.source.display()
     ));
     text

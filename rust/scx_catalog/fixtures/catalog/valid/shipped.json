@@ -31,5 +31,34 @@
     "scx_layered",
     "scx_mitosis",
     "scx_nitosis"
+  ],
+  "stable": [
+    "scx_beerland",
+    "scx_bpfland",
+    "scx_cake",
+    "scx_cosmos",
+    "scx_eevdf",
+    "scx_flash",
+    "scx_lavd",
+    "scx_layered",
+    "scx_mitosis",
+    "scx_p2dq",
+    "scx_pandemonium",
+    "scx_rustland",
+    "scx_rusty",
+    "scx_tickless"
+  ],
+  "experimental": [
+    "scx_chaos",
+    "scx_flow",
+    "scx_forge",
+    "scx_mavd",
+    "scx_mlfq",
+    "scx_nitosis",
+    "scx_rburst",
+    "scx_reevdf",
+    "scx_rlfifo",
+    "scx_rlocal",
+    "scx_rvtime"
   ]
 }

@@ -42,15 +42,18 @@ and no D-Bus. The configuration is the unit's `EnvironmentFile`
     { "id": "scx_cosmos", "label": "Cosmos",
       "description": "Keeps the system responsive under load." }
   ],
-  "hidden": ["scx_layered", "scx_mitosis"]
+  "hidden": ["scx_layered", "scx_mitosis"],
+  "stable": ["scx_bpfland", "scx_lavd"],
+  "experimental": ["scx_flow", "scx_mlfq"]
 }
 ```
 
 Rules, checked by `scx_catalog::Catalog::validate` and so by every load:
 
 - `version` is 1.
-- `recommended` is a non-empty list. `hidden` is a list, possibly empty
-  or absent. Unknown keys are an error.
+- `recommended` is a non-empty list. `hidden`, `stable` and
+  `experimental` are lists, possibly empty or absent. Unknown keys are
+  an error.
 - A recommended entry's `id` is `default` or a scheduler name: a bare
   `scx_*` name of ASCII letters, digits, `_` and `-`, at most 64
   characters. Never a path: the executable is found in systemd's default
@@ -63,6 +66,26 @@ Rules, checked by `scx_catalog::Catalog::validate` and so by every load:
   disabled.
 - A hidden entry is a scheduler name by the same rule, unique, and not a
   recommended one.
+- A stable entry is a scheduler name by the same rule, unique. It is
+  the maintainers' word that they stand behind the scheduler; a
+  recommended scheduler counts as stable without being listed. In the
+  shipped catalog every stable entry lives under `scheds/rust`, and the
+  crate's tests hold it to that; a place there is not stability, so a
+  scheduler under `scheds/rust` that is not stable by its own account
+  is not listed here.
+- An experimental entry is a scheduler name by the same rule, unique,
+  not a recommended one and not a stable one. It may also be hidden. In
+  the shipped catalog the list holds every scheduler under
+  `scheds/experimental`, and the ones under `scheds/rust` whose own
+  README says they are not for production (`scx_chaos`, built to
+  misbehave; `scx_forge`, a base meant to be rewritten); the tests
+  record those extras by name. Every scheduler in the tree has a tier on
+  record.
+- A scheduler the catalog names nowhere is unknown to it: installed,
+  and that is all the list says. Nothing is stable by default, however
+  it got installed. The tier is information for the lists, not a
+  restriction: an experimental or unknown scheduler starts like any
+  other.
 - A recommended entry starts its scheduler with the scheduler's own
   defaults and no options. Options are the administrator's, through
   `run`.
@@ -338,8 +361,14 @@ print the same object):
       "available": false }
   ],
   "all": [
-    { "name": "scx_cosmos", "path": "/usr/bin/scx_cosmos", "recommended": true },
-    { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland", "recommended": false }
+    { "name": "scx_cosmos", "path": "/usr/bin/scx_cosmos",
+      "recommended": true, "tier": "stable" },
+    { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland",
+      "recommended": false, "tier": "stable" },
+    { "name": "scx_flow", "path": "/usr/bin/scx_flow",
+      "recommended": false, "tier": "experimental" },
+    { "name": "scx_rake", "path": "/usr/local/bin/scx_rake",
+      "recommended": false, "tier": "unknown" }
   ],
   "config": "/etc/default/scx",
   "current": { ... the same object as get ... }
@@ -351,9 +380,13 @@ print the same object):
   when it is installed in systemd's default search path, and `path` is
   then the resolved executable.
 - `all` is every `scx_*` scheduler found in that search path, minus the
-  hidden ones, with whether each is recommended: the recommended ones
-  first, in the catalog's order, then the rest by name. Clients show
-  the list in this order.
+  hidden ones, with whether each is recommended and its `tier`:
+  `stable`, `experimental`, or `unknown` when the catalog names the
+  scheduler nowhere. The recommended ones come first, in the catalog's
+  order, then the other stable ones by name, then the experimental ones
+  by name, then the unknown ones by name. Clients show the list in this
+  order and mark the tier; a client reading older output without the
+  field treats it as unknown, since that output made no statement.
 - `config` is the unit's environment file, the one starting writes and
   the one clients watch; absent when the unit declares none.
 

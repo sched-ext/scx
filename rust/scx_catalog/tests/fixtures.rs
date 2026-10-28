@@ -27,7 +27,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use scx_catalog::catalog::Catalog;
+use scx_catalog::catalog::{Catalog, Tier};
 use scx_catalog::failure::verdict;
 use scx_catalog::state::{Current, detect};
 use scx_catalog::systemd::{Process, parse_manager_environment, parse_unit_info, unit_environment};
@@ -79,6 +79,91 @@ fn the_shipped_catalog_is_the_valid_fixture() {
         text, fixture,
         "fixtures/catalog/valid/shipped.json is a copy of services/catalog.json"
     );
+}
+
+/// The `scx_*` directories directly under `scheds/<dir>` in this
+/// checkout.
+fn schedulers_under(dir: &str) -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scheds")
+        .join(dir);
+    let mut names: Vec<String> = fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("{}: {err}", root.display()))
+        .map(|e| e.unwrap())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("scx_"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The tiers in the shipped catalog follow the tree, in the direction
+/// that keeps the labels honest. Every scheduler under
+/// `scheds/experimental` is experimental; a scheduler under
+/// `scheds/rust` may be experimental too when its own README says so
+/// (scx_chaos exists to misbehave, scx_forge is a base to be rewritten
+/// by an agent), so the list may hold more, never less. Every `stable`
+/// entry and every recommended scheduler lives under `scheds/rust`, and
+/// a place there is not stability: what the catalog calls stable it
+/// says by name. Adding or moving a scheduler without updating the
+/// catalog fails here, so the file cannot drift from the layout it
+/// describes, and the extras are recorded so that each is a decision
+/// rather than an oversight.
+#[test]
+fn the_shipped_tiers_follow_the_tree() {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services/catalog.json");
+    let catalog = Catalog::parse(&fs::read_to_string(shipped).unwrap()).unwrap();
+    let rust = schedulers_under("rust");
+    let experimental = schedulers_under("experimental");
+
+    for sched in &experimental {
+        assert!(
+            catalog.experimental.contains(sched),
+            "services/catalog.json: {sched} is under scheds/experimental but not experimental"
+        );
+    }
+    let extras: Vec<&String> = catalog
+        .experimental
+        .iter()
+        .filter(|s| !experimental.contains(s))
+        .collect();
+    for sched in &extras {
+        assert!(
+            rust.contains(sched),
+            "experimental {sched} is under neither scheds/experimental nor scheds/rust"
+        );
+    }
+    assert_eq!(extras, [&"scx_chaos".to_owned(), &"scx_forge".to_owned()]);
+
+    for sched in &catalog.stable {
+        assert!(
+            rust.contains(sched),
+            "stable {sched} is not under scheds/rust"
+        );
+    }
+    for entry in &catalog.recommended {
+        if let Some(sched) = entry.sched() {
+            assert!(
+                rust.contains(&sched.to_owned()),
+                "recommended {sched} is not under scheds/rust"
+            );
+        }
+    }
+    for list in [&catalog.stable, &catalog.experimental] {
+        let mut sorted = list.clone();
+        sorted.sort();
+        assert_eq!(list, &sorted, "the tier lists are kept sorted");
+    }
+    // Every scheduler in the tree has a tier on record; nothing under
+    // scheds/rust is left for the default to decide.
+    for sched in rust.iter().chain(&experimental) {
+        assert_ne!(
+            catalog.tier(sched),
+            Tier::Unknown,
+            "{sched} is in the tree but the catalog says nothing about it"
+        );
+    }
 }
 
 /// One `detection/*.json` case.
