@@ -25,6 +25,4 @@ main.rs or \*.bpf.c files.
 - [scx_mitosis](scx_mitosis/README.md)
 - [scx_pandemonium](scx_pandemonium/README.md)
 - [scx_p2dq](scx_p2dq/README.md)
-- [scx_rustland](scx_rustland/README.md)
 - [scx_rusty](scx_rusty/README.md)
-- [scx_tickless](scx_tickless/README.md)
