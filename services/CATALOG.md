@@ -194,14 +194,18 @@ Clients that are not root run the privileged commands as
   does not hide, the recommended ones marked. `list`, `list recommended`,
   `list all` and `get` take only `--json`.
 - `start SCHED` takes exactly one argument: `default`, or a scheduler
-  from `list all` by name, started with its own defaults. A hidden
-  scheduler is refused with a pointer to `run`; a path or anything that
-  is not a scheduler name is a usage error.
+  from `list all` by name, started with its own defaults. What `list
+  all` would not show is refused by the same two tests the listing
+  applies: an `scx_*` executable that is not a scheduler (`scx_loader`,
+  `scx_forge_agent` and the other tools) is not a scheduler here either,
+  and a hidden scheduler is refused with a pointer to `run`. A path or
+  anything that is not a scheduler name is a usage error.
 - `start` alone starts the unit again after `stop`. Because the shipped
   policy lets it run without a password, it starts only what `start
   SCHED` could have written: `SCX_SCHEDULER` must resolve, through the
   same rules `start` and `run` use, to an executable in systemd's
-  default search path that the catalog does not hide; `SCX_FLAGS` must
+  default search path that `list all` would show (a scheduler, not
+  hidden); `SCX_FLAGS` must
   be empty; no `SCX_*_OVERRIDE` may be in effect; and the environment
   must have resolved. Anything else is refused, with the command that
   does it with the right authority: `start SCHED`, which rewrites the

@@ -55,12 +55,7 @@ incomplete; a start by hand may reuse the stale configuration or overrides",
         });
     }
     validate_name(id)?;
-    if catalog.is_hidden(id) {
-        bail!(
-            "{id} is not in the list: it needs a configuration of its own; start it with \
-`run {id} ARGS...` as an administrator"
-        );
-    }
+    listed(catalog, id)?;
     let path = systemd::resolve(id)?.to_string_lossy().into_owned();
     launch(&info, Launch::Set(path.clone(), Vec::new()))?;
     Ok(Started {
@@ -144,13 +139,26 @@ scheduler's own defaults",
         format!("the configured scheduler {configured} cannot be started; use `start SCHED`")
     })?;
     let name = catalog::sched_name(&path.to_string_lossy());
-    if catalog.is_hidden(&name) {
+    listed(catalog, &name).context("the configured scheduler cannot be resumed")?;
+    Ok(name)
+}
+
+/// Whether `name` is something `list all` would show, which is exactly
+/// what the password-free `start` may run: a scheduler by the scan's
+/// own test (`scx_loader` and the other `scx_*` tools are not), and not
+/// one the catalog hides. The listing applies the same two tests, so
+/// the two cannot disagree on what is startable.
+fn listed(catalog: &Catalog, name: &str) -> Result<()> {
+    if !systemd::is_scheduler_name(name) {
+        bail!("{name} is not a scheduler; `list all` does not offer it");
+    }
+    if catalog.is_hidden(name) {
         bail!(
-            "the configured scheduler {name} is not in the list: it needs a configuration of \
-its own; start it with `run` as an administrator"
+            "{name} is not in the list: it needs a configuration of its own; start it with \
+`run {name} ARGS...` as an administrator"
         );
     }
-    Ok(name)
+    Ok(())
 }
 
 /// The schedulers installed in systemd's default search path, each
@@ -166,6 +174,12 @@ pub fn installed() -> Result<Vec<(String, PathBuf)>> {
 pub fn run(sched: &str, args: &[String]) -> Result<Started> {
     for arg in args {
         validate_arg(arg)?;
+    }
+    // Hidden is fine here; a tool that is not a scheduler is not, with
+    // any authority: scx.service exists to run schedulers.
+    let name = catalog::sched_name(sched);
+    if !systemd::is_scheduler_name(&name) {
+        bail!("{name} is not a scheduler");
     }
     let path = systemd::resolve(sched)?.to_string_lossy().into_owned();
     let info = systemd::unit_info()?;
@@ -224,7 +238,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
-        for name in ["scx_cosmos", "scx_bpfland", "scx_layered"] {
+        for name in ["scx_cosmos", "scx_bpfland", "scx_layered", "scx_loader"] {
             exe(&bin, name);
         }
         let dirs = vec![bin];
@@ -236,7 +250,7 @@ mod tests {
     }
 
     fn refused(dirs: &[PathBuf], vars: &[(&str, &str)]) -> String {
-        decide(dirs, vars).unwrap_err().to_string()
+        format!("{:#}", decide(dirs, vars).unwrap_err())
     }
 
     #[test]
@@ -264,6 +278,13 @@ mod tests {
         assert!(msg.contains("options") && msg.contains("run"), "{msg}");
         let msg = refused(&dirs, &[("SCX_SCHEDULER", "scx_layered")]);
         assert!(msg.contains("not in the list"), "{msg}");
+        // Installed, executable, scx_-prefixed, and still not a
+        // scheduler: what the scan leaves out, start leaves out.
+        let msg = refused(&dirs, &[("SCX_SCHEDULER", "scx_loader")]);
+        assert!(msg.contains("not a scheduler"), "{msg}");
+        let err = listed(&catalog(), "scx_loader").unwrap_err().to_string();
+        assert!(err.contains("not a scheduler"), "{err}");
+        listed(&catalog(), "scx_bpfland").unwrap();
         let msg = refused(&dirs, &[("SCX_SCHEDULER", "scx_rusty")]);
         assert!(msg.contains("cannot be started"), "{msg}");
         // A path: off the search path, or under a tree the path policy

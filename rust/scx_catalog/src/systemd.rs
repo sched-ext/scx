@@ -31,6 +31,14 @@ const NOT_SCHEDULERS: [&str; 4] = [
     "scx_rustland_core",
 ];
 
+/// Whether a name is one the scan would list: an `scx_*` name that is
+/// not one of the known non-schedulers. The one test the listing and
+/// `start` share, so that nothing starts without a password that
+/// `list all` would not show.
+pub fn is_scheduler_name(name: &str) -> bool {
+    crate::catalog::validate_sched(name).is_ok() && !NOT_SCHEDULERS.contains(&name)
+}
+
 /// Where `systemd-path` lives. Called by absolute path with a cleared
 /// environment, so that the directory list this crate trusts cannot
 /// itself come from a directory in the caller's PATH.
@@ -588,10 +596,7 @@ pub fn scan_dirs_with_paths(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<(Str
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if crate::catalog::validate_sched(&name).is_ok()
-                && !NOT_SCHEDULERS.contains(&name.as_str())
-                && is_executable_file(&entry.path())
-            {
+            if is_scheduler_name(&name) && is_executable_file(&entry.path()) {
                 found.entry(name).or_insert_with(|| entry.path());
             }
         }
