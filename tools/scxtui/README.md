@@ -31,15 +31,16 @@ configuration. There is no daemon and no D-Bus; the backend is
 - **All schedulers (`A`):** every `scx_*` scheduler installed in
   systemd's default search path that the catalog does not hide: the
   ones the catalog calls stable first, with the recommended ones
-  marked and on top, then the ones it calls experimental under a
-  divider, then anything installed that the catalog does not name, each
-  marked as such. Enter starts the selected scheduler with its
+  marked and on top, then the ones it calls experimental, then anything
+  installed that the catalog does not name, each group under its own
+  divider. Enter starts the selected scheduler with its
   own defaults, without a password; `a` asks for its command-line
   arguments first and goes through `scxcli run`, which asks for an
   administrator's. The view opens with a warning that a scheduler
   unsuited to the workload can perform worse than the kernel's default.
-- **Status panel:** what runs now (the unit's process), what the next
-  start would run (the file plus any `SCX_SCHEDULER_OVERRIDE` /
+- **Status panel:** the state (the kernel's scheduler, or which one
+  runs), what runs now (the unit's process), what is configured and
+  whether it is what runs (the file, or an `SCX_SCHEDULER_OVERRIDE` /
   `SCX_FLAGS_OVERRIDE` in effect), why the last start failed, and the
   kernel's `sched_ext` state with a warning whenever it disagrees with
   the unit: a scheduler attached outside the service, a unit that is

@@ -222,13 +222,7 @@ fn execute(command: Command) -> Result<()> {
 fn render_current(current: &Current) -> String {
     let mut text = String::new();
     let state = match current.scheduler.as_deref() {
-        Some(DEFAULT_ID) => match &current.next {
-            Some(next) => format!(
-                "default (the kernel's scheduler); {} selected but not running",
-                next.sched
-            ),
-            None => "default (the kernel's scheduler)".to_owned(),
-        },
+        Some(DEFAULT_ID) => "default (kernel scheduler)".to_owned(),
         Some(name) => format!("{name} running"),
         None if current.attached() => "a scheduler is attached outside scx.service".to_owned(),
         None => "scx.service is active, nothing attached yet".to_owned(),
@@ -238,17 +232,30 @@ fn render_current(current: &Current) -> String {
         Some(r) => text.push_str(&format!("running: {} {}\n", r.sched, r.args.join(" "))),
         None => text.push_str("running: nothing\n"),
     }
-    if let Some(next) = &current.next {
-        text.push_str(&format!(
-            "next start: {} {}{}\n",
-            next.sched,
-            next.args.join(" "),
-            if next.overridden {
-                " (from an SCX_*_OVERRIDE)"
+    // What the configuration says the unit runs, and whether that is
+    // what runs now: one line, since the file and the next start are
+    // the same thing unless an override is in effect. An environment
+    // that did not resolve is unknown, not "nothing": `next` may be
+    // what a partial read found. The last failed start is reported on
+    // its own line below and not pinned on this configuration, which
+    // may not be the one that failed.
+    match (&current.config_error, &current.next) {
+        (Some(_), _) => text.push_str("configured: unknown\n"),
+        (None, Some(next)) => {
+            let what = format!("{} {}", next.sched, next.args.join(" "));
+            let what = what.trim_end();
+            let note = if next.overridden {
+                "SCX_*_OVERRIDE in effect"
+            } else if current.running.as_ref().is_some_and(|r| {
+                scx_catalog::catalog::sched_name(&next.sched) == r.sched && r.args == next.args
+            }) {
+                "running"
             } else {
-                ""
-            }
-        ));
+                "not running"
+            };
+            text.push_str(&format!("configured: {what} ({note})\n"));
+        }
+        (None, None) => text.push_str("configured: nothing\n"),
     }
     match &current.kernel {
         Some(k) => text.push_str(&format!(
@@ -437,9 +444,33 @@ mod tests {
             "failure":{"message":"boom","status":"exit-code/1"}}"#;
         let current: Current = serde_json::from_str(json).unwrap();
         let text = render_current(&current);
-        assert!(text.contains("/usr/bin/scx_cosmos selected but not running"));
+        assert!(text.contains("state: default (kernel scheduler)\n"));
+        // The failure is the unit's last run, not necessarily this
+        // configuration's: it gets its own line and no verdict here.
+        assert!(text.contains("configured: /usr/bin/scx_cosmos (not running)\n"));
+        assert!(!text.contains("failed to start"));
         assert!(text.contains("last start failed (exit-code/1): boom"));
-        assert!(text.contains("next start: /usr/bin/scx_cosmos \n"));
+
+        // An environment that did not resolve is unknown, even when a
+        // partial read produced a `next`.
+        let json = r#"{"version":2,"scheduler":"default",
+            "unit":{"active":false,"enabled":true},"running":null,
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"disabled","ops":null},"failure":null,
+            "config_error":"/etc/scx/local is unreadable"}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        let text = render_current(&current);
+        assert!(text.contains("configured: unknown\n"), "{text}");
+        assert!(!text.contains("configured: /usr/bin"));
+        assert!(text.contains("warning: /etc/scx/local is unreadable"));
+
+        let json = r#"{"version":2,"scheduler":"scx_cosmos",
+            "unit":{"active":true,"enabled":true},
+            "running":{"sched":"scx_cosmos","args":[]},
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"enabled","ops":"cosmos"},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(render_current(&current).contains("configured: /usr/bin/scx_cosmos (running)\n"));
 
         let json = r#"{"version":2,"scheduler":null,
             "unit":{"active":false,"enabled":false},"running":null,"next":null,
