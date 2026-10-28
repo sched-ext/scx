@@ -60,8 +60,12 @@ pub enum Launch {
     /// Write both keys. `SCX_FLAGS` is written even when empty, so a
     /// start without options clears a stale set.
     Set(String, Vec<String>),
-    /// Remove both keys.
-    Remove,
+    /// Write both keys empty. Not removed: an `EnvironmentFile=`
+    /// assignment wins over `Environment=` in the unit file or a
+    /// drop-in, so an empty value in the file masks a scheduler set
+    /// there, where a missing key would let it through to the next
+    /// `systemctl start`. Empty is unset to the unit's shell.
+    Clear,
 }
 
 impl Launch {
@@ -72,28 +76,35 @@ impl Launch {
             Launch::Set(sched, flags) => {
                 vec![(SCHEDULER_KEY, sched.clone()), (FLAGS_KEY, flags.join(" "))]
             }
-            Launch::Remove => Vec::new(),
+            // An UnsetEnvironment= of an empty key changes nothing: unset
+            // and empty are the same to the shell.
+            Launch::Clear => Vec::new(),
         }
     }
 }
 
 /// Rewrites the managed keys in place, preserving every other line and
-/// appending keys that were absent. A key being removed disappears from
-/// the file, and a key that appears more than once collapses into one.
+/// appending keys that were absent. A key that appears more than once
+/// collapses into one.
 /// Matches on the parsed key, the way the reader does, so a line written
 /// as `SCX_SCHEDULER = x` is replaced rather than kept next to the new
 /// one. Always ends with a trailing newline.
 pub fn render(content: &str, launch: &Launch) -> String {
-    // What a managed key becomes: `None` drops the line, `Some(line)`
-    // replaces it.
-    let plan = |key: &str| -> Option<String> {
-        match launch {
-            Launch::Remove => None,
-            Launch::Set(sched, flags) => Some(if key == SCHEDULER_KEY {
-                format!("{SCHEDULER_KEY}={sched}")
-            } else {
-                format!("{FLAGS_KEY}=\"{}\"", flags.join(" "))
-            }),
+    // What a managed key's line becomes.
+    let plan = |key: &str| -> String {
+        let (sched, flags): (&str, String) = match launch {
+            Launch::Clear => ("", String::new()),
+            Launch::Set(sched, flags) => (sched, flags.join(" ")),
+        };
+        if key == SCHEDULER_KEY {
+            // A path is written bare, as the shipped file has it; an
+            // empty value is quoted so that the line reads as a choice.
+            match sched {
+                "" => format!("{SCHEDULER_KEY}=\"\""),
+                sched => format!("{SCHEDULER_KEY}={sched}"),
+            }
+        } else {
+            format!("{FLAGS_KEY}=\"{flags}\"")
         }
     };
     let mut seen: Vec<&str> = Vec::new();
@@ -104,19 +115,15 @@ pub fn render(content: &str, launch: &Launch) -> String {
             Some(k) => {
                 if !seen.contains(&k) {
                     seen.push(k);
-                    if let Some(new) = plan(k) {
-                        lines.push(new);
-                    }
+                    lines.push(plan(k));
                 }
             }
             None => lines.push(line.to_owned()),
         }
     }
     for key in MANAGED_KEYS {
-        if !seen.contains(&key)
-            && let Some(new) = plan(key)
-        {
-            lines.push(new);
+        if !seen.contains(&key) {
+            lines.push(plan(key));
         }
     }
     let mut text = lines.join("\n");
@@ -183,17 +190,26 @@ mod tests {
     }
 
     #[test]
-    fn default_removes_both_managed_keys_and_keeps_the_rest() {
-        // lavd with options -> default: nothing is left for a later
-        // `systemctl start` to pick up.
+    fn default_clears_both_managed_keys_in_place_and_keeps_the_rest() {
+        // lavd with options -> default: both keys stay, empty, so a
+        // value from a lower layer (Environment= in a drop-in) is
+        // masked rather than let through to a later `systemctl start`.
         let lavd = render(
             "# scx.service\nOTHER=1\n",
             &Launch::Set("/usr/bin/scx_lavd".into(), strs(&["--performance"])),
         );
-        let default = render(&lavd, &Launch::Remove);
-        assert_eq!(default, "# scx.service\nOTHER=1\n");
-        assert!(!parse_map(&default).contains_key(SCHEDULER_KEY));
-        assert_eq!(Launch::Remove.values(), Vec::<(&str, String)>::new());
+        let default = render(&lavd, &Launch::Clear);
+        assert_eq!(
+            default,
+            "# scx.service\nOTHER=1\nSCX_SCHEDULER=\"\"\nSCX_FLAGS=\"\"\n"
+        );
+        assert_eq!(parse_map(&default)[SCHEDULER_KEY], "");
+        // A file that never had the keys gets them, empty.
+        assert_eq!(
+            render("# scx.service\n", &Launch::Clear),
+            "# scx.service\nSCX_SCHEDULER=\"\"\nSCX_FLAGS=\"\"\n"
+        );
+        assert_eq!(Launch::Clear.values(), Vec::<(&str, String)>::new());
     }
 
     #[test]

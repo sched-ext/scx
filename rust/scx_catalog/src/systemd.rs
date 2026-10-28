@@ -317,8 +317,9 @@ overridden, edit that file instead",
             );
         }
     }
-    // Only a key the write sets can be dropped by an unset; a key the
-    // write removes or leaves alone is no concern of this check.
+    // Only a key the write sets to a value can be dropped by an unset;
+    // a key the write clears is no concern of this check, since unset
+    // and empty are the same to the shell.
     let values = launch.values();
     if let Some(entry) = info
         .unset_environment
@@ -374,6 +375,39 @@ pub fn write_config(info: &UnitInfo, launch: &Launch) -> Result<()> {
     check_write_effective(info, launch)?;
     rewrite_file(&path, |old| Ok(envfile::render(old, launch)))
         .with_context(|| format!("cannot rewrite {}", path.display()))
+}
+
+/// Reads the unit's environment back after a `Launch::Clear` and the
+/// override cleanup, the way the unit would, and refuses to call the
+/// cleanup done while any layer still supplies a scheduler: the write
+/// masks `Environment=`, `clear_overrides` the manager, and the write
+/// checks refuse a later file, but the proof that nothing starts is the
+/// composed result, not the sum of the parts.
+pub fn verify_cleared(info: &UnitInfo) -> Result<()> {
+    verify_cleared_in(&current_environment(info))
+}
+
+/// The judgement of [`verify_cleared`], pure over the composed
+/// environment.
+pub fn verify_cleared_in(env: &UnitEnvironment) -> Result<()> {
+    if let Some(err) = &env.error {
+        bail!("the environment of {UNIT} could not be read back ({err})");
+    }
+    // All four, not the two scheduler keys: the unit expands
+    // `${SCX_SCHEDULER_OVERRIDE:-$SCX_SCHEDULER} ${SCX_FLAGS_OVERRIDE:-$SCX_FLAGS}`
+    // unquoted, so with no scheduler the first word of the flags is
+    // what gets executed.
+    for key in [
+        SCHEDULER_OVERRIDE_KEY,
+        FLAGS_OVERRIDE_KEY,
+        envfile::SCHEDULER_KEY,
+        envfile::FLAGS_KEY,
+    ] {
+        if let Some(value) = env.non_empty(key) {
+            bail!("{key}={value} is still in effect for {UNIT} after the cleanup");
+        }
+    }
+    Ok(())
 }
 
 /// Drops the runtime overrides from the manager environment, so the
@@ -852,9 +886,9 @@ UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
             ..with_files(vec![required(&first)])
         };
         assert!(check_write_effective(&info, &written).is_err());
-        // Default removes every key, so an unset of any of them cannot
-        // drop what it writes.
-        let removing = Launch::Remove;
+        // Default clears every key, so an unset of any of them cannot
+        // change what it writes.
+        let removing = Launch::Clear;
         let info = UnitInfo {
             unset_environment: strs(&["SCX_SCHEDULER", "SCX_FLAGS=x"]),
             ..with_files(vec![required(&first)])
@@ -1008,6 +1042,68 @@ UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
                 "{err:#}"
             ),
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Default's cleanup writes the keys empty rather than dropping
+    /// them: an `EnvironmentFile=` assignment wins over `Environment=`,
+    /// so the empty value masks a scheduler a drop-in sets, where a
+    /// missing key would let it through to the next `systemctl start`.
+    /// The read-back after the cleanup is what says so.
+    #[test]
+    fn clearing_masks_a_scheduler_from_a_lower_layer() {
+        let dir = scratch_dir("mask");
+        let first = dir.join("scx");
+        let info = UnitInfo {
+            environment: pairs(&[("SCX_SCHEDULER", "/usr/bin/scx_lavd")]),
+            ..with_files(vec![required(&first)])
+        };
+        // Keys dropped: the drop-in's scheduler is what the unit sees.
+        fs::write(&first, "# scx.service\n").unwrap();
+        let env = unit_environment(&info, Vec::new());
+        assert_eq!(env.non_empty("SCX_SCHEDULER"), Some("/usr/bin/scx_lavd"));
+        assert!(
+            verify_cleared_in(&env)
+                .unwrap_err()
+                .to_string()
+                .contains("still in effect")
+        );
+        // Keys cleared: masked.
+        fs::write(&first, envfile::render("# scx.service\n", &Launch::Clear)).unwrap();
+        let env = unit_environment(&info, Vec::new());
+        assert_eq!(env.non_empty("SCX_SCHEDULER"), None);
+        verify_cleared_in(&env).unwrap();
+        // An override left in the manager is caught the same way.
+        let env = unit_environment(&info, pairs(&[("SCX_SCHEDULER_OVERRIDE", "scx_rusty")]));
+        assert!(
+            verify_cleared_in(&env)
+                .unwrap_err()
+                .to_string()
+                .contains("SCX_SCHEDULER_OVERRIDE")
+        );
+        // Flags alone are enough to refuse: with no scheduler the
+        // unit's shell would execute the first word of them.
+        let env = unit_environment(&info, pairs(&[("SCX_FLAGS_OVERRIDE", "/usr/bin/printf x")]));
+        assert!(
+            verify_cleared_in(&env)
+                .unwrap_err()
+                .to_string()
+                .contains("SCX_FLAGS_OVERRIDE")
+        );
+        let flags_info = UnitInfo {
+            environment: pairs(&[("SCX_FLAGS", "-v")]),
+            ..with_files(vec![required(&first)])
+        };
+        fs::write(&first, "# scx.service\n").unwrap();
+        assert!(
+            verify_cleared_in(&unit_environment(&flags_info, Vec::new()))
+                .unwrap_err()
+                .to_string()
+                .contains("SCX_FLAGS=")
+        );
+        let mut broken = unit_environment(&info, Vec::new());
+        broken.error = Some("x".into());
+        assert!(verify_cleared_in(&broken).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 }

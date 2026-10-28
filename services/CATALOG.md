@@ -89,13 +89,24 @@ systemd manager environment (`systemctl unset-environment`), and runs
 refuse this one. `SCX_SCHEDULER` is the resolved absolute path, so that
 what the unit runs is exactly what was checked.
 
-Starting `default` runs `systemctl disable --now` first, then removes
-both keys. Stopping does not depend on the cleanup: a configuration that
-cannot be rewritten (a later file sets the keys, say) leaves the unit
-stopped and reports the cleanup failure. After a successful cleanup
-nothing of the previous scheduler is left behind: a later `systemctl
-start scx.service` by hand has no scheduler to run and fails, rather than
-silently bringing the old one back.
+Starting `default` runs `systemctl disable --now` first, then writes
+both keys empty (`SCX_SCHEDULER=""`, `SCX_FLAGS=""`) and reads the
+unit's environment back. The keys are cleared, not removed: an
+`EnvironmentFile=` assignment wins over `Environment=` in the unit file
+or a drop-in, so an empty value masks a scheduler set there, where a
+missing key would let it through to the next `systemctl start`; empty is
+unset to the unit's shell. The read-back composes the environment the
+way the unit does and refuses to call the cleanup done while any layer
+still supplies any of the four variables: the unit expands
+`${SCX_SCHEDULER_OVERRIDE:-$SCX_SCHEDULER} ${SCX_FLAGS_OVERRIDE:-$SCX_FLAGS}`
+unquoted, so with no scheduler the first word of the flags would be
+what runs.
+Stopping does not depend on the cleanup: a configuration that cannot be
+rewritten (a later file sets the keys, say) leaves the unit stopped and
+reports the cleanup failure. After a successful cleanup nothing of the
+previous scheduler is left behind: a later `systemctl start scx.service`
+by hand launches no scheduler (the unit's `exec` has nothing to run and
+the unit ends at once), rather than silently bringing the old one back.
 
 `scxcli run SCHED [ARGS...]` writes the same two keys with the options
 given. There is no marker telling a `run` from a `start`: the file is
@@ -111,8 +122,9 @@ Writing:
   changes while it is being rewritten, is never overwritten.
 - The write is refused when it could not take effect: when a later
   `EnvironmentFile=` sets one of the keys; when an `UnsetEnvironment=`
-  on the unit would drop a key the write sets (one the write removes, as
-  `default` does with both, is no concern); when a non-empty
+  on the unit would drop a key the write sets to a value (one the write
+  clears, as `default` does with both, is no concern, since unset and
+  empty are the same to the shell); when a non-empty
   `SCX_SCHEDULER_OVERRIDE` or `SCX_FLAGS_OVERRIDE` would still be set
   after `systemctl unset-environment`, that is, in the unit's
   `Environment=`, a drop-in or any environment file, composed the way

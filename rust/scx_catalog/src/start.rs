@@ -39,12 +39,16 @@ pub fn start_from(catalog: &Catalog, id: &str) -> Result<Started> {
         // point of Default is that no scheduler runs, and a
         // configuration that cannot be rewritten (a later file sets
         // the keys, say) must not leave one running. The cleanup then
-        // removes both managed keys, so a later `systemctl start` by
-        // hand finds no scheduler to run; if it fails the error says
-        // the unit is already stopped.
+        // writes both managed keys empty, which masks a scheduler set
+        // in a lower layer (Environment= in the unit file or a
+        // drop-in), and the environment is read back the way the unit
+        // would, so that a later `systemctl start` by hand is known to
+        // find no scheduler. If the stop fails the error says the unit
+        // is already stopped.
         systemd::systemctl(&["disable", "--now"])?;
-        let cleanup =
-            systemd::write_config(&info, &Launch::Remove).and_then(|()| systemd::clear_overrides());
+        let cleanup = systemd::write_config(&info, &Launch::Clear)
+            .and_then(|()| systemd::clear_overrides())
+            .and_then(|()| systemd::verify_cleared(&info));
         cleanup.context(
             "scx.service is stopped and disabled, but the configuration cleanup is \
 incomplete; a start by hand may reuse the stale configuration or overrides",
