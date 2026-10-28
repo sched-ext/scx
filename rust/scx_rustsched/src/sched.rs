@@ -242,6 +242,19 @@ impl Cid {
     pub fn kick(self, flags: KickFlags) {
         scx_bpf_kick_cid(self.0, flags.0);
     }
+
+    /// The task the CID runs now: its idle task when it has nothing to
+    /// run, or a task of another class. Read without the CID's lock, so it
+    /// may already have switched. Valid until the callback returns.
+    #[inline(always)]
+    pub fn curr<'task>(self) -> Option<&'task Task> {
+        let task = crate::kfuncs::scx_bpf_cid_curr(self.0);
+        if task.is_null() {
+            None
+        } else {
+            Some(unsafe { Task::from_ptr(task) })
+        }
+    }
 }
 
 /// CIDs to loop over, from `Cid::all()` or `Cid::scope()`. The loop is one
