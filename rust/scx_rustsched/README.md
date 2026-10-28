@@ -153,6 +153,7 @@ on the dispatch paths it knows leave the CID busy.
 | `task.sum_exec_runtime()`, `task.nvcsw()`, `task.sched_info()`, `task.start_time()` | The task's history: runtime, voluntary switches, total wait and run count (None without CONFIG_SCHED_INFO), creation time in the clock of `helpers::ktime_get_ns()` |
 | `task.kthread()`, `task.idle_task()` | Is it a kernel thread; is it a CPU's idle task |
 | `Cid::current()`, `Cid::count()`, `cid.kick(flags)` | The CID the callback runs on, how many there are, and making one reschedule |
+| `cid.curr()` | The task a CID runs now, read without its lock, as a `CurrTask`: a `Task` that cannot be kept past the callback |
 | `Cid::from_cpu(cpu)`, `Cid::nr_cpus()`, `cid.set_perf(perf)` | The CID of a CPU by the kernel's number, how many CPU numbers there are, and telling the frequency governor how busy the CID is |
 | `cid.is_idle()`, `cid.is_core_idle()`, `a.same_core(b)`, `a.same_llc(b)`, `cid.llc_span()`, `cid.cpu()`, `cid.capacity()` | What the topology and the idle tracking know of a CID |
 | `Task::from_tid(tid)`, `Task::current()` | A task found by the id `task.tid()` gave, and the one this CPU was running: valid until the callback returns |

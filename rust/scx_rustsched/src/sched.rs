@@ -242,6 +242,44 @@ impl Cid {
     pub fn kick(self, flags: KickFlags) {
         scx_bpf_kick_cid(self.0, flags.0);
     }
+
+    /// The task the CID runs now: its idle task when it has nothing to
+    /// run, or a task of another class. Read without the CID's lock, so it
+    /// may already have switched. See `CurrTask` for how long it is valid.
+    #[inline(always)]
+    pub fn curr(self) -> Option<CurrTask> {
+        match core::ptr::NonNull::new(crate::kfuncs::scx_bpf_cid_curr(self.0)) {
+            Some(task) => Some(CurrTask {
+                task,
+                local: core::marker::PhantomData,
+            }),
+            None => None,
+        }
+    }
+}
+
+/// The task a CID runs, from `Cid::curr()`, which the kernel keeps valid
+/// only until the callback that read it returns.
+///
+/// It is a `Task` through `Deref`, for as long as the `CurrTask` lives. It
+/// is neither `Copy` nor `Sync`, so it cannot be stored in a global, a
+/// `Var` or the arena, and with no allocator nothing can keep it beyond
+/// the callback's own frames. A reference with a lifetime of the caller's
+/// choosing, as `Task::current()` and `Task::from_tid()` return, could be
+/// `'static`. `Option<CurrTask>` is one register, the pointer, null for
+/// none.
+pub struct CurrTask {
+    task: core::ptr::NonNull<task_struct>,
+    local: core::marker::PhantomData<*mut ()>,
+}
+
+impl core::ops::Deref for CurrTask {
+    type Target = Task;
+
+    #[inline(always)]
+    fn deref(&self) -> &Task {
+        unsafe { Task::from_ptr(self.task.as_ptr()) }
+    }
 }
 
 /// CIDs to loop over, from `Cid::all()` or `Cid::scope()`. The loop is one
