@@ -3,11 +3,14 @@
 
 //! scx_ravd: loads the scheduler in bpf/ and runs it until Ctrl-C.
 
+use std::cell::Cell;
 use std::ffi::OsStr;
 
 use libbpf_rs::{MapCore, MapFlags, Object};
 use log::info;
-use scx_rustsched_loader::{Attached, Scheduler};
+use scx_rustsched_loader::{Attached, Scheduler, Stats};
+
+mod stats;
 
 /// The scheduler's options, named as scx_lavd's. `scx_rustsched::opts!()`
 /// in bpf/src/main.rs declares a tunable for each, named as the option in
@@ -90,6 +93,18 @@ impl Scheduler for Opts {
 
     fn stopped(&self, name: &str, why: &str) {
         info!("{name} scheduler stopped: {why}");
+    }
+
+    fn stats(&self) -> Option<Stats> {
+        let mseq = Cell::new(0);
+        Some(Stats::new(
+            stats::server_data,
+            move |object| {
+                mseq.set(mseq.get() + 1);
+                stats::Metrics::read(object, mseq.get())
+            },
+            stats::show(),
+        ))
     }
 }
 

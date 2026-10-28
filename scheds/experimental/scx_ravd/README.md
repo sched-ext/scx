@@ -77,7 +77,7 @@ What it leaves out, for later ports:
   IRQ and steal time from the PELT clock.
 - The default fast load balancer, which budgets migrations by the queued
   load of each task: this is the balancer lavd runs with `--no-fast-lb`.
-- The warm-CPU wait, cgroup `cpu.max`, the introspection ring buffer and
+- The warm-CPU wait, cgroup `cpu.max`, the introspection ring buffer with
   `--monitor-sched-samples`, and schedutil's rate limit.
 - CPU hotplug: the kernel ejects the scheduler when a CPU comes or goes.
 
@@ -100,6 +100,10 @@ The options are lavd's names for what is ported: `--slice-min-us`,
 `--slice-max-us`, `--pinned-slice-us`, `--preempt-shift`,
 `--lb-local-dsq-util-pct`, `--no-preemption`, `--no-wake-sync`,
 `--no-slice-boost`, `--no-freq-scaling` and `--per-cpu-dsq`.
+
+`--stats <interval>` prints, beside the scheduler, what the statistics timer
+collects, under lavd's metric names, and `--monitor <interval>` prints it
+from another process; `--help-stats` describes each metric.
 
 ## Status
 
