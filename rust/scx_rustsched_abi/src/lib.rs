@@ -106,6 +106,14 @@ pub const OPS_FLAGS: usize = 51;
 /// task_struct.se.sum_exec_runtime: the runtime the kernel has accounted
 /// to a task.
 pub const SUM_EXEC_RUNTIME: usize = 52;
+/// task_struct.nvcsw and task_struct.start_time: a task's voluntary
+/// switches and its creation time.
+pub const NVCSW: usize = 53;
+pub const START_TIME: usize = 54;
+/// task_struct.sched_info.run_delay and pcount, plus one, 0 where the
+/// kernel has no CONFIG_SCHED_INFO.
+pub const RUN_DELAY: usize = 55;
+pub const PCOUNT: usize = 56;
 
 /// The bits of RUNTIME_OPTIONS: what a scheduler asks of the runtime's
 /// topology, idle scans and clock, rather than of its own policy.

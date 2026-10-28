@@ -463,6 +463,18 @@ pub fn configuration(dump_len: u32, runtime_options: u64) -> Result<[u64; config
     let (se, se_offset) = member(&btf, task, "se")?;
     let se = Struct::try_from(se).map_err(|_| anyhow::anyhow!("task_struct.se is not a struct"))?;
     values[config::SUM_EXEC_RUNTIME] = se_offset + member(&btf, se, "sum_exec_runtime")?.1;
+    values[config::NVCSW] = member(&btf, task, "nvcsw")?.1;
+    values[config::START_TIME] = member(&btf, task, "start_time")?.1;
+    // How long a task has waited runnable and how often it ran, where the
+    // kernel keeps sched_info.
+    if let Ok((info, info_offset)) = member(&btf, task, "sched_info")
+        && let Ok(info) = Struct::try_from(info)
+        && let Ok((_, delay_offset)) = member(&btf, info, "run_delay")
+        && let Ok((_, pcount_offset)) = member(&btf, info, "pcount")
+    {
+        values[config::RUN_DELAY] = info_offset + delay_offset + 1;
+        values[config::PCOUNT] = info_offset + pcount_offset + 1;
+    }
     // The enqueue flags and re-enqueue reasons that say whether
     // ops.select_cid() placed a task and why the kernel handed one back,
     // and the lazy preemption flag, 0 where the kernel has none.
