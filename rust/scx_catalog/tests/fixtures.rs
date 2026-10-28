@@ -103,7 +103,8 @@ fn schedulers_under(dir: &str) -> Vec<String> {
 /// `scheds/experimental` is experimental; a scheduler under
 /// `scheds/rust` may be experimental too when its own README says so
 /// (scx_chaos exists to misbehave, scx_forge is a base to be rewritten
-/// by an agent), so the list may hold more, never less. Every `stable`
+/// by an agent) or its maintainers do (scx_rustland, scx_tickless), so
+/// the list may hold more, never less. Every `stable`
 /// entry and every recommended scheduler lives under `scheds/rust`, and
 /// a place there is not stability: what the catalog calls stable it
 /// says by name. Adding or moving a scheduler without updating the
@@ -134,7 +135,10 @@ fn the_shipped_tiers_follow_the_tree() {
             "experimental {sched} is under neither scheds/experimental nor scheds/rust"
         );
     }
-    assert_eq!(extras, [&"scx_chaos".to_owned(), &"scx_forge".to_owned()]);
+    assert_eq!(
+        extras.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        ["scx_chaos", "scx_forge", "scx_rustland", "scx_tickless"]
+    );
 
     for sched in &catalog.stable {
         assert!(

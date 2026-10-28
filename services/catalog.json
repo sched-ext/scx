@@ -44,9 +44,7 @@
     "scx_mitosis",
     "scx_p2dq",
     "scx_pandemonium",
-    "scx_rustland",
-    "scx_rusty",
-    "scx_tickless"
+    "scx_rusty"
   ],
   "experimental": [
     "scx_chaos",
@@ -59,6 +57,8 @@
     "scx_reevdf",
     "scx_rlfifo",
     "scx_rlocal",
-    "scx_rvtime"
+    "scx_rustland",
+    "scx_rvtime",
+    "scx_tickless"
   ]
 }

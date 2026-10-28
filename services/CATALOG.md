@@ -76,10 +76,11 @@ Rules, checked by `scx_catalog::Catalog::validate` and so by every load:
 - An experimental entry is a scheduler name by the same rule, unique,
   not a recommended one and not a stable one. It may also be hidden. In
   the shipped catalog the list holds every scheduler under
-  `scheds/experimental`, and the ones under `scheds/rust` whose own
-  README says they are not for production (`scx_chaos`, built to
-  misbehave; `scx_forge`, a base meant to be rewritten); the tests
-  record those extras by name. Every scheduler in the tree has a tier on
+  `scheds/experimental`, and the ones under `scheds/rust` that are not
+  for production by their own README (`scx_chaos`, built to misbehave;
+  `scx_forge`, a base meant to be rewritten) or by their maintainers'
+  word (`scx_rustland`, `scx_tickless`); the tests record those extras
+  by name. Every scheduler in the tree has a tier on
   record.
 - A scheduler the catalog names nowhere is unknown to it: installed,
   and that is all the list says. Nothing is stable by default, however
