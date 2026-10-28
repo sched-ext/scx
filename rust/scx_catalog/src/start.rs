@@ -53,6 +53,17 @@ pub fn start_from(catalog: &Catalog, id: &str) -> Result<Started> {
             "scx.service is stopped and disabled, but the configuration cleanup is \
 incomplete; a start by hand may reuse the stale configuration or overrides",
         )?;
+        // The unit is stopped and the configuration cleared, but the
+        // kernel is the truth: a scheduler started outside scx.service
+        // (from a shell, say) survives both, and Default has not
+        // happened until the kernel's own scheduler runs.
+        if let Some(ops) = still_attached()? {
+            bail!(
+                "scx.service is stopped and disabled, but the kernel still reports a \
+scheduler attached (ops \"{ops}\"); it is not under scx.service's control, so stop its \
+process to return to the kernel's scheduler"
+            );
+        }
         return Ok(Started {
             id: DEFAULT_ID.to_owned(),
             launch: None,
@@ -66,6 +77,41 @@ incomplete; a start by hand may reuse the stale configuration or overrides",
         id: id.to_owned(),
         launch: Some((path, Vec::new())),
     })
+}
+
+/// The ops name of a scheduler the kernel still reports attached after
+/// the unit was stopped, or `None` once nothing is. A scheduler the
+/// unit did run detaches as its process exits, which `systemctl stop`
+/// waits for, but the kernel's view can trail that by a moment, so a
+/// short wait tells "not yet" from "not ours". A kernel without
+/// sched_ext has nothing attached.
+fn still_attached() -> Result<Option<String>> {
+    settle(
+        || Ok(crate::kernel::read()?.and_then(|k| k.ops)),
+        20,
+        std::time::Duration::from_millis(50),
+    )
+}
+
+/// Polls `read` up to `tries` times, `pause` apart, until it reports
+/// nothing attached; what it reported last otherwise. Pure over the
+/// reader, so the three outcomes are tested without a kernel.
+fn settle(
+    mut read: impl FnMut() -> Result<Option<String>>,
+    tries: u32,
+    pause: std::time::Duration,
+) -> Result<Option<String>> {
+    let mut last = None;
+    for attempt in 0..tries {
+        last = read()?;
+        if last.is_none() {
+            return Ok(None);
+        }
+        if attempt + 1 < tries {
+            std::thread::sleep(pause);
+        }
+    }
+    Ok(last)
 }
 
 /// Stops the unit and nothing else: the selected scheduler stays in the
@@ -328,5 +374,49 @@ mod tests {
                 .to_string()
                 .contains("could not be resolved")
         );
+    }
+
+    #[test]
+    fn settle_waits_for_a_detach_and_reports_what_stays() {
+        use std::time::Duration;
+        let no_wait = Duration::ZERO;
+        // No sched_ext, or nothing attached: done at once.
+        let mut calls = 0;
+        let got = settle(
+            || {
+                calls += 1;
+                Ok(None)
+            },
+            20,
+            no_wait,
+        )
+        .unwrap();
+        assert_eq!((got, calls), (None, 1));
+        // Attached throughout: every try is used and the name comes back.
+        let mut calls = 0;
+        let got = settle(
+            || {
+                calls += 1;
+                Ok(Some("rusty".to_owned()))
+            },
+            5,
+            no_wait,
+        )
+        .unwrap();
+        assert_eq!((got.as_deref(), calls), (Some("rusty"), 5));
+        // Detaches on the third read: the wait pays off.
+        let mut calls = 0;
+        let got = settle(
+            || {
+                calls += 1;
+                Ok((calls < 3).then(|| "cosmos".to_owned()))
+            },
+            20,
+            no_wait,
+        )
+        .unwrap();
+        assert_eq!((got, calls), (None, 3));
+        // A read error is the caller's, not swallowed.
+        assert!(settle(|| bail!("sysfs unreadable"), 3, no_wait).is_err());
     }
 }

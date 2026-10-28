@@ -108,6 +108,16 @@ previous scheduler is left behind: a later `systemctl start scx.service`
 by hand launches no scheduler (the unit's `exec` has nothing to run and
 the unit ends at once), rather than silently bringing the old one back.
 
+Last, the kernel is asked. A scheduler started outside `scx.service`
+(from a shell, say) survives the stop and the cleanup, and `default` has
+not happened until the kernel's own scheduler runs, so `start default`
+fails, naming the attached `ops`, while one is still attached (the error
+describes that state; it cannot tell who started it); the unit
+is stopped and disabled all the same, and `get` then reports the state
+described below (`scheduler` null with `kernel.ops` set), which clients
+show as a scheduler outside the unit's control. A scheduler the unit
+did run is given a moment to detach first.
+
 `scxcli run SCHED [ARGS...]` writes the same two keys with the options
 given. There is no marker telling a `run` from a `start`: the file is
 the whole truth, and a scheduler with options in `SCX_FLAGS` is a `run`
