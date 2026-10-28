@@ -38,9 +38,9 @@ and no D-Bus. The configuration is the unit's `EnvironmentFile`
   "version": 1,
   "recommended": [
     { "id": "default", "label": "Default",
-      "description": "The kernel's own scheduler; no sched_ext scheduler runs." },
+      "description": "The kernel's built-in scheduler (no sched_ext scheduler active)." },
     { "id": "scx_cosmos", "label": "Cosmos",
-      "description": "Lightweight, keeps tasks on their CPU ..." }
+      "description": "Keeps the system responsive under load." }
   ],
   "hidden": ["scx_layered", "scx_mitosis"]
 }
@@ -284,7 +284,7 @@ print the same object):
   "customized": false,
   "recommended": [
     { "id": "default", "label": "Default",
-      "description": "The kernel's own scheduler; no sched_ext scheduler runs.",
+      "description": "The kernel's built-in scheduler (no sched_ext scheduler active).",
       "available": true },
     { "id": "scx_cosmos", "label": "Cosmos", "description": "...",
       "path": "/usr/bin/scx_cosmos", "available": true },

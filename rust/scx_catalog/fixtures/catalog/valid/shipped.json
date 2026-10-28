@@ -4,27 +4,27 @@
     {
       "id": "default",
       "label": "Default",
-      "description": "The kernel's own scheduler; no sched_ext scheduler runs."
+      "description": "The kernel's built-in scheduler (no sched_ext scheduler active)."
     },
     {
       "id": "scx_cosmos",
       "label": "Cosmos",
-      "description": "Lightweight, keeps tasks on their CPU while the system has room and switches to deadline scheduling under load."
+      "description": "Keeps the system responsive under load."
     },
     {
       "id": "scx_lavd",
       "label": "LAVD",
-      "description": "Latency-criticality aware virtual deadlines: measures how latency-sensitive each task is and schedules accordingly."
+      "description": "Prioritizes tasks based on their latency criticality."
     },
     {
       "id": "scx_eevdf",
       "label": "EEVDF",
-      "description": "A port of the kernel's own EEVDF scheduler to sched_ext, for comparing the two."
+      "description": "Brings newer kernel scheduler updates without requiring a kernel upgrade."
     },
     {
       "id": "scx_cake",
       "label": "Cake",
-      "description": "Gaming responsiveness and general-purpose use: keeps runnable tasks from waiting while preserving cache locality."
+      "description": "Improves gaming responsiveness."
     }
   ],
   "hidden": [
