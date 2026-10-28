@@ -20,8 +20,10 @@ enum consts {
 	NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
 	NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
 
-	/* Kernel definitions */
-	CLOCK_BOOTTIME		= 7,
+	/* The most CPUs, LLCs and nodes the scheduler handles. */
+	MAX_CPUS = 1024,
+	/* The words of the queued mask, 256 cache lines. */
+	QUEUED_WORDS = 2048,
 };
 
 #ifndef __VMLINUX_H__
@@ -38,13 +40,36 @@ typedef signed long s64;
 typedef int pid_t;
 #endif /* __VMLINUX_H__ */
 
-struct cpu_arg {
-	s32 cpu_id;
+/*
+ * What each CPU counts for the statistics, in a per-CPU map that user space
+ * sums: only the CPU a callback runs on writes its counters.
+ */
+struct counters {
+	/* Wakeups sent straight to an idle CPU. */
+	u64 direct;
+	/* Wakeups placed on borrowed virtual time. */
+	u64 borrowed;
+	/* Wakeups queued on another CPU to take it, and searches that found none. */
+	u64 moved;
+	u64 missed;
+	/* Preemptions of a running task by a waking one. */
+	u64 preempts;
+	/* Tasks taken from another CPU's queue. */
+	u64 steals;
+	/* Running tasks moved by the tick to a better idle CPU. */
+	u64 balanced;
+	/* Tasks handed from a worse CPU to a CPU of the best tier. */
+	u64 rotated;
 };
 
-struct domain_arg {
-	s32 cpu_id;
-	s32 sibling_cpu_id;
+/*
+ * In and out of bpfland_cpu_priority(): the CPU, and its packing priority
+ * and whether its domains pack asymmetrically.
+ */
+struct cpu_priority_args {
+	u64 cpu;
+	s64 priority;
+	u64 asym_packing;
 };
 
 #endif /* __INTF_H */

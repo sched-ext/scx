@@ -11,8 +11,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::ffi::{c_int, c_ulong};
-use std::fmt::Write;
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -21,26 +20,25 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::MapCore;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::warn;
-use log::{debug, info};
+use libbpf_rs::skel::Skel;
+use log::{debug, info, warn};
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
+use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::NR_CPU_IDS;
-use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::autopower::{PowerProfile, fetch_power_profile};
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
-use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -51,39 +49,29 @@ use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_bpfland";
 
-// Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
-fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
-    if cpus.is_empty() {
-        return String::from("none");
-    }
+/// The most CPUs the BPF side handles, MAX_CPUS in src/bpf/intf.h.
+const MAX_CPUS: usize = 1024;
 
-    // Determine the maximum CPU ID to create a sufficiently large byte vector.
-    let max_cpu_id = *cpus.iter().max().unwrap();
+/// The bits of the queued mask of the BPF side, QUEUED_WORDS in src/bpf/intf.h.
+const QUEUED_BITS: usize = 2048 * 64;
 
-    // Create a byte vector with enough bytes to cover all CPU IDs.
-    let mut bitmask = vec![0u8; (max_cpu_id + 1).div_ceil(8)];
+/// The bits of a cache line.
+const LINE_BITS: usize = 512;
 
-    // Set the appropriate bits for each CPU ID.
-    for cpu_id in cpus {
-        let byte_index = cpu_id / 8;
-        let bit_index = cpu_id % 8;
-        bitmask[byte_index] |= 1 << bit_index;
-    }
+/// The most CPU tiers the BPF side tells apart, MAX_TIERS in src/bpf/main.bpf.c.
+const MAX_TIERS: u32 = 8;
 
-    // Convert the byte vector to a hexadecimal string.
-    let hex_str: String = bitmask.iter().rev().fold(String::new(), |mut f, byte| {
-        let _ = write!(&mut f, "{:02x}", byte);
-        f
-    });
+/// How much less capacity a CPU may have than the largest of its tier, in percent. Cores of one
+/// type can differ by a few percent, and a move between two of them would gain nothing.
+const CAPACITY_TOLERANCE_PCT: usize = 5;
 
-    format!("0x{}", hex_str)
-}
-
-/// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
+/// scx_bpfland: an EEVDF-style scheduler with one queue per CPU, virtual-time borrowing and
+/// requests sized by the CPU burst.
 ///
-/// This scheduler is derived from scx_rustland, but it is fully implemented in BPF. It has a minimal
-/// user-space part written in Rust to process command line options, collect metrics and log out
-/// scheduling statistics.
+/// Each CPU runs the eligible task with the earliest virtual deadline from its own queue. A task's
+/// deadline is its virtual time plus how long it runs between two sleeps, so tasks that run in
+/// short bursts take the CPU from those that compute without a pause. A waking task also borrows
+/// virtual time, which keeps interactive workloads responsive beside CPU-intensive ones.
 ///
 /// The BPF part makes all the scheduling decisions (see src/bpf/main.bpf.c).
 #[derive(Debug, Parser)]
@@ -92,121 +80,86 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "1000")]
+    /// Scheduling slice duration in microseconds.
+    #[clap(short = 's', long, default_value = "1600")]
     slice_us: u64,
 
-    /// Minimum scheduling slice duration in microseconds (0 = no minimum time slice).
-    #[clap(short = 'L', long, default_value = "0")]
-    slice_min_us: u64,
-
-    /// Maximum time slice lag in microseconds.
+    /// The CPUs to place tasks on: a preference among all of them, or a domain they are kept in.
     ///
-    /// A positive value can help to enhance the responsiveness of interactive tasks, but it can
-    /// also make performance more "spikey".
-    #[clap(short = 'l', long, default_value = "40000")]
-    slice_us_lag: u64,
-
-    /// Throttle the running CPUs by periodically injecting idle cycles.
+    /// A preference orders the CPUs that placement tries first, and tasks still use every CPU
+    /// when those are busy:
+    ///  - "performance" = the fastest CPUs first, the default where the CPUs rank
+    ///  - "powersave" = the slowest CPUs first
+    ///  - "turbo" = the CPUs that boost highest first, then the fastest
+    ///  - "auto" = "powersave" under the power-saver profile, otherwise "performance"
+    ///  - "cores" = one thread of each physical core first, then its SMT siblings
     ///
-    /// This option can help extend battery life on portable devices, reduce heating, fan noise
-    /// and overall energy consumption (0 = disable).
-    #[clap(short = 't', long, default_value = "0")]
-    throttle_us: u64,
+    /// A CPU list is a domain: it keeps tasks on its CPUs, queued there rather than spilled onto
+    /// other CPUs when those are busy. Tasks whose affinity excludes the domain, and
+    /// migration-disabled tasks, may run outside it. "all" uses every online CPU, which is the
+    /// default.
+    #[clap(short = 'm', long, value_name = "DOMAIN")]
+    primary_domain: Option<String>,
 
-    /// Set CPU idle QoS resume latency in microseconds (-1 = disabled).
-    ///
-    /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
-    /// performance at the cost of higher power consumption. Alternatively, increasing the latency
-    /// value may reduce performance, but also improve power efficiency.
-    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
-    idle_resume_us: i64,
+    /// Do not place tasks on the CPUs they are better off on, where the CPUs rank: by the
+    /// kernel's packing priorities, or by their capacities on a machine with big and little cores.
+    #[clap(long)]
+    no_asym_packing: bool,
 
-    /// Enable per-CPU tasks prioritization.
-    ///
-    /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
-    /// can't be migrated when their only usable CPU is busy). Enabling this option can introduce
-    /// unfairness and potentially trigger stalls, but it can improve performance of server-type
-    /// workloads (such as large parallel builds).
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
-    local_pcpu: bool,
+    /// Do not let a waking task with a shorter request and an earlier deadline take the CPU from
+    /// the running task.
+    #[clap(long)]
+    no_preempt: bool,
 
-    /// Enable kthreads prioritization (EXPERIMENTAL).
-    ///
-    /// Enabling this can improve system performance, but it may also introduce noticeable
-    /// interactivity issues or unfairness in scenarios with high kthread activity, such as heavy
-    /// I/O or network traffic.
-    ///
-    /// Use it only when conducting specific experiments or if you have a clear understanding of
-    /// its implications.
-    #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
-    local_kthreads: bool,
+    /// Pick the earliest deadline whatever the virtual time, instead of among the eligible tasks,
+    /// the ones not ahead of the clock.
+    #[clap(long)]
+    no_eligibility: bool,
 
-    /// Disable direct dispatch during synchronous wakeups.
-    ///
-    /// Enabling this option can lead to a more uniform load distribution across available cores,
-    /// potentially improving performance in certain scenarios. However, it may come at the cost of
-    /// reduced efficiency for pipe-intensive workloads that benefit from tighter producer-consumer
-    /// coupling.
-    #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
-    no_wake_sync: bool,
+    /// Do not keep a task's lag across a sleep, as EEVDF does: sleeping then earns service, up to
+    /// the lag bound.
+    #[clap(long)]
+    no_vlag: bool,
 
-    /// Enable sticky tasks.
-    ///
-    /// If enabled force tasks with a high rate of enqueues/sec to stay on the same CPU, to reduce
-    /// locking contention on the shared runqueues.
-    ///
-    /// This can help making the scheduler more robust with intensive scheduling workloads and
-    /// benchmarks, but it can negatively impact on latency.
-    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
-    sticky_tasks: bool,
+    /// Maximum lag of a task when it is queued, behind the clock or ahead of it, in microseconds
+    /// of service at nice 0.
+    #[clap(short = 'l', long, default_value = "10000")]
+    lag_bound_us: u64,
 
-    /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
-    /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
-    /// tasks may overflow to other available CPUs.
+    /// Minimum time a task runs before a waking task can take the CPU from it, in microseconds.
+    #[clap(short = 'g', long, default_value = "100")]
+    min_granularity_us: u64,
+
+    /// Do not let a waking task borrow virtual time. By default it is queued at least
+    /// --vtime-borrowing-us behind the clock, ahead of the tasks that stayed runnable, and on a
+    /// CPU where it preempts the one that runs.
+    #[clap(long)]
+    no_vtime_borrowing: bool,
+
+    /// How much a waking task borrows, in microseconds of service at nice 0.
+    #[clap(long, default_value = "20000")]
+    vtime_borrowing_us: u64,
+
+    /// Maximum time (us) that a task can run on the CPUs of a worse tier before it is handed to
+    /// a CPU of the best one, where the CPUs rank.
     ///
-    /// Special values:
-    ///  - "auto" = automatically detect the CPUs based on the active power profile
-    ///  - "performance" = automatically detect and prioritize the fastest CPUs
-    ///  - "powersave" = automatically detect and prioritize the slowest CPUs
-    ///  - "all" = all CPUs assigned to the primary domain
-    ///  - "none" = no prioritization, tasks are dispatched on the first CPU available
-    #[clap(short = 'm', long, default_value = "auto")]
-    primary_domain: String,
-
-    /// Enable preferred idle CPU scanning.
+    /// A task that never sleeps keeps its CPU slice after slice. On a machine with big and
+    /// little cores, CPU-bound tasks then stay where they started, and the ones on the little
+    /// cores fall behind. Past this threshold, a task whose slice ends on a worse CPU swaps
+    /// places with one that has run on CPUs of the best tier of its LLC for as long without
+    /// sleeping, so that CPU-bound tasks take turns on the best CPUs.
     ///
-    /// With this option enabled, the scheduler will prioritize assigning tasks to higher-ranked
-    /// cores before considering lower-ranked ones.
-    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
-    preferred_idle_scan: bool,
-
-    /// Disable SMT awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_smt: bool,
-
-    /// Disable NUMA awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_numa: bool,
-
-    /// Enable CPU frequency control (only with schedutil governor).
-    ///
-    /// With this option enabled the CPU frequency will be automatically scaled based on the load.
-    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
-    cpufreq: bool,
+    /// 0 = rotation disabled.
+    #[clap(long, default_value = "0")]
+    rotate_us: u64,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
 
-    /// Run in stats monitoring mode with the specified interval. Scheduler
-    /// is not launched.
+    /// Run in stats monitoring mode with the specified interval. Scheduler is not launched.
     #[clap(long)]
     monitor: Option<f64>,
-
-    /// Enable BPF debugging via /sys/kernel/tracing/trace_pipe.
-    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
-    debug: bool,
 
     /// Enable verbose output, including libbpf details.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
@@ -224,13 +177,145 @@ struct Opts {
     pub libbpf: LibbpfOpts,
 }
 
+/// The order in which placement tries the CPUs, see --primary-domain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Preference {
+    Performance,
+    Powersave,
+    Turbo,
+    Cores,
+}
+
+/// The preference --primary-domain names, if it names one, and whether it follows the power
+/// profile.
+fn preference(spec: &str, profile: PowerProfile) -> Option<(Preference, bool)> {
+    match spec {
+        "performance" => Some((Preference::Performance, false)),
+        "powersave" => Some((Preference::Powersave, false)),
+        "turbo" => Some((Preference::Turbo, false)),
+        "cores" => Some((Preference::Cores, false)),
+        "auto" => Some((
+            if profile == PowerProfile::Powersave {
+                Preference::Powersave
+            } else {
+                Preference::Performance
+            },
+            true,
+        )),
+        _ => None,
+    }
+}
+
+/// The active power profile, from power-profiles-daemon where it runs.
+fn power_profile() -> PowerProfile {
+    let profile = fetch_power_profile(true);
+    if profile == PowerProfile::Unknown {
+        fetch_power_profile(false)
+    } else {
+        profile
+    }
+}
+
+fn primary_domain(spec: &str, topo: &Topology) -> Result<Cpumask> {
+    let mut mask = Cpumask::new();
+    if spec == "all" || preference(spec, PowerProfile::Unknown).is_some() {
+        for &cpu in topo.all_cpus.keys() {
+            mask.set_cpu(cpu)?;
+        }
+    } else {
+        for part in spec.split(',') {
+            let part = part.trim();
+            let (first, last) = match part.split_once('-') {
+                Some((first, last)) => (first.trim().parse::<usize>()?, last.trim().parse()?),
+                None => {
+                    let cpu = part.parse::<usize>()?;
+                    (cpu, cpu)
+                }
+            };
+            if first > last || last >= MAX_CPUS {
+                bail!("invalid primary CPU range: {part}");
+            }
+            for cpu in first..=last {
+                if !topo.all_cpus.contains_key(&cpu) {
+                    bail!("primary CPU {cpu} is not online");
+                }
+                mask.set_cpu(cpu)?;
+            }
+        }
+    }
+    if mask.iter().next().is_none() {
+        bail!("the primary domain must contain an online CPU");
+    }
+    Ok(mask)
+}
+
+/// The CPUs of each domain, listed one domain after the other: what the BPF side iterates a
+/// domain with, from its base for its length.
+struct Domains {
+    of_cpu: Vec<i32>,
+    base: Vec<u32>,
+    len: Vec<u32>,
+    cpus: Vec<u16>,
+}
+
+impl Domains {
+    /// Group the CPUs by `key`, numbering the domains densely in key order.
+    fn new(topo: &Topology, key: impl Fn(&scx_utils::Cpu) -> usize) -> Self {
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for cpu in topo.all_cpus.values() {
+            groups.entry(key(cpu)).or_default().push(cpu.id);
+        }
+        let mut domains = Domains {
+            of_cpu: vec![0; MAX_CPUS],
+            base: vec![0; MAX_CPUS],
+            len: vec![0; MAX_CPUS],
+            cpus: Vec::with_capacity(MAX_CPUS),
+        };
+        for (dom, cpus) in groups.values().enumerate() {
+            domains.base[dom] = domains.cpus.len() as u32;
+            domains.len[dom] = cpus.len() as u32;
+            for &cpu in cpus {
+                domains.of_cpu[cpu] = dom as i32;
+                domains.cpus.push(cpu as u16);
+            }
+        }
+        domains.cpus.resize(MAX_CPUS, 0);
+        domains
+    }
+
+    /// The bit of each CPU in the queued mask of the BPF side: the bits of each domain from a
+    /// cache line of their own, or the CPU's number where the mask has too few lines for that.
+    fn queued_bits(&self) -> Vec<u32> {
+        let mut bits: Vec<u32> = (0..MAX_CPUS as u32).collect();
+        let lens: Vec<usize> = self
+            .len
+            .iter()
+            .take_while(|&&len| len > 0)
+            .map(|&len| len as usize)
+            .collect();
+        let lines: usize = lens.iter().map(|len| len.div_ceil(LINE_BITS)).sum();
+        if lines * LINE_BITS > QUEUED_BITS {
+            return bits;
+        }
+        let mut line = 0;
+        for (dom, &len) in lens.iter().enumerate() {
+            let base = self.base[dom] as usize;
+            for pos in 0..len {
+                bits[self.cpus[base + pos] as usize] = (line * LINE_BITS + pos) as u32;
+            }
+            line += len.div_ceil(LINE_BITS);
+        }
+        bits
+    }
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    opts: &'a Opts,
-    topo: Topology,
-    power_profile: PowerProfile,
     stats_server: StatsServer<(), Metrics>,
+    _arenalib: ArenaLib,
+    /// The power profile "auto" was resolved by, to restart when it changes.
+    auto_profile: Option<PowerProfile>,
     user_restart: bool,
 }
 
@@ -238,65 +323,36 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         try_set_rlimit_infinity();
 
-        // Initialize CPU topology.
-        let topo = Topology::new().unwrap();
-
-        // Check host topology to determine if we need to enable SMT capabilities.
-        let smt_enabled = !opts.disable_smt && topo.smt_enabled;
-
-        // Determine the amount of non-empty NUMA nodes in the system.
-        let nr_nodes = topo
-            .nodes
-            .values()
-            .filter(|node| !node.all_cpus.is_empty())
-            .count();
-        info!("NUMA nodes: {}", nr_nodes);
-
-        // Automatically disable NUMA optimizations when running on non-NUMA systems.
-        let numa_enabled = !opts.disable_numa && nr_nodes > 1;
-        if !numa_enabled {
-            info!("Disabling NUMA optimizations");
+        let topo = Topology::new().context("reading the CPU topology")?;
+        let nr_cpus = *NR_CPU_IDS;
+        if nr_cpus > MAX_CPUS {
+            bail!("{} CPUs, at most {} are supported", nr_cpus, MAX_CPUS);
         }
 
-        // Determine the primary scheduling domain.
-        let power_profile = Self::power_profile();
-        let domain =
-            Self::resolve_energy_domain(&opts.primary_domain, power_profile).map_err(|err| {
-                anyhow!(
-                    "failed to resolve primary domain '{}': {}",
-                    opts.primary_domain,
-                    err
-                )
-            })?;
+        let spec = opts.primary_domain.as_deref().unwrap_or("all");
+        let primary = primary_domain(spec, &topo).context("parsing the primary domain")?;
+        let profile = if spec == "auto" {
+            power_profile()
+        } else {
+            PowerProfile::Unknown
+        };
+        let (pref, auto) = preference(spec, profile).unwrap_or((Preference::Performance, false));
 
         info!(
             "{} {} {}",
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION")),
-            if smt_enabled { "SMT on" } else { "SMT off" }
+            if topo.smt_enabled {
+                "SMT on"
+            } else {
+                "SMT off"
+            }
         );
-
-        // Print command line.
         info!(
             "scheduler options: {}",
             std::env::args().collect::<Vec<_>>().join(" ")
         );
 
-        if opts.idle_resume_us >= 0 {
-            if !cpu_idle_resume_latency_supported() {
-                warn!("idle resume latency not supported");
-            } else {
-                info!("Setting idle QoS to {} us", opts.idle_resume_us);
-                for cpu in topo.all_cpus.values() {
-                    update_cpu_idle_resume_latency(
-                        cpu.id,
-                        opts.idle_resume_us.try_into().unwrap(),
-                    )?;
-                }
-            }
-        }
-
-        // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
@@ -304,282 +360,282 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.bpfland_ops_mut().exit_dump_len = opts.exit_dump_len;
 
-        // Override default BPF scheduling parameters.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
-        rodata.debug = opts.debug;
-        rodata.smt_enabled = smt_enabled;
-        rodata.numa_enabled = numa_enabled;
-        rodata.local_pcpu = opts.local_pcpu;
-        rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.sticky_tasks = opts.sticky_tasks;
-        rodata.slice_max = opts.slice_us * 1000;
-        rodata.slice_min = opts.slice_min_us * 1000;
-        rodata.slice_lag = opts.slice_us_lag * 1000;
-        rodata.throttle_ns = opts.throttle_us * 1000;
-        rodata.primary_all = domain.weight() == *NR_CPU_IDS;
-
-        // Generate the list of available CPUs sorted by capacity in descending order.
-        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
-        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
-        for (i, cpu) in cpus.iter().enumerate() {
-            rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
-            rodata.preferred_cpus[i] = cpu.id as u64;
+        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.lag_bound_ns = opts.lag_bound_us * 1000;
+        rodata.min_granularity_ns = opts.min_granularity_us * 1000;
+        rodata.vtime_borrowing_ns = opts.vtime_borrowing_us * 1000;
+        rodata.rotate_ns = opts.rotate_us * 1000;
+        rodata.no_asym_packing = opts.no_asym_packing;
+        rodata.no_preempt = opts.no_preempt;
+        rodata.no_eligibility = opts.no_eligibility;
+        rodata.no_vlag = opts.no_vlag;
+        rodata.no_vtime_borrowing = opts.no_vtime_borrowing;
+        rodata.stats_enabled = opts.stats.is_some();
+        rodata.smt_enabled = topo.smt_enabled;
+        rodata.nr_cpus = nr_cpus as u32;
+        rodata.primary_all = primary.iter().count() == topo.all_cpus.len();
+        for cpu in primary.iter() {
+            rodata.primary_cpus[cpu] = true;
         }
-        if opts.preferred_idle_scan {
-            info!(
-                "Preferred CPUs: {:?}",
-                &rodata.preferred_cpus[0..cpus.len()]
-            );
+        if !rodata.primary_all {
+            info!("Primary CPUs: {} (no spillover)", primary.to_cpulist());
         }
-        rodata.preferred_idle_scan = opts.preferred_idle_scan;
 
-        // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
-        // (it's never a good idea to throttle per-CPU kthreads).
-        rodata.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
+        // The topology: the LLC, node and core of each CPU, and the CPUs of each.
+        let llcs = Domains::new(&topo, |cpu| cpu.llc_id);
+        let nodes = Domains::new(&topo, |cpu| cpu.node_id);
+        let cores = Domains::new(&topo, |cpu| cpu.core_id);
+        let queued_bits = llcs.queued_bits();
+        for i in 0..MAX_CPUS {
+            rodata.cpu_llc[i] = llcs.of_cpu[i];
+            rodata.cpu_node[i] = nodes.of_cpu[i];
+            rodata.cpu_core[i] = cores.of_cpu[i];
+            rodata.llc_base[i] = llcs.base[i];
+            rodata.llc_len[i] = llcs.len[i];
+            rodata.node_base[i] = nodes.base[i];
+            rodata.node_len[i] = nodes.len[i];
+            rodata.core_base[i] = cores.base[i];
+            rodata.core_len[i] = cores.len[i];
+            rodata.llc_cpus[i] = llcs.cpus[i];
+            rodata.node_cpus[i] = nodes.cpus[i];
+            rodata.core_cpus[i] = cores.cpus[i];
+            rodata.cpu_queued_bit[i] = queued_bits[i];
+        }
 
-        // Set scheduler flags.
-        skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
-            | *compat::SCX_OPS_ENQ_LAST
+        skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
-            | if numa_enabled {
-                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
-            } else {
-                0
-            };
+            | *compat::SCX_OPS_KEEP_BUILTIN_IDLE
+            | *compat::SCX_OPS_TID_TO_TASK;
+        // Find queued tasks by their scx tid where the kernel can, which reads as zero on a
+        // kernel without it.
+        skel.maps.rodata_data.as_mut().unwrap().tid_lookup = *compat::SCX_OPS_TID_TO_TASK != 0;
+        // PID lookup can lose unhashed exiting tasks. Let the kernel dispatch them directly
+        // unless TID lookup can find them reliably.
+        if *compat::SCX_OPS_TID_TO_TASK != 0 {
+            skel.struct_ops.bpfland_ops_mut().flags |= *compat::SCX_OPS_ENQ_EXITING;
+        }
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.bpfland_ops_mut().flags
         );
 
-        // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
 
-        // Initialize the primary scheduling domain.
-        Self::init_energy_domain(&mut skel, &domain).map_err(|err| {
-            anyhow!(
-                "failed to initialize primary domain 0x{:x}: {}",
-                domain,
-                err
-            )
-        })?;
+        Self::init_place_tiers(&mut skel, &topo, &llcs, pref)?;
 
-        // Initialize CPU frequency scaling.
-        if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, opts.cpufreq) {
-            bail!(
-                "failed to initialize cpufreq performance level: error {}",
-                err
-            );
-        }
+        // Watch the BPF streams: an arena fault is reported and fatal rather than silently fixed
+        // up.
+        let arenalib =
+            ArenaLib::start(skel.object_mut()).context("starting arena userspace services")?;
 
-        // Initialize SMT domains.
-        if smt_enabled {
-            Self::init_smt_domains(&mut skel, &topo)?;
-        }
-
-        // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, bpfland_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
+        info!("{} attached", SCHEDULER_NAME);
 
         Ok(Self {
             skel,
             struct_ops,
-            opts,
-            topo,
-            power_profile,
             stats_server,
+            _arenalib: arenalib,
+            auto_profile: auto.then_some(profile),
             user_restart: false,
         })
     }
 
-    fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_primary_cpu;
-        let mut args = cpu_arg {
-            cpu_id: cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
-    fn epp_to_cpumask(profile: Powermode) -> Result<Cpumask> {
-        let mut cpus = get_primary_cpus(profile).unwrap_or_default();
-        if cpus.is_empty() {
-            cpus = get_primary_cpus(Powermode::Any).unwrap_or_default();
-        }
-        Cpumask::from_str(&cpus_to_cpumask(&cpus))
-    }
-
-    fn resolve_energy_domain(primary_domain: &str, power_profile: PowerProfile) -> Result<Cpumask> {
-        let domain = match primary_domain {
-            "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
-            "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
-            "turbo" => Self::epp_to_cpumask(Powermode::Turbo)?,
-            "auto" => match power_profile {
-                PowerProfile::Powersave => Self::epp_to_cpumask(Powermode::Powersave)?,
-                PowerProfile::Balanced { .. }
-                | PowerProfile::Performance
-                | PowerProfile::Unknown => Self::epp_to_cpumask(Powermode::Any)?,
-            },
-            "all" => Self::epp_to_cpumask(Powermode::Any)?,
-            &_ => Cpumask::from_str(primary_domain)?,
-        };
-
-        Ok(domain)
-    }
-
-    fn init_energy_domain(skel: &mut BpfSkel<'_>, domain: &Cpumask) -> Result<()> {
-        info!("primary CPU domain = 0x{:x}", domain);
-
-        // Clear the primary domain by passing a negative CPU id.
-        if let Err(err) = Self::enable_primary_cpu(skel, -1) {
-            bail!("failed to reset primary domain: error {}", err);
-        }
-
-        // Update primary scheduling domain.
-        for cpu in 0..*NR_CPU_IDS {
-            if domain.test_cpu(cpu)
-                && let Err(err) = Self::enable_primary_cpu(skel, cpu as i32)
-            {
-                bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
-            }
-        }
-
-        Ok(())
-    }
-
-    // Update hint for the cpufreq governor.
-    fn init_cpufreq_perf(
+    /// Rank the CPUs, after load and before attach: tier 0 is the one placement tries first. The
+    /// kernel's packing priorities rank them where every CPU packs asymmetrically,
+    /// SD_ASYM_PACKING, and the priorities differ. Otherwise their capacities rank them where
+    /// those differ. @pref then orders the tiers, see --primary-domain.
+    fn init_place_tiers(
         skel: &mut BpfSkel<'_>,
-        primary_domain: &String,
-        auto: bool,
+        topo: &Topology,
+        llcs: &Domains,
+        pref: Preference,
     ) -> Result<()> {
-        // If we are using the powersave profile always scale the CPU frequency to the minimum,
-        // otherwise use the maximum, unless automatic frequency scaling is enabled.
-        let perf_lvl: i64 = match primary_domain.as_str() {
-            "powersave" => 0,
-            _ if auto => -1,
-            _ => 1024,
+        let (mut tiers, source) = match Self::packing_tiers(skel, topo)? {
+            Some(tiers) => (tiers, "packing priority"),
+            None => match Self::capacity_tiers(topo) {
+                Some(tiers) => (tiers, "capacity"),
+                None => (topo.all_cpus.keys().map(|&cpu| (cpu, 0)).collect(), ""),
+            },
         };
-        info!(
-            "cpufreq performance level: {}",
-            match perf_lvl {
-                1024 => "max".into(),
-                0 => "min".into(),
-                n if n < 0 => "auto".into(),
-                _ => perf_lvl.to_string(),
+        let mut nr_tiers = tiers.iter().map(|&(_, tier)| tier + 1).max().unwrap_or(1);
+        match pref {
+            Preference::Performance => {}
+            // The slowest first.
+            Preference::Powersave => {
+                for (_, tier) in tiers.iter_mut() {
+                    *tier = nr_tiers - 1 - *tier;
+                }
             }
-        );
-        skel.maps.bss_data.as_mut().unwrap().cpufreq_perf_lvl = perf_lvl;
+            // The CPUs that boost highest ahead of the tier they are in.
+            Preference::Turbo if nr_tiers < MAX_TIERS => {
+                let turbo = |cpu: usize| {
+                    matches!(
+                        topo.all_cpus.get(&cpu).map(|cpu| &cpu.core_type),
+                        Some(CoreType::Big { turbo: true })
+                    )
+                };
+                if tiers.iter().any(|&(cpu, _)| turbo(cpu)) {
+                    for (cpu, tier) in tiers.iter_mut() {
+                        if !turbo(*cpu) {
+                            *tier += 1;
+                        }
+                    }
+                }
+            }
+            Preference::Turbo => {}
+            // Within each tier, the first thread of every core ahead of its siblings.
+            Preference::Cores => {
+                let first = |cpu: usize| {
+                    topo.all_cores.values().any(|core| {
+                        core.cpus.keys().find(|cpu| topo.all_cpus.contains_key(cpu)) == Some(&cpu)
+                    })
+                };
+                for (cpu, tier) in tiers.iter_mut() {
+                    *tier = (*tier * 2 + u32::from(!first(*cpu))).min(MAX_TIERS - 1);
+                }
+            }
+        }
+        // Number the tiers densely: one that the order left empty is dropped.
+        let mut levels: Vec<u32> = tiers.iter().map(|&(_, tier)| tier).collect();
+        levels.sort_unstable();
+        levels.dedup();
+        for (_, tier) in tiers.iter_mut() {
+            *tier = levels.iter().position(|&level| level == *tier).unwrap_or(0) as u32;
+        }
+        nr_tiers = levels.len().max(1) as u32;
 
-        Ok(())
-    }
-
-    fn power_profile() -> PowerProfile {
-        let profile = fetch_power_profile(true);
-        if profile == PowerProfile::Unknown {
-            fetch_power_profile(false)
+        let bss = skel.maps.bss_data.as_mut().unwrap();
+        bss.cpus_ranked = nr_tiers > 1;
+        bss.nr_place_tiers = nr_tiers;
+        for llc in 0..MAX_CPUS {
+            bss.llc_place_tier[llc] = u32::MAX;
+        }
+        for &(cpu, tier) in &tiers {
+            bss.place_tier[cpu] = tier;
+            let llc = llcs.of_cpu[cpu] as usize;
+            bss.llc_place_tier[llc] = bss.llc_place_tier[llc].min(tier);
+        }
+        if nr_tiers > 1 {
+            info!(
+                "CPU ranking: by {}, {} tiers, {} order",
+                source,
+                nr_tiers,
+                format!("{pref:?}").to_lowercase()
+            );
         } else {
-            profile
+            info!("CPU ranking: off");
         }
+
+        Ok(())
     }
 
-    fn refresh_sched_domain(&mut self) -> bool {
-        if self.power_profile != PowerProfile::Unknown {
-            let power_profile = Self::power_profile();
-            if power_profile != self.power_profile {
-                self.power_profile = power_profile;
-
-                if self.opts.primary_domain == "auto" {
-                    return true;
-                }
-                if let Err(err) = Self::init_cpufreq_perf(
-                    &mut self.skel,
-                    &self.opts.primary_domain,
-                    self.opts.cpufreq,
-                ) {
-                    warn!("failed to refresh cpufreq performance level: error {}", err);
-                }
+    /// Each CPU's tier by the kernel's packing priority, highest first, or None if the kernel
+    /// does not rank the CPUs.
+    fn packing_tiers(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<Option<Vec<(usize, u32)>>> {
+        let mut priorities = Vec::new();
+        let mut all_pack = true;
+        for cpu in topo.all_cpus.values() {
+            let mut args = cpu_priority_args {
+                cpu: cpu.id as u64,
+                priority: 0,
+                asym_packing: 0,
+            };
+            let input = ProgramInput {
+                context_in: Some(unsafe {
+                    std::slice::from_raw_parts_mut(
+                        &mut args as *mut _ as *mut u8,
+                        std::mem::size_of_val(&args),
+                    )
+                }),
+                ..Default::default()
+            };
+            let out = skel
+                .progs
+                .bpfland_cpu_priority
+                .test_run(input)
+                .context("running bpfland_cpu_priority")?;
+            if out.return_value != 0 {
+                bail!("bpfland_cpu_priority failed: {}", out.return_value);
             }
+            all_pack &= args.asym_packing != 0;
+            priorities.push((cpu.id, args.priority));
+        }
+        let distinct = priorities.windows(2).any(|pair| pair[0].1 != pair[1].1);
+        if !all_pack || !distinct {
+            return Ok(None);
         }
 
-        false
+        // The distinct priorities, highest first: a CPU's tier is the index of its own.
+        let mut levels: Vec<i64> = priorities.iter().map(|&(_, prio)| prio).collect();
+        levels.sort_unstable_by(|a, b| b.cmp(a));
+        levels.dedup();
+        Ok(Some(
+            priorities
+                .iter()
+                .map(|&(cpu, prio)| {
+                    let tier = levels.iter().position(|&level| level == prio).unwrap_or(0);
+                    (cpu, (tier as u32).min(MAX_TIERS - 1))
+                })
+                .collect(),
+        ))
     }
 
-    fn enable_sibling_cpu(
-        skel: &mut BpfSkel<'_>,
-        cpu: usize,
-        sibling_cpu: usize,
-    ) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_sibling_cpu;
-        let mut args = domain_arg {
-            cpu_id: cpu as c_int,
-            sibling_cpu_id: sibling_cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
-    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
-        let smt_siblings = topo.sibling_cpus();
-
-        info!("SMT sibling CPUs: {:?}", smt_siblings);
-        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
-            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).unwrap();
-        }
-
-        Ok(())
+    /// Each CPU's tier by the capacity the kernel gives it, largest first, or None if the
+    /// capacities are not known or do not differ. A new tier begins at a capacity more than
+    /// CAPACITY_TOLERANCE_PCT below the largest of the tier before.
+    fn capacity_tiers(topo: &Topology) -> Option<Vec<(usize, u32)>> {
+        let mut capacities: Vec<(usize, usize)> = topo
+            .all_cpus
+            .values()
+            .map(|cpu| Some((cpu.id, cpu.kernel_cpu_capacity?)))
+            .collect::<Option<_>>()?;
+        capacities.sort_by_key(|&(cpu, capacity)| (std::cmp::Reverse(capacity), cpu));
+        let mut anchor = capacities.first()?.1;
+        let mut tier = 0;
+        let tiers: Vec<(usize, u32)> = capacities
+            .iter()
+            .map(|&(cpu, capacity)| {
+                if capacity * 100 < anchor * (100 - CAPACITY_TOLERANCE_PCT) {
+                    tier = (tier + 1).min(MAX_TIERS - 1);
+                    anchor = capacity;
+                }
+                (cpu, tier)
+            })
+            .collect();
+        (tier > 0).then_some(tiers)
     }
 
     fn get_metrics(&self) -> Metrics {
-        let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
-        Metrics {
-            nr_running: bss_data.nr_running,
-            nr_cpus: bss_data.nr_online_cpus,
-            nr_kthread_dispatches: bss_data.nr_kthread_dispatches,
-            nr_direct_dispatches: bss_data.nr_direct_dispatches,
-            nr_shared_dispatches: bss_data.nr_shared_dispatches,
-            nr_idle_select_path_picks: bss_data.nr_idle_select_path_picks,
-            nr_idle_enqueue_path_picks: bss_data.nr_idle_enqueue_path_picks,
-            nr_idle_prev_cpu_picks: bss_data.nr_idle_prev_cpu_picks,
-            nr_idle_primary_picks: bss_data.nr_idle_primary_picks,
-            nr_idle_spill_picks: bss_data.nr_idle_spill_picks,
-            nr_idle_pick_failures: bss_data.nr_idle_pick_failures,
-            nr_idle_primary_domain_misses: bss_data.nr_idle_primary_domain_misses,
-            nr_idle_global_misses: bss_data.nr_idle_global_misses,
-            nr_waker_cpu_biases: bss_data.nr_waker_cpu_biases,
-            nr_keep_running_reuses: bss_data.nr_keep_running_reuses,
-            nr_keep_running_queue_empty: bss_data.nr_keep_running_queue_empty,
-            nr_keep_running_smt_blocked: bss_data.nr_keep_running_smt_blocked,
-            nr_keep_running_queued_work: bss_data.nr_keep_running_queued_work,
-            nr_dispatch_cpu_dsq_consumes: bss_data.nr_dispatch_cpu_dsq_consumes,
-            nr_dispatch_node_dsq_consumes: bss_data.nr_dispatch_node_dsq_consumes,
+        let mut metrics = Metrics::default();
+        let key = 0_u32.to_ne_bytes();
+        if let Ok(Some(values)) = self
+            .skel
+            .maps
+            .counters_stor
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
+            for value in values {
+                if value.len() < std::mem::size_of::<counters>() {
+                    continue;
+                }
+                let c: counters =
+                    unsafe { std::ptr::read_unaligned(value.as_ptr() as *const counters) };
+                metrics.nr_direct += c.direct;
+                metrics.nr_borrowed += c.borrowed;
+                metrics.nr_moved += c.moved;
+                metrics.nr_missed += c.missed;
+                metrics.nr_preempts += c.preempts;
+                metrics.nr_steals += c.steals;
+                metrics.nr_balanced += c.balanced;
+                metrics.nr_rotated += c.rotated;
+            }
         }
+        metrics
     }
 
     pub fn exited(&mut self) -> bool {
@@ -589,7 +645,12 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            if self.refresh_sched_domain() {
+            // "auto" follows the power profile: a new one ranks the CPUs again.
+            if self
+                .auto_profile
+                .is_some_and(|profile| power_profile() != profile)
+            {
+                info!("power profile changed, restarting");
                 self.user_restart = true;
                 break;
             }
@@ -608,14 +669,6 @@ impl<'a> Scheduler<'a> {
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {SCHEDULER_NAME} scheduler");
-
-        // Restore default CPU idle QoS resume latency.
-        if self.opts.idle_resume_us >= 0 && cpu_idle_resume_latency_supported() {
-            for cpu in self.topo.all_cpus.values() {
-                update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
-                    .unwrap();
-            }
-        }
     }
 }
 
