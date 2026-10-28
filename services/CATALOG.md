@@ -232,7 +232,13 @@ Clients that are not root run the privileged commands as
   must have resolved. Anything else is refused, with the command that
   does it with the right authority: `start SCHED`, which rewrites the
   file and clears overrides, or `run` as an administrator for a
-  configuration with options. `reset-failed` precedes the start.
+  configuration with options. What was validated is the executable the
+  value resolves to; what the unit's shell would run is the value as
+  written, and a bare name is looked up in that shell's own PATH, which
+  a drop-in or an environment file can point elsewhere. So when the
+  file holds anything but the resolved absolute path, that path is
+  written into it first, exactly as `start SCHED` would have, and only
+  then is the unit started. `reset-failed` precedes the start.
 - `stop` stops the unit and changes nothing else: the selected scheduler
   stays in the file, `get` reports `default` running with it as `next`,
   and the next boot or `start` brings it back. It is for a baseline

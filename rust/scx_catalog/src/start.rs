@@ -132,14 +132,35 @@ pub fn resume() -> Result<String> {
     let info = systemd::unit_info()?;
     let env = systemd::current_environment(&info);
     let dirs = systemd::system_binary_dirs()?;
-    let name = resumable(&loaded.catalog, &env, &dirs)?;
+    let resumed = resumable(&loaded.catalog, &env, &dirs)?;
+    // What was validated is the executable `path`; what the unit's
+    // shell would run is `SCX_SCHEDULER` as written, and a bare name in
+    // it is looked up in the shell's own PATH, which a drop-in or an
+    // environment file can point elsewhere. So the file is made to say
+    // the path before the start, as `start SCHED` writes it; a file
+    // that already does is left alone.
+    if resumed.pin {
+        systemd::write_config(&info, &Launch::Set(resumed.path.clone(), Vec::new()))
+            .context("cannot pin the validated scheduler path before starting")?;
+    }
     systemd::reset_failed();
     systemd::systemctl(&["start"])?;
-    Ok(name)
+    Ok(resumed.name)
+}
+
+/// What [`resumable`] found: the scheduler by name, the executable it
+/// resolved to, and whether the file names something other than that
+/// path (a bare name, or a path spelled differently) and must be
+/// rewritten to it before the unit starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resumable {
+    pub name: String,
+    pub path: String,
+    pub pin: bool,
 }
 
 /// Whether the environment the unit would start with is one `start
-/// SCHED` could have written, and which scheduler that is:
+/// SCHED` could have written, and which scheduler and executable:
 /// `SCX_SCHEDULER` must resolve, against `dirs` (systemd's search
 /// path) and through the same rules `start` and `run` use, to an
 /// executable the catalog does not hide; `SCX_FLAGS` must be empty; no
@@ -152,7 +173,7 @@ pub fn resumable(
     catalog: &Catalog,
     env: &systemd::UnitEnvironment,
     dirs: &[PathBuf],
-) -> Result<String> {
+) -> Result<Resumable> {
     use crate::envfile::{
         FLAGS_KEY, FLAGS_OVERRIDE_KEY, SCHEDULER_KEY, SCHEDULER_OVERRIDE_KEY, split_flags,
     };
@@ -188,9 +209,25 @@ scheduler's own defaults",
     let path = systemd::resolve_scheduler(configured, dirs).with_context(|| {
         format!("the configured scheduler {configured} cannot be started; use `start SCHED`")
     })?;
-    let name = catalog::sched_name(&path.to_string_lossy());
+    let path = path.to_string_lossy().into_owned();
+    let name = catalog::sched_name(&path);
     listed(catalog, &name).context("the configured scheduler cannot be resumed")?;
-    Ok(name)
+    Ok(Resumable::of(name, configured, path))
+}
+
+impl Resumable {
+    /// Pinned when the file says anything but the resolved path: a bare
+    /// name, or a path spelled differently. A file that already holds
+    /// the path, as `start` and `run` leave it, is not rewritten, which
+    /// matters for a file an administrator made readable but not
+    /// writable to this tool.
+    fn of(name: String, configured: &str, path: String) -> Self {
+        Resumable {
+            name,
+            pin: configured != path,
+            path,
+        }
+    }
 }
 
 /// Whether `name` is something `list all` would show, which is exactly
@@ -296,7 +333,7 @@ mod tests {
     }
 
     fn decide(dirs: &[PathBuf], vars: &[(&str, &str)]) -> Result<String> {
-        resumable(&catalog(), &env(vars), dirs)
+        resumable(&catalog(), &env(vars), dirs).map(|r| r.name)
     }
 
     fn refused(dirs: &[PathBuf], vars: &[(&str, &str)]) -> String {
@@ -316,6 +353,28 @@ mod tests {
                 assert_eq!(decide(&dirs, &vars).unwrap(), sched);
             }
         }
+        // A bare name is validated against systemd's search path, but
+        // the unit's shell would look it up in its own PATH, so the
+        // resolved path is to be pinned into the file first. A file
+        // that already holds that path is left alone.
+        let found = resumable(&catalog(), &env(&[("SCX_SCHEDULER", "scx_cosmos")]), &dirs).unwrap();
+        let expected = dirs[0].join("scx_cosmos").to_string_lossy().into_owned();
+        assert_eq!(
+            found,
+            Resumable {
+                name: "scx_cosmos".into(),
+                path: expected.clone(),
+                pin: true
+            }
+        );
+        // A file that already holds the resolved path is not rewritten.
+        // The decision is taken on the strings; the production resolver
+        // only takes absolute paths under /usr, which a scratch tree is
+        // not, so the resolution step is covered above and the decision
+        // here.
+        assert!(!Resumable::of("scx_cosmos".into(), &expected, expected.clone()).pin);
+        assert!(Resumable::of("scx_cosmos".into(), "scx_cosmos", expected.clone()).pin);
+        assert!(Resumable::of("scx_cosmos".into(), "/usr/bin/../bin/scx_cosmos", expected).pin);
     }
 
     #[test]

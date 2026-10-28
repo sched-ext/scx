@@ -29,7 +29,7 @@ pub use catalog::{
     Catalog, DEFAULT_ID, FORMAT_VERSION, Loaded, Recommendation, is_customized, load, load_shipped,
 };
 pub use listing::{Installed, Listing, Pick, list};
-pub use start::{Started, installed, resumable, resume, run, start, stop};
+pub use start::{Resumable, Started, installed, resumable, resume, run, start, stop};
 pub use state::{Current, Failure, Next, OUTPUT_VERSION, Running, Unit, current};
 
 /// Whether an error is a lack of privileges rather than a failure: a
