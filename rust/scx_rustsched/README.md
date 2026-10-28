@@ -33,6 +33,7 @@ the toolchain need out of sight. The schedulers written in it have no
 | [scx_rlocal](../../scheds/experimental/scx_rlocal) | Per-CPU queues with stealing: a state per CID, topology loops, a global function |
 | [scx_rburst](../../scheds/experimental/scx_rburst) | EEVDF-style, with virtual-time borrowing and requests sized by the CPU burst: queues ordered by deadline, eligibility, a state that follows the task |
 | [scx_reevdf](../../scheds/experimental/scx_reevdf) | A full EEVDF scheduler: the callbacks through `#[scheduler]`, the policy on the layers under the framework |
+| [scx_rake](../../scheds/experimental/scx_rake) | scx_cake's policy, all in the typed API: per-CID queues and per-LLC pools, the task a CID runs, seats changed by compare and exchange |
 
 ## Writing a scheduler
 
