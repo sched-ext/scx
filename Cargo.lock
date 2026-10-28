@@ -6344,6 +6344,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_ravd"
+version = "1.1.4"
+dependencies = [
+ "clap",
+ "libbpf-rs 0.27.2",
+ "log",
+ "scx_rustsched_build",
+ "scx_rustsched_loader",
+]
+
+[[package]]
 name = "scx_raw_pmu"
 version = "1.1.4"
 dependencies = [

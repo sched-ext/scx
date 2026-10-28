@@ -1,0 +1,21 @@
+[package]
+name = "scx_ravd"
+version = "1.1.4"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "A LAVD sched_ext scheduler completely written in Rust, after scx_lavd"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libbpf-rs = "=0.27.2"
+log = "0.4"
+scx_rustsched_loader = { path = "../../../rust/scx_rustsched_loader", version = "1.1.4" }
+
+[build-dependencies]
+scx_rustsched_build = { path = "../../../rust/scx_rustsched_build", version = "1.1.4" }
+
+# CI has no Rust BPF toolchain, and builds scx_ravd without its BPF
+# objects.
+[package.metadata.veristat]
+disable = true
