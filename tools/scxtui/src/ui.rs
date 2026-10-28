@@ -4,7 +4,7 @@
 //! exception is the log view writing its viewport height and clamped
 //! scroll offset back into the app.
 
-use crate::model::{Current, DEFAULT_ID, Listing};
+use crate::model::{Current, DEFAULT_ID, Listing, Tier};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -135,14 +135,30 @@ fn draw_recommended_list(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
+    // Stable first, experimental after, then what the catalog does not
+    // name, as the listing orders them; the first entry of each later
+    // group carries a divider above it so the boundary is visible
+    // without a header row to skip over.
+    let first_of = |tier: Tier| app.all().iter().position(|s| s.tier == tier);
+    let dividers = [
+        (first_of(Tier::Experimental), "  experimental"),
+        (first_of(Tier::Unknown), "  not in the catalog"),
+    ];
     let items: Vec<ListItem> = app
         .all()
         .iter()
-        .map(|sched| {
+        .enumerate()
+        .map(|(idx, sched)| {
             let (mark, style) = marker(app.listing.as_ref(), &sched.name);
-            ListItem::new(Line::from(vec![
+            let (tier, tier_style) = match sched.tier {
+                Tier::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
+                Tier::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
+                Tier::Unknown => ("  not in the catalog", Style::default().fg(Color::DarkGray)),
+            };
+            let row = Line::from(vec![
                 Span::styled(mark, style),
                 Span::styled(strip_prefix(&sched.name).to_owned(), style),
+                Span::styled(tier, tier_style),
                 Span::styled(
                     if sched.recommended {
                         "  recommended"
@@ -151,7 +167,13 @@ fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
                     },
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]))
+            ]);
+            match dividers.iter().find(|(at, _)| *at == Some(idx)) {
+                Some((_, title)) => {
+                    ListItem::new(vec![Line::from(Span::styled(*title, tier_style)), row])
+                }
+                None => ListItem::new(row),
+            }
         })
         .collect();
 
@@ -326,6 +348,18 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
                         "  (Enter starts it with its own defaults, a with arguments you type)",
                     ),
                 ]));
+                match sched.tier {
+                    Tier::Stable => {}
+                    Tier::Experimental => lines.push(Line::from(Span::styled(
+                        "  experimental: the catalog does not classify this scheduler as stable",
+                        Style::default().fg(Color::Yellow),
+                    ))),
+                    Tier::Unknown => lines.push(Line::from(Span::styled(
+                        "  the catalog says nothing about this scheduler; it is installed, and \
+that is all that is known",
+                        Style::default().fg(Color::DarkGray),
+                    ))),
+                }
                 lines.push(Line::from(Span::styled(
                     format!("  {}", sched.path),
                     Style::default().fg(Color::DarkGray),

@@ -53,6 +53,34 @@ pub struct Catalog {
     /// still starts them.
     #[serde(default)]
     pub hidden: Vec<String>,
+    /// Schedulers the maintainers call stable, by name. A recommended
+    /// scheduler counts as stable without being listed here. Said
+    /// explicitly, never assumed from where a scheduler lives in the
+    /// tree or how it got installed: a scheduler the catalog does not
+    /// name is unknown to it.
+    #[serde(default)]
+    pub stable: Vec<String>,
+    /// Schedulers the catalog does not call stable and says so: the
+    /// ones under `scheds/experimental`, and any other whose authors
+    /// say it is not for production. Listed after the stable ones and
+    /// marked, so that the full list says what a user is reaching for.
+    /// A hidden scheduler may be experimental as well.
+    #[serde(default)]
+    pub experimental: Vec<String>,
+}
+
+/// What the catalog says about an installed scheduler, for the full
+/// list. The order is the list's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    /// Named in `stable`, or recommended.
+    Stable,
+    /// Named in `experimental`.
+    Experimental,
+    /// Named nowhere: installed, but the catalog says nothing about it,
+    /// and neither does the list.
+    Unknown,
 }
 
 /// A loaded catalog and where it came from.
@@ -89,6 +117,16 @@ impl Catalog {
         self.hidden.iter().any(|h| h == name)
     }
 
+    pub fn tier(&self, name: &str) -> Tier {
+        if self.is_recommended(name) || self.stable.iter().any(|e| e == name) {
+            Tier::Stable
+        } else if self.experimental.iter().any(|e| e == name) {
+            Tier::Experimental
+        } else {
+            Tier::Unknown
+        }
+    }
+
     /// The rules of `services/CATALOG.md`, all of them, so that a file
     /// that passes here is one every tool accepts.
     pub fn validate(&self) -> Result<()> {
@@ -121,6 +159,24 @@ impl Catalog {
             }
             if self.is_recommended(name) {
                 bail!("{name:?} is both recommended and hidden");
+            }
+        }
+        for (idx, name) in self.stable.iter().enumerate() {
+            validate_name(name).with_context(|| format!("stable entry {}", idx + 1))?;
+            if self.stable[..idx].contains(name) {
+                bail!("stable entry {name:?} appears more than once");
+            }
+        }
+        for (idx, name) in self.experimental.iter().enumerate() {
+            validate_name(name).with_context(|| format!("experimental entry {}", idx + 1))?;
+            if self.experimental[..idx].contains(name) {
+                bail!("experimental entry {name:?} appears more than once");
+            }
+            if self.is_recommended(name) {
+                bail!("{name:?} is both recommended and experimental");
+            }
+            if self.stable.contains(name) {
+                bail!("{name:?} is both stable and experimental");
             }
         }
         Ok(())
@@ -318,7 +374,93 @@ mod tests {
             version: FORMAT_VERSION,
             recommended: ids.iter().map(|id| entry(id)).collect(),
             hidden: hidden.iter().map(|s| (*s).to_owned()).collect(),
+            stable: Vec::new(),
+            experimental: Vec::new(),
         }
+    }
+
+    fn with_experimental(mut c: Catalog, names: &[&str]) -> Catalog {
+        c.experimental = names.iter().map(|s| (*s).to_owned()).collect();
+        c
+    }
+
+    fn with_stable(mut c: Catalog, names: &[&str]) -> Catalog {
+        c.stable = names.iter().map(|s| (*s).to_owned()).collect();
+        c
+    }
+
+    /// The tier is what the catalog says, never a default: a scheduler
+    /// named nowhere (one built from a branch and dropped into
+    /// /usr/local/bin, say) is unknown, not stable.
+    #[test]
+    fn a_scheduler_the_catalog_does_not_name_is_unknown_not_stable() {
+        let c = with_stable(
+            with_experimental(catalog(&["default", "scx_cosmos"], &[]), &["scx_flow"]),
+            &["scx_bpfland"],
+        );
+        c.validate().unwrap();
+        assert_eq!(
+            c.tier("scx_cosmos"),
+            Tier::Stable,
+            "recommended counts as stable"
+        );
+        assert_eq!(c.tier("scx_bpfland"), Tier::Stable);
+        assert_eq!(c.tier("scx_flow"), Tier::Experimental);
+        assert_eq!(c.tier("scx_rake"), Tier::Unknown);
+        assert_eq!(c.tier("scx_chaos"), Tier::Unknown);
+        assert!(Tier::Stable < Tier::Experimental && Tier::Experimental < Tier::Unknown);
+        // Stable entries are names and unique; one may not be
+        // experimental too.
+        assert!(
+            with_stable(catalog(&["default"], &[]), &["bpfland"])
+                .validate()
+                .is_err()
+        );
+        let err = with_stable(catalog(&["default"], &[]), &["scx_bpfland", "scx_bpfland"])
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("more than once"));
+        let err = with_stable(
+            with_experimental(catalog(&["default"], &[]), &["scx_flow"]),
+            &["scx_flow"],
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.to_string().contains("both stable and experimental"));
+    }
+
+    #[test]
+    fn experimental_entries_are_names_unique_and_not_recommended() {
+        let c = with_experimental(
+            catalog(&["default", "scx_cosmos"], &["scx_nitosis"]),
+            &["scx_flow", "scx_nitosis"],
+        );
+        c.validate().unwrap();
+        assert_eq!(c.tier("scx_flow"), Tier::Experimental);
+        assert_eq!(c.tier("scx_cosmos"), Tier::Stable);
+        // Hidden and experimental may overlap (nitosis is both); a
+        // recommended scheduler is stable by definition.
+        for bad in ["default", "flow", "/usr/bin/scx_flow"] {
+            assert!(
+                with_experimental(catalog(&["default"], &[]), &[bad])
+                    .validate()
+                    .is_err(),
+                "{bad:?}"
+            );
+        }
+        let err = with_experimental(catalog(&["default"], &[]), &["scx_flow", "scx_flow"])
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("more than once"));
+        let err = with_experimental(catalog(&["default", "scx_flow"], &[]), &["scx_flow"])
+            .validate()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("both recommended and experimental")
+        );
+        // Round trip keeps the field; it may be left out.
+        assert_eq!(Catalog::parse(&c.render().unwrap()).unwrap(), c);
     }
 
     #[test]

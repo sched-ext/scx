@@ -26,7 +26,8 @@ pub mod state;
 pub mod systemd;
 
 pub use catalog::{
-    Catalog, DEFAULT_ID, FORMAT_VERSION, Loaded, Recommendation, is_customized, load, load_shipped,
+    Catalog, DEFAULT_ID, FORMAT_VERSION, Loaded, Recommendation, Tier, is_customized, load,
+    load_shipped,
 };
 pub use listing::{Installed, Listing, Pick, list};
 pub use start::{Resumable, Started, installed, resumable, resume, run, start, stop};

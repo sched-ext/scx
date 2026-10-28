@@ -13,7 +13,8 @@ widgets and scripts all go through it.
 scxcli list [--json]              The recommended schedulers and the
                                   current state
 scxcli list recommended [--json]  The same
-scxcli list all [--json]          Every installed scheduler
+scxcli list all [--json]          Every installed scheduler: stable,
+                                  experimental, then unlisted
 scxcli get [--json]               Show which scheduler is running
 scxcli start SCHED                Start a scheduler from `list all` with its
                                   defaults, or `default` for the kernel's own

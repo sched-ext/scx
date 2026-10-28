@@ -40,6 +40,20 @@ pub struct Installed {
     pub name: String,
     pub path: String,
     pub recommended: bool,
+    /// What the catalog says: `stable`, `experimental`, or `unknown`
+    /// when it names the scheduler nowhere. Absent in older output
+    /// reads as unknown, since that output made no such statement.
+    #[serde(default)]
+    pub tier: Tier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Stable,
+    Experimental,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +180,29 @@ mod tests {
             seen += 1;
         }
         assert!(seen >= 10);
+    }
+
+    #[test]
+    fn an_installed_entry_without_a_tier_is_unknown_and_round_trips_its_tier() {
+        let old: Installed = serde_json::from_str(
+            r#"{"name":"scx_cosmos","path":"/usr/bin/scx_cosmos","recommended":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old.tier,
+            Tier::Unknown,
+            "no statement is not a stable statement"
+        );
+        let exp: Installed = serde_json::from_str(
+            r#"{"name":"scx_flow","path":"/usr/bin/scx_flow","recommended":false,"tier":"experimental"}"#,
+        )
+        .unwrap();
+        assert_eq!(exp.tier, Tier::Experimental);
+        assert!(
+            serde_json::to_string(&exp)
+                .unwrap()
+                .contains("\"tier\":\"experimental\"")
+        );
     }
 
     #[test]

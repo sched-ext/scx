@@ -688,6 +688,7 @@ mod tests {
             name: name.into(),
             path: format!("/usr/bin/{name}"),
             recommended,
+            tier: crate::model::Tier::Stable,
         }
     }
 
