@@ -12,8 +12,8 @@ fork, the features it removed, the representation choices, the verifier
 constraints that shaped the code, and the procedure for syncing with
 mitosis.
 
-The last sync, on 2026-10-06, covered main through 42378f3ac13a
-("scx_mitosis: Sample the demand metrics over measured intervals").
+The last sync, on 2026-10-28, covered main through ba5f4dc84c1e ("Merge pull
+request #3948 from sched-ext/scxcli-view").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
@@ -30,21 +30,21 @@ and a port preserves all of the following.
   the same inputs: cell assignment, the vtime accounting of the cell, LLC
   and per-cid queues, the idle pick order, borrowing, draining, stealing and
   slice shrinking. Differences exist only where the cid form, arena storage
-  or the removed features force them, and each is listed under "Differences
-  requiring validation" with its reason.
+  or the removed features force them, or where they are kept by choice, and
+  each is listed under "Differences requiring validation" with its reason.
 - Source parity. Files keep mitosis's relative paths, function layout and
   identifiers wherever they let the two be compared function by function,
   down to the mitosis_ prefixes, the MitosisTopology type and the "mitosis"
   ops name. Only what holds a different thing is renamed, as the cid-valued
   fields, the DSQ helpers and the callbacks the cid form renames are.
-- Scheduler state in the arena. Cells, per-cid contexts, task and cgroup
-  contexts, the topology snapshot, and the idle and cell masks are arena
-  memory owned by the loaded object. The native objects that remain are the
-  userspace-written configuration, the sequence counters, the arena pointers
-  and the cgroup allocator's ready flag in BSS, the cell mask allocator and
-  its RCU state, the root cgroup kptr, the level_cells scratch of the
-  configuration's cgroup walk, the read-only options, and the library's task
-  and cgroup storage maps and RCU doorbell ring buffer.
+- Scheduler state in the arena. Cells, per-cid, task and cgroup contexts,
+  the topology snapshot, and the idle and cell masks are arena memory of the
+  loaded object. In BSS stay the userspace-written configuration, the
+  sequence counters, the arena pointers, the cgroup allocator's ready flag
+  and the sub_cap_busy and sub_cap_pending flags. Native elsewhere are the
+  cell mask allocator and its RCU state, the root cgroup kptr, the
+  configuration walk's level_cells scratch, the read-only options, and the
+  library's task and cgroup storage maps and RCU doorbell ring buffer.
 - The cid form. Scheduler-owned CPU fields hold cids, masks are cmasks over
   the cid space, and the kernel's cid kfuncs replace the CPU ones. Linux CPU
   IDs appear only at the boundaries listed under "CPU identities".
@@ -90,6 +90,14 @@ task_ctx elements, and starts the library's BPF stream watcher and RCU
 reclaim threads. arena_init() sizes the bitmap allocator from the nr_cpu_ids
 rodata that main.rs sets and fails without it, and allocates the rotor of
 the cmask distribute helpers.
+
+build.rs builds the object with -DSCX_ARENA_SCALAR, under which the __arena
+tag and the address-space casts expand to nothing, and the nitosis sources
+carry no tags since 53c6c0215b63 ("scx_nitosis: Drop the __arena tags"). The
+define adds the rodata marker __SCX_MARKER_arena_scalar to the object, and
+scx_ops_cid_open!() sets the BPF_F_ARENA_SCALAR load flag on an object that
+carries it. The flag is due in v7.4, and a kernel without it rejects the
+load with EINVAL.
 
 ## CPU identities
 
@@ -269,16 +277,104 @@ enqueue side's queue count increment and the drainer's CAS-and-recheck are
 full barriers on their own, so either the drainer sees the queued work or
 the enqueuer sees the LLC without cpus, and no wakeup is lost.
 
+## Hosting sub-schedulers
+
+A sub-scheduler attaches to a cgroup that owns a cell and takes over exactly
+that cell. ops.sub_attach() returns -EINVAL for a cgroup that owns no cell.
+struct cell records the owner cgroup in owner_cgid, kept while a detaching
+sub still holds the cell, and the attached sub's cgroup id in sub_cgid, 0
+when none. ops.sub_attach(), ops.sub_detach() and the record phases of
+apply_cell_config() write both under the arena spinlock cells_lock, and the
+owner changes only while sub_cgid is zero. Readers load the one word and
+take no lock.
+
+The sub holds SCX_CAP_ENQ, SCX_CAP_PREEMPT, SCX_CAP_PERF and
+SCX_CAP_ENQ_IMMED on the cell's primary cids, and SCX_CAP_ENQ_IMMED alone on
+its borrowable cids with --enable-borrowing. sub_cap_sync() brings every
+delegated cell's caps in line with the published cell masks, as deltas
+against scx_bpf_sub_caps(), every revoke before any grant so that no moving
+cid is held with SCX_CAP_ENQ by two subs.
+
+apply_cell_config() and ops.sub_attach() both call sub_cap_sync() and the
+kernel does not serialize them, so the sub_cap_busy and sub_cap_pending
+flags keep the pass to one runner without losing a request. The pass makes
+up to eight kfunc calls per delegated cell, two caps queries and up to two
+grants or revokes per half, and none without subs. It runs outside
+cells_lock.
+
+The kernel drops a sub's caps when it detaches, and ops.sub_detach() clears
+sub_cgid, which hands the cell back to the cell manager. Userspace keeps a
+destroyed cgroup's cell id in CellManager's detaching_cells until it sees
+sub_cgid clear, and the release triggers an apply that clears the owner.
+
+ops.dispatch() on a delegated cid serves the root's own queues first,
+because the per-cid DSQ holds tasks that can run nowhere else and a task on
+its way into the sub stays the root's until the kernel re-homes it. It then
+offers the cid to the sub with scx_bpf_sub_dispatch(), and it skips the
+sibling-LLC steal. The root always sets SCX_OPS_TID_TO_TASK, because the
+kernel rejects a sub that sets it unless the root has it too.
+
+A sub's tasks never pass through ops.stopping(), so
+ops.sub_cid_sched_updated() charges a delegated cell's cpu time per cid, in
+sub_ns under the per-cid sub_lock, and the sub_charge_cids() syscall program
+charges every open interval before each userspace sample, taking every cid's
+sub_lock with irqsave. The clock it uses is listed under "Differences
+requiring validation".
+
+sub_q_pct and the Sub column of the per-cell dispatch breakdown, next to
+Local, CPU, Cell and Borrow, are the share of the cell's queue decisions
+that were dispatches handed to a sub, counted by CSTAT_SUB_DISPATCH. The
+denominator is every queue decision, mostly enqueue placements.
+
+With sub_cgid 0 everywhere the delegation changes no scheduling decision.
+Its cost without a sub is unmeasured. The kernel calls
+ops.sub_cid_sched_updated() on every switch of a cid between a root task and
+idle or another class, because the root implements the op and the kernel
+notifies on every change of the cid's scheduler, and each call takes the
+cid's sub_lock. sub_charge_cids() takes every cid's sub_lock with irqsave
+before each sample, every apply runs sub_cap_sync()'s scan over MAX_CELLS
+cells, and SCX_OPS_TID_TO_TASK is set.
+
+The delegated cells' accounting is to be reworked to cut its cost, together
+with the clock mix under "Differences requiring validation".
+
+Every load, hosting or not, needs a kernel with ops.sub_cid_sched_updated(),
+the requirement the README states. The op is always set, and the loader
+clears only sub_attach and sub_detach on an older kernel.
+
 ## Differences requiring validation
 
-Scan order within and across shards differs from the builtin picker's, so
-repeated choices spread across eligible cids but in different sequences. The
-distribute rotor belongs to the loaded object, where the builtin's is kernel
-state. Measure the resulting distribution.
+A scan starts at prev's shard when prev is in the window. Shards are LLC
+aligned, so even with LLC awareness off a scan prefers idle cids in prev's
+LLC. mitosis calls the builtin scx_bpf_pick_idle_cpu(), which scans the
+whole mask from a rotor after mitosis's own prev test. nitosis keeps the
+prev-shard start by choice.
 
-Cell masks and the cpu-to-cell reporting skip offline cpus, where mitosis
-kept their bits. A configuration that names offline cpus contributes nothing
-for them.
+The sequences differ beyond that. cid order is not cpu order, the per-cid
+rotor of cmask_any_and_distribute() picks within a shard, and the builtin's
+rotor is kernel state while nitosis's belongs to the loaded object. A claim
+is retried at most IDLE_PICK_RETRIES times per shard, the bound of the BPF
+loop, where the builtin retries until the set is empty. Measure the
+resulting distribution.
+
+Borrowed placements are inserted with SCX_ENQ_IMMED, since 259b14637e74
+("scx_nitosis: Insert borrowed placements with SCX_ENQ_IMMED"), where
+mitosis inserts them with no flags. A sub holds only SCX_CAP_ENQ_IMMED on
+its cell's borrowable cids, so the root's own cells borrow under the same
+idle-only rule. A borrowed task that misses the idle window goes back
+through enqueue to be placed again, where in mitosis it waits on the
+borrowed cid's local DSQ. CSTAT_BORROW_BOUNCE, the Bounce column and
+borrow_bounce_pct count the bounces.
+
+Cell masks skip offline cpus, where mitosis kept their bits. CellManager
+assigns only topology.span, so no configuration names an offline cpu. Tail
+cids keep cpu_ctx.cell 0, as mitosis's per-cpu map does, and the cpu-to-cell
+reporting comes out the same.
+
+MAX_LLCS is 64, where mitosis's is 16. mitosis's topology.rs refuses to
+start on a machine with more than 16 LLCs, LLC awareness or not. nitosis
+runs there, and ops.init() fails beyond 64. On 16 LLCs or fewer the behavior
+is the same.
 
 Per-cid contexts use NUMA_NO_NODE arena pages. Their placement can differ
 from the percpu map's, so measure locality effects on multi-node hardware.
@@ -319,9 +415,8 @@ remaining scans have not been converted, see "Open items".
 ## Verifier constraints
 
 A program that only dereferences arena pointers handed to it never loads the
-arena map and is rejected at the first address-space cast.
-MITOSIS_TOUCH_ARENA() at the top of every such program gives it the
-reference.
+arena map and is rejected at the first arena access. MITOSIS_TOUCH_ARENA()
+at the top of every such program gives it the reference.
 
 init_cgrp_ctx() is a global function, because its arena accesses verify
 expensively and inlining them into tp_cgroup_mkdir()'s ancestor loop
@@ -331,28 +426,55 @@ once LLC awareness stacked a second pick level into ops.select_cid().
 sub_cap_sync_cell() is one too, so that the two halves of the cap pass share
 a single copy of its cmask bodies.
 
-The ops.init() topology walk fills each entry field by field, because clang
-20 derived the destination of the aggregate copy before the arena
-address-space cast and the verifier saw the stores go through a scalar.
-scx_cargo refuses to build cid-form schedulers with clang before 22 unless
-SCX_ALLOW_OLD_CLANG is set.
+The ops.init() topology walk fills each entry field by field. clang 20
+derived the destination of the aggregate copy before the arena address-space
+cast, and the verifier rejected the stores it saw go through a scalar. Under
+SCX_ARENA_SCALAR a store through a plain scalar is an arena access, so that
+failure cannot happen in this object, and an aggregate copy has not been
+tried since. scx_cargo refuses to build cid-form schedulers with clang
+before 22 unless SCX_ALLOW_OLD_CLANG is set.
 
 scx_mavd's stack model reads any object. On the object built from this tree
 at the last sync, the deepest chain is:
 
-    mitosis_enqueue     144 -> 144
-    update_task_cell     56 ->  64
-    update_task_cmask   136 -> 144
-    cmask_and           112 -> 112
-                               464
+    mitosis_enqueue       128
+    update_task_cell       48
+    update_task_cmask     128
+    cmask_and             112
+                          416
 
-The left column is the deepest r10 offset in the object, the right one the
-rounded frame the verifier adds. The same chain ending in set_task_llc()
-instead of cmask_and() also models at 464. ops.select_cid() models at 400
-through the same helpers, and ops.dispatch() at 448 through the idle pick
-phases. The verifier's own stack depths and the per-program instruction
-counts have not been measured. To re-measure, build scx_nitosis and run the
-model from the repository root:
+Each number is the rounded frame the verifier adds for the subprog. The same
+chain ending in set_task_llc() instead of cmask_and() also models at 416.
+ops.select_cid() models at 368 through the same helpers from a frame of 80,
+and ops.dispatch() at 432, its frame of 272 over pick_idle_cid_cores() at
+160.
+
+The verifier's own stack depths and per-program instruction counts were
+measured on 2026-10-28 on sched_ext for-next a96c41fea8da (7.3.0-rc5,
+lockdep) in a vng VM with 16 cpus as 8 cores x 2 threads, a debug build,
+every program loaded at verifier log level 4.
+
+One run used the default options and one every BPF rodata option:
+--enable-llc-awareness, --enable-borrowing, --enable-slice-shrinking,
+--dynamic-affinity-cpu-selection, --use-lockless-peek and
+--reject-multicpu-pinning, with exiting-task-workaround on by default in
+both. Processed instructions, with the verifier's stack depth in
+parentheses:
+
+    select_cid   27,229 (368)   79,358 (368)
+    enqueue      27,123 (416)  123,149 (416)
+    dispatch      1,047 (176)   32,833 (272)
+    running         111 (80)     1,692 (160)
+    init_task    32,063 (336)   34,351 (336)
+    init         56,404 (336)   56,184 (336)
+
+The BPF options are rodata, so the verifier prunes the disabled paths and
+the default counts are the lower ones, except for init, whose default count
+is not lower than the all-on one. The verifier's stack depths sit at or
+under the model's chains, dispatch at 272 against the modeled 432, because
+the model is an upper bound.
+
+To re-measure, build scx_nitosis and run the model from the repository root:
 
 ```sh
 python3 scheds/experimental/scx_mavd/tools/stack-chains.py \
@@ -360,10 +482,11 @@ python3 scheds/experimental/scx_mavd/tools/stack-chains.py \
     mitosis_select_cid mitosis_enqueue mitosis_dispatch
 ```
 
-Then load the scheduler with the verifier log level at 4 on every program
-for the verifier's stack depth and processed-instruction lines, as
-"Re-measuring" in scx_mavd's CONVERSION.md describes, and record the results
-here.
+Then set the verifier log level to 4 on every program, set_log_level(4) on
+each program of the opened skeleton in main.rs, and run the scheduler with
+--log-level trace. libbpf prints each program's verifier log, which gives
+"stack depth max N", then one line per subprog, and ends with "processed N
+insns". Record the results here.
 
 ## Known issues
 
@@ -503,17 +626,70 @@ diff -r --no-dereference $M/scheds/rust/scx_mitosis \
 
 Beyond the conversion and the removed features, the differences are the
 crate name, the description, the scx_arena dependency and the veristat
-opt-out in Cargo.toml, the README, build.rs linking the arena library, the
-src/bpf/lib symlink, the scheduler name in main.rs and in the test scripts,
-the ktstr tests and the undefok_flags.rs tests, and this file. Everything
-else in that diff must be explained by a section of this file.
+opt-out in Cargo.toml, the README, build.rs linking the arena library and
+defining SCX_ARENA_SCALAR, the src/bpf/lib symlink, the scheduler name in
+main.rs and in the test scripts, the ktstr tests and the undefok_flags.rs
+tests, this file, and mitosis's config mode, config.rs with CellSource,
+--cell-config and --reconfiguration-interval-s, which "Skipped mitosis
+commits" covers. Everything else in that diff must be explained by a section
+of this file.
 
 ## Skipped mitosis commits
 
 Each mitosis commit a sync did not port, as sha12 ("subject"), with its
 reason.
 
-None yet.
+The sync of 2026-10-28 skipped twelve commits that change only the subcell
+scheme, which "Removed features" covers, and seven that add the cell config
+mode. The maintainer decided to skip config mode. It mainly carries subcell
+layouts, and its pattern-based cell selection, which is cell level, is
+deferred until it can return with subcells through the cid topology
+override.
+
+Subcell only:
+
+- 0eff90309443 ("scx_mitosis: Hoist subcell assignment out of the cell
+  manager borrows"): moves only the subcell step out of the cell manager
+  borrow. nitosis's blocks already return just the cell and CPU assignments.
+- 4cca986266c3 ("scx_mitosis: Pre-create DSQs for every subcell slot from
+  init"): subcell DSQs. nitosis already creates every cell and LLC DSQ in
+  init.
+- 4e0d30a2d1d2 ("scx_mitosis: Always share idle CPUs among sibling
+  subcells"): the sibling-subcell idle step and the subcell borrowable
+  masks, a no-op with one subcell per cell.
+- 50d881b411d2 ("scx_mitosis: Share a cell smaller than its subcell count"):
+  the subcell split only.
+- 76c0eff7b39f ("scx_mitosis: Plumb subcell match rules through to BPF"):
+  subcell match rules.
+- 5a831d79da59 ("scx_mitosis: Match tasks into configured subcells"):
+  subcell comm matching.
+- 9b89bf9211fc ("scx_mitosis: Tag CPUs with their subcell when applying
+  configured subcells"): nitosis has no apply_configured_cell_subcells(),
+  and the cell-level vtime advance on a retag is already in it.
+- 101a57f15fc4 ("scx_mitosis: Account running and queued time per subcell"):
+  per-subcell accounting slots, read only by the subcell stats and weights.
+- 2837168fbb58 ("scx_mitosis: Estimate each task's CPU demand per subcell"):
+  per-task demand charged to subcell slots only.
+- 56c52ab98ef1 ("scx_mitosis: Export per-subcell demand stats"):
+  SubcellMetrics only.
+- 2c1c39e9fa5f ("scx_mitosis: Weight subcell partitions by demand"): subcell
+  split weights only.
+- 3e41326dd28c ("scx_mitosis: Allocate subcells in LLC chunks"): called only
+  from the subcell split.
+
+The cell config mode:
+
+- 90d2af23d31a ("scx_mitosis: Factor out the requested-minimum displacement
+  check")
+- e41f0a58f323 ("scx_mitosis: Add cell manager helpers for externally
+  resolved cells")
+- 31342deb513f ("scx_mitosis: Wrap the cell manager in a CellSource enum")
+- 5dc0ae77f511 ("scx_mitosis: Add the cell config parser")
+- f15afcaaa50f ("scx_mitosis: Resolve configured cells from the cgroup
+  tree")
+- f0bf0e15866e ("scx_mitosis: Skip cgroups that vanish during the cell
+  resolve walk")
+- 67c8aa0557f2 ("scx_mitosis: Add --cell-config mode")
 
 ## Validation obligations
 
