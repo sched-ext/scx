@@ -37,7 +37,19 @@ pub fn task_policy(task: &Task) -> u32 {
     }
 }
 
+const PF_IDLE: u32 = 0x2;
 const PF_EXITING: u32 = 0x4;
+const PF_KTHREAD: u32 = 0x0020_0000;
+
+/// What sched_info says of a task: how long it has waited runnable in
+/// all, and how many times it got a CPU.
+#[derive(Clone, Copy)]
+pub struct SchedInfo {
+    /// sched_info.run_delay, in nanoseconds.
+    pub run_delay: u64,
+    /// sched_info.pcount.
+    pub pcount: u64,
+}
 
 /// Is `task` exiting?
 #[inline(always)]
@@ -226,6 +238,62 @@ impl Task {
     #[inline(always)]
     pub fn sum_exec_runtime(&self) -> u64 {
         unsafe { self.field::<u64>(config::SUM_EXEC_RUNTIME) }
+    }
+
+    /// How many times the task gave up the CPU of its own accord,
+    /// task_struct.nvcsw: its runtime divided by it is its mean burst.
+    #[inline(always)]
+    pub fn nvcsw(&self) -> u64 {
+        unsafe { self.field::<u64>(config::NVCSW) }
+    }
+
+    /// When the task was created, task_struct.start_time: in the clock of
+    /// `helpers::ktime_get_ns()`, not of `time::now()`.
+    #[inline(always)]
+    pub fn start_time(&self) -> u64 {
+        unsafe { self.field::<u64>(config::START_TIME) }
+    }
+
+    /// How long the task has waited runnable and how many times it ran,
+    /// None on a kernel without CONFIG_SCHED_INFO.
+    #[inline(always)]
+    pub fn sched_info(&self) -> Option<SchedInfo> {
+        let delay = config::get(config::RUN_DELAY);
+        let pcount = config::get(config::PCOUNT);
+        if delay == 0 || pcount == 0 {
+            return None;
+        }
+        Some(SchedInfo {
+            run_delay: unsafe { self.word_at(delay - 1) },
+            pcount: unsafe { self.word_at(pcount - 1) },
+        })
+    }
+
+    /// The 64-bit word of the task at byte `offset`. A method rather than
+    /// a closure: an outlined closure takes an unnamed environment
+    /// parameter, which the kernel's BTF check refuses.
+    #[inline(always)]
+    unsafe fn word_at(&self, offset: u64) -> u64 {
+        unsafe {
+            read_volatile(
+                self.as_ptr()
+                    .cast::<u8>()
+                    .add(offset as usize)
+                    .cast::<u64>(),
+            )
+        }
+    }
+
+    /// Is the task a kernel thread, PF_KTHREAD?
+    #[inline(always)]
+    pub fn kthread(&self) -> bool {
+        unsafe { self.field::<u32>(config::TASK_FLAGS) & PF_KTHREAD != 0 }
+    }
+
+    /// Is the task a CPU's idle task, PF_IDLE?
+    #[inline(always)]
+    pub fn idle_task(&self) -> bool {
+        unsafe { self.field::<u32>(config::TASK_FLAGS) & PF_IDLE != 0 }
     }
 
     /// When the task last became runnable, in jiffies.
