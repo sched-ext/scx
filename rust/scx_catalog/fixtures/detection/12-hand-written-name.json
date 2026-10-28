@@ -1,0 +1,36 @@
+{
+  "unit": "active",
+  "manager": [],
+  "files": {
+    "env": "SCX_SCHEDULER=scx_bpfland\n"
+  },
+  "cmdline": [
+    "/usr/bin/scx_bpfland"
+  ],
+  "sysfs": {
+    "state": "enabled",
+    "ops": "bpfland"
+  },
+  "expected": {
+    "version": 2,
+    "scheduler": "scx_bpfland",
+    "unit": {
+      "active": true,
+      "enabled": true
+    },
+    "running": {
+      "sched": "scx_bpfland",
+      "args": []
+    },
+    "next": {
+      "sched": "scx_bpfland",
+      "args": [],
+      "override": false
+    },
+    "kernel": {
+      "state": "enabled",
+      "ops": "bpfland"
+    },
+    "failure": null
+  }
+}

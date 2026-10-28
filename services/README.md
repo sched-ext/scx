@@ -80,14 +80,26 @@ journalctl -u scx.service -b 0
 
 ## Interactive management
 
-[`scxtui`](../tools/scxtui/README.md) wraps the steps above in a terminal
-UI: it rewrites `SCX_SCHEDULER` and `SCX_FLAGS` in the unit's environment
-file (`/etc/default/scx` here, `/etc/sysconfig/scx` on distributions that
-patch the unit), drives the unit with `systemctl`, shows the running
-scheduler next to what the next start would run, including any
-`SCX_SCHEDULER_OVERRIDE` in effect, and browses the unit's journal.
+[`scxtui`](../tools/scxtui/README.md) is a terminal UI over the catalog
+below: it lists the recommended schedulers with the running one marked,
+starts one with a key, shows what runs now next to what the next start
+would run (including any `SCX_SCHEDULER_OVERRIDE` in effect) and the
+kernel's own `sched_ext` state, and browses the unit's journal. It runs
+as a normal user and goes through `scxcli` for every change.
 
 ```
-cargo build --release -p scxtui
-sudo ./target/release/scxtui
+cargo build --release -p scxtui -p scxcli
+./target/release/scxtui
 ```
+
+## The catalog
+
+[`scxcli`](../tools/scxcli/README.md) manages the unit from a catalog of
+schedulers: the ones the scx maintainers recommend (Default, Cosmos,
+LAVD, EEVDF, Cake), everything else that is installed, and a hidden set
+that needs a configuration of its own. `scxcli start scx_cosmos` writes
+`SCX_SCHEDULER` and `SCX_FLAGS` to `/etc/default/scx` and restarts the
+unit; `scxcli get` says which scheduler is running. The catalog ships as
+`/usr/share/scx/catalog.json` (`catalog.json` here) and an administrator
+overrides it with `/etc/scx/catalog.json`. The contract is in
+[CATALOG.md](CATALOG.md).

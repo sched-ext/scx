@@ -1,0 +1,36 @@
+{
+  "unit": "active",
+  "manager": [],
+  "files": {
+    "env": "# scx.service\nSCX_SCHEDULER=/usr/bin/scx_cosmos\nSCX_FLAGS=\"\"\n"
+  },
+  "cmdline": [
+    "/usr/bin/scx_cosmos"
+  ],
+  "sysfs": {
+    "state": "enabled",
+    "ops": "cosmos"
+  },
+  "expected": {
+    "version": 2,
+    "scheduler": "scx_cosmos",
+    "unit": {
+      "active": true,
+      "enabled": true
+    },
+    "running": {
+      "sched": "scx_cosmos",
+      "args": []
+    },
+    "next": {
+      "sched": "/usr/bin/scx_cosmos",
+      "args": [],
+      "override": false
+    },
+    "kernel": {
+      "state": "enabled",
+      "ops": "cosmos"
+    },
+    "failure": null
+  }
+}

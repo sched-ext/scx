@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<!--
+  polkit actions for scxcli, told apart by the first argument. pkexec
+  matches org.freedesktop.policykit.exec.path and .argv1, so an action
+  covers exactly one subcommand and scxcli's own parser decides what
+  that subcommand accepts.
+
+  Install as /usr/share/polkit-1/actions/org.sched_ext.scxcli.policy.
+  A distribution that wants every action to need a password ships a
+  stricter file or none; scxcli then works only as root.
+-->
+<policyconfig>
+  <vendor>sched_ext</vendor>
+  <vendor_url>https://github.com/sched-ext/scx</vendor_url>
+
+  <action id="org.sched_ext.scxcli.start">
+    <description>Start a sched_ext scheduler with its defaults</description>
+    <message>Authentication is required to start a scheduler</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">start</annotate>
+  </action>
+
+  <action id="org.sched_ext.scxcli.stop">
+    <description>Stop the sched_ext scheduler, keeping the selection</description>
+    <message>Authentication is required to stop the scheduler</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">stop</annotate>
+  </action>
+
+  <action id="org.sched_ext.scxcli.run">
+    <description>Start a sched_ext scheduler with arbitrary options</description>
+    <message>Authentication is required to start a scheduler with options</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">run</annotate>
+  </action>
+</policyconfig>

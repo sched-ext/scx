@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "Domyślny",
+      "description": "Planista jądra; żaden planista sched_ext nie działa."
+    },
+    {
+      "id": "scx_lavd-git",
+      "label": "LAVD (git)",
+      "description": ""
+    }
+  ],
+  "hidden": [
+    "scx_layered",
+    "scx_mitosis"
+  ]
+}

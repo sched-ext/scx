@@ -1,0 +1,10 @@
+LoadState=loaded
+ActiveState=inactive
+UnitFileState=disabled
+MainPID=0
+Result=success
+ExecMainStatus=0
+InvocationID=
+Environment=
+EnvironmentFiles=@env (ignore_errors=no)
+UnsetEnvironment=

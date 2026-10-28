@@ -1,0 +1,23 @@
+[package]
+name = "scxcli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+authors = ["Piotr Gorski <lucjan.lucjanov@gmail.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "Command-line tool for sched_ext schedulers, built on scx.service"
+readme = "README.md"
+keywords = ["sched-ext", "scx", "scheduler", "systemd", "linux"]
+categories = ["command-line-utilities"]
+
+[package.metadata.scx]
+ci.use_clippy = true
+
+[package.metadata.veristat]
+disable = true
+
+[dependencies]
+anyhow = "1"
+scx_catalog = { path = "../../rust/scx_catalog", version = "0.1.0" }
+serde_json = "1"

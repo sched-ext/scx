@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    },
+    {
+      "id": "/usr/bin/scx_lavd",
+      "label": "L"
+    }
+  ]
+}

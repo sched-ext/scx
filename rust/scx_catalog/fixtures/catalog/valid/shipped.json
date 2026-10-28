@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "Default",
+      "description": "The kernel's built-in scheduler (no sched_ext scheduler active)."
+    },
+    {
+      "id": "scx_cosmos",
+      "label": "Cosmos",
+      "description": "Keeps the system responsive under load."
+    },
+    {
+      "id": "scx_lavd",
+      "label": "LAVD",
+      "description": "Prioritizes tasks based on their latency criticality."
+    },
+    {
+      "id": "scx_eevdf",
+      "label": "EEVDF",
+      "description": "Brings newer kernel scheduler updates without requiring a kernel upgrade."
+    },
+    {
+      "id": "scx_cake",
+      "label": "Cake",
+      "description": "Improves gaming responsiveness."
+    }
+  ],
+  "hidden": [
+    "scx_layered",
+    "scx_mitosis",
+    "scx_nitosis"
+  ]
+}
