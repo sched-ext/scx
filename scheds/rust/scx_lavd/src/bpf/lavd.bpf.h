@@ -150,7 +150,6 @@ enum consts_flags {
 	LAVD_FLAG_FUTEX_BOOST		= (0x1 << 0), /* futex acquired or not */
 	LAVD_FLAG_NEED_LOCK_BOOST	= (0x1 << 1), /* need to boost lock for deadline calculation */
 	LAVD_FLAG_IS_GREEDY		= (0x1 << 2), /* task's overscheduling ratio compared to its nice priority */
-	LAVD_FLAG_IS_AFFINITIZED	= (0x1 << 3), /* is this task pinned to a subset of all CPUs? */
 	LAVD_FLAG_IS_WAKEUP		= (0x1 << 4), /* is this a wake up? */
 	LAVD_FLAG_IS_SYNC_WAKEUP	= (0x1 << 5), /* is this a sync wake up? */
 	LAVD_FLAG_ON_BIG		= (0x1 << 6), /* can a task run on a big core? */
@@ -1002,6 +1001,7 @@ struct pick_ctx {
 	bool a_empty:1;
 	bool o_empty:1;
 	bool is_task_big:1;
+	bool affinitized:1; /* is_affinitized(), set by init_ao_masks() */
 };
 
 
