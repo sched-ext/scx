@@ -693,20 +693,50 @@ The cell config mode:
 
 ## Validation obligations
 
-Choose affected cases and the required confidence for the change at hand.
-The wider coverage inventory includes cell isolation, dynamic cell creation
-and destruction, cell exclusion, borrowing, demand rebalancing, cpuset
-changes, LLC awareness with draining and stealing, pinned tasks and dynamic
-affinity selection, slice shrinking, SMT on and off, possible but offline
-cpus, hotplug restarts, cgroup tracking with the CPU controller enabled and
-disabled, and attach and detach. It is not a mandatory matrix for every
-port. Record source, binary and kernel identities once per batch.
+Every update to nitosis tests the sub-scheduler scenarios below. They are
+the main thing to test and come before the root-only suites.
 
-The functional drivers are mitosis's, renamed. The scripts under test/ run a
-built scheduler binary, SCHEDULER_BIN, against test cgroups and need root
-and cgroup v2, and test_cell_isolation.sh needs stress-ng. tests/ holds the
-ktstr tests behind the ktstr-tests feature. All of them need a kernel with
-the cid form of sched_ext.
+nitosis runs as the root with its cells under a parent cgroup and with
+--enable-borrowing, so that the IMMED-only grants on borrowable cids are
+exercised. A sub attaches to a cell's cgroup by path, `--cgroup PATH` for
+scx_mavd, the sub used so far, and any sub that attaches with a cgroup path
+works. The kernel needs the sub-scheduler interface, CONFIG_EXT_SUB_SCHED,
+and lockdep, since most sub-scheduler bugs show up as lockdep reports.
+
+- An attach to a cgroup that owns no cell is refused. The kernel reports the
+  sub disabled with "parent rejected (-22)".
+- An attach to a cell, then load inside the delegated cell, in another cell
+  and in the root cell. nitosis's stats show the delegated cell's dispatches
+  going to the sub, sub_q_pct 100 for that cell.
+- Cell churn with a sub attached: a new cell under load.
+- A detach under load, with the cell returning to nitosis, and a reattach
+  under load.
+- Two subs at once on two cells.
+- A cell's cgroup removed under its attached sub. The kernel unregisters the
+  sub, and a later new cell reuses the id only after that.
+- The root exiting under attached subs. Each sub exits with "parent exiting"
+  and sched_ext ends disabled.
+
+A passing sub scenario shows each sub's attach and exit reason in the kernel
+log, the expected per-cell sub_q_pct, progress in every workload, the
+surviving subs still running after another sub or cell goes away, and a
+kernel log with no warning, lockdep report or stall.
+
+Choose affected cases and the required confidence for the change at hand.
+The root-only coverage inventory includes cell isolation, dynamic cell
+creation and destruction, cell exclusion, borrowing, demand rebalancing,
+cpuset changes, LLC awareness with draining and stealing, pinned tasks and
+dynamic affinity selection, slice shrinking, SMT on and off, possible but
+offline cpus, hotplug restarts, cgroup tracking with the CPU controller
+enabled and disabled, and attach and detach. It is not a mandatory matrix
+for every port. Record source, binary and kernel identities once per batch.
+
+The functional drivers are mitosis's, renamed, and they cover root mode
+only. The scripts under test/ run a built scheduler binary, SCHEDULER_BIN,
+against test cgroups and need root and cgroup v2, and test_cell_isolation.sh
+needs stress-ng. tests/ holds the ktstr tests behind the ktstr-tests
+feature. All of them need a kernel with the cid form of sched_ext. The tree
+has no driver for the sub scenarios yet.
 
 Whatever runs, a passing case shows the scheduler attached on the expected
 kernel, workers running under sched_ext and making progress, a clean detach
