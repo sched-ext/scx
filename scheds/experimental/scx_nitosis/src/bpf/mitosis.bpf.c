@@ -582,8 +582,9 @@ static inline bool claim_idle_cid(s32 cid)
 
 /*
  * Record @cid's idle state in the per-shard idle and idle_smt masks, the only
- * idle state in the cid form. ops.update_idle() reports every transition here.
- * Pickers claim bits with claim_idle_cid_masks().
+ * idle state in the cid form. ops.update_idle() reports every transition here,
+ * and ops.dispatch() sets the bit again for a claimed cid that was given no
+ * task. Pickers claim bits with claim_idle_cid_masks().
  */
 static __always_inline void update_cid_idle(s32 cid, bool idle)
 {
@@ -1287,7 +1288,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 				scx_bpf_task_set_slice(prev, slice_ns);
 			}
 		}
-		return;
+		goto rearm;
 	}
 
 	/*
@@ -1299,9 +1300,11 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		min_vtime_dsq = min_vtime_dsq.raw == cell_dsq.raw ? cid_dsq : cell_dsq;
 		if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
 			/* our queues are empty, so offer the cid to the sub */
-			if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid))
+			if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid)) {
 				cstat_inc(CSTAT_SUB_DISPATCH, cell, cctx);
-			return;
+				return;
+			}
+			goto rearm;
 		}
 	}
 
@@ -1313,6 +1316,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 	else if (enable_llc_awareness)
 		cell_llc_nr_queued_dec(&cells[cell], llc);
+	return;
+
+rearm:
+	/*
+	 * A cid claimed and kicked by an idle pick but never given a task stays
+	 * idle with no ops.update_idle() transition, and its clear bit hides it
+	 * from every picker until it next runs a task and goes idle again. Set
+	 * the bit again when the idle task is current, as the builtin idle
+	 * tracking does.
+	 */
+	if (!prev && !cmask_test(cid, &idle_masks[topo->cid[cid].shard_idx].cmask)) {
+		struct task_struct *curr = scx_bpf_cid_curr(cid);
+
+		if (curr && (curr->flags & PF_IDLE))
+			update_cid_idle(cid, true);
+	}
 }
 
 /*

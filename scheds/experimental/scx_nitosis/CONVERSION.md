@@ -229,8 +229,21 @@ bug and fails on the invalid DSQ.
 The cid form has no builtin idle tracking or picking. ops.update_idle()
 maintains one windowed idle cmask per topology shard, and pickers claim a
 cid with a test-and-clear, the analog of scx_bpf_test_and_clear_cpu_idle().
-Shards are LLC aligned, so transitions and claim contention stay local. A
-scan starts at prev's shard, or at a pseudo-random shard without a usable
+A claimed cid that is given no task stays idle without an ops.update_idle()
+transition, so ops.dispatch() sets its bit again when it dispatches nothing
+and the idle task is current, as the builtin idle tracking does. Shards are
+LLC aligned, so transitions and claim contention stay local.
+
+A claim and the arrival of the claimed task are separate steps: the remote
+wakeup lands later on the select path, and the deferred dispatch to the
+local DSQ waits for the cid's rq lock on the enqueue path. The cid's
+dispatch can run in between, find its local DSQ empty and set the bit again,
+so a second picker can claim the cid and two tasks land on it, the second
+waiting behind the first. The builtin idle tracking has the same window in
+its pick_task_idle() re-set, so this matches mitosis rather than regressing
+from it.
+
+A scan starts at prev's shard, or at a pseudo-random shard without a usable
 prev, rotates through the shards of its window, and picks within a shard
 with cmask_any_and_distribute(), whose per-cid rotor mirrors
 bpf_cpumask_any_and_distribute(). A claim is retried at most
@@ -257,11 +270,6 @@ full barriers on their own, so either the drainer sees the queued work or
 the enqueuer sees the LLC without cpus, and no wakeup is lost.
 
 ## Differences requiring validation
-
-The builtin idle picker restored the idle bit of a cpu that was claimed and
-kicked but never given a task. In nitosis a claimed but unused cid stays
-busy until it next runs a task and goes idle again. Measure whether idle
-cpus go unused under wakeup bursts.
 
 Scan order within and across shards differs from the builtin picker's, so
 repeated choices spread across eligible cids but in different sequences. The
@@ -544,8 +552,6 @@ metal.
 - Whether the drain-bit loops should take the fetching atomics when the
   loader's probe finds the JIT lowers them, as the shared cmask bit helpers
   do.
-- Restoring the idle bit of an abandoned claim, which the builtin idle
-  picker did.
 - Whether idle tracking should move onto the shared cid idle helpers in
   scheds/include/lib/cid_idle.h, which arrived after the conversion.
 - Bringing back the subcell scheme and virtual LLCs through a cid topology
