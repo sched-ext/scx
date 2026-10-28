@@ -581,6 +581,46 @@ static inline bool claim_idle_cid(s32 cid)
 }
 
 /*
+ * Record @cid's idle state in the per-shard idle and idle_smt masks, the only
+ * idle state in the cid form. ops.update_idle() reports every transition here.
+ * Pickers claim bits with claim_idle_cid_masks().
+ */
+static __always_inline void update_cid_idle(s32 cid, bool idle)
+{
+	struct mitosis_topo *t = topo;
+	struct scx_cmask *im, *ism;
+	s32 core;
+
+	im = &idle_masks[t->cid[cid].shard_idx].cmask;
+	if (idle)
+		cmask_set(cid, im);
+	else
+		cmask_clear(cid, im);
+
+	if (!t->smt_active)
+		return;
+
+	core = t->cid[cid].core_idx;
+	if (core < 0)
+		return;
+
+	ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
+
+	/*
+	 * Mirror the builtin idle core tracking, racy but self-correcting: the
+	 * core range is set only when every sibling is idle and cleared on any
+	 * busy transition.
+	 */
+	if (idle) {
+		if (!cmask_full_range(im, t->core_cids[core].base, t->core_cids[core].nr))
+			return;
+		cmask_set_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
+	} else {
+		cmask_clear_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
+	}
+}
+
+/*
  * Locate @prev_cid's shard when it falls inside the scan window, MAX_CPUS
  * otherwise.
  */
@@ -2549,46 +2589,11 @@ int apply_cell_config(void *ctx)
 }
 
 // clang-format off
-/*
- * The only source of idle state in the cid form. Keep the per-shard idle and
- * idle_smt masks in sync. Pickers claim bits with claim_idle_cid_masks().
- */
 void BPF_STRUCT_OPS(mitosis_update_idle, s32 cid, bool idle)
 {
-	struct mitosis_topo *t;
-	struct scx_cmask *im, *ism;
-	s32 core;
-
 	MITOSIS_TOUCH_ARENA();
 
-	t = topo;
-	im = &idle_masks[t->cid[cid].shard_idx].cmask;
-	if (idle)
-		cmask_set(cid, im);
-	else
-		cmask_clear(cid, im);
-
-	if (!t->smt_active)
-		return;
-
-	core = t->cid[cid].core_idx;
-	if (core < 0)
-		return;
-
-	ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
-
-	/*
-	 * Mirror the builtin idle core tracking, racy but self-correcting: the
-	 * core range is set only when every sibling is idle and cleared on any
-	 * busy transition.
-	 */
-	if (idle) {
-		if (!cmask_full_range(im, t->core_cids[core].base, t->core_cids[core].nr))
-			return;
-		cmask_set_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
-	} else {
-		cmask_clear_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
-	}
+	update_cid_idle(cid, idle);
 }
 
 SCX_OPS_CID_DEFINE(mitosis,
