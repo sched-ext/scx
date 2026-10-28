@@ -78,10 +78,9 @@ polkit policy and the catalog.
 
 scxtui has no command line of its own beyond `--help` and `--version`.
 Scripts use scxcli directly: `scxcli get --json`, `scxcli list --json`,
-`pkexec scxcli start SCHED`. The earlier scxctl-style `--cli` prints the
-scxcli command that replaces each of its subcommands and exits; it will
-be removed in the next release. `--export-profiles` is gone: the catalog
-is a plain JSON file and `scxcli list --json` prints it resolved.
+`pkexec scxcli start SCHED`. The scxctl-style `--cli` and
+`--export-profiles` of earlier versions are gone: the catalog is a plain
+JSON file and `scxcli list --json` prints it resolved.
 
 Per-scheduler modes (`auto`, `gaming`, `powersave`, `lowlatency`,
 `server`) and the scx_loader configuration files scxtui used to read
