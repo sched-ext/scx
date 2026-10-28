@@ -405,15 +405,6 @@ static void collect_sys_stat(void)
 		cpuc->avg_util_invr = calc_asym_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
 
 		/*
-		 * Both utilization signals are now up to date, so recompute
-		 * the performance target. A busy CPU sends it itself from
-		 * ops.running() and ops.tick(). An idle CPU runs neither, so
-		 * lower its frequency from here as its target decays.
-		 */
-		calc_cpuperf_target(cpuc);
-		decay_idle_cpuperf_target(cpuc, c->now);
-
-		/*
 		 * Calculate domain-pinned task utilization. Clamp both
 		 * snapshots to compute_wall. For wall time, this guards against
 		 * cross-interval contamination (last_measured_*_clk is sampled
@@ -493,6 +484,17 @@ static void collect_sys_stat(void)
 		 * WARNING: This should be called after updating cpuc->cur_util.
 		 */
 		update_effective_capacity(cpuc);
+
+		/*
+		 * Both utilization signals were updated in the first pass, so
+		 * recompute the performance target. A busy CPU sends it itself
+		 * from ops.running() and ops.tick(). An idle CPU runs neither,
+		 * so lower its frequency from here as its target decays. This
+		 * stays out of the first pass, which exceeds the verifier's
+		 * instruction limit with these calls inside it.
+		 */
+		calc_cpuperf_target(cpuc);
+		decay_idle_cpuperf_target(cpuc, c->now);
 
 		/*
 		 * Accumulate statistics.
