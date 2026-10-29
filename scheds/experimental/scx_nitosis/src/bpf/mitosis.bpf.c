@@ -581,6 +581,47 @@ static inline bool claim_idle_cid(s32 cid)
 }
 
 /*
+ * Record @cid's idle state in the per-shard idle and idle_smt masks, the only
+ * idle state in the cid form. ops.update_idle() reports every transition here,
+ * and ops.dispatch() sets the bit again for a claimed cid that was given no
+ * task. Pickers claim bits with claim_idle_cid_masks().
+ */
+static __always_inline void update_cid_idle(s32 cid, bool idle)
+{
+	struct mitosis_topo *t = topo;
+	struct scx_cmask *im, *ism;
+	s32 core;
+
+	im = &idle_masks[t->cid[cid].shard_idx].cmask;
+	if (idle)
+		cmask_set(cid, im);
+	else
+		cmask_clear(cid, im);
+
+	if (!t->smt_active)
+		return;
+
+	core = t->cid[cid].core_idx;
+	if (core < 0)
+		return;
+
+	ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
+
+	/*
+	 * Mirror the builtin idle core tracking, racy but self-correcting: the
+	 * core range is set only when every sibling is idle and cleared on any
+	 * busy transition.
+	 */
+	if (idle) {
+		if (!cmask_full_range(im, t->core_cids[core].base, t->core_cids[core].nr))
+			return;
+		cmask_set_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
+	} else {
+		cmask_clear_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
+	}
+}
+
+/*
  * Locate @prev_cid's shard when it falls inside the scan window, MAX_CPUS
  * otherwise.
  */
@@ -1119,6 +1160,19 @@ static __always_inline bool pinned_dsq_overdue(struct cpu_ctx *cctx)
 	return since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
 }
 
+/*
+ * Charge the running time of the task described by @tctx since it was last
+ * accounted to its cell's demand counter on the target CPU.
+ */
+static __always_inline void account_task_running(struct cpu_ctx *cctx, struct task_ctx *tctx, u64 now)
+{
+	u64 used;
+
+	used = time_delta(now, tctx->running_accounted_at);
+	tctx->running_accounted_at = now;
+	cctx->running_ns[tctx->cell] += used;
+}
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
 	MITOSIS_TOUCH_ARENA();
@@ -1127,7 +1181,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 	u32 cell;
 	u64 sub_cgid;
 
-	cctx = cur_cpu_ctx();
+	cctx = &cpu_ctxs[cid];
 	cell = READ_ONCE(cctx->cell);
 	sub_cgid = READ_ONCE(cells[cell].sub_cgid);
 
@@ -1219,10 +1273,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 					stay = tctx->dsq.raw == cid_dsq.raw;
 			}
 
-			if (stay)
+			if (stay) {
+				/*
+				 * This is an accounting hook as well as a refill.
+				 * Once prev's slice is extended the core picks it
+				 * again, and put_prev_set_next_task() returns early
+				 * for next == prev, so neither stopping() nor
+				 * running() fires for as long as prev stays alone on
+				 * this cpu. Charge any runtime accumulated since the
+				 * last tick or slice extension, and let stopping()
+				 * charge the remainder.
+				 */
+				account_task_running(cctx, tctx, scx_clock_task(cctx->cpu));
 				scx_bpf_task_set_slice(prev, slice_ns);
+			}
 		}
-		return;
+		goto rearm;
 	}
 
 	/*
@@ -1234,9 +1300,11 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		min_vtime_dsq = min_vtime_dsq.raw == cell_dsq.raw ? cid_dsq : cell_dsq;
 		if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
 			/* our queues are empty, so offer the cid to the sub */
-			if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid))
+			if (sub_cgid && scx_bpf_sub_dispatch(sub_cgid)) {
 				cstat_inc(CSTAT_SUB_DISPATCH, cell, cctx);
-			return;
+				return;
+			}
+			goto rearm;
 		}
 	}
 
@@ -1248,6 +1316,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
 	else if (enable_llc_awareness)
 		cell_llc_nr_queued_dec(&cells[cell], llc);
+	return;
+
+rearm:
+	/*
+	 * A cid claimed and kicked by an idle pick but never given a task stays
+	 * idle with no ops.update_idle() transition, and its clear bit hides it
+	 * from every picker until it next runs a task and goes idle again. Set
+	 * the bit again when the idle task is current, as the builtin idle
+	 * tracking does.
+	 */
+	if (!prev && !cmask_test(cid, &idle_masks[topo->cid[cid].shard_idx].cmask)) {
+		struct task_struct *curr = scx_bpf_cid_curr(cid);
+
+		if (curr && (curr->flags & PF_IDLE))
+			update_cid_idle(cid, true);
+	}
 }
 
 /*
@@ -1265,8 +1349,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+	u64 now;
 
-	cctx = cur_cpu_ctx();
+	cctx = &cpu_ctxs[scx_bpf_task_cid(p)];
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
@@ -1288,8 +1373,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	/* Record the running slice start time. */
-	tctx->started_running_at = scx_bpf_now();
-	tctx->charged_at = tctx->started_running_at;
+	now = scx_bpf_now();
+	tctx->started_running_at = now;
+	tctx->running_accounted_at = scx_clock_task(cctx->cpu);
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
 	if (enable_slice_shrinking) {
@@ -1313,25 +1399,15 @@ static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
 		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
 }
 
-/*
- * Charge the task's time since the last charge to its cell. Called from the
- * tick as well as stopping(), so a task kept running by the slice extension
- * accrues as it runs.
- */
-static void charge_running(struct task_ctx *tctx, struct cpu_ctx *cctx,
-			   u64 now)
-{
-	cctx->running_ns[tctx->cell] += time_delta(now, tctx->charged_at);
-	tctx->charged_at = now;
-}
-
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 {
+	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
+	cctx = &cpu_ctxs[scx_bpf_task_cid(p)];
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
-	charge_running(tctx, cur_cpu_ctx(), scx_bpf_now());
+	account_task_running(cctx, tctx, scx_clock_task(cctx->cpu));
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -1342,7 +1418,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	u64 now, used;
 	u32 cidx;
 
-	cctx = cur_cpu_ctx();
+	cctx = &cpu_ctxs[scx_bpf_task_cid(p)];
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
@@ -1408,7 +1484,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	charge_running(tctx, cctx, now);
+	/* Charge whatever the slice extensions since the last flush left over. */
+	account_task_running(cctx, tctx, scx_clock_task(cctx->cpu));
 }
 
 SEC("fentry/cpuset_write_resmask")
@@ -2531,46 +2608,11 @@ int apply_cell_config(void *ctx)
 }
 
 // clang-format off
-/*
- * The only source of idle state in the cid form. Keep the per-shard idle and
- * idle_smt masks in sync. Pickers claim bits with claim_idle_cid_masks().
- */
 void BPF_STRUCT_OPS(mitosis_update_idle, s32 cid, bool idle)
 {
-	struct mitosis_topo *t;
-	struct scx_cmask *im, *ism;
-	s32 core;
-
 	MITOSIS_TOUCH_ARENA();
 
-	t = topo;
-	im = &idle_masks[t->cid[cid].shard_idx].cmask;
-	if (idle)
-		cmask_set(cid, im);
-	else
-		cmask_clear(cid, im);
-
-	if (!t->smt_active)
-		return;
-
-	core = t->cid[cid].core_idx;
-	if (core < 0)
-		return;
-
-	ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
-
-	/*
-	 * Mirror the builtin idle core tracking, racy but self-correcting: the
-	 * core range is set only when every sibling is idle and cleared on any
-	 * busy transition.
-	 */
-	if (idle) {
-		if (!cmask_full_range(im, t->core_cids[core].base, t->core_cids[core].nr))
-			return;
-		cmask_set_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
-	} else {
-		cmask_clear_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
-	}
+	update_cid_idle(cid, idle);
 }
 
 SCX_OPS_CID_DEFINE(mitosis,
