@@ -227,6 +227,12 @@ struct Opts {
     #[clap(long = "no-fast-lb", action = clap::ArgAction::SetTrue)]
     no_fast_lb: bool,
 
+    /// Default: --no-force-steal-limit is deactivated (force stealing is limited).
+    /// Let force stealing scan every distance and NUMA node on each dispatch,
+    /// with no rate limit.
+    #[clap(long = "no-force-steal-limit", action = clap::ArgAction::SetTrue)]
+    no_force_steal_limit: bool,
+
     /// Default: --no-ovrflw-extend is deactivated (overflow-set extension
     /// on wake-up is on). Disable the proactive overflow-set extension in
     /// ops.select_cpu() that absorbs bursty wake-ups by adding a fresh
@@ -792,6 +798,7 @@ impl<'a> Scheduler<'a> {
         rodata.xmig_min_gain_ns = opts.xmig_min_gain_us * 1000;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
+        rodata.no_force_steal_limit = opts.no_force_steal_limit as u8;
         rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
 
         rodata.no_wake_sync = opts.no_wake_sync;

@@ -221,6 +221,9 @@ const volatile u8	mig_delta_pct = 0;
 /* Disable batch-migration load balancer; set via --no-fast-lb. */
 const volatile u8	no_fast_lb = 0;
 
+/* Turn off the force-stealing limits; set via --no-force-steal-limit. */
+const volatile u8	no_force_steal_limit = 0;
+
 /* Disable the proactive overflow-set extension on wake-up;
  * set via --no-ovrflw-extend. */
 const volatile u8	no_ovrflw_extend;
