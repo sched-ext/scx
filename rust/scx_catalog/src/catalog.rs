@@ -371,17 +371,36 @@ options is a custom profile, with a sched and an id of its own"
     validate_text("description", &entry.description, 0, 256)
 }
 
+/// What `start ID` takes: `default`, a scheduler name, or a custom
+/// profile's id. The two namespaces do not overlap (a profile id never
+/// starts with `scx_`), so this is a syntax check for the parser; which
+/// one it is, and whether the catalog has it, is decided at the start.
+pub fn validate_start_id(id: &str) -> Result<()> {
+    if id == DEFAULT_ID || validate_name(id).is_ok() {
+        return Ok(());
+    }
+    validate_profile_id(id)
+        .with_context(|| format!("{id:?} is neither a scheduler name (scx_*) nor a profile id"))
+}
+
 /// A custom profile's id: lowercase ASCII letters, digits, `-` and
-/// `_`, at most 64 characters, not `default`, and not an `scx_*` name,
-/// so that `start ID` can never be read as a scheduler's name.
+/// `_`, starting with a letter or digit so that it is never taken for
+/// an option, at most 64 characters, not `default`, and not an `scx_*`
+/// name, so that `start ID` can never be read as a scheduler's name.
 pub fn validate_profile_id(id: &str) -> Result<()> {
-    let ok = !id.is_empty()
-        && id.len() <= 64
+    let ok = id.len() <= 64
+        && id
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         && id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
     if !ok {
-        bail!("invalid profile id {id:?}: 1 to 64 lowercase ASCII letters, digits, '_' and '-'");
+        bail!(
+            "invalid profile id {id:?}: 1 to 64 lowercase ASCII letters, digits, '_' and '-', \
+starting with a letter or digit"
+        );
     }
     if id == DEFAULT_ID {
         bail!("a custom profile cannot be called {DEFAULT_ID:?}");
@@ -668,6 +687,16 @@ mod tests {
     }
 
     #[test]
+    fn a_start_id_is_default_a_scheduler_name_or_a_profile_id() {
+        for ok in ["default", "scx_cosmos", "latency", "low-latency"] {
+            validate_start_id(ok).unwrap();
+        }
+        for bad in ["", "Cosmos", "/usr/bin/scx_cosmos", "a b", "../etc", "scx_"] {
+            assert!(validate_start_id(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn profile_ids_are_lowercase_and_never_scheduler_names() {
         for ok in ["latency", "low-latency_2", "a", &"x".repeat(64)] {
             validate_profile_id(ok).unwrap();
@@ -679,6 +708,9 @@ mod tests {
             "scx_",
             "Latency",
             "low latency",
+            "-v",
+            "--json",
+            "_x",
             "latency/1",
             "zażółć",
             &"x".repeat(65),

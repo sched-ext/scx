@@ -92,7 +92,8 @@ Rules, checked by `scx_catalog::Catalog::validate` and so by every load:
   A plain profile starts its scheduler with the scheduler's own
   defaults; `args` on it is absent or empty (in a version 2 file).
 - A profile is custom when it has `sched`. Its `id` is 1 to 64
-  lowercase ASCII letters, digits, `_` and `-`, not `default` and not
+  lowercase ASCII letters, digits, `_` and `-`, starting with a letter
+  or digit (so it is never taken for an option), not `default` and not
   starting with `scx_`, so that `start ID` can never be read as a
   scheduler's name. `sched` is a scheduler name by the rule above, and
   `args` holds at most 32 options, each 1 to 256 characters of ASCII
@@ -296,14 +297,14 @@ and whether it is recommended or hidden is the listing's business.
 ```
 scxcli list [recommended|all] [--json]   # any user
 scxcli get [--json]                      # any user
-scxcli start SCHED            # root, or polkit: allow_active=yes
+scxcli start ID               # root, or polkit: allow_active=yes
 scxcli start                  # root, or polkit: allow_active=yes
 scxcli stop                   # root, or polkit: allow_active=yes
 scxcli run SCHED [ARGS...]    # root, or polkit: auth_admin_keep
 ```
 
 Clients that are not root run the privileged commands as
-`pkexec scxcli start SCHED`. scxcli does not escalate on its own.
+`pkexec scxcli start ID`. scxcli does not escalate on its own.
 
 - `list` and `list recommended` show the recommended entries with the
   current state; `list all` shows every installed scheduler the catalog
@@ -316,31 +317,51 @@ Clients that are not root run the privileged commands as
   since nothing privileged follows from it. `source` is then the file
   and `customized` false. No other command takes a catalog: `start` and
   `resume` consult the installed one, since the policy covers what that
-  one lists.
-- `start SCHED` takes exactly one argument: `default`, or a scheduler
-  from `list all` by name, started with its own defaults. What `list
-  all` would not show is refused by the same two tests the listing
-  applies: an `scx_*` executable that is not a scheduler (`scx_loader`,
-  `scx_forge_agent` and the other tools) is not a scheduler here either,
-  and a hidden scheduler is refused with a pointer to `run`. A path or
-  anything that is not a scheduler name is a usage error.
+  one lists. A client listing with `--catalog` therefore shows custom
+  profiles that `start ID` would not run as shown: the installed
+  catalog may have no such id, or another command under it. Such a
+  client does not start a custom profile from a listing it got that
+  way, and says so; `default` and plain profiles are the same command
+  under every catalog, so those it may start. Options never travel
+  from a listing to `start`: `start` takes an id and nothing else.
+- `start ID` takes exactly one argument: `default`; a scheduler from
+  `list all` by name, started with its own defaults; or a custom
+  profile by its id, started with the scheduler and options the
+  installed catalog gives it. What `list all` would not show is refused
+  by the same two tests the listing applies: an `scx_*` executable that
+  is not a scheduler (`scx_loader`, `scx_forge_agent` and the other
+  tools) is not a scheduler here either, and a hidden scheduler is
+  refused with a pointer to `run` and to profiles. A profile may name a
+  hidden scheduler, but not a tool. A path, or anything that is neither
+  a scheduler name nor a profile id in form, is a usage error; an id in
+  form that the catalog does not have is a failure.
 - `start` alone starts the unit again after `stop`. Because the shipped
   policy lets it run without a password, it starts only what `start
-  SCHED` could have written: `SCX_SCHEDULER` must resolve, through the
+  ID` could have written: `SCX_SCHEDULER` must resolve, through the
   same rules `start` and `run` use, to an executable in systemd's
-  default search path that `list all` would show (a scheduler, not
-  hidden); `SCX_FLAGS` must
-  be empty; no `SCX_*_OVERRIDE` may be in effect; and the environment
-  must have resolved. Anything else is refused, with the command that
-  does it with the right authority: `start SCHED`, which rewrites the
-  file and clears overrides, or `run` as an administrator for a
-  configuration with options. What was validated is the executable the
-  value resolves to; what the unit's shell would run is the value as
-  written, and a bare name is looked up in that shell's own PATH, which
-  a drop-in or an environment file can point elsewhere. So when the
-  file holds anything but the resolved absolute path, that path is
-  written into it first, exactly as `start SCHED` would have, and only
-  then is the unit started. `reset-failed` precedes the start.
+  default search path; no `SCX_*_OVERRIDE` may be in effect; the
+  environment must have resolved; `SCX_FLAGS` must be in the one form
+  `start` and `run` write, options separated by single spaces with
+  nothing around them, since the unit's shell splits the value on its
+  own rules (a no-break space is a separator to a Unicode reader and
+  part of a word to bash) and only that form is read the same way by
+  both; and then either `SCX_FLAGS` is empty and the scheduler is one
+  `list all` would show (a scheduler, not hidden), or the scheduler and
+  `SCX_FLAGS` are exactly the command of a custom profile in the
+  installed catalog, the same executable and the same options in the
+  same order. Anything else is refused, with the
+  command that does it with the right authority: `start ID`, which
+  rewrites the file and clears overrides, or `run` as an administrator
+  for a configuration with options no profile has. A profile edited
+  since the selection no longer matches and is refused the same way,
+  rather than started as something else. What was validated is the
+  executable the value resolves to; what the unit's shell would run is
+  the value as written, and a bare name is looked up in that shell's
+  own PATH, which a drop-in or an environment file can point elsewhere.
+  So when the file holds anything but the resolved absolute path, that
+  path is written into it first, with the options as they were, exactly
+  as `start ID` would have, and only then is the unit started.
+  `reset-failed` precedes the start.
 - `stop` stops the unit and changes nothing else: the selected scheduler
   stays in the file, `get` reports `default` running with it as `next`,
   and the next boot or `start` brings it back. It is for a baseline
@@ -357,7 +378,7 @@ Clients that are not root run the privileged commands as
   bash, which expands `$SCX_SCHEDULER $SCX_FLAGS` unquoted, and the
   allowlist exists so that nothing written survives that expansion as
   anything but the intended words.
-- There is no `restart`: `start SCHED` restarts the unit with the
+- There is no `restart`: `start ID` restarts the unit with the
   scheduler, and `systemctl restart scx.service` restarts it with the
   file as it is. A `restart` of its own would have to choose between the
   running process and the file, which differ after a hand edit.
@@ -472,13 +493,14 @@ by the `org.freedesktop.policykit.exec.argv1` annotation:
 | `org.sched_ext.scxcli.stop`  | `stop`  | `allow_active=yes`|
 | `org.sched_ext.scxcli.run`   | `run`   | `auth_admin_keep` |
 
-Starting needs no password because the caller passes only a name, the
-scheduler starts with its own defaults, and the executable comes from
-systemd's default search path and a catalog that an administrator
-controls; the risk in a scheduler is in its options, not in a binary
-under `/usr`. Stopping changes nothing about what runs as root. Starting
-a scheduler with arbitrary options, or a hidden one with the
-configuration it needs, changes what runs as root and needs an
+Starting needs no password because the caller passes only an id: the
+scheduler starts with its own defaults, or with the options an
+administrator wrote into the trusted catalog for that id, and the
+executable comes from systemd's default search path; the risk in a
+scheduler is in its options, and the only options this path runs are
+the administrator's. Stopping changes nothing about what runs as root.
+Starting a scheduler with options of the caller's choosing, or a hidden
+one outside a profile, changes what runs as root and needs an
 administrator. The policy is a separate file: a distribution that wants
 every action to need a password ships a stricter one or none, and scxcli
 then works only as root.

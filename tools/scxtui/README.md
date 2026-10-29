@@ -82,7 +82,7 @@ which lists with the named catalog file instead of the installed one
 before it is installed); starting a scheduler still goes by the
 installed catalog, since the polkit policy covers what that one lists.
 Scripts use scxcli directly: `scxcli get --json`, `scxcli list --json`,
-`pkexec scxcli start SCHED`. The scxctl-style `--cli` and
+`pkexec scxcli start ID`. The scxctl-style `--cli` and
 `--export-profiles` of earlier versions are gone: the catalog is a plain
 JSON file and `scxcli list --json` prints it resolved.
 

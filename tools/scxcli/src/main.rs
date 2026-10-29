@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use scx_catalog::catalog::{DEFAULT_ID, validate_arg, validate_name, validate_sched};
+use scx_catalog::catalog::{DEFAULT_ID, validate_arg, validate_sched, validate_start_id};
 use scx_catalog::{Current, Listing, Tier};
 
 const USAGE: &str = "\
@@ -31,9 +31,10 @@ USAGE:
       --catalog PATH                  List with this catalog file instead
                                       of the installed one
     scxcli get [--json]               Show which scheduler is running
-    scxcli start SCHED                Start a scheduler from `list all` with
-                                      its defaults, or `default` for the
-                                      kernel's own (root, or pkexec)
+    scxcli start ID                   Start an entry of `list`: a profile
+                                      by id, a scheduler from `list all`
+                                      with its defaults, or `default` for
+                                      the kernel's own (root, or pkexec)
     scxcli start                      Start the selected scheduler again
                                       after `stop` (root, or pkexec)
     scxcli stop                       Stop the scheduler, keep the selection
@@ -148,14 +149,12 @@ fn parse(args: &[String]) -> Result<Command> {
         "start" => match rest {
             [] => Ok(Command::Start { id: None }),
             [id] => {
-                if id != DEFAULT_ID {
-                    validate_name(id).map_err(|err| Usage(format!("{err:#}")))?;
-                }
+                validate_start_id(id).map_err(|err| Usage(format!("{err:#}")))?;
                 Ok(Command::Start {
                     id: Some(id.clone()),
                 })
             }
-            _ => usage("start takes at most one scheduler name; options go through run"),
+            _ => usage("start takes at most one id; options go through run or a profile"),
         },
         "run" => match rest {
             [] => usage("run takes a scheduler"),
@@ -241,7 +240,9 @@ fn execute(command: Command) -> Result<()> {
         Command::Start { id: Some(id) } => {
             let started = scx_catalog::start(&id)?;
             match started.launch {
-                Some((path, _)) => writeln!(out, "started {}: {path}", started.id)?,
+                Some((path, args)) => {
+                    writeln!(out, "started {}", render_started(&started.id, &path, &args))?
+                }
                 None => writeln!(out, "default: scx.service stopped and disabled")?,
             }
         }
@@ -252,6 +253,17 @@ fn execute(command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `scx_cosmos: /usr/bin/scx_cosmos`, or for a profile
+/// `latency: /usr/bin/scx_eevdf --slice-us 1600`.
+fn render_started(id: &str, path: &str, args: &[String]) -> String {
+    let mut text = format!("{id}: {path}");
+    for arg in args {
+        text.push(' ');
+        text.push_str(arg);
+    }
+    text
 }
 
 fn render_current(current: &Current) -> String {
@@ -464,7 +476,27 @@ mod tests {
     }
 
     #[test]
-    fn start_takes_default_or_one_scheduler_name() {
+    fn start_takes_default_one_scheduler_name_or_one_profile_id() {
+        // A profile id parses; whether the catalog has it is the
+        // start's business, not the parser's.
+        assert_eq!(
+            p(&["start", "latency"]).unwrap(),
+            Command::Start {
+                id: Some("latency".into())
+            }
+        );
+        assert_eq!(
+            render_started(
+                "latency",
+                "/usr/bin/scx_eevdf",
+                &["--slice-us".into(), "1600".into()]
+            ),
+            "latency: /usr/bin/scx_eevdf --slice-us 1600"
+        );
+        assert_eq!(
+            render_started("scx_cosmos", "/usr/bin/scx_cosmos", &[]),
+            "scx_cosmos: /usr/bin/scx_cosmos"
+        );
         assert_eq!(p(&["start"]).unwrap(), Command::Start { id: None });
         assert_eq!(
             p(&["start", "scx_cosmos"]).unwrap(),
@@ -481,7 +513,7 @@ mod tests {
         assert!(is_usage(p(&["start", "scx_cosmos", "scx_lavd"])));
         assert!(is_usage(p(&["start", "scx_lavd", "--performance"])));
         assert!(is_usage(p(&["start", "--json"])));
-        assert!(is_usage(p(&["start", "cosmos"])));
+        assert!(is_usage(p(&["start", "Cosmos"])));
         assert!(is_usage(p(&["start", "/usr/bin/scx_cosmos"])));
         assert!(is_usage(p(&["start", "../etc"])));
         assert!(is_usage(p(&["start", "a b"])));

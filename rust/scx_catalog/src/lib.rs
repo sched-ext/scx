@@ -30,7 +30,7 @@ pub use catalog::{
     Tier, is_customized, load, load_file, load_shipped, validate_profile_id,
 };
 pub use listing::{Installed, Listing, Pick, list, list_with};
-pub use start::{Resumable, Started, installed, resumable, resume, run, start, stop};
+pub use start::{Resumable, Started, installed, plan, resumable, resume, run, start, stop};
 pub use state::{Current, Failure, Next, OUTPUT_VERSION, Running, Unit, current};
 
 /// Whether an error is a lack of privileges rather than a failure: a
