@@ -91,14 +91,6 @@ reclaim threads. arena_init() sizes the bitmap allocator from the nr_cpu_ids
 rodata that main.rs sets and fails without it, and allocates the rotor of
 the cmask distribute helpers.
 
-build.rs builds the object with -DSCX_ARENA_SCALAR, under which the __arena
-tag and the address-space casts expand to nothing, and the nitosis sources
-carry no tags since 53c6c0215b63 ("scx_nitosis: Drop the __arena tags"). The
-define adds the rodata marker __SCX_MARKER_arena_scalar to the object, and
-scx_ops_cid_open!() sets the BPF_F_ARENA_SCALAR load flag on an object that
-carries it. The flag is due in v7.4, and a kernel without it rejects the
-load with EINVAL.
-
 ## CPU identities
 
 Scheduler-owned CPU fields hold cids. Locals named cpu in converted code can
@@ -415,8 +407,9 @@ remaining scans have not been converted, see "Open items".
 ## Verifier constraints
 
 A program that only dereferences arena pointers handed to it never loads the
-arena map and is rejected at the first arena access. MITOSIS_TOUCH_ARENA()
-at the top of every such program gives it the reference.
+arena map and is rejected at the first address-space cast.
+MITOSIS_TOUCH_ARENA() at the top of every such program gives it the
+reference.
 
 init_cgrp_ctx() is a global function, because its arena accesses verify
 expensively and inlining them into tp_cgroup_mkdir()'s ancestor loop
@@ -426,33 +419,33 @@ once LLC awareness stacked a second pick level into ops.select_cid().
 sub_cap_sync_cell() is one too, so that the two halves of the cap pass share
 a single copy of its cmask bodies.
 
-The ops.init() topology walk fills each entry field by field. clang 20
-derived the destination of the aggregate copy before the arena address-space
-cast, and the verifier rejected the stores it saw go through a scalar. Under
-SCX_ARENA_SCALAR a store through a plain scalar is an arena access, so that
-failure cannot happen in this object, and an aggregate copy has not been
-tried since. scx_cargo refuses to build cid-form schedulers with clang
-before 22 unless SCX_ALLOW_OLD_CLANG is set.
+The ops.init() topology walk fills each entry field by field, because clang
+20 derived the destination of the aggregate copy before the arena
+address-space cast and the verifier saw the stores go through a scalar.
+scx_cargo refuses to build cid-form schedulers with clang before 22 unless
+SCX_ALLOW_OLD_CLANG is set.
 
-scx_mavd's stack model reads any object. On the object built from this tree
-at the last sync, the deepest chain is:
+scx_mavd's stack model reads any object. On the object built from this tree,
+the deepest chain is:
 
-    mitosis_enqueue       128
-    update_task_cell       48
-    update_task_cmask     128
+    mitosis_enqueue       144
+    update_task_cell       64
+    update_task_cmask     144
     cmask_and             112
-                          416
+                          464
 
 Each number is the rounded frame the verifier adds for the subprog. The same
-chain ending in set_task_llc() instead of cmask_and() also models at 416.
-ops.select_cid() models at 368 through the same helpers from a frame of 80,
-and ops.dispatch() at 432, its frame of 272 over pick_idle_cid_cores() at
-160.
+chain ending in set_task_llc() instead of cmask_and() also models at 464.
+ops.select_cid() models at 400 through the same helpers from a frame of 80,
+and ops.dispatch() at 480, its frame of 304 over pick_idle_cid_cores() at
+176.
 
-The verifier's own stack depths and per-program instruction counts were
-measured on 2026-10-28 on sched_ext for-next a96c41fea8da (7.3.0-rc5,
-lockdep) in a vng VM with 16 cpus as 8 cores x 2 threads, a debug build,
-every program loaded at verifier log level 4.
+The verifier's own stack depths and per-program instruction counts below are
+from the SCX_ARENA_SCALAR object and have not been re-taken on the object
+built with the __arena tags. They were measured on 2026-10-28 on sched_ext
+for-next a96c41fea8da (7.3.0-rc5, lockdep) in a vng VM with 16 cpus as 8
+cores x 2 threads, a debug build, every program loaded at verifier log level
+4.
 
 One run used the default options and one every BPF rodata option:
 --enable-llc-awareness, --enable-borrowing, --enable-slice-shrinking,
@@ -470,8 +463,8 @@ parentheses:
 
 The BPF options are rodata, so the verifier prunes the disabled paths and
 the default counts are the lower ones, except for init, whose default count
-is not lower than the all-on one. The verifier's stack depths sit at or
-under the model's chains, dispatch at 272 against the modeled 432, because
+is not lower than the all-on one. The verifier's stack depths sat at or
+under that object's model, dispatch at 272 against its modeled 432, because
 the model is an upper bound.
 
 To re-measure, build scx_nitosis and run the model from the repository root:
@@ -626,13 +619,12 @@ diff -r --no-dereference $M/scheds/rust/scx_mitosis \
 
 Beyond the conversion and the removed features, the differences are the
 crate name, the description, the scx_arena dependency and the veristat
-opt-out in Cargo.toml, the README, build.rs linking the arena library and
-defining SCX_ARENA_SCALAR, the src/bpf/lib symlink, the scheduler name in
-main.rs and in the test scripts, the ktstr tests and the undefok_flags.rs
-tests, this file, and mitosis's config mode, config.rs with CellSource,
---cell-config and --reconfiguration-interval-s, which "Skipped mitosis
-commits" covers. Everything else in that diff must be explained by a section
-of this file.
+opt-out in Cargo.toml, the README, build.rs linking the arena library, the
+src/bpf/lib symlink, the scheduler name in main.rs and in the test scripts,
+the ktstr tests and the undefok_flags.rs tests, this file, and mitosis's
+config mode, config.rs with CellSource, --cell-config and
+--reconfiguration-interval-s, which "Skipped mitosis commits" covers.
+Everything else in that diff must be explained by a section of this file.
 
 ## Skipped mitosis commits
 

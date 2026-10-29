@@ -13,11 +13,7 @@ enum ravg_consts {
 #ifdef __BPF__
 
 #ifndef __arena
-#ifdef SCX_ARENA_SCALAR
-#define __arena
-#else
 #define __arena __attribute__((address_space(1)))
-#endif
 #endif /* __arena */
 
 #ifndef __arg_arena

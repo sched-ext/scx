@@ -360,7 +360,7 @@ struct cpdom_ctx {
  * are recomputed from scratch each LB round. Hopefully, transient negativity is
  * harmless.
  */
-static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
+static __always_inline void decrement_stealee_budget(struct cpdom_ctx __arena *cpdomc,
 						     u64 amount)
 {
 	__sync_fetch_and_sub(&cpdomc->stealee_budget_invr, amount);
@@ -373,7 +373,7 @@ static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
  * Atomically subtract @amount from the stealer's ingress budget.
  * Same rationale as decrement_stealee_budget().
  */
-static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
+static __always_inline void decrement_stealer_budget(struct cpdom_ctx __arena *cpdomc,
 						     u64 amount)
 {
 	__sync_fetch_and_sub(&cpdomc->stealer_budget_invr, amount);
@@ -385,24 +385,24 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
 extern struct cpdom_ctx __arena_global	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern int __arena_global		nr_cpdoms;
 
-static __always_inline struct cpdom_ctx *get_cpdom_ctx(s64 id)
+static __always_inline struct cpdom_ctx __arena *get_cpdom_ctx(s64 id)
 {
 	return &cpdom_ctxs[id];
 }
 
-typedef struct task_ctx task_ctx;
+typedef struct task_ctx __arena task_ctx;
 
 extern u32 nr_cids;
-extern struct scx_cmask *online_cmask;
-extern struct scx_cmask *sweep_cmask;
+extern struct scx_cmask __arena *online_cmask;
+extern struct scx_cmask __arena *sweep_cmask;
 
 int init_cid_masks(void);
 
-extern struct cpu_ctx *cpu_ctxs;
+extern struct cpu_ctx __arena *cpu_ctxs;
 
-struct cpu_ctx *get_cpu_ctx(void);
-struct cpu_ctx *get_cpu_ctx_id(s32 cid);
-struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
+struct cpu_ctx __arena *get_cpu_ctx(void);
+struct cpu_ctx __arena *get_cpu_ctx_id(s32 cid);
+struct cpu_ctx __arena *get_cpu_ctx_task(const struct task_struct *p);
 
 /*
  * CPU context
@@ -493,7 +493,7 @@ struct cpu_ctx {
 	 * by address mismatch. cached_pid == 0 means invalid.
 	 */
 	u64		cached_task;		/* (struct task_struct *) as u64 */
-	u64		cached_taskc_raw;	/* (task_ctx *) as u64 */
+	u64		cached_taskc_raw;	/* (task_ctx __arena *) as u64 */
 	u32		cached_pid;
 
 	/* --- cacheline 2 boundary (128 bytes): per-interval results --- */
@@ -597,9 +597,9 @@ struct cpu_ctx {
 	u64		prev_pelt_clk;
 
 	/* --- cacheline 4 boundary (256 bytes): cpumask scratch --- */
-	struct scx_cmask *a_mask;	/* scratch: task & active */
-	struct scx_cmask *o_mask;	/* scratch: task & overflow */
-	struct scx_cmask *temp_mask;	/* scratch: general-purpose */
+	struct scx_cmask __arena *a_mask;	/* scratch: task & active */
+	struct scx_cmask __arena *o_mask;	/* scratch: task & overflow */
+	struct scx_cmask __arena *temp_mask;	/* scratch: general-purpose */
 
 	u16 core_cid;		/* first cid of this cid's core, which names the core's DSQ */
 	u16 core_nr_cids;	/* cids in the core */
@@ -747,14 +747,14 @@ extern volatile bool __arena_global	no_core_compaction;
 extern volatile bool __arena_global	ovrflw_counted_active;
 extern volatile bool __arena_global	no_freq_scaling;
 
-bool test_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag);
-void set_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag);
-void reset_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag);
+bool test_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag);
+void set_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag);
+void reset_cpu_flag(struct cpu_ctx __arena __arg_arena *cpuc, u64 flag);
 
 bool is_lock_holder(task_ctx *taskc);
-bool is_lock_holder_running(struct cpu_ctx __arg_arena *cpuc);
+bool is_lock_holder_running(struct cpu_ctx __arena __arg_arena *cpuc);
 bool have_scheduled(task_ctx *taskc);
-bool have_pending_tasks(struct cpu_ctx __arg_arena *cpuc);
+bool have_pending_tasks(struct cpu_ctx __arena __arg_arena *cpuc);
 bool can_boost_slice(void);
 bool is_lat_cri(task_ctx *taskc);
 u16 get_nice_prio(struct task_struct *p);
@@ -770,7 +770,7 @@ extern const volatile u64	warm_cpu_ns;	/* warm-CPU wait budget (ns) */
 /* Per-CPU warmth clock (util.bpf.c). */
 u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cid, u64 now);
 void task_update_cpu_warmth(task_ctx __arg_arena *taskc,
-			    struct cpu_ctx __arg_arena *cpuc, u64 slice_used,
+			    struct cpu_ctx __arena __arg_arena *cpuc, u64 slice_used,
 			    u64 now);
 
 static __always_inline bool use_per_cpu_dsq(void)
@@ -795,7 +795,7 @@ static __always_inline bool use_cpdom_dsq(void)
 	return !per_cpu_dsq;
 }
 
-static __always_inline bool is_turbulent_cpu(struct cpu_ctx *cpuc)
+static __always_inline bool is_turbulent_cpu(struct cpu_ctx __arena *cpuc)
 {
 	/*
 	 * A CPU is turbulent when its latency headroom (inversely related
@@ -806,13 +806,13 @@ static __always_inline bool is_turbulent_cpu(struct cpu_ctx *cpuc)
 	return cpuc->lat_headroom < LAVD_LC_LATENCY_SENSITIVE_THRESH;
 }
 
-static __always_inline bool is_steady_cpu(struct cpu_ctx *cpuc)
+static __always_inline bool is_steady_cpu(struct cpu_ctx __arena *cpuc)
 {
 	return !is_turbulent_cpu(cpuc);
 }
 
 static __always_inline bool
-can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
+can_consume_steady_dsq(struct cpdom_ctx __arena *cpdomc)
 {
 	bool turbulent = is_turbulent_cpu(get_cpu_ctx());
 
@@ -832,8 +832,8 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 
 u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
 		   u64 nr_cpus);
-u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx __arg_arena *cpuc);
-u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx __arg_arena *cpdomc);
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx __arena __arg_arena *cpuc);
+u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx __arena __arg_arena *cpdomc);
 
 /*
  * Time until whatever is running on @cpuc stops, in wall-clock ns.
@@ -856,7 +856,7 @@ u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx __arg_arena *cpd
  * itself, so a task deep into a burst reads as staying for as long again.
  * The remaining slice caps them, being the bound the kernel enforces.
  */
-static __always_inline u64 calc_residual_time(struct cpu_ctx *cpuc, u64 now)
+static __always_inline u64 calc_residual_time(struct cpu_ctx __arena *cpuc, u64 now)
 {
 	u64 est = READ_ONCE(cpuc->est_stopping_clk);
 	struct task_struct *curr;
@@ -877,9 +877,9 @@ static __always_inline u64 calc_residual_time(struct cpu_ctx *cpuc, u64 now)
 	return min(time_delta(est, now), remaining);
 }
 
-bool queued_on_cpu(struct cpu_ctx __arg_arena *cpuc);
-bool is_cpu_congested(struct cpu_ctx __arg_arena *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc,
+bool queued_on_cpu(struct cpu_ctx __arena __arg_arena *cpuc);
+bool is_cpu_congested(struct cpu_ctx __arena __arg_arena *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
 		      task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
 
@@ -908,7 +908,7 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
 static __always_inline
 bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
 {
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx __arena *cpuc = get_cpu_ctx_id(cpu);
 	u64 heat, budget, est, wait;
 
 	heat = task_cpu_warmth(taskc, cpu, now);
@@ -940,11 +940,11 @@ static __always_inline u32 task_load_metric(task_ctx *taskc)
 	return taskc->util_est;
 }
 
-extern struct scx_cmask *turbo_cmask; /* CPU mask for turbo CPUs */
-extern struct scx_cmask *big_cmask; /* CPU mask for big CPUs */
-extern struct scx_cmask *active_cmask; /* CPU mask for active CPUs */
-extern struct scx_cmask *ovrflw_cmask; /* CPU mask for overflow CPUs */
-extern struct scx_cmask *steady_cmask; /* CPU mask for non-turbulent CPUs */
+extern struct scx_cmask __arena *turbo_cmask; /* CPU mask for turbo CPUs */
+extern struct scx_cmask __arena *big_cmask; /* CPU mask for big CPUs */
+extern struct scx_cmask __arena *active_cmask; /* CPU mask for active CPUs */
+extern struct scx_cmask __arena *ovrflw_cmask; /* CPU mask for overflow CPUs */
+extern struct scx_cmask __arena *steady_cmask; /* CPU mask for non-turbulent CPUs */
 
 /* DSQ helpers. */
 
@@ -968,10 +968,10 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
  * transition and returns true if the bit was already set.
  */
 static __always_inline bool
-__ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
+__ovrflw_test_and_set(struct scx_cmask __arena *ovrflw, s32 cpu)
 {
-	struct cpu_ctx *cpuc;
-	struct cpdom_ctx *cpdc;
+	struct cpu_ctx __arena *cpuc;
+	struct cpdom_ctx __arena *cpdc;
 
 	if (cmask_test_and_set(cpu, ovrflw))
 		return true;
@@ -1004,7 +1004,7 @@ __ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
  * lock.
  */
 static __always_inline bool
-ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
+ovrflw_test_and_set(struct scx_cmask __arena *ovrflw, s32 cpu)
 {
 	if (cmask_test(cpu, ovrflw))
 		return true;
@@ -1022,10 +1022,10 @@ ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
  * was already clear.
  */
 static __always_inline bool
-ovrflw_test_and_clear(struct scx_cmask *ovrflw, s32 cpu)
+ovrflw_test_and_clear(struct scx_cmask __arena *ovrflw, s32 cpu)
 {
-	struct cpu_ctx *cpuc;
-	struct cpdom_ctx *cpdc;
+	struct cpu_ctx __arena *cpuc;
+	struct cpdom_ctx __arena *cpdc;
 
 	if (!cmask_test_and_clear(cpu, ovrflw))
 		return false;
@@ -1043,22 +1043,22 @@ ovrflw_test_and_clear(struct scx_cmask *ovrflw, s32 cpu)
 int plan_x_cpdom_migration(void);
 
 /* Preemption management helpers. */
-void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc,
+void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc,
 			  u64 now);
 
 /* Futex lock-related helpers. */
 
-void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx __arg_arena *cpuc);
+void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx __arena __arg_arena *cpuc);
 
 /* Scheduler introspection-related helpers. */
 
 u64 get_est_stopping_clk(task_ctx *taskc, u64 now);
 void try_proc_introspec_cmd(struct task_struct *p, task_ctx *taskc);
-void reset_cpu_preemption_info(struct cpu_ctx __arg_arena *cpuc);
-int shrink_boosted_slice_remote(struct cpu_ctx __arg_arena *cpuc, u64 now);
+void reset_cpu_preemption_info(struct cpu_ctx __arena __arg_arena *cpuc);
+int shrink_boosted_slice_remote(struct cpu_ctx __arena __arg_arena *cpuc, u64 now);
 void shrink_boosted_slice_at_tick(struct task_struct *p,
-				  struct cpu_ctx __arg_arena *cpuc, u64 now);
-void preempt_at_tick(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc);
+				  struct cpu_ctx __arena __arg_arena *cpuc, u64 now);
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx __arena __arg_arena *cpuc);
 void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 task_ctx *taskc,
 					 s32 preferred_cpu,
@@ -1090,11 +1090,11 @@ struct pick_ctx {
 	 * Additional output arguments for init_ao_masks().
 	 * Additional input arguments for find_sticky_cpu_and_cpdom().
 	 */
-	struct cpu_ctx *cpuc_cur;
-	struct scx_cmask *a_mask; /* task's active mask */
-	struct scx_cmask *o_mask; /* task's overflow mask */
+	struct cpu_ctx __arena *cpuc_cur;
+	struct scx_cmask __arena *a_mask; /* task's active mask */
+	struct scx_cmask __arena *o_mask; /* task's overflow mask */
 	/* Scratch mask for pick_idle_cpu_at_cpdom(). */
-	struct scx_cmask *temp_mask;
+	struct scx_cmask __arena *temp_mask;
 	/*
 	 * Flags.
 	 */
@@ -1105,22 +1105,22 @@ struct pick_ctx {
 };
 
 
-s32 find_cpu_in(const struct scx_cmask __arg_arena *src_mask,
-		struct cpu_ctx __arg_arena *cpuc_cur);
+s32 find_cpu_in(const struct scx_cmask __arena __arg_arena *src_mask,
+		struct cpu_ctx __arena __arg_arena *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrflw,
 		   bool *is_idle);
-void set_cpu_idle_state(struct cpu_ctx __arg_arena *cpuc, s32 cpu);
-void update_core_idle_state(struct cpu_ctx __arg_arena *cpuc);
-bool clear_cpu_idle_state(struct cpu_ctx __arg_arena *cpuc, s32 cpu);
+void set_cpu_idle_state(struct cpu_ctx __arena __arg_arena *cpuc, s32 cpu);
+void update_core_idle_state(struct cpu_ctx __arena __arg_arena *cpuc);
+bool clear_cpu_idle_state(struct cpu_ctx __arena __arg_arena *cpuc, s32 cpu);
 bool claim_idle_cpu(s32 cpu);
-bool is_cpu_hinted_idle(struct cpu_ctx __arg_arena *cpuc);
+bool is_cpu_hinted_idle(struct cpu_ctx __arena __arg_arena *cpuc);
 
 bool consume_task(u64 cpdom_id);
 
 extern u64 __arena_global cur_logical_clk;
 u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
 
-static __always_inline struct scx_cmask *get_cpdom_mask(s64 id)
+static __always_inline struct scx_cmask __arena *get_cpdom_mask(s64 id)
 {
 	return &get_cpdom_ctx(id)->online;
 }
