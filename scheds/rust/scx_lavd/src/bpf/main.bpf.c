@@ -1105,10 +1105,22 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * migrate_disable) so nr_pinned_tasks drives slice shrinking for
 	 * both cases. The matching decrement in lavd_quiescent() uses the
 	 * same predicate.
+	 *
+	 * The task's demand also adds to @cpu's performance target, since it
+	 * can run nowhere else. Send the rise now rather than when the task
+	 * runs. The kernel holds the rq lock of task_cpu(@p) here, so the
+	 * send is possible only when @cpu is that CPU.
 	 */
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
+		taskc->pinned_demand = READ_ONCE(taskc->util_est);
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+		__sync_fetch_and_add(&cpuc->cpuperf_pinned,
+				     taskc->pinned_demand);
+		if (cpu == scx_bpf_task_cpu(p)) {
+			send_cpuperf_target(cpuc, scx_bpf_now(),
+					    LAVD_CPUPERF_RISE);
+		}
 	}
 
 	/*
@@ -1233,10 +1245,16 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * pinned_cpu_id == -ENOENT guard ensures one increment per
 	 * accounting cycle and defends against the rare sequence where
 	 * a prior non-throttled lavd_enqueue() already set the marker.
+	 *
+	 * The rise of @cpu's performance target is not sent here, since this
+	 * does not run under @cpu's rq lock. It is sent when the task runs.
 	 */
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
+		taskc->pinned_demand = READ_ONCE(taskc->util_est);
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+		__sync_fetch_and_add(&cpuc->cpuperf_pinned,
+				     taskc->pinned_demand);
 	}
 
 	/*
@@ -1803,7 +1821,9 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 *
 	 * The target normally follows this CPU's utilization history. If @p's
 	 * duty cycle is higher, use it instead, since the CPU's utilization
-	 * takes time to catch up with @p's demand.
+	 * takes time to catch up with @p's demand. A pinned @p counted here
+	 * is left out of the pinned tasks' average, since its demand is
+	 * already in the floor.
 	 *
 	 * A drop is not sent here, so lowering the frequency lags. While the
 	 * CPU stays busy, ops.tick() sends the drop at the first tick past
@@ -1811,6 +1831,9 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * waits for the sys_stat timer, up to one interval (10 ms).
 	 */
 	WRITE_ONCE(cpuc->cpuperf_floor, READ_ONCE(taskc->util_est));
+	WRITE_ONCE(cpuc->cpuperf_floor_pinned,
+		   (taskc->pinned_cpu_id == cpuc->cpu_id) ?
+		   taskc->pinned_demand : 0);
 	send_cpuperf_target(cpuc, now, LAVD_CPUPERF_RISE);
 
 	/*
@@ -1851,6 +1874,9 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	 * adds to the target keeps changing, so a single send is not enough.
 	 * Do it before any early return below. @cpuc is @p's CPU, whose rq
 	 * the kernel holds here.
+	 *
+	 * The resend includes the pinned tasks waiting here, so it also
+	 * delivers a rise that ops.enqueue() could not send.
 	 */
 	send_cpuperf_target(cpuc, now, LAVD_CPUPERF_REFRESH);
 
@@ -1900,6 +1926,9 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	if (READ_ONCE(cpuc->cpuperf_floor)) {
 		WRITE_ONCE(cpuc->cpuperf_floor, 0);
 	}
+	if (READ_ONCE(cpuc->cpuperf_floor_pinned)) {
+		WRITE_ONCE(cpuc->cpuperf_floor_pinned, 0);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1936,9 +1965,13 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		struct cpu_ctx *cpuc_pinned =
 			get_cpu_ctx_id(taskc->pinned_cpu_id);
 
-		if (cpuc_pinned)
+		if (cpuc_pinned) {
 			__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
+			__sync_fetch_and_sub(&cpuc_pinned->cpuperf_pinned,
+					     taskc->pinned_demand);
+		}
 		taskc->pinned_cpu_id = -ENOENT;
+		taskc->pinned_demand = 0;
 	}
 
 	/*
@@ -2355,6 +2388,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
+	taskc->pinned_demand = 0;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;

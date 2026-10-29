@@ -1179,12 +1179,14 @@ static __always_inline u64 get_cpufreq_rate_limit_ns(struct cpu_ctx *cpuc)
 
 /*
  * Send @cpuc's performance target: the CPU's target from its utilization
- * history, or the running task's demand if higher. schedutil silently drops
- * a request inside its rate limit, so @mode decides when to send:
+ * history, or the demand of the tasks that must run here if higher. Those are
+ * the running task plus the average demand of the other pinned tasks runnable
+ * here. schedutil silently drops a request inside its rate limit, so @mode
+ * decides when to send:
  *
- * - LAVD_CPUPERF_RISE (ops.running()): only a rise. A drop waits for the
- *   next refresh, and an RT/DL task leaving the CPU forces no send, since
- *   its dequeue already updates schedutil.
+ * - LAVD_CPUPERF_RISE (ops.running(), or ops.enqueue() of a pinned task):
+ *   only a rise. A drop waits for the next refresh, and an RT/DL task leaving
+ *   the CPU forces no send, since its dequeue already updates schedutil.
  * - LAVD_CPUPERF_REFRESH (ops.tick()): once per rate limit, changed or not,
  *   to retry dropped sends and track the RT/DL/IRQ load schedutil adds.
  * - LAVD_CPUPERF_DECAY (sys_stat timer): an idle CPU's drop, since an idle
@@ -1195,14 +1197,29 @@ int send_cpuperf_target(struct cpu_ctx *cpuc, u64 now, u32 mode)
 {
 	u64 rate_limit = get_cpufreq_rate_limit_ns(cpuc);
 	u32 step = LAVD_SCALE >> LAVD_CPUPERF_UP_SHIFT;
-	u32 demand, target, cur;
+	u32 demand, target, cur, nr, sum, own;
 	bool send;
 
 	if (!rate_limit) {
 		return 0;
 	}
 
+	/*
+	 * The pinned sum and count are read apart and may briefly disagree,
+	 * which only skews the target until the next send.
+	 */
 	demand = READ_ONCE(cpuc->cpuperf_floor);
+	nr = READ_ONCE(cpuc->nr_pinned_tasks);
+	sum = READ_ONCE(cpuc->cpuperf_pinned);
+	own = READ_ONCE(cpuc->cpuperf_floor_pinned);
+	if (own && nr) {
+		sum -= min(sum, own);
+		nr--;
+	}
+	if (nr) {
+		demand += sum / nr;
+	}
+
 	target = max(READ_ONCE(cpuc->cpuperf_target),
 		     min(round_up(demand, step), LAVD_SCALE));
 	cur = READ_ONCE(cpuc->cpuperf_cur);
