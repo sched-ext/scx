@@ -244,11 +244,17 @@ fn render_current(current: &Current) -> String {
         (None, Some(next)) => {
             let what = format!("{} {}", next.sched, next.args.join(" "));
             let what = what.trim_end();
+            // The kernel's word as well as the unit's: the process
+            // exists before its scheduler is attached.
+            let name = scx_catalog::catalog::sched_name(&next.sched);
+            let running = current.scheduler.as_deref() == Some(name.as_str())
+                && current
+                    .running
+                    .as_ref()
+                    .is_some_and(|r| r.sched == name && r.args == next.args);
             let note = if next.overridden {
                 "SCX_*_OVERRIDE in effect"
-            } else if current.running.as_ref().is_some_and(|r| {
-                scx_catalog::catalog::sched_name(&next.sched) == r.sched && r.args == next.args
-            }) {
+            } else if running {
                 "running"
             } else {
                 "not running"
@@ -471,6 +477,17 @@ mod tests {
             "kernel":{"state":"enabled","ops":"cosmos"},"failure":null}"#;
         let current: Current = serde_json::from_str(json).unwrap();
         assert!(render_current(&current).contains("configured: /usr/bin/scx_cosmos (running)\n"));
+        // The unit's process is up but the kernel has nothing attached
+        // yet: not running, whatever the process says.
+        let json = r#"{"version":2,"scheduler":null,
+            "unit":{"active":true,"enabled":true},
+            "running":{"sched":"scx_cosmos","args":[]},
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"disabled","ops":null},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(
+            render_current(&current).contains("configured: /usr/bin/scx_cosmos (not running)\n")
+        );
 
         let json = r#"{"version":2,"scheduler":null,
             "unit":{"active":false,"enabled":false},"running":null,"next":null,

@@ -256,10 +256,14 @@ fn configured_line(current: &Current) -> (String, Color) {
     if next.overridden {
         return (format!("{what} (SCX_*_OVERRIDE in effect)"), Color::Yellow);
     }
-    let running = current
-        .running
-        .as_ref()
-        .is_some_and(|r| r.sched == next.name() && r.args == next.args);
+    // "running" takes the kernel's word as well as the unit's: the
+    // unit's process exists before its scheduler is attached, and
+    // `scheduler` is set only once the kernel reports it.
+    let running = current.scheduler.as_deref() == Some(next.name())
+        && current
+            .running
+            .as_ref()
+            .is_some_and(|r| r.sched == next.name() && r.args == next.args);
     // "not running" and no more: `failure` is the unit's last run,
     // which may have been another configuration, and the Last start
     // line below reports it on its own.
