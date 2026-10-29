@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -27,6 +28,8 @@ USAGE:
                                       current state
     scxcli list recommended [--json]  The same
     scxcli list all [--json]          Every installed scheduler
+      --catalog PATH                  List with this catalog file instead
+                                      of the installed one
     scxcli get [--json]               Show which scheduler is running
     scxcli start SCHED                Start a scheduler from `list all` with
                                       its defaults, or `default` for the
@@ -51,11 +54,22 @@ const EXIT_PERMISSION: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    List { what: ListWhat, json: bool },
-    Get { json: bool },
-    Start { id: Option<String> },
+    List {
+        what: ListWhat,
+        json: bool,
+        catalog: Option<PathBuf>,
+    },
+    Get {
+        json: bool,
+    },
+    Start {
+        id: Option<String>,
+    },
     Stop,
-    Run { sched: String, args: Vec<String> },
+    Run {
+        sched: String,
+        args: Vec<String>,
+    },
     Help,
     Version,
 }
@@ -102,9 +116,26 @@ fn parse(args: &[String]) -> Result<Command> {
                 Some((word, tail)) if word == "all" => (ListWhat::All, tail),
                 _ => (ListWhat::Recommended, rest),
             };
+            // `--json` and `--catalog PATH`, each at most once, in any
+            // order. `list` is the one command that takes a catalog of
+            // the caller's choosing: it only reads.
+            let mut json = false;
+            let mut catalog = None;
+            let mut rest = rest.iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--json" if !json => json = true,
+                    "--catalog" if catalog.is_none() => match rest.next() {
+                        Some(path) if !path.is_empty() => catalog = Some(PathBuf::from(path)),
+                        _ => return usage("--catalog takes a path"),
+                    },
+                    other => return usage(format!("unexpected argument {other:?}")),
+                }
+            }
             Ok(Command::List {
                 what,
-                json: only_json(rest)?,
+                json,
+                catalog,
             })
         }
         "get" => Ok(Command::Get {
@@ -172,8 +203,12 @@ fn execute(command: Command) -> Result<()> {
     match command {
         Command::Help => write!(out, "{USAGE}")?,
         Command::Version => writeln!(out, "scxcli {}", env!("CARGO_PKG_VERSION"))?,
-        Command::List { what, json } => {
-            let listing = scx_catalog::list()?;
+        Command::List {
+            what,
+            json,
+            catalog,
+        } => {
+            let listing = scx_catalog::list_with(catalog.as_deref())?;
             if json {
                 writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
             } else {
@@ -364,7 +399,11 @@ mod tests {
 
     #[test]
     fn reads_and_help_parse() {
-        let list = |what, json| Command::List { what, json };
+        let list = |what, json| Command::List {
+            what,
+            json,
+            catalog: None,
+        };
         assert_eq!(p(&["list"]).unwrap(), list(ListWhat::Recommended, false));
         assert_eq!(
             p(&["list", "--json"]).unwrap(),
@@ -380,6 +419,38 @@ mod tests {
         );
         assert!(is_usage(p(&["list", "profiles"])));
         assert!(is_usage(p(&["list", "all", "x"])));
+        assert_eq!(
+            p(&[
+                "list",
+                "all",
+                "--catalog",
+                "./services/catalog.json",
+                "--json"
+            ])
+            .unwrap(),
+            Command::List {
+                what: ListWhat::All,
+                json: true,
+                catalog: Some("./services/catalog.json".into()),
+            }
+        );
+        assert_eq!(
+            p(&["list", "--json", "--catalog", "c.json"]).unwrap(),
+            Command::List {
+                what: ListWhat::Recommended,
+                json: true,
+                catalog: Some("c.json".into()),
+            }
+        );
+        assert!(is_usage(p(&["list", "--catalog"])));
+        assert!(is_usage(p(&["list", "--catalog", ""])));
+        assert!(is_usage(p(&["list", "--json", "--json"])));
+        assert!(is_usage(p(&["list", "--catalog", "a", "--catalog", "b"])));
+        // Only `list` takes a catalog: the privileged commands consult
+        // the installed one, and the policy covers what that one lists.
+        assert!(is_usage(p(&["get", "--catalog", "c.json"])));
+        assert!(is_usage(p(&["start", "--catalog", "c.json"])));
+        assert!(is_usage(p(&["start", "scx_cosmos", "--catalog", "c.json"])));
         assert_eq!(p(&["get", "--json"]).unwrap(), Command::Get { json: true });
         assert_eq!(p(&["stop"]).unwrap(), Command::Stop);
         assert!(is_usage(p(&["stop", "now"])));

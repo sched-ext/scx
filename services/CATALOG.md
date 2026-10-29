@@ -250,8 +250,16 @@ Clients that are not root run the privileged commands as
 
 - `list` and `list recommended` show the recommended entries with the
   current state; `list all` shows every installed scheduler the catalog
-  does not hide, the recommended ones marked. `list`, `list recommended`,
-  `list all` and `get` take only `--json`.
+  does not hide, the recommended ones marked. `list` in every form
+  takes `--json` and `--catalog PATH`; `get` takes only `--json`.
+  `--catalog` lists with the named file instead of the installed
+  catalog (a checkout's `services/catalog.json`, say, to see what it
+  would show before it is installed): the same scan and the same state,
+  classified by that file, which is read as is, without the trust rules,
+  since nothing privileged follows from it. `source` is then the file
+  and `customized` false. No other command takes a catalog: `start` and
+  `resume` consult the installed one, since the policy covers what that
+  one lists.
 - `start SCHED` takes exactly one argument: `default`, or a scheduler
   from `list all` by name, started with its own defaults. What `list
   all` would not show is refused by the same two tests the listing

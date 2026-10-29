@@ -15,6 +15,8 @@ scxcli list [--json]              The recommended schedulers and the
 scxcli list recommended [--json]  The same
 scxcli list all [--json]          Every installed scheduler: stable,
                                   experimental, then unlisted
+  --catalog PATH                  List with this catalog file instead of
+                                  the installed one
 scxcli get [--json]               Show which scheduler is running
 scxcli start SCHED                Start a scheduler from `list all` with its
                                   defaults, or `default` for the kernel's own

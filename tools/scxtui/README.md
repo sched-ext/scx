@@ -76,7 +76,11 @@ polkit policy and the catalog.
 
 ## Command line
 
-scxtui has no command line of its own beyond `--help` and `--version`.
+scxtui's command line is `--help`, `--version` and `--catalog PATH`,
+which lists with the named catalog file instead of the installed one
+(`scxtui --catalog ./services/catalog.json` shows a checkout's catalog
+before it is installed); starting a scheduler still goes by the
+installed catalog, since the polkit policy covers what that one lists.
 Scripts use scxcli directly: `scxcli get --json`, `scxcli list --json`,
 `pkexec scxcli start SCHED`. The scxctl-style `--cli` and
 `--export-profiles` of earlier versions are gone: the catalog is a plain

@@ -250,7 +250,15 @@ impl App {
 
     fn start_watching(&mut self) {
         let config = self.listing.as_ref().and_then(|l| l.config.clone());
-        match Watcher::new(&Watcher::files_for(config.as_deref())) {
+        let mut files = Watcher::files_for(config.as_deref());
+        // A catalog given on the command line is a file like the
+        // others: a change to it refreshes the lists.
+        if let Some(source) = self.listing.as_ref().map(|l| l.source.clone())
+            && !files.contains(&source)
+        {
+            files.push(source);
+        }
+        match Watcher::new(&files) {
             Ok(watcher) => self.watcher = Some(watcher),
             Err(err) => self.error(&format!("file watching unavailable ({err:#}); polling")),
         }
@@ -556,10 +564,21 @@ kernel's default; the recommended ones are marked",
     fn refresh(&mut self) {
         match self.backend.list() {
             Ok(listing) => {
-                self.selected = self
-                    .selected
-                    .min(listing.recommended.len().saturating_sub(1));
-                self.sched_selected = self.sched_selected.min(listing.all.len().saturating_sub(1));
+                // The cursor follows the entry, not its position: a
+                // catalog change (or an installation) that moves the
+                // focused scheduler leaves it focused. Only an entry
+                // that is gone falls back to the clamped position.
+                let pick = self.selected_pick().map(|p| p.id.clone());
+                let sched = self.selected_scheduler().map(|s| s.name.clone());
+                self.selected = pick
+                    .and_then(|id| listing.recommended.iter().position(|p| p.id == id))
+                    .unwrap_or(
+                        self.selected
+                            .min(listing.recommended.len().saturating_sub(1)),
+                    );
+                self.sched_selected = sched
+                    .and_then(|name| listing.all.iter().position(|s| s.name == name))
+                    .unwrap_or(self.sched_selected.min(listing.all.len().saturating_sub(1)));
                 self.listing = Some(listing);
                 self.listing_error = None;
             }
@@ -817,6 +836,43 @@ mod tests {
     fn startup_selects_the_running_scheduler_in_both_lists() {
         let Harness { app, .. } = app();
         assert_eq!(app.selected_pick().unwrap().id, "scx_cosmos");
+        assert_eq!(app.selected_scheduler().unwrap().name, "scx_cosmos");
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_focused_scheduler_when_the_lists_reorder() {
+        let Harness {
+            mut app, listing, ..
+        } = app();
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected_pick().unwrap().id, "scx_eevdf");
+        app.on_key(key(KeyCode::Char('A')));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.selected_scheduler().unwrap().name, "scx_bpfland");
+
+        // Another catalog: eevdf moves to the top of the recommended
+        // list, a new scheduler lands before bpfland in the full one.
+        {
+            let mut l = listing.borrow_mut();
+            l.recommended = vec![
+                pick("scx_eevdf", true),
+                pick("default", true),
+                pick("scx_cosmos", true),
+            ];
+            l.all.insert(0, installed("scx_aaa", false));
+        }
+        app.refresh();
+        assert_eq!(app.selected_pick().unwrap().id, "scx_eevdf");
+        assert_eq!(app.selected_scheduler().unwrap().name, "scx_bpfland");
+
+        // An entry that is gone: the cursor stays where it was, clamped.
+        {
+            let mut l = listing.borrow_mut();
+            l.recommended.retain(|p| p.id != "scx_eevdf");
+            l.all.retain(|s| s.name != "scx_bpfland");
+        }
+        app.refresh();
+        assert_eq!(app.selected_pick().unwrap().id, "default");
         assert_eq!(app.selected_scheduler().unwrap().name, "scx_cosmos");
     }
 
