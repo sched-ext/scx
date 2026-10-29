@@ -30,7 +30,11 @@ and no D-Bus. The configuration is the unit's `EnvironmentFile`
   file exists it is used; the shipped one is read only when it does not.
   The two are never merged, so an override
   replaces the whole catalog and does not pick up upstream changes to the
-  entries it does not mention. A file that exists but cannot be used
+  entries it does not mention; `catalog show --shipped` prints the
+  shipped one for a client to compare or start a fresh copy from.
+  Clients write the override only through `scxcli catalog save` and
+  remove it with `scxcli catalog reset`; an administrator may also edit
+  it by hand as root. A file that exists but cannot be used
   (unreadable, invalid, untrusted, or a symlink whose target is missing)
   is an error, never a fallback to the shipped catalog: a broken override
   is still the administrator's configuration.
@@ -252,8 +256,9 @@ Writing:
   then read from, not from a second lookup of the path. Otherwise every
   command that loads the catalog refuses, naming the file or directory.
   A `/etc/scx` that is itself a symlink, dangling or not, is a broken
-  configuration and an error, never "no override". Nothing writes that
-  file: an administrator edits it by hand, with the modes above.
+  configuration and an error, never "no override". `catalog save` is
+  what writes that file, with the modes above; an administrator may
+  also edit it by hand as root.
 - Known limitation, kept on purpose: the contract says `get` and `list`
   work for any user, which holds for the files as this tool creates
   them. An administrator who makes the environment file or the catalog
@@ -301,6 +306,9 @@ scxcli start ID               # root, or polkit: allow_active=yes
 scxcli start                  # root, or polkit: allow_active=yes
 scxcli stop                   # root, or polkit: allow_active=yes
 scxcli run SCHED [ARGS...]    # root, or polkit: auth_admin_keep
+scxcli catalog show [--shipped]          # any user
+scxcli catalog save           # root, or polkit: auth_admin_keep
+scxcli catalog reset          # root, or polkit: auth_admin_keep
 ```
 
 Clients that are not root run the privileged commands as
@@ -378,6 +386,41 @@ Clients that are not root run the privileged commands as
   bash, which expands `$SCX_SCHEDULER $SCX_FLAGS` unquoted, and the
   allowlist exists so that nothing written survives that expansion as
   anything but the intended words.
+- `catalog show` prints the catalog in use (the override when there is
+  one, else the shipped file), rendered the way the crate writes it,
+  every list included, for a client to edit and send back whole; with
+  `--shipped`, the shipped catalog whatever is in use, so a client can
+  offer a fresh copy to start from or show what an override differs
+  in. `catalog save` reads a whole catalog on standard input, at most
+  64 KiB, takes no argument (any is a usage error, so scxcli never
+  opens a path it was handed under this action), validates it with the
+  administrator's rules (custom profiles allowed, since this is the
+  file they are allowed in) before anything is written, and writes it
+  as the crate renders it, not byte for byte as it came. The write
+  rules are stricter than the read rules: `/etc/scx` must be root's
+  and writable by nobody else, sticky or not, since anyone can add an
+  entry to a sticky world-writable directory, a symlink under the name
+  about to be written included, between any check and the write; and
+  a `/etc/scx` or `/etc/scx/catalog.json` that is a symlink is
+  refused, as is an existing file the read rules would refuse
+  (writing root's catalog into a place someone else controls would
+  hand them the password-free `start`). A missing `/etc/scx` is
+  created closed (0700, which the umask cannot widen) and then opened
+  to 0755, so there is no moment at which another user could put an
+  entry in it. The file goes through a scratch file under a fresh
+  name, `fsync`, and a rename over the path, which replaces whatever
+  directory entry is there, a link that appeared since the check
+  included, rather than writing through it. The file is always
+  written 0644, whatever an earlier override's mode: what this
+  command installs is read by `list` as any user. scxcli does not
+  restart anything: a profile whose command changed is the client's
+  to start again with `start ID`, and `get` says what runs meanwhile.
+  `catalog reset` removes the override, so
+  the shipped catalog is in use again; a missing override is not an
+  error, a `/etc/scx` that is a symlink is, and an override that is
+  itself a symlink is removed as the link it is. Clients run these as
+  `pkexec scxcli catalog save < edited.json`; `show` needs no
+  privilege and clients run it as themselves.
 - There is no `restart`: `start ID` restarts the unit with the
   scheduler, and `systemctl restart scx.service` restarts it with the
   file as it is. A `restart` of its own would have to choose between the
@@ -499,14 +542,15 @@ slow poll for those alone.
 
 ## polkit
 
-scx ships `org.sched_ext.scxcli.policy` with three actions, told apart
+scx ships `org.sched_ext.scxcli.policy` with four actions, told apart
 by the `org.freedesktop.policykit.exec.argv1` annotation:
 
-| action                       | argv1   | default           |
-|------------------------------|---------|-------------------|
-| `org.sched_ext.scxcli.start` | `start` | `allow_active=yes`|
-| `org.sched_ext.scxcli.stop`  | `stop`  | `allow_active=yes`|
-| `org.sched_ext.scxcli.run`   | `run`   | `auth_admin_keep` |
+| action                         | argv1     | default           |
+|--------------------------------|-----------|-------------------|
+| `org.sched_ext.scxcli.start`   | `start`   | `allow_active=yes`|
+| `org.sched_ext.scxcli.stop`    | `stop`    | `allow_active=yes`|
+| `org.sched_ext.scxcli.run`     | `run`     | `auth_admin_keep` |
+| `org.sched_ext.scxcli.catalog` | `catalog` | `auth_admin_keep` |
 
 Starting needs no password because the caller passes only an id: the
 scheduler starts with its own defaults, or with the options an
@@ -516,6 +560,9 @@ scheduler is in its options, and the only options this path runs are
 the administrator's. Stopping changes nothing about what runs as root.
 Starting a scheduler with options of the caller's choosing, or a hidden
 one outside a profile, changes what runs as root and needs an
-administrator. The policy is a separate file: a distribution that wants
-every action to need a password ships a stricter one or none, and scxcli
-then works only as root.
+administrator; so does changing the catalog, which decides what the
+password-free `start` offers from then on. `catalog show` falls under
+the same action when run through pkexec, but needs none of it and
+clients run it as themselves. The policy is a separate file: a
+distribution that wants every action to need a password ships a
+stricter one or none, and scxcli then works only as root.

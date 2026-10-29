@@ -62,7 +62,7 @@ pub(crate) struct Ident {
 }
 
 impl Ident {
-    fn of(meta: &fs::Metadata) -> Self {
+    pub(crate) fn of(meta: &fs::Metadata) -> Self {
         Self {
             uid: meta.uid(),
             mode: meta.permissions().mode() & 0o7777,
@@ -109,7 +109,7 @@ catalog in it",
     Ok(())
 }
 
-fn lstat(path: &Path) -> Result<Ident> {
+pub(crate) fn lstat(path: &Path) -> Result<Ident> {
     fs::symlink_metadata(path)
         .map(|meta| Ident::of(&meta))
         .with_context(|| format!("cannot stat {}", path.display()))
