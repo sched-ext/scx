@@ -4,6 +4,10 @@ This is a single user-defined scheduler used within [`sched_ext`](https://github
 
 ## Overview
 
+Requires Linux 6.16 or newer. On Linux 6.13, verification fails because the
+EDQ uses unsupported atomic release stores and CPU selection exceeds the
+verifier complexity limit.
+
 `scx_bpfland` is an EEVDF-like scheduler (Earliest Eligible Virtual Deadline
 First) with one deadline-ordered queue per CPU. It adds two things to the EEVDF
 model: each task's request is sized from how long it actually runs between two

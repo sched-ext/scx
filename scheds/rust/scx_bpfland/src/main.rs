@@ -689,6 +689,24 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let release =
+        std::fs::read_to_string("/proc/sys/kernel/osrelease").context("reading kernel release")?;
+    let mut fields = release.trim().split(['.', '-']);
+    let major: u32 = fields
+        .next()
+        .context("missing kernel major version")?
+        .parse()?;
+    let minor: u32 = fields
+        .next()
+        .context("missing kernel minor version")?
+        .parse()?;
+    if (major, minor) < (6, 16) {
+        bail!(
+            "scx_bpfland requires Linux 6.16 or newer (running {})",
+            release.trim()
+        );
+    }
+
     let loglevel = simplelog::LevelFilter::Info;
 
     let mut lcfg = simplelog::ConfigBuilder::new();
