@@ -7,14 +7,12 @@
 
 u32 nr_cids;
 struct scx_cmask *online_cmask;
-struct scx_cmask *idle_cmask;
-struct scx_cmask *idle_smt_cmask;
 /* the revoke sweep's scratch mask, one sweep runs at a time */
 struct scx_cmask *sweep_cmask;
 
 enum {
-	NR_GLOBAL_MASKS = 9,
-	NR_CPU_MASKS = 7,
+	NR_GLOBAL_MASKS = 7,
+	NR_CPU_MASKS = 3,
 };
 
 /* the scratch masks share one arena pool, @mask_sz bytes apart */
@@ -55,9 +53,7 @@ int init_cid_masks(void)
 	ovrflw_cmask = pool_mask(pool, mask_sz, 3);
 	steady_cmask = pool_mask(pool, mask_sz, 4);
 	online_cmask = pool_mask(pool, mask_sz, 5);
-	idle_cmask = pool_mask(pool, mask_sz, 6);
-	idle_smt_cmask = pool_mask(pool, mask_sz, 7);
-	sweep_cmask = pool_mask(pool, mask_sz, 8);
+	sweep_cmask = pool_mask(pool, mask_sz, 6);
 
 	bpf_arena_for(cid, 0, nr_cids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
@@ -72,10 +68,6 @@ int init_cid_masks(void)
 		cpuc->a_mask = pool_mask(pool, mask_sz, i);
 		cpuc->o_mask = pool_mask(pool, mask_sz, i + 1);
 		cpuc->temp_mask = pool_mask(pool, mask_sz, i + 2);
-		cpuc->i_mask = pool_mask(pool, mask_sz, i + 3);
-		cpuc->ia_mask = pool_mask(pool, mask_sz, i + 4);
-		cpuc->io_mask = pool_mask(pool, mask_sz, i + 5);
-		cpuc->iat_mask = pool_mask(pool, mask_sz, i + 6);
 
 		/*
 		 * A core's cids are contiguous, so its first cid names the core
@@ -117,6 +109,8 @@ int init_cid_masks(void)
 
 		cmask_init(&cpdomc->cpus, 0, nr_cids);
 		cmask_init(&cpdomc->online, 0, nr_cids);
+		cmask_init(&cpdomc->idle, 0, nr_cids);
+		cmask_init(&cpdomc->idle_smt, 0, nr_cids);
 		if (!cpdomc->is_valid)
 			continue;
 		bpf_arena_for(cid, 0, nr_cids) {
@@ -126,91 +120,4 @@ int init_cid_masks(void)
 		}
 	}
 	return 0;
-}
-
-/**
- * claim_idle_cid - Claim an idle CID
- * @cid: candidate CID
- *
- * Return 1 if claimed, 0 if busy, or -ENOENT if its context is unavailable.
- */
-__hidden
-s32 claim_idle_cid(s32 cid)
-{
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
-
-	asm volatile("" :: "r"(&arena));
-	if (!cpuc)
-		return -ENOENT;
-	/* clear the whole core even when another picker wins */
-	if (is_smt_active)
-		cmask_clear_range(idle_smt_cmask, cpuc->core_cid, cpuc->core_nr_cids);
-	return cmask_test_and_clear(cid, idle_cmask);
-}
-
-__hidden
-s32 pick_idle_cid(const struct scx_cmask __arg_arena *allowed, u64 flags)
-{
-	s32 cid, claimed;
-
-	asm volatile("" :: "r"(&arena));
-	while (can_loop) {
-		/* prefer whole cores even without CORE set */
-		if (is_smt_active) {
-			cid = cmask_any_and_distribute(idle_smt_cmask, allowed);
-			if (cid < nr_cids)
-				goto found;
-			if (flags & SCX_PICK_IDLE_CORE)
-				return -EBUSY;
-		}
-		cid = cmask_any_and_distribute(idle_cmask, allowed);
-		if (cid >= nr_cids)
-			return -EBUSY;
-found:
-		claimed = claim_idle_cid(cid);
-		if (claimed > 0)
-			return cid;
-		if (claimed < 0)
-			return -EBUSY;
-	}
-	return -EBUSY;
-}
-
-__hidden
-void update_idle_cid(s32 cid, bool idle)
-{
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cid);
-	s32 sibling;
-
-	asm volatile("" :: "r"(&arena));
-	if (idle)
-		cmask_set(cid, idle_cmask);
-	else
-		cmask_clear(cid, idle_cmask);
-	if (!is_smt_active)
-		return;
-	if (idle) {
-		/* offline siblings must not prevent a full-core idle claim */
-		bpf_arena_for(sibling, cpuc->core_cid, cpuc->core_cid + cpuc->core_nr_cids) {
-			if (cmask_test(sibling, online_cmask) &&
-			    !cmask_test(sibling, idle_cmask))
-				return;
-		}
-		bpf_arena_for(sibling, cpuc->core_cid, cpuc->core_cid + cpuc->core_nr_cids) {
-			if (cmask_test(sibling, online_cmask))
-				cmask_set(sibling, idle_smt_cmask);
-		}
-	} else {
-		cmask_clear_range(idle_smt_cmask, cpuc->core_cid, cpuc->core_nr_cids);
-	}
-}
-
-void scx_cgroup_bw_kick_idle_cb(void)
-{
-	s32 cid = pick_idle_cid(online_cmask, SCX_PICK_IDLE_CORE);
-
-	if (cid == -EBUSY)
-		cid = pick_idle_cid(online_cmask, 0);
-	if (cid >= 0)
-		scx_bpf_kick_cid(cid, SCX_KICK_IDLE);
 }

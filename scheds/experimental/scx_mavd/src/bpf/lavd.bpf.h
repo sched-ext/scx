@@ -19,6 +19,12 @@
  */
 #define U64_MAX		((u64)~0ULL)
 #define S64_MAX		((s64)(U64_MAX >> 1))
+/*
+ * "Never" for a completion-time estimate: far above any real value, so it
+ * never wins a comparison, yet far below U64_MAX, so a caller can add a
+ * residual to it without wrapping. Positive as s64 as well.
+ */
+#define LAVD_COMP_TIME_INF	(U64_MAX >> 2)
 #define U32_MAX		((u32)~0U)
 #define S32_MAX		((s32)(U32_MAX >> 1))
 
@@ -145,7 +151,6 @@ enum consts_flags {
 	LAVD_FLAG_FUTEX_BOOST		= (0x1 << 0), /* futex acquired or not */
 	LAVD_FLAG_NEED_LOCK_BOOST	= (0x1 << 1), /* need to boost lock for deadline calculation */
 	LAVD_FLAG_IS_GREEDY		= (0x1 << 2), /* task's overscheduling ratio compared to its nice priority */
-	LAVD_FLAG_IS_AFFINITIZED	= (0x1 << 3), /* is this task pinned to a subset of all CPUs? */
 	LAVD_FLAG_IS_WAKEUP		= (0x1 << 4), /* is this a wake up? */
 	LAVD_FLAG_IS_SYNC_WAKEUP	= (0x1 << 5), /* is this a sync wake up? */
 	LAVD_FLAG_ON_BIG		= (0x1 << 6), /* can a task run on a big core? */
@@ -250,6 +255,8 @@ struct task_ctx {
 	s16	queued_on_cid;		/* primary cid this task's load is counted on; -1 = not queued */
 	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
+	u64	queued_svc_snapshot;	/* avg_runtime_invr snapshotted at enqueue time for the per-cpdom counter */
+	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
@@ -289,6 +296,7 @@ struct cpdom_ctx {
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
+	u64	qload_svc_invr;			    /* queued service time: sum of avg_runtime_invr for all queued tasks, tracked atomically */
 	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
@@ -305,6 +313,11 @@ struct cpdom_ctx {
 	u32	avg_dom_pinned_util_invr_sum;	    /* the sum of average invariant domain-pinned task utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
+	u32	nr_overflow_cpus;		    /* the number of of overflow CPUs in this cpdom,
+						     * maintained via atomic inc/dec at every
+						     * overflow cpumask mutation. */
+	u32	cap_sum_overflow_cpus;		    /* sum of effective_capacity of overflow
+						     * CPUs in this cpdom. */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 
 	/* per-cpdom preemption vulnerability threshold tracking */
@@ -323,6 +336,17 @@ struct cpdom_ctx {
 			 u64 cpus_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
 	TRAILING_OVERLAP(struct scx_cmask, online, bits,
 			 u64 online_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
+
+	/*
+	 * Idle hints: the domain's idle cids and its fully idle cores,
+	 * maintained in idle.bpf.c, each on a cacheline of its own.
+	 */
+	__TRAILING_OVERLAP(struct scx_cmask, idle, bits,
+			   __attribute__((aligned(CACHELINE_SIZE))),
+			   u64 idle_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
+	__TRAILING_OVERLAP(struct scx_cmask, idle_smt, bits,
+			   __attribute__((aligned(CACHELINE_SIZE))),
+			   u64 idle_smt_bits[CMASK_NR_WORDS(LAVD_CPU_ID_MAX)];);
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
@@ -370,14 +394,9 @@ typedef struct task_ctx task_ctx;
 
 extern u32 nr_cids;
 extern struct scx_cmask *online_cmask;
-extern struct scx_cmask *idle_cmask;
-extern struct scx_cmask *idle_smt_cmask;
 extern struct scx_cmask *sweep_cmask;
 
 int init_cid_masks(void);
-s32 claim_idle_cid(s32 cid);
-s32 pick_idle_cid(const struct scx_cmask __arg_arena *allowed, u64 flags);
-void update_idle_cid(s32 cid, bool idle);
 
 extern struct cpu_ctx *cpu_ctxs;
 
@@ -414,6 +433,7 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
 	u16		kernel_cpu;	/* Linux CPU ID for per-CPU kernel data */
+	volatile u32	ovrflw_cap;	/* effective_capacity counted in the overflow set */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -490,8 +510,13 @@ struct cpu_ctx {
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
 	volatile u32	cpuperf_target;	/* performance target computed at the last sys_stat
-					   interval, committed at ops.running() */
-	u32		cpuperf_cur;	/* CPU's current performance target */
+					   interval */
+	volatile u32	cpuperf_floor;	/* demand of the task running here, or 0 */
+	volatile u32	cpuperf_cur;	/* target last sent to the kernel, or
+					   LAVD_CPUPERF_UNSET to force the next commit */
+	volatile u64	cpuperf_commit_clk; /* when the target was last sent */
+	volatile u64	cpufreq_rate_limit_ns; /* schedutil rate limit, see
+						  update_cpufreq_rate_limit() */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
@@ -575,10 +600,6 @@ struct cpu_ctx {
 	struct scx_cmask *a_mask;	/* scratch: task & active */
 	struct scx_cmask *o_mask;	/* scratch: task & overflow */
 	struct scx_cmask *temp_mask;	/* scratch: general-purpose */
-	struct scx_cmask *i_mask;	/* scratch: task & idle */
-	struct scx_cmask *ia_mask;	/* scratch: idle & active */
-	struct scx_cmask *io_mask;	/* scratch: idle & overflow */
-	struct scx_cmask *iat_mask;	/* scratch: idle & active & turbo */
 
 	u16 core_cid;		/* first cid of this cid's core, which names the core's DSQ */
 	u16 core_nr_cids;	/* cids in the core */
@@ -595,6 +616,8 @@ struct cpu_ctx {
 	 * other fields.
 	 */
 	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
+	u64	qload_svc_invr;		/* queued service time: sum of avg_runtime_invr,
+					   same write pattern as qload_invr above */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
@@ -715,11 +738,13 @@ extern volatile u64 __arena_global	powersave_mode_ns;
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 extern const volatile u64	pinned_slice_ns;
+extern const volatile u64	xmig_min_gain_ns;
 extern const volatile u8	no_ovrflw_extend;
 
 extern volatile bool __arena_global	reinit_cpumask_for_performance;
 extern volatile bool __arena_global	no_preemption;
 extern volatile bool __arena_global	no_core_compaction;
+extern volatile bool __arena_global	ovrflw_counted_active;
 extern volatile bool __arena_global	no_freq_scaling;
 
 bool test_cpu_flag(struct cpu_ctx __arg_arena *cpuc, u64 flag);
@@ -805,6 +830,53 @@ can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
 	       cpdomc->nr_steady_cpus == 0;
 }
 
+u64 calc_comp_time(u64 task_svc_invr, u64 queued_svc_invr, u64 cap_sum,
+		   u64 nr_cpus);
+u64 calc_comp_time_on_cpu(u64 task_svc_invr, struct cpu_ctx __arg_arena *cpuc);
+u64 calc_comp_time_on_cpdom(u64 task_svc_invr, struct cpdom_ctx __arg_arena *cpdomc);
+
+/*
+ * Time until whatever is running on @cpuc stops, in wall-clock ns.
+ *
+ * Kept apart from the calc_comp_time_on_*() estimators, which carry no
+ * residual so that they stay comparable with one another. A caller that needs
+ * a wall-clock wait rather than a comparison adds this on top.
+ *
+ * SCX_SLICE_INF means nothing is running: lavd only ever writes it to
+ * est_stopping_clk when a CPU goes idle, is taken offline, or is initialized,
+ * and never as a task's slice. So there is nothing to wait for and the
+ * residual is zero.
+ *
+ * est_stopping_clk is the running task's average runtime counted from its
+ * start, not its slice. While it lies ahead it is the better guess, bounded
+ * by the slice the kernel will enforce. Once the task has outrun its average
+ * there is nothing left to predict from, so guess twice and take the larger:
+ * a quarter of the average, as the spread of its runtimes, so a task a
+ * little past its average still reads as about to stop; and the overrun
+ * itself, so a task deep into a burst reads as staying for as long again.
+ * The remaining slice caps them, being the bound the kernel enforces.
+ */
+static __always_inline u64 calc_residual_time(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 est = READ_ONCE(cpuc->est_stopping_clk);
+	struct task_struct *curr;
+	u64 remaining;
+
+	if (est == SCX_SLICE_INF)
+		return 0;
+
+	curr = scx_bpf_cid_curr(cpuc->cid);
+	remaining = curr ? curr->scx.slice : 0;
+	if (now >= est) {
+		u64 spread = time_delta(est, cpuc->running_clk) / 4;
+		u64 overrun = time_delta(now, est);
+
+		return min(max(spread, overrun), remaining);
+	}
+
+	return min(time_delta(est, now), remaining);
+}
+
 bool queued_on_cpu(struct cpu_ctx __arg_arena *cpuc);
 bool is_cpu_congested(struct cpu_ctx __arg_arena *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx __arg_arena *cpuc,
@@ -882,18 +954,50 @@ struct dsq_entry {
 			 * not consume this DSQ (sorts last, skipped). */
 };
 
+/* A cpuperf_cur no target can equal, so the next commit always sends. */
+#define LAVD_CPUPERF_UNSET	((u32)-1)
+
 u64 peek_dsq_vtime(u64 dsq_id);
 void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 
 /* Overflow-set bookkeeping helpers. */
 
 /*
- * Atomically add @cpu to the global overflow cpumask. Mirrors the return
- * semantics of cmask_test_and_set(): true if the bit was already set, false if
- * it was newly set. A sub-scheduler tests the online view and sets the bit
- * under sub_set_lock. A cid the sub does not hold is reported as already set so
- * that no caller kicks it. A caller already holding sub_set_lock on an online
- * cid uses cmask_test_and_set() directly.
+ * ovrflw_test_and_set() for a caller that already holds sub_set_lock on an
+ * online cid. It sets the bit, updates the per-cpdom counters on a 0->1
+ * transition and returns true if the bit was already set.
+ */
+static __always_inline bool
+__ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
+{
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (cmask_test_and_set(cpu, ovrflw))
+		return true;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
+		return false;
+	cpdc = get_cpdom_ctx(cpuc->cpdom_id);
+	__sync_fetch_and_add(&cpdc->nr_overflow_cpus, 1);
+	cpuc->ovrflw_cap = cpuc->effective_capacity;
+	__sync_fetch_and_add(&cpdc->cap_sum_overflow_cpus, cpuc->ovrflw_cap);
+	return false;
+}
+
+/*
+ * Atomically add @cpu to the global overflow cpumask and, on a 0->1
+ * transition, bump the per-cpdom (nr_overflow_cpus,
+ * cap_sum_overflow_cpus) counters used by completion-time-based
+ * migration to estimate cpdom throughput over active+overflow CPUs.
+ *
+ * Returns true if the bit was already set (no counter update); false if
+ * it was newly set (counters bumped).
+ *
+ * A sub-scheduler tests the online view and sets the bit under sub_set_lock. A
+ * cid the sub does not hold is reported as already set so that no caller kicks
+ * it. A caller already holding sub_set_lock on an online cid uses
+ * __ovrflw_test_and_set() directly.
  *
  * The picker calls this on every wakeup of a task pinned to a cid outside the
  * active set. Test the bit first so that only the call that sets it takes the
@@ -908,18 +1012,30 @@ ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
 	guard(sub_set)();
 	if (sub_mode && !cmask_test(cpu, online_cmask))
 		return true;
-	return cmask_test_and_set(cpu, ovrflw);
+	return __ovrflw_test_and_set(ovrflw, cpu);
 }
 
 /*
- * Atomically remove @cpu from the global overflow cpumask. Mirrors the return
- * semantics of cmask_test_and_clear(): true if the bit was set before this
- * call, false if it was already clear.
+ * Atomically remove @cpu from the global overflow cpumask and, on a
+ * 1->0 transition, decrement the per-cpdom counters. Returns true if
+ * the bit was set before this call (counters decremented); false if it
+ * was already clear.
  */
 static __always_inline bool
 ovrflw_test_and_clear(struct scx_cmask *ovrflw, s32 cpu)
 {
-	return cmask_test_and_clear(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (!cmask_test_and_clear(cpu, ovrflw))
+		return false;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
+		return true;
+	cpdc = get_cpdom_ctx(cpuc->cpdom_id);
+	__sync_fetch_and_sub(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_sub(&cpdc->cap_sum_overflow_cpus, cpuc->ovrflw_cap);
+	return true;
 }
 
 /* Load balancer helpers. */
@@ -977,17 +1093,7 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct scx_cmask *a_mask; /* task's active mask */
 	struct scx_cmask *o_mask; /* task's overflow mask */
-	/*
-	 * Additional input arguments for init_idle_i_mask().
-	 */
-	const struct scx_cmask *i_mask;
-	/*
-	 * Additional input arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
-	 */
-	struct scx_cmask *ia_mask;
-	struct scx_cmask *iat_mask;
-	struct scx_cmask *io_mask;
+	/* Scratch mask for pick_idle_cpu_at_cpdom(). */
 	struct scx_cmask *temp_mask;
 	/*
 	 * Flags.
@@ -995,10 +1101,7 @@ struct pick_ctx {
 	bool a_empty:1;
 	bool o_empty:1;
 	bool is_task_big:1;
-	bool i_empty:1;
-	bool ia_empty:1;
-	bool iat_empty:1;
-	bool io_empty:1;
+	bool affinitized:1; /* is_affinitized(), set by init_ao_masks() */
 };
 
 
@@ -1006,6 +1109,11 @@ s32 find_cpu_in(const struct scx_cmask __arg_arena *src_mask,
 		struct cpu_ctx __arg_arena *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, struct task_struct *p, bool extend_ovrflw,
 		   bool *is_idle);
+void set_cpu_idle_state(struct cpu_ctx __arg_arena *cpuc, s32 cpu);
+void update_core_idle_state(struct cpu_ctx __arg_arena *cpuc);
+bool clear_cpu_idle_state(struct cpu_ctx __arg_arena *cpuc, s32 cpu);
+bool claim_idle_cpu(s32 cpu);
+bool is_cpu_hinted_idle(struct cpu_ctx __arg_arena *cpuc);
 
 bool consume_task(u64 cpdom_id);
 

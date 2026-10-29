@@ -23,7 +23,12 @@ int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
 
 int calc_cpuperf_target(struct cpu_ctx __arg_arena *cpuc);
-int update_cpuperf_target(struct cpu_ctx __arg_arena *cpuc);
+int update_cpufreq_rate_limit(struct cpu_ctx __arg_arena *cpuc);
+int update_next_cpufreq_rate_limit(void);
+int warn_cpufreq_rate_limit_err(void);
+int update_cpuperf_target(struct cpu_ctx __arg_arena *cpuc, u32 demand, u64 now);
+int refresh_cpuperf_target(struct cpu_ctx __arg_arena *cpuc, u64 now);
+int decay_idle_cpuperf_target(struct cpu_ctx __arg_arena *cpuc, u64 now);
 
 extern volatile int __arena_global	power_mode;
 extern volatile bool __arena_global	is_powersave_mode;

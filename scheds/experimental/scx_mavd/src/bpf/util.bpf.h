@@ -42,6 +42,20 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
 
+/*
+ * Check if @p is restricted to a subset of the cids. Derive it from @taskc's
+ * copy of the allowed cmask, which ops.set_cmask() keeps current, rather than
+ * from a flag cached beside the copy, so the two can never disagree.
+ *
+ * - The copy's weight covers the configured affinity.
+ * - is_migration_disabled() covers a migration-disabled task, which cannot
+ *   move whatever the copy says.
+ */
+static __always_inline bool is_affinitized(const struct task_struct *p, task_ctx *taskc)
+{
+	return cmask_weight(&taskc->allowed) != nr_cids || is_migration_disabled(p);
+}
+
 static inline bool rt_or_dl_task(struct task_struct *p)
 {
 	return unlikely(p->prio < MAX_RT_PRIO);
@@ -51,6 +65,12 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
 {
 	struct task_struct *curr = scx_bpf_cid_curr(cpu);
 	return curr && rt_or_dl_task(curr);
+}
+
+static __always_inline bool is_cpu_idle_now(s32 cpu)
+{
+	struct task_struct *curr = scx_bpf_cid_curr(cpu);
+	return curr && curr->pid == 0;
 }
 
 /*
