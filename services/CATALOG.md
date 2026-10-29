@@ -444,29 +444,44 @@ print the same object):
     { "id": "scx_cosmos", "label": "Cosmos", "description": "...",
       "path": "/usr/bin/scx_cosmos", "available": true },
     { "id": "scx_eevdf", "label": "EEVDF", "description": "...",
+      "available": false },
+    { "id": "latency", "label": "Low latency", "description": "...",
+      "sched": "scx_eevdf", "args": ["--slice-us", "1600"],
       "available": false }
   ],
   "all": [
     { "name": "scx_cosmos", "path": "/usr/bin/scx_cosmos",
-      "recommended": true, "tier": "stable" },
+      "recommended": true, "featured": true, "tier": "stable" },
     { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland",
-      "recommended": false, "tier": "stable" },
+      "recommended": false, "featured": false, "tier": "stable" },
     { "name": "scx_flow", "path": "/usr/bin/scx_flow",
-      "recommended": false, "tier": "experimental" },
+      "recommended": false, "featured": false, "tier": "experimental" },
     { "name": "scx_rake", "path": "/usr/local/bin/scx_rake",
-      "recommended": false, "tier": "unknown" }
+      "recommended": false, "featured": false, "tier": "unknown" }
   ],
   "config": "/etc/default/scx",
   "current": { ... the same object as get ... }
 }
 ```
 
-- `recommended` is the catalog's list, in its order. `available` is
-  whether the entry can be started here: `default` always, a scheduler
-  when it is installed in systemd's default search path, and `path` is
-  then the resolved executable.
+- `recommended` is the catalog's list of profiles, in its order.
+  `available` is whether the entry can be started here: `default`
+  always, a scheduler when it is installed in systemd's default search
+  path, and `path` is then the resolved executable. A custom profile
+  carries `sched`, its scheduler by name, and `args`, its options;
+  both keys are absent on a plain profile (`args` is then empty). The
+  command a profile stands for is `path` with `args`. The unit's file
+  holds that command and not the id, so a client that marks the
+  running or the selected profile compares the command: the scheduler
+  the kernel reports, or `next`, with exactly those options; a plain
+  profile matches with none. Two profiles with one command are both
+  marked, and which one was picked is not on record; an
+  administrator who wants them told apart gives them different
+  options.
 - `all` is every `scx_*` scheduler found in that search path, minus the
-  hidden ones, with whether each is recommended and its `tier`:
+  hidden ones, with whether a plain profile names it (`recommended`),
+  whether the catalog features it (`featured`; absent in older output
+  reads as false) and its `tier`:
   `stable`, `experimental`, or `unknown` when the catalog names the
   scheduler nowhere. The featured ones come first, in `featured`'s
   order, then the other stable ones by name, then the experimental ones
