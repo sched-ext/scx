@@ -492,16 +492,13 @@ can_loop in bpf_arena_for() and cmask_for_each() bounds verifier state, not
 valid traversal. Every scan is bounded by the immutable cid, CPU or domain
 count, far below the may_goto budget, so complete scans finish.
 
-Runtime preference-table reads go through a plain const volatile u16 view,
+Runtime preference-table reads go through a const volatile u16 __arena view,
 as lavd's reads of its const volatile rodata table do, so every read is a
 fresh load. The arena table itself is declared plain u16. The view adds no
 ordering or synchronization with writers. A relaxed atomic load would
-compile to the same plain load under the v4 ISA the build uses.
-
-The object builds with -DSCX_ARENA_SCALAR, from build.rs, and the loader
-sets BPF_F_ARENA_SCALAR in scx_ops_cid_open!() through the rodata marker the
-define adds, so a load or store through a plain scalar is an arena access
-and the object carries no address-space casts.
+compile to the same plain load under the v4 ISA the build uses. Emitted
+AS1-to-AS0 casts mark PTR_TO_ARENA, including in this tree's READ_ONCE()
+expansion.
 
 ## Mask traversal
 
@@ -513,10 +510,10 @@ scan failed verifier loop detection in statistics collection. The macro
 evaluates the mask expression more than once, so keep it free of side
 effects.
 
-Arena-resident types are spelled out as struct rather than aliased. A
-typedef of the kernel's struct scx_cmask made a field access in the
-traversal macro relocate against the alias, which the kernel BTF has no
-match for, and ops.set_cmask() failed to load.
+Arena-resident types are spelled out as struct with the __arena qualifier
+rather than aliased. A typedef of the kernel's struct scx_cmask made a field
+access in the traversal macro relocate against the alias, which the kernel
+BTF has no match for, and ops.set_cmask() failed to load.
 
 ## Verifier constraints
 
@@ -544,13 +541,11 @@ verifier prunes the other path, so the counts also depend on the kernel.
 The scheduler requires clang 22 or newer. scx_cargo refuses to build a
 cid-form scheduler with an older one unless SCX_ALLOW_OLD_CLANG is set.
 
-Clang 19 through 21 compiled the memset that zeroes the arena-resident
+Clang 19 through 21 compile the memset that zeroes the arena-resident
 sys_stat_ctx in sys_stat.bpf.c into stores through the raw arena address,
-without the address-space cast that clang 22 emitted, and the verifier
-rejected init, cid_online and cid_offline, the programs that reach it, with
-an invalid scalar memory access. Under SCX_ARENA_SCALAR a store through a
-plain scalar is an arena access, so that failure cannot occur as described,
-and older clangs have not been tried since.
+without the address-space cast that clang 22 emits, and the verifier rejects
+init, cid_online and cid_offline, the programs that reach it, with an
+invalid scalar memory access.
 
 ### The combined stack limit
 
@@ -570,8 +565,8 @@ like static ones.
 
 ops.dispatch() runs on a private stack, which sched_ext requests for it.
 There each subprog of 64 bytes or more is charged on its own instead of
-combined, which is why dispatch's verifier depth, 160, is far below its
-model, 480.
+combined, which is why dispatch's verifier depth is far below its model, 160
+against 480 on the SCX_ARENA_SCALAR object.
 
 ### The deepest chains
 
@@ -581,32 +576,37 @@ cmask_andnot(), are global functions with a frame of their own, while the
 scans and bit tests stay inline in their callers. The deepest chain from
 either program is the picker's own, six frames down to the idle claim:
 
-    lavd_enqueue (or lavd_select_cid)  96 ->  96
-    pick_idle_cpu                     120 -> 128 (may_goto)
-    migrate_to_neighbor                96 ->  96 (may_goto)
-    pick_idle_cpu_at_cpdom              0 ->   0
-    pick_idle_cpu_in                  104 -> 112 (may_goto)
-    clear_cpu_idle_state               32 ->  32
-                                                464
+    lavd_enqueue                      128 -> 128
+    pick_idle_cpu                     128 -> 128 (may_goto)
+    migrate_to_neighbor               112 -> 112 (may_goto)
+    pick_idle_cpu_at_cpdom              0 ->   0 (may_goto)
+    pick_idle_cpu_in                  128 -> 128 (may_goto)
+    clear_cpu_idle_state               32 ->  32 (may_goto)
+                                                528
 
 The left column is the deepest r10 offset in the emitted object, the right
 one the rounded frame the verifier adds, and "(may_goto)" marks the 8 bytes
-the tool adds for a may_goto, as its docstring explains. Both roots' frames
-are 96, so the chain models at 464 from lavd_enqueue() and lavd_select_cid()
-alike.
+the tool adds for a may_goto, as its docstring explains. lavd_select_cid()'s
+frame is 112, 104 rounded, so the same chain models at 512 from it.
 
-The next chains are at 432: migrate_to_neighbor() to
-debug_neighbor_migration(), 112, and pick_idle_cpu_at_cpdom() to
-cmask_and(), 112. The verifier's own `stack depth` line at log level 4
-reports 464 for both programs, equal to the model.
+The next chains from lavd_enqueue() are at 480: migrate_to_neighbor() to
+debug_neighbor_migration() or find_sticky_cpu_at_cpdom(), 112 each, and
+pick_idle_cpu_at_cpdom() to cmask_and(), 112. The verifier's own `stack
+depth` line at log level 4 reported 464 for both programs on the
+SCX_ARENA_SCALAR object, equal to its model, and has not been re-read on the
+object built with the __arena tags.
 
-At 464 the chain fits 512, so the two programs load on either budget. It
-stood at 544 for a while during this sync, with the migration debug print of
-6203b56f0f69 ("scx_lavd: log task migrations under debug verbosity") inline
-in migrate_to_neighbor(), whose frame it grew from 112 to 160, and came back
-once the print moved into debug_neighbor_migration(). lavd_dispatch() models
-at 480: lavd_dispatch 128, scx_cgroup_bw_reenqueue 48, cbw_reenqueue_cgroup
-112, scx_atq_pop 32, rb_pop 0, rb_remove_node 48 and rbnode_switch 112.
+At 528 from lavd_enqueue() the model is over 512. The verifier's depth on
+this object has not been measured. The object loads and runs on a 7.4
+kernel, which has the 2048-byte budget on x86-64, and the model is an upper
+bound. lavd_dispatch() models at 496: lavd_dispatch 176,
+scan_dsq_for_ovflw_ext 208 and arena_spin_lock_slowpath 112.
+
+On the SCX_ARENA_SCALAR object the chain modeled at 464. It stood at 544 for
+a while during this sync, with the migration debug print of 6203b56f0f69
+("scx_lavd: log task migrations under debug verbosity") inline in
+migrate_to_neighbor(), whose frame it grew from 112 to 160, and came back
+once the print moved into debug_neighbor_migration().
 
 ### The current layout
 
@@ -690,10 +690,11 @@ never reaches does not count.
 
 Every rejection seen during the conversion modeled over 512, at 528 and 544,
 but a 528 model has both loaded and been rejected depending on what the
-verifier reached, and the current object models at 464 from both
-lavd_enqueue() and lavd_select_cid() and loads, with the verifier reporting
-464 for both. A model over the limit therefore names a chain to measure, and
-the verifier's `stack depth` line decides.
+verifier reached, and the SCX_ARENA_SCALAR object modeled at 464 and loaded
+with the verifier reporting 464 for both programs. The current object models
+at 528 from lavd_enqueue() and its verifier depth has not been read. A model
+over the limit therefore names a chain to measure, and the verifier's `stack
+depth` line decides.
 
 ### The instruction budget
 
@@ -747,8 +748,8 @@ the picker's mask intersections are verified once per program instead of at
 every call site: on the same mavd code they took select_cid from 88k to 70k
 verified instructions and enqueue from 105k to 89k, and returning the picker
 to lavd's inline helpers cost 4k and 3k of that back. Verified instructions
-per program on the current object, with the verifier's stack depth in
-parentheses:
+per program on the SCX_ARENA_SCALAR object, with the verifier's stack depth
+in parentheses:
 
     lavd_select_cid          56,236 (464)
     lavd_enqueue             75,167 (464)
@@ -759,12 +760,13 @@ parentheses:
     lavd_cid_offline         22,325 (176)
     lavd_sub_ecaps_updated   13,664 (208)
 
-Measured on 2026-10-28 in the environment above. The previous table, 74,705,
-93,913, 720,425, 163,698 and 44,723 for the first five programs, was
-measured on 2026-10-06 on the posted cid-sched kernel and is not comparable:
-the kernel and the code both differ, and the cause of the drop, dispatch
-from 720k to 40k among them, was not investigated. The per-port deltas on
-the same kernel are in each port's notes.
+Measured on 2026-10-28 in the environment above and not re-taken on the
+object built with the __arena tags. The previous table, 74,705, 93,913,
+720,425, 163,698 and 44,723 for the first five programs, was measured on
+2026-10-06 on the posted cid-sched kernel and is not comparable: the kernel
+and the code both differ, and the cause of the drop, dispatch from 720k to
+40k among them, was not investigated. The per-port deltas on the same kernel
+are in each port's notes.
 
 The sub-scheduler mode was measured with veristat on 2026-10-07. veristat
 verifies the object with the source defaults, so its counts are not
@@ -772,8 +774,7 @@ comparable with the ones above. Root mode and sub mode (sub_mode forced to
 1 with -G), in that order: select_cid 66,266 and 61,176, enqueue 78,814 and
 82,238, dispatch 592,062 and 643,427, init_task 163,698 both, init 41,300
 and 66,838. Measured before the sweep moved from the stat timer to the
-bpf_call_rcu() callback; veristat no longer loads the object since the arena
-scalar rebase.
+bpf_call_rcu() callback.
 
 Dispatch rose from 473k to 720k when the cleanup dropped the tests on
 lookups that can still return NULL, the effect above, and the last result
