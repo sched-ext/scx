@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    },
+    {
+      "id": "scx_eevdf",
+      "label": "EEVDF",
+      "args": ["--slice-us", "1600"]
+    }
+  ]
+}

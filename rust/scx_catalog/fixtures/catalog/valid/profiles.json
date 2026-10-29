@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "Default",
+      "description": "The kernel's own scheduler."
+    },
+    {
+      "id": "scx_cosmos",
+      "label": "Cosmos"
+    },
+    {
+      "id": "latency",
+      "label": "Low latency",
+      "description": "EEVDF with a short slice.",
+      "sched": "scx_eevdf",
+      "args": ["--slice-us", "1600", "--disable-cgroups"]
+    },
+    {
+      "id": "server",
+      "label": "Server",
+      "sched": "scx_eevdf",
+      "args": ["--slice-us", "20000"]
+    },
+    {
+      "id": "gaming-layered",
+      "label": "Gaming (layered)",
+      "description": "A hidden scheduler with the configuration it needs.",
+      "sched": "scx_layered",
+      "args": ["--run-example"]
+    }
+  ],
+  "featured": ["scx_cosmos", "scx_lavd", "scx_eevdf"],
+  "hidden": ["scx_layered"],
+  "stable": ["scx_bpfland"],
+  "experimental": ["scx_flow"]
+}

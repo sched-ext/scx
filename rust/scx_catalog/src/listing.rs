@@ -79,12 +79,14 @@ pub fn picks(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Pick> {
         .collect()
 }
 
-/// The installed schedulers minus the hidden ones: the recommended ones
-/// first, in the catalog's order, then the other stable ones by name,
+/// The installed schedulers minus the hidden ones: the featured ones
+/// first, in `featured`'s order, then the other stable ones by name,
 /// then the experimental ones by name, then the ones the catalog does
 /// not name. The full list is what a user who skipped the recommended
 /// view scrolls through: the maintainers' picks should be the first
-/// thing in it and what nobody vouches for the last.
+/// thing in it and what nobody vouches for the last. The order is
+/// upstream's list, not the profiles: an override that rewrites the
+/// profiles does not reorder what upstream features.
 pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installed> {
     let mut shown: Vec<Installed> = installed
         .iter()
@@ -99,11 +101,11 @@ pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installe
     // By tier, rank and then name, not by rank alone: the scan happens
     // to come sorted, but the order is this function's contract, not
     // the scan's.
+    let featured = catalog.featured();
     shown.sort_by_cached_key(|s| {
-        let rank = catalog
-            .recommended
+        let rank = featured
             .iter()
-            .position(|r| r.id == s.name)
+            .position(|f| *f == s.name)
             .unwrap_or(usize::MAX);
         (s.tier, rank, s.name.clone())
     });
@@ -216,5 +218,56 @@ mod tests {
         // output.
         let reversed: Vec<(String, PathBuf)> = installed.iter().rev().cloned().collect();
         assert_eq!(shown(&catalog, &reversed), ordered);
+    }
+
+    /// With `featured` written out, it is what orders the full list,
+    /// not the profiles: an administrator's override that offers eevdf
+    /// profiles first still shows upstream's featured order, and a
+    /// scheduler with a profile but not featured sorts by its tier.
+    #[test]
+    fn featured_orders_the_full_list_not_the_profiles() {
+        let catalog = Catalog::parse(
+            r#"{"version":2,"recommended":[
+                {"id":"default","label":"Default"},
+                {"id":"scx_eevdf","label":"EEVDF"},
+                {"id":"latency","label":"Low latency","sched":"scx_eevdf",
+                 "args":["--slice-us","1600"]},
+                {"id":"scx_rusty","label":"Rusty"}
+            ],
+            "featured":["scx_cosmos","scx_lavd","scx_eevdf"],
+            "stable":["scx_rusty","scx_bpfland"],
+            "experimental":["scx_flow"]}"#,
+        )
+        .unwrap();
+        let installed: Vec<(String, PathBuf)> = [
+            "scx_bpfland",
+            "scx_cosmos",
+            "scx_eevdf",
+            "scx_flow",
+            "scx_lavd",
+            "scx_rusty",
+        ]
+        .iter()
+        .map(|n| ((*n).to_owned(), PathBuf::from(format!("/usr/bin/{n}"))))
+        .collect();
+        assert_eq!(
+            shown(&catalog, &installed)
+                .iter()
+                .map(|s| (s.name.as_str(), s.recommended, s.tier))
+                .collect::<Vec<_>>(),
+            vec![
+                ("scx_cosmos", false, Tier::Stable),
+                ("scx_lavd", false, Tier::Stable),
+                ("scx_eevdf", true, Tier::Stable),
+                ("scx_bpfland", false, Tier::Stable),
+                ("scx_rusty", true, Tier::Stable),
+                ("scx_flow", false, Tier::Experimental),
+            ]
+        );
+        // A plain profile's scheduler is still available through the
+        // profile, whatever its place in the full list.
+        let picks = picks(&catalog, &installed);
+        assert_eq!(picks.len(), 4);
+        assert!(picks.iter().all(|p| p.available));
     }
 }
