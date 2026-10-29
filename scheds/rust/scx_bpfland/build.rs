@@ -8,6 +8,9 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .build()
+        .add_source("../../../lib/edq.bpf.c")
+        .add_source("../../../lib/common.bpf.c")
+        .add_source("../../../lib/sdt_alloc.bpf.c")
+        .compile_link_gen()
         .unwrap();
 }
