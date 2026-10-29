@@ -1018,9 +1018,36 @@ None yet.
 
 ## Validation obligations
 
+Every update to mavd tests the sub-scheduler scenarios below. They are the
+main thing to test and come before the root-only coverage.
+
+scx_nitosis runs as the root with its cells under a parent cgroup and with
+--enable-borrowing, and mavd attaches to a cell's cgroup with `--cgroup
+PATH`. The kernel needs the sub-scheduler interface, CONFIG_EXT_SUB_SCHED,
+and lockdep, since most sub-scheduler bugs show up as lockdep reports.
+
+- An attach to a cgroup that owns no cell is refused. The kernel reports the
+  sub disabled with "parent rejected (-22)".
+- An attach to a cell, then load inside the delegated cell, in another cell
+  and in the root cell. nitosis's stats show the delegated cell's dispatches
+  going to mavd, sub_q_pct 100 for that cell.
+- Cell churn with mavd attached.
+- A detach and a reattach under load.
+- Two mavd subs at once on two cells.
+- A cell's cgroup removed under its attached sub. mavd exits with
+  "unregistered from the main kernel (cgroup N going offline)", and the
+  other subs and nitosis keep running.
+- The root exiting under two subs. Each exits with "parent exiting" and
+  sched_ext ends disabled.
+
+A passing sub scenario shows each sub's attach and exit reason in the kernel
+log, the expected per-cell sub_q_pct, progress in every workload, the
+surviving subs still running after another sub or cell goes away, and a
+kernel log with no warning, lockdep report or stall.
+
 Choose affected cases and the required confidence for the change at hand.
-The wider coverage inventory includes affinity and migration disable, SMT
-on/off, initially offline CPUs, hotplug, remote core scheduling, RT/DL
+The root-only coverage inventory includes affinity and migration disable,
+SMT on/off, initially offline CPUs, hotplug, remote core scheduling, RT/DL
 takeover, cgroup quota wakeups, preemption, statistics, power profiles,
 attach/detach, the schedutil paths (the rate-limit read, the resend from
 ops.tick(), the idle decay and the demand floor) and the completion-time
