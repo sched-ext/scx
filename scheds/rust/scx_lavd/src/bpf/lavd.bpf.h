@@ -890,6 +890,13 @@ struct dsq_entry {
 /* A cpuperf_cur no target can equal, so the next commit always sends. */
 #define LAVD_CPUPERF_UNSET	((u32)-1)
 
+/* When send_cpuperf_target() sends, by caller. */
+enum lavd_cpuperf_send_mode {
+	LAVD_CPUPERF_RISE,	/* a rise, from ops.running() */
+	LAVD_CPUPERF_REFRESH,	/* once per rate limit, from ops.tick() */
+	LAVD_CPUPERF_DECAY,	/* an idle CPU's drop, from sys_stat */
+};
+
 u64 peek_dsq_vtime(u64 dsq_id);
 void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 

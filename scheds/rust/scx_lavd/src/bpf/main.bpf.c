@@ -1751,15 +1751,6 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-/*
- * @taskc's demand: its runnable duty cycle (util_est), the share of a CPU's
- * time it needs.
- */
-static __always_inline u32 task_cpuperf_demand(task_ctx *taskc)
-{
-	return min(READ_ONCE(taskc->util_est), LAVD_SCALE);
-}
-
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
@@ -1813,8 +1804,14 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * The target normally follows this CPU's utilization history. If @p's
 	 * duty cycle is higher, use it instead, since the CPU's utilization
 	 * takes time to catch up with @p's demand.
+	 *
+	 * A drop is not sent here, so lowering the frequency lags. While the
+	 * CPU stays busy, ops.tick() sends the drop at the first tick past
+	 * the rate limit. Once the CPU goes idle, no tick runs, so the drop
+	 * waits for the sys_stat timer, up to one interval (10 ms).
 	 */
-	update_cpuperf_target(cpuc, task_cpuperf_demand(taskc), now);
+	WRITE_ONCE(cpuc->cpuperf_floor, READ_ONCE(taskc->util_est));
+	send_cpuperf_target(cpuc, now, LAVD_CPUPERF_RISE);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -1855,7 +1852,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	 * Do it before any early return below. @cpuc is @p's CPU, whose rq
 	 * the kernel holds here.
 	 */
-	refresh_cpuperf_target(cpuc, now);
+	send_cpuperf_target(cpuc, now, LAVD_CPUPERF_REFRESH);
 
 	account_task_runtime(p, taskc, cpuc, now, true);
 
