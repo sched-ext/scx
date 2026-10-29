@@ -4,14 +4,14 @@
 //! exception is the log view writing its viewport height and clamped
 //! scroll offset back into the app.
 
-use crate::model::{Current, DEFAULT_ID, Listing, Tier};
+use crate::model::{Current, DEFAULT_ID, Listing, Pick, Tier};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Input, View, is_running, is_selected};
+use crate::app::{App, Input, View, is_running, is_running_pick, is_selected, is_selected_pick};
 use crate::logs;
 
 const SCHED_PREFIX: &str = "scx_";
@@ -71,16 +71,35 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The marker in front of a list entry: running, selected for the next
 /// start but not running, or nothing.
-fn marker(listing: Option<&Listing>, id: &str) -> (&'static str, Style) {
-    match listing {
-        Some(l) if is_running(l, id) => (
+fn marker(running: bool, selected: bool) -> (&'static str, Style) {
+    if running {
+        (
             "● ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Some(l) if is_selected(l, id) => ("○ ", Style::default().fg(Color::Yellow)),
-        _ => ("  ", Style::default()),
+        )
+    } else if selected {
+        ("○ ", Style::default().fg(Color::Yellow))
+    } else {
+        ("  ", Style::default())
+    }
+}
+
+/// A profile's marker: by its command, so that of two profiles on one
+/// scheduler the one whose options run is the one marked.
+fn pick_marker(listing: Option<&Listing>, pick: &Pick) -> (&'static str, Style) {
+    match listing {
+        Some(l) => marker(is_running_pick(l, pick), is_selected_pick(l, pick)),
+        None => marker(false, false),
+    }
+}
+
+/// A scheduler's marker in the full list: by name.
+fn sched_marker(listing: Option<&Listing>, name: &str) -> (&'static str, Style) {
+    match listing {
+        Some(l) => marker(is_running(l, name), is_selected(l, name)),
+        None => marker(false, false),
     }
 }
 
@@ -89,15 +108,26 @@ fn draw_recommended_list(frame: &mut Frame, app: &App, area: Rect) {
         .recommended()
         .iter()
         .map(|pick| {
-            let (mark, style) = marker(app.listing.as_ref(), &pick.id);
+            let (mark, style) = pick_marker(app.listing.as_ref(), pick);
             let style = if !pick.available {
                 Style::default().fg(Color::DarkGray)
             } else {
                 style
             };
+            // A custom profile says what it runs, after the label: the
+            // label is the administrator's name for it, the command is
+            // what tells it from the plain entry above.
+            let command = match &pick.sched {
+                Some(sched) => format!("  {} {}", strip_prefix(sched), format_flags(&pick.args)),
+                None => String::new(),
+            };
             let mut lines = vec![Line::from(vec![
                 Span::styled(mark, style),
                 Span::styled(pick.label.clone(), style),
+                Span::styled(
+                    command.trim_end().to_owned(),
+                    Style::default().fg(Color::Cyan),
+                ),
                 Span::styled(
                     if pick.available {
                         String::new()
@@ -134,27 +164,54 @@ fn draw_recommended_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// The groups of the full list, in its order: the featured schedulers
+/// (the maintainers' picks, stable by definition), the other stable
+/// ones, the experimental ones, and what the catalog does not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Featured,
+    Stable,
+    Experimental,
+    Unknown,
+}
+
+impl Group {
+    fn of(sched: &crate::model::Installed) -> Self {
+        if sched.featured {
+            Group::Featured
+        } else {
+            match sched.tier {
+                Tier::Stable => Group::Stable,
+                Tier::Experimental => Group::Experimental,
+                Tier::Unknown => Group::Unknown,
+            }
+        }
+    }
+}
+
 /// One item of the full list: a group header, or the scheduler at
 /// that index of the listing's `all`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AllRow {
-    Header { tier: Tier, first: bool },
+    Header { group: Group, first: bool },
     Scheduler(usize),
 }
 
 /// The full list's items in order: a header before the first scheduler
-/// of each tier, then the schedulers. Pure, so the mapping between the
-/// cursor (a scheduler index) and the item list is tested on its own.
+/// of each group, then the schedulers. Pure, so the mapping between
+/// the cursor (a scheduler index) and the item list is tested on its
+/// own.
 fn all_list_rows(all: &[crate::model::Installed]) -> Vec<AllRow> {
-    let mut rows = Vec::with_capacity(all.len() + 3);
-    let mut last: Option<Tier> = None;
+    let mut rows = Vec::with_capacity(all.len() + 4);
+    let mut last: Option<Group> = None;
     for (idx, sched) in all.iter().enumerate() {
-        if last != Some(sched.tier) {
+        let group = Group::of(sched);
+        if last != Some(group) {
             rows.push(AllRow::Header {
-                tier: sched.tier,
+                group,
                 first: rows.is_empty(),
             });
-            last = Some(sched.tier);
+            last = Some(group);
         }
         rows.push(AllRow::Scheduler(idx));
     }
@@ -162,8 +219,9 @@ fn all_list_rows(all: &[crate::model::Installed]) -> Vec<AllRow> {
 }
 
 fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
-    // Stable first, experimental after, then what the catalog does not
-    // name, as the listing orders them. Each group is named once, by a
+    // Featured first, the other stable ones, experimental after, then
+    // what the catalog does not name, as the listing orders them. Each
+    // group is named once, by a
     // header item of its own (a rule and the name, the rule left off
     // the first group, which starts at the frame). Headers are items
     // so that the list lays them out, but they are never the selected
@@ -174,11 +232,14 @@ fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
-            AllRow::Header { tier, first } => {
-                let (title, style) = match tier {
-                    Tier::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
-                    Tier::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
-                    Tier::Unknown => ("  not in the catalog", Style::default().fg(Color::DarkGray)),
+            AllRow::Header { group, first } => {
+                let (title, style) = match group {
+                    Group::Featured => ("  featured", Style::default().fg(Color::Cyan)),
+                    Group::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
+                    Group::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
+                    Group::Unknown => {
+                        ("  not in the catalog", Style::default().fg(Color::DarkGray))
+                    }
                 };
                 let mut lines = Vec::new();
                 if !first {
@@ -192,18 +253,10 @@ fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
             }
             AllRow::Scheduler(idx) => {
                 let sched = &app.all()[*idx];
-                let (mark, style) = marker(app.listing.as_ref(), &sched.name);
+                let (mark, style) = sched_marker(app.listing.as_ref(), &sched.name);
                 ListItem::new(Line::from(vec![
                     Span::styled(mark, style),
                     Span::styled(strip_prefix(&sched.name).to_owned(), style),
-                    Span::styled(
-                        if sched.recommended {
-                            "  recommended"
-                        } else {
-                            ""
-                        },
-                        Style::default().fg(Color::DarkGray),
-                    ),
                 ]))
             }
         })
@@ -340,13 +393,18 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled("Focused: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(pick.label.clone(), Style::default().fg(Color::Cyan)),
                 ]));
+                // The id, and for a custom profile the command it
+                // stands for: the scheduler with the options.
                 lines.push(Line::from(Span::styled(
                     format!(
                         "  {}",
-                        if pick.id == DEFAULT_ID {
-                            "kernel default".to_owned()
-                        } else {
-                            pick.id.clone()
+                        match (&pick.sched, pick.id.as_str()) {
+                            (_, DEFAULT_ID) => "kernel default".to_owned(),
+                            (Some(sched), id) =>
+                                format!("{id}: {sched} {}", format_flags(&pick.args))
+                                    .trim_end()
+                                    .to_owned(),
+                            (None, id) => id.to_owned(),
                         }
                     ),
                     Style::default().fg(Color::Gray),
@@ -360,7 +418,15 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
             }
             if let Some(listing) = &app.listing {
                 lines.push(Line::from(Span::styled(
-                    format!("  catalog from {}", listing.source.display()),
+                    format!(
+                        "  catalog from {}{}",
+                        listing.source.display(),
+                        if app.preview_catalog {
+                            " (preview: custom profiles do not start from here)"
+                        } else {
+                            ""
+                        }
+                    ),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
@@ -602,17 +668,26 @@ mod tests {
             name: name.into(),
             path: format!("/usr/bin/{name}"),
             recommended: false,
+            featured: false,
             tier,
         }
     }
 
-    /// A header goes before the first scheduler of each tier and
+    fn featured(name: &str) -> Installed {
+        Installed {
+            featured: true,
+            ..installed(name, Tier::Stable)
+        }
+    }
+
+    /// A header goes before the first scheduler of each group and
     /// nowhere else; the rule is left off the first header; the
     /// scheduler items keep the listing's indices.
     #[test]
     fn the_full_list_puts_one_header_before_each_group() {
         let all = [
-            installed("scx_cosmos", Tier::Stable),
+            featured("scx_cosmos"),
+            featured("scx_lavd"),
             installed("scx_rusty", Tier::Stable),
             installed("scx_flow", Tier::Experimental),
             installed("scx_rake", Tier::Unknown),
@@ -621,21 +696,26 @@ mod tests {
             all_list_rows(&all),
             vec![
                 AllRow::Header {
-                    tier: Tier::Stable,
+                    group: Group::Featured,
                     first: true
                 },
                 AllRow::Scheduler(0),
                 AllRow::Scheduler(1),
                 AllRow::Header {
-                    tier: Tier::Experimental,
+                    group: Group::Stable,
                     first: false
                 },
                 AllRow::Scheduler(2),
                 AllRow::Header {
-                    tier: Tier::Unknown,
+                    group: Group::Experimental,
                     first: false
                 },
                 AllRow::Scheduler(3),
+                AllRow::Header {
+                    group: Group::Unknown,
+                    first: false
+                },
+                AllRow::Scheduler(4),
             ]
         );
         assert!(all_list_rows(&[]).is_empty());
@@ -644,7 +724,7 @@ mod tests {
         assert_eq!(
             all_list_rows(&[installed("scx_flow", Tier::Experimental)])[0],
             AllRow::Header {
-                tier: Tier::Experimental,
+                group: Group::Experimental,
                 first: true
             }
         );

@@ -78,9 +78,11 @@ fn main() -> Result<()> {
 
     // Backend resolution happens before entering raw mode, so failures
     // print as normal error messages instead of garbling the terminal.
+    let preview = catalog.is_some();
     let backend = ScxcliBackend::connect(catalog)?;
     let warning = backend.policy_mismatch();
     let mut app = App::new(Box::new(backend));
+    app.preview_catalog = preview;
     if let Some(text) = warning {
         app.warn(&text);
     }

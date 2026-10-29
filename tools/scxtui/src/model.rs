@@ -22,16 +22,49 @@ pub const DEFAULT_ID: &str = "default";
 pub const ADMIN_PATH: &str = "/etc/scx/catalog.json";
 pub const SHIPPED_PATH: &str = "/usr/share/scx/catalog.json";
 
-/// One recommended entry as `list --json` prints it.
+/// One profile as `list --json` prints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pick {
     pub id: String,
     pub label: String,
     #[serde(default)]
     pub description: String,
+    /// A custom profile's scheduler, by name; absent on a plain
+    /// profile, whose id is the scheduler, and on `default`.
+    #[serde(default)]
+    pub sched: Option<String>,
+    /// The options the profile starts its scheduler with; none on a
+    /// plain profile.
+    #[serde(default)]
+    pub args: Vec<String>,
     #[serde(default)]
     pub path: Option<String>,
     pub available: bool,
+}
+
+impl Pick {
+    /// The scheduler the profile starts, by name, or `None` for
+    /// `default`.
+    pub fn sched_name(&self) -> Option<&str> {
+        match &self.sched {
+            Some(sched) => Some(sched),
+            None => (self.id != DEFAULT_ID).then_some(self.id.as_str()),
+        }
+    }
+
+    /// A custom profile: a scheduler with options under an id of its
+    /// own, whose command the installed catalog decides.
+    pub fn is_custom(&self) -> bool {
+        self.sched.is_some()
+    }
+
+    /// Whether `sched` (by name) with `args` is exactly this profile's
+    /// command. The unit's file holds a command and not a profile id,
+    /// so this is how the running or selected profile is found; a
+    /// plain profile matches its scheduler with no options.
+    pub fn is_command(&self, sched: &str, args: &[String]) -> bool {
+        self.sched_name() == Some(sched) && self.args == args
+    }
 }
 
 /// One installed scheduler the catalog does not hide.
@@ -39,7 +72,12 @@ pub struct Pick {
 pub struct Installed {
     pub name: String,
     pub path: String,
+    /// A plain profile names it.
     pub recommended: bool,
+    /// The catalog features it: the maintainers' pick, shown first.
+    /// Absent in older output reads as not featured.
+    #[serde(default)]
+    pub featured: bool,
     /// What the catalog says: `stable`, `experimental`, or `unknown`
     /// when it names the scheduler nowhere. Absent in older output
     /// reads as unknown, since that output made no such statement.
