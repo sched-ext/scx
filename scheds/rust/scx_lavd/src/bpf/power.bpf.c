@@ -1211,9 +1211,12 @@ static __always_inline void commit_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
  * Raise the floor to @demand, the demand of the task about to run, and send
  * the target if it rose above the last one sent. ops.running() is the first
  * point at which a CPU runs a task after its target may have moved: the task
- * brought its own demand, the sys_stat timer computed a new target, or an
- * RT/DL task took the CPU and LAVD_CPUPERF_UNSET voided the last send, since
- * the RT/DL task may have left the frequency anywhere.
+ * brought its own demand, or the sys_stat timer computed a new target.
+ *
+ * An RT/DL task leaving the CPU does not force a send. Its dequeue already
+ * runs a schedutil update, and a forced resend at every return from RT/DL
+ * adds frequency updates that can each hold off the next one for a
+ * rate-limit interval.
  *
  * Only a rise is sent from here. The floor changes at nearly every context
  * switch, so sending every drop would put the kfunc on the context-switch

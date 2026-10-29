@@ -1806,9 +1806,9 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	clear_cpu_idle_state(cpuc, cpuc->cpu_id);
 
 	/*
-	 * Send this CPU's performance target if it differs from the last one
-	 * sent: the sys_stat timer may have computed a new one, or an RT/DL
-	 * task may have run here and left the frequency anywhere.
+	 * Send this CPU's performance target if it rose above the last one
+	 * sent: @p brought its own demand, or the sys_stat timer computed a
+	 * new one.
 	 *
 	 * The target normally follows this CPU's utilization history. If @p's
 	 * duty cycle is higher, use it instead, since the CPU's utilization
@@ -2204,18 +2204,6 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
-	struct cpu_ctx *cpuc;
-
-	/*
-	 * The RT/DL task may leave the frequency anywhere. Only
-	 * invalidate the target here, so that ops.running() sends the
-	 * actual change request when an SCX task runs here again.
-	 */
-	cpuc = get_cpu_ctx_id(cpu);
-	if (cpuc) {
-		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
-	}
-
 	/*
 	 * Requeue tasks stranded on the local DSQ when a higher-priority
 	 * scheduling class takes the CPU, so the BPF scheduler can
@@ -2245,18 +2233,6 @@ int BPF_PROG(lavd_sched_switch, bool preempt,
 	 */
 	if (unlikely(next->prio < MAX_RT_PRIO &&
 		     prev->prio >= MAX_RT_PRIO)) {
-		struct cpu_ctx *cpuc;
-
-		/*
-		 * The RT/DL task may leave the frequency anywhere. Only
-		 * invalidate the target here, so that ops.running() sends the
-		 * actual change request when an SCX task runs here again.
-		 */
-		cpuc = get_cpu_ctx();
-		if (cpuc) {
-			WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
-		}
-
 		/* Reenqueue any SCX tasks stranded on the local DSQ. */
 		scx_bpf_reenqueue_local_from_anywhere();
 	}
