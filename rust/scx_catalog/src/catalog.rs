@@ -299,6 +299,25 @@ pub fn load() -> Result<Loaded> {
     load_checked(&candidates(), Some(Path::new(ADMIN_PATH)))
 }
 
+/// A catalog file named by the caller, for listing: a checkout's
+/// `services/catalog.json`, say, to see what it would show before it
+/// is installed. Read as is, without the trust rules, since nothing
+/// privileged follows from it; `start` and `resume` always consult the
+/// installed catalog.
+pub fn load_file(path: &Path) -> Result<Loaded> {
+    use std::io::Read;
+    let mut text = String::new();
+    fs::File::open(path)
+        .and_then(|mut file| file.read_to_string(&mut text))
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let catalog =
+        Catalog::parse(&text).with_context(|| format!("cannot load {}", path.display()))?;
+    Ok(Loaded {
+        catalog,
+        source: path.to_path_buf(),
+    })
+}
+
 /// The shipped catalog, ignoring any override.
 pub fn load_shipped() -> Result<Loaded> {
     load_from(&[Path::new(SHIPPED_PATH)])
@@ -602,6 +621,25 @@ mod tests {
         assert!(validate_entry(&e).is_err());
         e.description = "zażółć gęślą jaźń".into();
         validate_entry(&e).unwrap();
+    }
+
+    #[test]
+    fn a_named_file_loads_as_is_and_a_missing_or_bad_one_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        fs::write(
+            &path,
+            catalog(&["default", "scx_lavd"], &[]).render().unwrap(),
+        )
+        .unwrap();
+        let loaded = load_file(&path).unwrap();
+        assert_eq!(
+            (loaded.source.as_path(), loaded.catalog.recommended.len()),
+            (path.as_path(), 2)
+        );
+        assert!(load_file(&dir.path().join("absent.json")).is_err());
+        fs::write(&path, "{").unwrap();
+        assert!(load_file(&path).is_err());
     }
 
     #[test]

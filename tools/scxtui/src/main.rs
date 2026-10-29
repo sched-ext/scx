@@ -11,6 +11,8 @@ mod system;
 mod ui;
 mod watch;
 
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 
 use app::App;
@@ -20,9 +22,12 @@ const USAGE: &str = "\
 scxtui - TUI for sched_ext schedulers, through scxcli and scx.service
 
 USAGE:
-    scxtui
+    scxtui [--catalog PATH]
 
 OPTIONS:
+    --catalog PATH   List with this catalog file instead of the installed
+                     one (a checkout's services/catalog.json, say); starting
+                     still goes by the installed catalog
     -h, --help       Show this help
     -V, --version    Show the version
 
@@ -32,59 +37,48 @@ starting one with options asks for an administrator's. For scripts, use
 scxcli directly.
 ";
 
-/// scxctl-style commands the removed `--cli` used to take, mapped to
-/// the scxcli command that replaces each. Printed instead of acting, for
-/// one release, so an old script fails with a pointer rather than a
-/// parse error.
-fn cli_pointer(args: &[String]) -> String {
-    let command = args.first().map(String::as_str).unwrap_or("");
-    let replacement = match command {
-        "get" => "scxcli get [--json]",
-        "list" | "modes" => "scxcli list [all] [--json]",
-        "start" | "switch" => {
-            "scxcli start SCHED, or scxcli run SCHED [ARGS...] for a scheduler with options"
+/// What the command line asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Run { catalog: Option<PathBuf> },
+    Help,
+    Version,
+}
+
+fn parse(args: &[String]) -> Result<Invocation> {
+    let mut catalog = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Invocation::Help),
+            "-V" | "--version" => return Ok(Invocation::Version),
+            "--catalog" if catalog.is_none() => match args.next() {
+                Some(path) if !path.is_empty() => catalog = Some(PathBuf::from(path)),
+                _ => bail!("--catalog takes a path\n\n{USAGE}"),
+            },
+            other => bail!("unknown argument: {other}\n\n{USAGE}"),
         }
-        "stop" => "scxcli stop (keeps the selection), or scxcli start default",
-        "restart" => {
-            "scxcli start SCHED (starting restarts the unit), or systemctl restart scx.service"
-        }
-        "restore" => "scxcli start SCHED",
-        _ => "scxcli --help",
-    };
-    format!(
-        "scxtui --cli was removed; schedulers are managed by scxcli. For `{}` use: {replacement}",
-        args.join(" ")
-    )
+    }
+    Ok(Invocation::Run { catalog })
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        None => {}
-        Some("-h" | "--help") => {
+    let catalog = match parse(&args)? {
+        Invocation::Help => {
             print!("{USAGE}");
             return Ok(());
         }
-        Some("-V" | "--version") => {
+        Invocation::Version => {
             println!("scxtui {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        Some("--cli") => {
-            eprintln!("{}", cli_pointer(&args[1..]));
-            std::process::exit(2);
-        }
-        Some(other) if other.starts_with("--export-profiles") => {
-            bail!(
-                "--export-profiles was removed; the catalog is /usr/share/scx/catalog.json (or \
-/etc/scx/catalog.json), and `scxcli list --json` prints it resolved"
-            );
-        }
-        Some(other) => bail!("unknown argument: {other}\n\n{USAGE}"),
-    }
+        Invocation::Run { catalog } => catalog,
+    };
 
     // Backend resolution happens before entering raw mode, so failures
     // print as normal error messages instead of garbling the terminal.
-    let backend = ScxcliBackend::connect()?;
+    let backend = ScxcliBackend::connect(catalog)?;
     let warning = backend.policy_mismatch();
     let mut app = App::new(Box::new(backend));
     if let Some(text) = warning {
@@ -102,11 +96,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_cli_pointer_names_the_replacement() {
+    fn the_command_line_takes_a_catalog_and_nothing_else() {
         let args = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert!(cli_pointer(&args(&["get", "--json"])).contains("scxcli get"));
-        assert!(cli_pointer(&args(&["switch", "-s", "lavd"])).contains("scxcli start SCHED"));
-        assert!(cli_pointer(&args(&["stop"])).contains("start default"));
-        assert!(cli_pointer(&args(&[])).contains("scxcli --help"));
+        assert_eq!(
+            parse(&args(&[])).unwrap(),
+            Invocation::Run { catalog: None }
+        );
+        assert_eq!(
+            parse(&args(&["--catalog", "./services/catalog.json"])).unwrap(),
+            Invocation::Run {
+                catalog: Some("./services/catalog.json".into())
+            }
+        );
+        assert_eq!(parse(&args(&["--help"])).unwrap(), Invocation::Help);
+        assert_eq!(parse(&args(&["-V"])).unwrap(), Invocation::Version);
+        assert!(parse(&args(&["--catalog"])).is_err());
+        assert!(parse(&args(&["--catalog", ""])).is_err());
+        assert!(parse(&args(&["--catalog", "a", "--catalog", "b"])).is_err());
+        assert!(parse(&args(&["--cli", "get"])).is_err());
     }
 }

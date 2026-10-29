@@ -110,10 +110,25 @@ pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installe
     shown
 }
 
-/// The listing of the live system.
+/// The listing of the live system, with the installed catalog.
 pub fn list() -> Result<Listing> {
-    let loaded = crate::catalog::load()?;
-    list_from(&loaded)
+    list_with(None)
+}
+
+/// The listing with the catalog at `catalog`, when given, instead of
+/// the installed one: the same scan and the same state, classified by
+/// that file. `customized` is then false, since the administrator's
+/// override is not what is in use, and `source` names the file.
+pub fn list_with(catalog: Option<&std::path::Path>) -> Result<Listing> {
+    let loaded = match catalog {
+        Some(path) => crate::catalog::load_file(path)?,
+        None => crate::catalog::load()?,
+    };
+    let mut listing = list_from(&loaded)?;
+    if catalog.is_some() {
+        listing.customized = false;
+    }
+    Ok(listing)
 }
 
 pub fn list_from(loaded: &Loaded) -> Result<Listing> {

@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -27,6 +28,8 @@ USAGE:
                                       current state
     scxcli list recommended [--json]  The same
     scxcli list all [--json]          Every installed scheduler
+      --catalog PATH                  List with this catalog file instead
+                                      of the installed one
     scxcli get [--json]               Show which scheduler is running
     scxcli start SCHED                Start a scheduler from `list all` with
                                       its defaults, or `default` for the
@@ -51,11 +54,22 @@ const EXIT_PERMISSION: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    List { what: ListWhat, json: bool },
-    Get { json: bool },
-    Start { id: Option<String> },
+    List {
+        what: ListWhat,
+        json: bool,
+        catalog: Option<PathBuf>,
+    },
+    Get {
+        json: bool,
+    },
+    Start {
+        id: Option<String>,
+    },
     Stop,
-    Run { sched: String, args: Vec<String> },
+    Run {
+        sched: String,
+        args: Vec<String>,
+    },
     Help,
     Version,
 }
@@ -102,9 +116,26 @@ fn parse(args: &[String]) -> Result<Command> {
                 Some((word, tail)) if word == "all" => (ListWhat::All, tail),
                 _ => (ListWhat::Recommended, rest),
             };
+            // `--json` and `--catalog PATH`, each at most once, in any
+            // order. `list` is the one command that takes a catalog of
+            // the caller's choosing: it only reads.
+            let mut json = false;
+            let mut catalog = None;
+            let mut rest = rest.iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--json" if !json => json = true,
+                    "--catalog" if catalog.is_none() => match rest.next() {
+                        Some(path) if !path.is_empty() => catalog = Some(PathBuf::from(path)),
+                        _ => return usage("--catalog takes a path"),
+                    },
+                    other => return usage(format!("unexpected argument {other:?}")),
+                }
+            }
             Ok(Command::List {
                 what,
-                json: only_json(rest)?,
+                json,
+                catalog,
             })
         }
         "get" => Ok(Command::Get {
@@ -172,8 +203,12 @@ fn execute(command: Command) -> Result<()> {
     match command {
         Command::Help => write!(out, "{USAGE}")?,
         Command::Version => writeln!(out, "scxcli {}", env!("CARGO_PKG_VERSION"))?,
-        Command::List { what, json } => {
-            let listing = scx_catalog::list()?;
+        Command::List {
+            what,
+            json,
+            catalog,
+        } => {
+            let listing = scx_catalog::list_with(catalog.as_deref())?;
             if json {
                 writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
             } else {
@@ -222,13 +257,7 @@ fn execute(command: Command) -> Result<()> {
 fn render_current(current: &Current) -> String {
     let mut text = String::new();
     let state = match current.scheduler.as_deref() {
-        Some(DEFAULT_ID) => match &current.next {
-            Some(next) => format!(
-                "default (the kernel's scheduler); {} selected but not running",
-                next.sched
-            ),
-            None => "default (the kernel's scheduler)".to_owned(),
-        },
+        Some(DEFAULT_ID) => "default (kernel scheduler)".to_owned(),
         Some(name) => format!("{name} running"),
         None if current.attached() => "a scheduler is attached outside scx.service".to_owned(),
         None => "scx.service is active, nothing attached yet".to_owned(),
@@ -238,17 +267,36 @@ fn render_current(current: &Current) -> String {
         Some(r) => text.push_str(&format!("running: {} {}\n", r.sched, r.args.join(" "))),
         None => text.push_str("running: nothing\n"),
     }
-    if let Some(next) = &current.next {
-        text.push_str(&format!(
-            "next start: {} {}{}\n",
-            next.sched,
-            next.args.join(" "),
-            if next.overridden {
-                " (from an SCX_*_OVERRIDE)"
+    // What the configuration says the unit runs, and whether that is
+    // what runs now: one line, since the file and the next start are
+    // the same thing unless an override is in effect. An environment
+    // that did not resolve is unknown, not "nothing": `next` may be
+    // what a partial read found. The last failed start is reported on
+    // its own line below and not pinned on this configuration, which
+    // may not be the one that failed.
+    match (&current.config_error, &current.next) {
+        (Some(_), _) => text.push_str("configured: unknown\n"),
+        (None, Some(next)) => {
+            let what = format!("{} {}", next.sched, next.args.join(" "));
+            let what = what.trim_end();
+            // The kernel's word as well as the unit's: the process
+            // exists before its scheduler is attached.
+            let name = scx_catalog::catalog::sched_name(&next.sched);
+            let running = current.scheduler.as_deref() == Some(name.as_str())
+                && current
+                    .running
+                    .as_ref()
+                    .is_some_and(|r| r.sched == name && r.args == next.args);
+            let note = if next.overridden {
+                "SCX_*_OVERRIDE in effect"
+            } else if running {
+                "running"
             } else {
-                ""
-            }
-        ));
+                "not running"
+            };
+            text.push_str(&format!("configured: {what} ({note})\n"));
+        }
+        (None, None) => text.push_str("configured: nothing\n"),
     }
     match &current.kernel {
         Some(k) => text.push_str(&format!(
@@ -351,7 +399,11 @@ mod tests {
 
     #[test]
     fn reads_and_help_parse() {
-        let list = |what, json| Command::List { what, json };
+        let list = |what, json| Command::List {
+            what,
+            json,
+            catalog: None,
+        };
         assert_eq!(p(&["list"]).unwrap(), list(ListWhat::Recommended, false));
         assert_eq!(
             p(&["list", "--json"]).unwrap(),
@@ -367,6 +419,38 @@ mod tests {
         );
         assert!(is_usage(p(&["list", "profiles"])));
         assert!(is_usage(p(&["list", "all", "x"])));
+        assert_eq!(
+            p(&[
+                "list",
+                "all",
+                "--catalog",
+                "./services/catalog.json",
+                "--json"
+            ])
+            .unwrap(),
+            Command::List {
+                what: ListWhat::All,
+                json: true,
+                catalog: Some("./services/catalog.json".into()),
+            }
+        );
+        assert_eq!(
+            p(&["list", "--json", "--catalog", "c.json"]).unwrap(),
+            Command::List {
+                what: ListWhat::Recommended,
+                json: true,
+                catalog: Some("c.json".into()),
+            }
+        );
+        assert!(is_usage(p(&["list", "--catalog"])));
+        assert!(is_usage(p(&["list", "--catalog", ""])));
+        assert!(is_usage(p(&["list", "--json", "--json"])));
+        assert!(is_usage(p(&["list", "--catalog", "a", "--catalog", "b"])));
+        // Only `list` takes a catalog: the privileged commands consult
+        // the installed one, and the policy covers what that one lists.
+        assert!(is_usage(p(&["get", "--catalog", "c.json"])));
+        assert!(is_usage(p(&["start", "--catalog", "c.json"])));
+        assert!(is_usage(p(&["start", "scx_cosmos", "--catalog", "c.json"])));
         assert_eq!(p(&["get", "--json"]).unwrap(), Command::Get { json: true });
         assert_eq!(p(&["stop"]).unwrap(), Command::Stop);
         assert!(is_usage(p(&["stop", "now"])));
@@ -437,9 +521,44 @@ mod tests {
             "failure":{"message":"boom","status":"exit-code/1"}}"#;
         let current: Current = serde_json::from_str(json).unwrap();
         let text = render_current(&current);
-        assert!(text.contains("/usr/bin/scx_cosmos selected but not running"));
+        assert!(text.contains("state: default (kernel scheduler)\n"));
+        // The failure is the unit's last run, not necessarily this
+        // configuration's: it gets its own line and no verdict here.
+        assert!(text.contains("configured: /usr/bin/scx_cosmos (not running)\n"));
+        assert!(!text.contains("failed to start"));
         assert!(text.contains("last start failed (exit-code/1): boom"));
-        assert!(text.contains("next start: /usr/bin/scx_cosmos \n"));
+
+        // An environment that did not resolve is unknown, even when a
+        // partial read produced a `next`.
+        let json = r#"{"version":2,"scheduler":"default",
+            "unit":{"active":false,"enabled":true},"running":null,
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"disabled","ops":null},"failure":null,
+            "config_error":"/etc/scx/local is unreadable"}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        let text = render_current(&current);
+        assert!(text.contains("configured: unknown\n"), "{text}");
+        assert!(!text.contains("configured: /usr/bin"));
+        assert!(text.contains("warning: /etc/scx/local is unreadable"));
+
+        let json = r#"{"version":2,"scheduler":"scx_cosmos",
+            "unit":{"active":true,"enabled":true},
+            "running":{"sched":"scx_cosmos","args":[]},
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"enabled","ops":"cosmos"},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(render_current(&current).contains("configured: /usr/bin/scx_cosmos (running)\n"));
+        // The unit's process is up but the kernel has nothing attached
+        // yet: not running, whatever the process says.
+        let json = r#"{"version":2,"scheduler":null,
+            "unit":{"active":true,"enabled":true},
+            "running":{"sched":"scx_cosmos","args":[]},
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"disabled","ops":null},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(
+            render_current(&current).contains("configured: /usr/bin/scx_cosmos (not running)\n")
+        );
 
         let json = r#"{"version":2,"scheduler":null,
             "unit":{"active":false,"enabled":false},"running":null,"next":null,

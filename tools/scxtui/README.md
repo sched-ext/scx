@@ -31,15 +31,16 @@ configuration. There is no daemon and no D-Bus; the backend is
 - **All schedulers (`A`):** every `scx_*` scheduler installed in
   systemd's default search path that the catalog does not hide: the
   ones the catalog calls stable first, with the recommended ones
-  marked and on top, then the ones it calls experimental under a
-  divider, then anything installed that the catalog does not name, each
-  marked as such. Enter starts the selected scheduler with its
+  marked and on top, then the ones it calls experimental, then anything
+  installed that the catalog does not name, each group under its own
+  divider. Enter starts the selected scheduler with its
   own defaults, without a password; `a` asks for its command-line
   arguments first and goes through `scxcli run`, which asks for an
   administrator's. The view opens with a warning that a scheduler
   unsuited to the workload can perform worse than the kernel's default.
-- **Status panel:** what runs now (the unit's process), what the next
-  start would run (the file plus any `SCX_SCHEDULER_OVERRIDE` /
+- **Status panel:** the state (the kernel's scheduler, or which one
+  runs), what runs now (the unit's process), what is configured and
+  whether it is what runs (the file, or an `SCX_SCHEDULER_OVERRIDE` /
   `SCX_FLAGS_OVERRIDE` in effect), why the last start failed, and the
   kernel's `sched_ext` state with a warning whenever it disagrees with
   the unit: a scheduler attached outside the service, a unit that is
@@ -75,12 +76,15 @@ polkit policy and the catalog.
 
 ## Command line
 
-scxtui has no command line of its own beyond `--help` and `--version`.
+scxtui's command line is `--help`, `--version` and `--catalog PATH`,
+which lists with the named catalog file instead of the installed one
+(`scxtui --catalog ./services/catalog.json` shows a checkout's catalog
+before it is installed); starting a scheduler still goes by the
+installed catalog, since the polkit policy covers what that one lists.
 Scripts use scxcli directly: `scxcli get --json`, `scxcli list --json`,
-`pkexec scxcli start SCHED`. The earlier scxctl-style `--cli` prints the
-scxcli command that replaces each of its subcommands and exits; it will
-be removed in the next release. `--export-profiles` is gone: the catalog
-is a plain JSON file and `scxcli list --json` prints it resolved.
+`pkexec scxcli start SCHED`. The scxctl-style `--cli` and
+`--export-profiles` of earlier versions are gone: the catalog is a plain
+JSON file and `scxcli list --json` prints it resolved.
 
 Per-scheduler modes (`auto`, `gaming`, `powersave`, `lowlatency`,
 `server`) and the scx_loader configuration files scxtui used to read

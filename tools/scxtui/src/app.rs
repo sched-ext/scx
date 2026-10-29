@@ -250,7 +250,15 @@ impl App {
 
     fn start_watching(&mut self) {
         let config = self.listing.as_ref().and_then(|l| l.config.clone());
-        match Watcher::new(&Watcher::files_for(config.as_deref())) {
+        let mut files = Watcher::files_for(config.as_deref());
+        // A catalog given on the command line is a file like the
+        // others: a change to it refreshes the lists.
+        if let Some(source) = self.listing.as_ref().map(|l| l.source.clone())
+            && !files.contains(&source)
+        {
+            files.push(source);
+        }
+        match Watcher::new(&files) {
             Ok(watcher) => self.watcher = Some(watcher),
             Err(err) => self.error(&format!("file watching unavailable ({err:#}); polling")),
         }
@@ -556,10 +564,21 @@ kernel's default; the recommended ones are marked",
     fn refresh(&mut self) {
         match self.backend.list() {
             Ok(listing) => {
-                self.selected = self
-                    .selected
-                    .min(listing.recommended.len().saturating_sub(1));
-                self.sched_selected = self.sched_selected.min(listing.all.len().saturating_sub(1));
+                // The cursor follows the entry, not its position: a
+                // catalog change (or an installation) that moves the
+                // focused scheduler leaves it focused. Only an entry
+                // that is gone falls back to the clamped position.
+                let pick = self.selected_pick().map(|p| p.id.clone());
+                let sched = self.selected_scheduler().map(|s| s.name.clone());
+                self.selected = pick
+                    .and_then(|id| listing.recommended.iter().position(|p| p.id == id))
+                    .unwrap_or(
+                        self.selected
+                            .min(listing.recommended.len().saturating_sub(1)),
+                    );
+                self.sched_selected = sched
+                    .and_then(|name| listing.all.iter().position(|s| s.name == name))
+                    .unwrap_or(self.sched_selected.min(listing.all.len().saturating_sub(1)));
                 self.listing = Some(listing);
                 self.listing_error = None;
             }
@@ -821,6 +840,43 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_keeps_the_focused_scheduler_when_the_lists_reorder() {
+        let Harness {
+            mut app, listing, ..
+        } = app();
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected_pick().unwrap().id, "scx_eevdf");
+        app.on_key(key(KeyCode::Char('A')));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.selected_scheduler().unwrap().name, "scx_bpfland");
+
+        // Another catalog: eevdf moves to the top of the recommended
+        // list, a new scheduler lands before bpfland in the full one.
+        {
+            let mut l = listing.borrow_mut();
+            l.recommended = vec![
+                pick("scx_eevdf", true),
+                pick("default", true),
+                pick("scx_cosmos", true),
+            ];
+            l.all.insert(0, installed("scx_aaa", false));
+        }
+        app.refresh();
+        assert_eq!(app.selected_pick().unwrap().id, "scx_eevdf");
+        assert_eq!(app.selected_scheduler().unwrap().name, "scx_bpfland");
+
+        // An entry that is gone: the cursor stays where it was, clamped.
+        {
+            let mut l = listing.borrow_mut();
+            l.recommended.retain(|p| p.id != "scx_eevdf");
+            l.all.retain(|s| s.name != "scx_bpfland");
+        }
+        app.refresh();
+        assert_eq!(app.selected_pick().unwrap().id, "default");
+        assert_eq!(app.selected_scheduler().unwrap().name, "scx_cosmos");
+    }
+
+    #[test]
     fn enter_starts_the_selected_entry_but_not_an_unavailable_one() {
         let Harness { mut app, calls, .. } = app();
         app.on_key(key(KeyCode::Enter));
@@ -959,6 +1015,89 @@ mod tests {
         app.selected = 2;
         app.refresh();
         assert_eq!(app.selected, 0);
+    }
+
+    /// Every view draws on a small terminal, with the panel's lines
+    /// wrapping rather than the frame failing, and the words the panel
+    /// is built on are the ones on screen.
+    #[test]
+    fn every_view_draws_at_80x24() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let Harness { mut app, .. } = app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for view in [View::Recommended, View::All, View::Logs] {
+            app.view = view;
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        }
+        app.view = View::All;
+        app.on_key(key(KeyCode::Char('a')));
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("State:"));
+        assert!(text.contains("Configured:"));
+        assert!(text.contains("Focused:"));
+        assert!(!text.contains("Selected:"));
+    }
+
+    /// The cursor lands on the scheduler, never on the header above
+    /// the first scheduler of a group: the headers are items of their
+    /// own and the selection is mapped past them.
+    #[test]
+    fn the_cursor_marks_the_first_scheduler_of_each_group_not_its_header() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let Harness {
+            mut app, listing, ..
+        } = app();
+        {
+            let mut l = listing.borrow_mut();
+            let tiered = |name: &str, tier| Installed {
+                name: name.into(),
+                path: format!("/usr/bin/{name}"),
+                recommended: false,
+                tier,
+            };
+            l.all = vec![
+                installed("scx_cosmos", true),
+                installed("scx_rusty", false),
+                tiered("scx_flow", crate::model::Tier::Experimental),
+                tiered("scx_mlfq", crate::model::Tier::Experimental),
+                tiered("scx_rake", crate::model::Tier::Unknown),
+            ];
+        }
+        app.refresh();
+        app.view = View::All;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (idx, name) in [(0, "cosmos"), (2, "flow"), (4, "rake")] {
+            app.sched_selected = idx;
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let width = usize::from(buffer.area.width);
+            let rows: Vec<String> = buffer
+                .content()
+                .chunks(width)
+                .map(|cells| cells.iter().map(|c| c.symbol()).collect())
+                .collect();
+            let marked: Vec<&String> = rows.iter().filter(|r| r.contains('\u{25b6}')).collect();
+            assert_eq!(marked.len(), 1, "one cursor on screen for {name}");
+            let row = marked[0];
+            assert!(row.contains(name), "cursor row for {name}: {row:?}");
+            for header in ["stable", "experimental", "not in the catalog", "\u{2500}"] {
+                assert!(
+                    !row.contains(header),
+                    "cursor on a header for {name}: {row:?}"
+                );
+            }
+        }
     }
 
     #[test]

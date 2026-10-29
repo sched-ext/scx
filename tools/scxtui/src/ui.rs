@@ -134,45 +134,77 @@ fn draw_recommended_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// One item of the full list: a group header, or the scheduler at
+/// that index of the listing's `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllRow {
+    Header { tier: Tier, first: bool },
+    Scheduler(usize),
+}
+
+/// The full list's items in order: a header before the first scheduler
+/// of each tier, then the schedulers. Pure, so the mapping between the
+/// cursor (a scheduler index) and the item list is tested on its own.
+fn all_list_rows(all: &[crate::model::Installed]) -> Vec<AllRow> {
+    let mut rows = Vec::with_capacity(all.len() + 3);
+    let mut last: Option<Tier> = None;
+    for (idx, sched) in all.iter().enumerate() {
+        if last != Some(sched.tier) {
+            rows.push(AllRow::Header {
+                tier: sched.tier,
+                first: rows.is_empty(),
+            });
+            last = Some(sched.tier);
+        }
+        rows.push(AllRow::Scheduler(idx));
+    }
+    rows
+}
+
 fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
     // Stable first, experimental after, then what the catalog does not
-    // name, as the listing orders them; the first entry of each later
-    // group carries a divider above it so the boundary is visible
-    // without a header row to skip over.
-    let first_of = |tier: Tier| app.all().iter().position(|s| s.tier == tier);
-    let dividers = [
-        (first_of(Tier::Experimental), "  experimental"),
-        (first_of(Tier::Unknown), "  not in the catalog"),
-    ];
-    let items: Vec<ListItem> = app
-        .all()
+    // name, as the listing orders them. Each group is named once, by a
+    // header item of its own (a rule and the name, the rule left off
+    // the first group, which starts at the frame). Headers are items
+    // so that the list lays them out, but they are never the selected
+    // item: the cursor is a scheduler, and its position in the item
+    // list is looked up by `all_list_rows`.
+    let rows = all_list_rows(app.all());
+    let rule = "\u{2500}".repeat(usize::from(area.width.saturating_sub(4)));
+    let items: Vec<ListItem> = rows
         .iter()
-        .enumerate()
-        .map(|(idx, sched)| {
-            let (mark, style) = marker(app.listing.as_ref(), &sched.name);
-            let (tier, tier_style) = match sched.tier {
-                Tier::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
-                Tier::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
-                Tier::Unknown => ("  not in the catalog", Style::default().fg(Color::DarkGray)),
-            };
-            let row = Line::from(vec![
-                Span::styled(mark, style),
-                Span::styled(strip_prefix(&sched.name).to_owned(), style),
-                Span::styled(tier, tier_style),
-                Span::styled(
-                    if sched.recommended {
-                        "  recommended"
-                    } else {
-                        ""
-                    },
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            match dividers.iter().find(|(at, _)| *at == Some(idx)) {
-                Some((_, title)) => {
-                    ListItem::new(vec![Line::from(Span::styled(*title, tier_style)), row])
+        .map(|row| match row {
+            AllRow::Header { tier, first } => {
+                let (title, style) = match tier {
+                    Tier::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
+                    Tier::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
+                    Tier::Unknown => ("  not in the catalog", Style::default().fg(Color::DarkGray)),
+                };
+                let mut lines = Vec::new();
+                if !first {
+                    lines.push(Line::from(Span::styled(
+                        rule.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
-                None => ListItem::new(row),
+                lines.push(Line::from(Span::styled(title, style)));
+                ListItem::new(lines)
+            }
+            AllRow::Scheduler(idx) => {
+                let sched = &app.all()[*idx];
+                let (mark, style) = marker(app.listing.as_ref(), &sched.name);
+                ListItem::new(Line::from(vec![
+                    Span::styled(mark, style),
+                    Span::styled(strip_prefix(&sched.name).to_owned(), style),
+                    Span::styled(
+                        if sched.recommended {
+                            "  recommended"
+                        } else {
+                            ""
+                        },
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
             }
         })
         .collect();
@@ -190,26 +222,16 @@ fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
         )
         .highlight_symbol("▶ ");
 
-    let mut state = ListState::default().with_selected(Some(app.sched_selected));
+    let selected = rows
+        .iter()
+        .position(|row| *row == AllRow::Scheduler(app.sched_selected));
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn state_line(current: &Current) -> (String, Color) {
     match current.scheduler.as_deref() {
-        Some(DEFAULT_ID) => match &current.next {
-            Some(next) => (
-                format!(
-                    "default (the kernel's scheduler); {} selected but not running",
-                    strip_prefix(next.name())
-                ),
-                if current.failure.is_some() {
-                    Color::Red
-                } else {
-                    Color::Yellow
-                },
-            ),
-            None => ("default: the kernel's scheduler".to_owned(), Color::White),
-        },
+        Some(DEFAULT_ID) => ("default (kernel scheduler)".to_owned(), Color::White),
         Some(name) => (format!("{} running", strip_prefix(name)), Color::Green),
         None if current.attached() => (
             "a scheduler is attached outside scx.service".to_owned(),
@@ -219,6 +241,36 @@ fn state_line(current: &Current) -> (String, Color) {
             "scx.service is active, nothing attached yet".to_owned(),
             Color::Yellow,
         ),
+    }
+}
+
+/// What the configuration says the unit runs, and whether that is what
+/// runs now. One line, since the file and the next start are the same
+/// thing unless an override is in effect, which the line then says.
+fn configured_line(current: &Current) -> (String, Color) {
+    let Some(next) = &current.next else {
+        return ("nothing".to_owned(), Color::White);
+    };
+    let what = format!("{} {}", strip_prefix(next.name()), format_flags(&next.args));
+    let what = what.trim_end();
+    if next.overridden {
+        return (format!("{what} (SCX_*_OVERRIDE in effect)"), Color::Yellow);
+    }
+    // "running" takes the kernel's word as well as the unit's: the
+    // unit's process exists before its scheduler is attached, and
+    // `scheduler` is set only once the kernel reports it.
+    let running = current.scheduler.as_deref() == Some(next.name())
+        && current
+            .running
+            .as_ref()
+            .is_some_and(|r| r.sched == next.name() && r.args == next.args);
+    // "not running" and no more: `failure` is the unit's last run,
+    // which may have been another configuration, and the Last start
+    // line below reports it on its own.
+    if running {
+        (format!("{what} (running)"), Color::White)
+    } else {
+        (format!("{what} (not running)"), Color::Yellow)
     }
 }
 
@@ -251,37 +303,14 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
                 )),
             }
             if let Some(err) = &current.config_error {
-                lines.push(kv("Next start", "unknown", Color::Red));
+                lines.push(kv("Configured", "unknown", Color::Red));
                 lines.push(Line::from(Span::styled(
                     format!("  ⚠ {err}"),
                     Style::default().fg(Color::Red),
                 )));
             } else {
-                match &current.next {
-                    Some(next) => {
-                        let text = format!(
-                            "{} {}{}",
-                            strip_prefix(next.name()),
-                            format_flags(&next.args),
-                            if next.overridden {
-                                " (SCX_*_OVERRIDE in effect)"
-                            } else {
-                                ""
-                            }
-                        );
-                        let changed = current
-                            .running
-                            .as_ref()
-                            .is_some_and(|r| r.sched != next.name() || r.args != next.args);
-                        let color = if next.overridden || changed {
-                            Color::Yellow
-                        } else {
-                            Color::White
-                        };
-                        lines.push(kv("Next start", text.trim_end(), color));
-                    }
-                    None => lines.push(kv("Next start", "nothing configured", Color::White)),
-                }
+                let (text, color) = configured_line(current);
+                lines.push(kv("Configured", &text, color));
             }
             if let Some(f) = &current.failure {
                 lines.push(kv(
@@ -308,7 +337,7 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
         View::Recommended => {
             if let Some(pick) = app.selected_pick() {
                 lines.push(Line::from(vec![
-                    Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Focused: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(pick.label.clone(), Style::default().fg(Color::Cyan)),
                 ]));
                 lines.push(Line::from(Span::styled(
@@ -339,7 +368,7 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
         View::All => {
             if let Some(sched) = app.selected_scheduler() {
                 lines.push(Line::from(vec![
-                    Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Focused: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(
                         strip_prefix(&sched.name).to_owned(),
                         Style::default().fg(Color::Cyan),
@@ -367,7 +396,7 @@ that is all that is known",
             }
             lines.push(Line::from(Span::styled(
                 "  a scheduler unsuited to the workload can perform worse than the kernel's \
-default; the recommended ones are marked",
+default",
                 Style::default().fg(Color::Yellow),
             )));
         }
@@ -566,6 +595,60 @@ fn format_flags(flags: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Installed;
+
+    fn installed(name: &str, tier: Tier) -> Installed {
+        Installed {
+            name: name.into(),
+            path: format!("/usr/bin/{name}"),
+            recommended: false,
+            tier,
+        }
+    }
+
+    /// A header goes before the first scheduler of each tier and
+    /// nowhere else; the rule is left off the first header; the
+    /// scheduler items keep the listing's indices.
+    #[test]
+    fn the_full_list_puts_one_header_before_each_group() {
+        let all = [
+            installed("scx_cosmos", Tier::Stable),
+            installed("scx_rusty", Tier::Stable),
+            installed("scx_flow", Tier::Experimental),
+            installed("scx_rake", Tier::Unknown),
+        ];
+        assert_eq!(
+            all_list_rows(&all),
+            vec![
+                AllRow::Header {
+                    tier: Tier::Stable,
+                    first: true
+                },
+                AllRow::Scheduler(0),
+                AllRow::Scheduler(1),
+                AllRow::Header {
+                    tier: Tier::Experimental,
+                    first: false
+                },
+                AllRow::Scheduler(2),
+                AllRow::Header {
+                    tier: Tier::Unknown,
+                    first: false
+                },
+                AllRow::Scheduler(3),
+            ]
+        );
+        assert!(all_list_rows(&[]).is_empty());
+        // A list that starts with an experimental scheduler still has
+        // its first header without a rule.
+        assert_eq!(
+            all_list_rows(&[installed("scx_flow", Tier::Experimental)])[0],
+            AllRow::Header {
+                tier: Tier::Experimental,
+                first: true
+            }
+        );
+    }
 
     #[test]
     fn flags_format_round_trips() {
