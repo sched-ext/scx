@@ -996,9 +996,16 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 *   - CPU hotplug removes an offline CPU from cpus_ptr
 		 * Clamp to cpus_ptr to prevent routing the task to the
 		 * per-CPU DSQ of a CPU that cannot run it.
+		 *
+		 * A migration-disabled task can run only on its own CPU, so
+		 * queue it where that CPU consumes. migrate_disable() raises
+		 * the counter before cpus_ptr narrows, so test the counter.
 		 */
-		if (cpu < 0 || cpu >= nr_cpu_ids ||
-		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		if (is_migration_disabled(p)) {
+			cpu = task_cpu;
+			taskc->suggested_cpu_id = cpu;
+		} else if (cpu < 0 || cpu >= nr_cpu_ids ||
+			   !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			cpu = bpf_cpumask_first(p->cpus_ptr);
 			taskc->suggested_cpu_id = cpu;
 		}
