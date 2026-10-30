@@ -164,7 +164,7 @@ static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struc
 	/*
 	 * Possible limitation: deeper queued task has lower avg runtime than head.
 	 */
-	struct task_struct *waiter = dsq_peek(cid_dsq.raw);
+	struct task_struct *waiter = scx_bpf_dsq_peek(cid_dsq.raw);
 	/* Raced with num queued above. Do nothing. */
 	if (!waiter)
 		return 0;

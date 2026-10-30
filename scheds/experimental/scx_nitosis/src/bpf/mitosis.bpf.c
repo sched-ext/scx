@@ -49,7 +49,6 @@ const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool reject_multicpu_pinning = false;
 const volatile bool enable_borrowing = false;
-const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
 
 /* applied_configuration_seq is bumped when a userspace-pushed config finishes applying. */
@@ -1205,7 +1204,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 	}
 
 	/* Peek at cell-LLC DSQ head */
-	p = dsq_peek(cell_dsq.raw);
+	p = scx_bpf_dsq_peek(cell_dsq.raw);
 	if (p) {
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
@@ -1217,7 +1216,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 	 * backlog the pinned head can lose every comparison for a full round
 	 * of the queue, so also bound how long the per-cid DSQ goes unserved.
 	 */
-	p = dsq_peek(cid_dsq.raw);
+	p = scx_bpf_dsq_peek(cid_dsq.raw);
 	if (p) {
 		bool overdue = pinned_dsq_overdue(cctx);
 

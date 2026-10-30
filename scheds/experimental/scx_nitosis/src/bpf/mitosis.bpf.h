@@ -199,24 +199,6 @@ struct task_ctx {
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 
-extern const volatile bool use_lockless_peek;
-
-/*
- * Peek at the head of a DSQ. Uses lockless kfunc when available,
- * otherwise falls back to bpf_for_each iterator.
- */
-static inline struct task_struct *dsq_peek(u64 dsq_id)
-{
-	struct task_struct *p;
-
-	if (use_lockless_peek)
-		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
-
-	bpf_for_each(scx_dsq, p, dsq_id, 0)
-		return p;
-	return NULL;
-}
-
 static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
 {
 	cctx->cstats[cell][idx] += delta;
