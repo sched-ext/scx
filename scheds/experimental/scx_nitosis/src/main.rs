@@ -179,10 +179,6 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
-    /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    use_lockless_peek: bool,
-
     /// Enable demand-based CPU rebalancing between cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_rebalancing: bool,
@@ -400,7 +396,6 @@ impl<'a> Scheduler<'a> {
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
 
         rodata.enable_borrowing = opts.enable_borrowing;
-        rodata.use_lockless_peek = opts.use_lockless_peek;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),

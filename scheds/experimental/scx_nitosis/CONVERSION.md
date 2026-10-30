@@ -79,6 +79,13 @@ userspace-driven topology they need. Until then, a mitosis change to subcell
 code is ported in its cell form where it has one, and a change that exists
 only for subcells or virtual LLCs is proposed for skipping.
 
+After the conversion, nitosis dropped --use-lockless-peek. It peeks DSQ
+heads with scx_bpf_dsq_peek() alone, since the iterator peek takes the DSQ's
+lock and every kernel nitosis loads on has the v7.1 fix to the kfunc. A
+mitosis change that adds a dsq_peek() call is ported with
+scx_bpf_dsq_peek(), and a change to the option or to dsq_peek() itself is
+proposed for skipping.
+
 ## Arena library
 
 build.rs links the library's arena allocator, per-task and per-cgroup
@@ -450,21 +457,20 @@ and ops.dispatch() at 432, its frame of 272 over pick_idle_cid_cores() at
 160.
 
 The verifier's own stack depths and per-program instruction counts were
-measured on 2026-10-28 on sched_ext for-next a96c41fea8da (7.3.0-rc5,
+measured on 2026-10-30 on sched_ext for-next a96c41fea8da (7.3.0-rc5,
 lockdep) in a vng VM with 16 cpus as 8 cores x 2 threads, a debug build,
 every program loaded at verifier log level 4.
 
 One run used the default options and one every BPF rodata option:
 --enable-llc-awareness, --enable-borrowing, --enable-slice-shrinking,
---dynamic-affinity-cpu-selection, --use-lockless-peek and
---reject-multicpu-pinning, with exiting-task-workaround on by default in
-both. Processed instructions, with the verifier's stack depth in
-parentheses:
+--dynamic-affinity-cpu-selection and --reject-multicpu-pinning, with
+exiting-task-workaround on by default in both. Processed instructions, with
+the verifier's stack depth in parentheses:
 
     select_cid   27,229 (368)   79,358 (368)
     enqueue      27,123 (416)  123,149 (416)
-    dispatch      1,047 (176)   32,833 (272)
-    running         111 (80)     1,692 (160)
+    dispatch      1,024 (176)   32,852 (272)
+    running         111 (48)     1,681 (128)
     init_task    32,063 (336)   34,351 (336)
     init         56,404 (336)   56,184 (336)
 
