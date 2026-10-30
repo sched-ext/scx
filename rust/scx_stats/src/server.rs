@@ -607,7 +607,7 @@ where
         let (ich, och) = ChannelPair::<Req, Res>::bidi();
 
         Self {
-            base_path: PathBuf::from("/var/run/scx"),
+            base_path: crate::default_stats_base_path(),
             sched_path: PathBuf::from("root"),
             stats_path: PathBuf::from("stats"),
             path: None,
