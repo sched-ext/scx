@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 
-//! Eligible Deadline Queue: an intrusive red-black tree, a port of scx_eevdf's
-//! lib/edq.bpf.c.
+//! Eligible Deadline Queue: an intrusive red-black tree, a port of
+//! rust/scx_arena/scx_arena/bpf/src/edq.bpf.c.
 //!
 //! The tree is ordered by deadline, ties broken by insertion order, and every
 //! node caches the minimum eligibility and the shortest slice of its subtree.

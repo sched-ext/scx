@@ -759,6 +759,7 @@ metal.
   loader's probe finds the JIT lowers them, as the shared cmask bit helpers
   do.
 - Whether idle tracking should move onto the shared cid idle helpers in
-  scheds/include/lib/cid_idle.h, which arrived after the conversion.
+  rust/scx_arena/scx_arena/bpf/include/lib/cid_idle.h, which arrived after
+  the conversion.
 - Bringing back the subcell scheme and virtual LLCs through a cid topology
   override.
