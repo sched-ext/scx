@@ -1769,11 +1769,41 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 }
 
+/*
+ * Extra performance target for @taskc while it runs, on top of its demand
+ * @util. On a big.LITTLE machine, a task more performance-critical than
+ * average gets up to its demand again at the system's maximum, so that it
+ * finishes its burst sooner. Other tasks get none.
+ *
+ * Tasks just above the average are left out, and so are tasks whose runs
+ * end before a raised target reaches the clock.
+ */
+static __always_inline
+u32 calc_cpuperf_boost(task_ctx *taskc, u32 util)
+{
+	u32 avg, max, pc;
+
+	if (!have_little_core ||
+	    taskc->avg_runtime_wall < LAVD_CPUPERF_BOOST_MIN_RUN_NS) {
+		return 0;
+	}
+
+	avg = sys_stat.avg_perf_cri;
+	max = sys_stat.max_perf_cri;
+	pc = taskc->perf_cri;
+	if (max <= avg ||
+	    pc <= avg + ((max - avg) >> LAVD_CPUPERF_BOOST_BAR_SHIFT)) {
+		return 0;
+	}
+	return (u64)util * (min(pc, max) - avg) / (max - avg);
+}
+
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
 	task_ctx *taskc;
 	u64 now = scx_bpf_now();
+	u32 util;
 
 	/*
 	 * lavd_running() may run on a CPU other than @p's: the kernel
@@ -1829,8 +1859,14 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * CPU stays busy, ops.tick() sends the drop at the first tick past
 	 * the rate limit. Once the CPU goes idle, no tick runs, so the drop
 	 * waits for the sys_stat timer, up to one interval (10 ms).
+	 *
+	 * A performance-critical @p gets a boost on top of its demand. A
+	 * pinned @p is left out of the pinned average unboosted, so its boost
+	 * applies only while it runs.
 	 */
-	WRITE_ONCE(cpuc->cpuperf_floor, READ_ONCE(taskc->util_est));
+	util = READ_ONCE(taskc->util_est);
+	WRITE_ONCE(cpuc->cpuperf_floor,
+		   min(util + calc_cpuperf_boost(taskc, util), LAVD_SCALE));
 	WRITE_ONCE(cpuc->cpuperf_floor_pinned,
 		   (taskc->pinned_cpu_id == cpuc->cpu_id) ?
 		   taskc->pinned_demand : 0);
