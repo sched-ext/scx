@@ -1724,7 +1724,8 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * the waker cannot be identified here. Skip the waker-dependent work
 	 * below: the waker's wake frequency is approximated in
 	 * ops.select_cpu(), and the waker-wakee criticality propagation is
-	 * disabled.
+	 * disabled. Note that waker_pid and waker_comm stay zero, meaning
+	 * 'not collected' in this mode.
 	 */
 	if (queued_wakeup)
 		return;
@@ -2459,6 +2460,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	if (is_ksoftirqd(p))
 		set_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
+
+	/*
+	 * With queued wakeups allowed, only the waker's wake frequency is
+	 * still tracked, approximated in ops.select_cpu(). The
+	 * waker-wakee relationship -- the lat_cri propagation, waker_pid,
+	 * waker_comm, and the WOKEN_BY_RT_DL boost -- is not maintained,
+	 * so what @p inherited from its parent is meaningless. Clear it
+	 * here rather than in ops.runnable(): the direct-dispatch path in
+	 * ops.select_cpu() can calculate the deadline before
+	 * ops.runnable() runs and would otherwise read the inherited
+	 * relationship.
+	 */
+	if (queued_wakeup) {
+		taskc->lat_cri_waker = 0;
+		taskc->lat_cri_wakee = 0;
+		taskc->waker_pid = 0;
+		taskc->waker_comm[0] = '\0';
+		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+	}
 
 	if (parent)
 		bpf_task_release(parent);
