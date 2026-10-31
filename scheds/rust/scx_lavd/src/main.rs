@@ -250,6 +250,14 @@ struct Opts {
     #[clap(long = "no-wake-sync", action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Allow the kernel to activate woken tasks asynchronously
+    /// (SCX_OPS_ALLOW_QUEUED_WAKEUP) and approximate the waker's wake
+    /// frequency in ops.select_cpu(). Wakeups that bypass select_cpu are
+    /// not counted, and the waker-wakee criticality propagation is
+    /// disabled. This is an experimental feature.
+    #[clap(long = "queued-wakeup", action = clap::ArgAction::SetTrue)]
+    queued_wakeup: bool,
+
     /// Disable dynamic slice boost for long-running tasks.
     #[clap(long = "no-slice-boost", action = clap::ArgAction::SetTrue)]
     no_slice_boost: bool,
@@ -775,6 +783,17 @@ impl<'a> Scheduler<'a> {
         order: &CpuOrder,
         debug_level: u8,
     ) -> Result<()> {
+        // Fail hard if queued wakeups were explicitly requested but the
+        // kernel lacks SCX_OPS_ALLOW_QUEUED_WAKEUP; do not silently start
+        // without them.
+        let queued_wakeup_flag = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+        if opts.queued_wakeup && queued_wakeup_flag == 0 {
+            anyhow::bail!(
+                "--queued-wakeup requires kernel SCX_OPS_ALLOW_QUEUED_WAKEUP support, \
+                 which this kernel lacks"
+            );
+        }
+
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.no_preemption = opts.no_preemption;
         bss_data.no_core_compaction = opts.no_core_compaction;
@@ -802,6 +821,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
 
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.queued_wakeup = opts.queued_wakeup;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
@@ -847,6 +867,19 @@ impl<'a> Scheduler<'a> {
 
         if opts.partial {
             skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
+
+        // Allow queued wakeups only when requested and supported. The flag
+        // only permits asynchronous activation; whether a given wakeup is
+        // actually queued still depends on the kernel's queuing
+        // conditions, so this means "allowed", not "always queued".
+        if opts.queued_wakeup {
+            skel.struct_ops.lavd_ops_mut().flags |= queued_wakeup_flag;
+            info!(
+                "Queued wakeups allowed; the waker's wake frequency is \
+                 approximated in select_cpu; the waker-wakee criticality \
+                 propagation is disabled."
+            );
         }
 
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;

@@ -229,6 +229,13 @@ const volatile u8	no_force_steal_limit = 0;
 const volatile u8	no_ovrflw_extend;
 
 /*
+ * Allow the queued wakeups (SCX_OPS_ALLOW_QUEUED_WAKEUP) and approximate
+ * the waker's wake frequency in ops.select_cpu(); set via
+ * --queued-wakeup.
+ */
+const volatile bool	queued_wakeup = false;
+
+/*
  * Warm-CPU wait budget. When > 0, a waking latency-tolerant task waits up to
  * this many ns for its previous CPU to free up before migrating to an idle one,
  * queueing on that CPU's per-CPU DSQ meanwhile. Warm cache and TLB state on the
@@ -861,6 +868,58 @@ static __always_inline void account_waker_wake_freq(task_ctx *waker_taskc)
 	}
 }
 
+/*
+ * With queued wakeups allowed, a wakeup can be activated asynchronously,
+ * so ops.runnable() can no longer identify the original waker. Instead,
+ * update the waker's wake frequency here, in ops.select_cpu(), which
+ * still runs in the original waker's context for a normal wakeup
+ * (SCX_WAKE_TTWU). Filter the context the same way as the default
+ * mode's ops.runnable() does.
+ *
+ * This is an approximation, not a complete count: wakeups that bypass
+ * ops.select_cpu() (e.g., a single-CPU-affinity or migration-disabled
+ * wakee) are not counted.
+ *
+ * WARNING: bpf_in_nmi/task/hardirq/serving_softirq() is supported only
+ * in x86 and arm64. On the unsupported architectures (e.g., s390x),
+ * it will always return 0. So, never use !bpf_in_xxx() and keep the
+ * logic below optional. See more details in below link:
+ *  - https://lore.kernel.org/bpf/20260124132706.183681-2-changwoo@igalia.com/T/#u
+ */
+static __always_inline void
+account_waker_wake_freq_on_select(struct task_struct *wakee)
+{
+	struct task_struct *waker;
+	task_ctx *waker_taskc;
+
+	if (bpf_in_hardirq() || bpf_in_serving_softirq() || bpf_in_nmi())
+		return;
+
+	waker = bpf_get_current_task_btf();
+	if (!waker || waker == wakee)
+		return;
+
+	if (is_ksoftirqd(waker))
+		return;
+
+	if (wakee->real_parent != waker->real_parent)
+		return;
+
+	if (is_kernel_task(wakee) != is_kernel_task(waker))
+		return;
+
+	waker_taskc = find_task_ctx(waker);
+	if (!waker_taskc) {
+		/*
+		 * The waker could be an idle task (swapper/_[_]), so we
+		 * just ignore.
+		 */
+		return;
+	}
+
+	account_waker_wake_freq(waker_taskc);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -878,6 +937,14 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!ictx.taskc || !ictx.cpuc_cur)
 		return prev_cpu;
+
+	/*
+	 * With queued wakeups allowed, the waker's wake frequency is
+	 * approximated here, not in ops.runnable(). Only a normal wakeup
+	 * (SCX_WAKE_TTWU) is counted; fork/exec is not.
+	 */
+	if (queued_wakeup && (wake_flags & SCX_WAKE_TTWU))
+		account_waker_wake_freq_on_select(p);
 
 	/*
 	 * Check whether it is a synchronous wake-up to boost
@@ -1652,12 +1719,20 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	WRITE_ONCE(p_taskc->acc_runtime_invr, 0);
 
 	/*
+	 * With queued wakeups allowed, the wake-up operations are batch
+	 * processed, so @current is not necessarily the original waker and
+	 * the waker cannot be identified here. Skip the waker-dependent work
+	 * below: the waker's wake frequency is approximated in
+	 * ops.select_cpu(), and the waker-wakee criticality propagation is
+	 * disabled.
+	 */
+	if (queued_wakeup)
+		return;
+
+	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
 	 * is updated. The @current task is a waker and @p is a waiter, which
-	 * is being wakened up now. This is true only when
-	 * SCX_OPS_ALLOW_QUEUED_WAKEUP is not set. The wake-up operations are
-	 * batch processed with SCX_OPS_ALLOW_QUEUED_WAKEUP, so @current task
-	 * is no longer a waker task.
+	 * is being wakened up now.
 	 */
 	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		return;
