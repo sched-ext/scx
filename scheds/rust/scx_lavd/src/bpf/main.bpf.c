@@ -840,6 +840,27 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	return ret;
 }
 
+/*
+ * Update the wake frequency of @waker_taskc using wall clock time.
+ * wake_freq measures how often this task wakes up other tasks -- an
+ * event-driven, external-world phenomenon. The interval between wakeup
+ * events is inherently a wall-clock quantity, unaffected by CPU capacity
+ * or frequency changes.
+ */
+static __always_inline void account_waker_wake_freq(task_ctx *waker_taskc)
+{
+	u64 now = scx_bpf_now();
+	u64 interval;
+
+	interval = time_delta(now,
+			      READ_ONCE(waker_taskc->last_runnable_clk));
+	if (interval >= LAVD_LC_WAKE_INTERVAL_MIN) {
+		WRITE_ONCE(waker_taskc->wake_freq,
+			   calc_avg_freq(waker_taskc->wake_freq, interval));
+		WRITE_ONCE(waker_taskc->last_runnable_clk, now);
+	}
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -1617,7 +1638,6 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_struct *waker;
 	task_ctx *p_taskc, *waker_taskc;
-	u64 now, interval;
 	int i;
 
 	/*
@@ -1689,19 +1709,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	/*
-	 * Update wake frequency using wall clock time. wake_freq measures how
-	 * often this task wakes up other tasks -- an event-driven, external-world
-	 * phenomenon. The interval between wakeup events is inherently a
-	 * wall-clock quantity, unaffected by CPU capacity or frequency changes.
-	 */
-	now = scx_bpf_now();
-	interval = time_delta(now, READ_ONCE(waker_taskc->last_runnable_clk));
-	if (interval >= LAVD_LC_WAKE_INTERVAL_MIN) {
-		WRITE_ONCE(waker_taskc->wake_freq,
-			   calc_avg_freq(waker_taskc->wake_freq, interval));
-		WRITE_ONCE(waker_taskc->last_runnable_clk, now);
-	}
+	account_waker_wake_freq(waker_taskc);
 
 	/*
 	 * Forward propagate waker’s latency criticality to wakee and
