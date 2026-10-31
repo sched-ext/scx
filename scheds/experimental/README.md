@@ -29,3 +29,4 @@ comments in their `main.rs` or `*.bpf.c` files.
 - [scx_rustland](scx_rustland/README.md)
 - [scx_rvtime](scx_rvtime/README.md): weighted vtime scheduler written in Rust BPF, with typed per-task state
 - [scx_tickless](scx_tickless/README.md)
+- [scx_intent](scx_intent/README.md): 5-class intent-based preemptive CPU scheduler with pure in-kernel BPF dispatch
