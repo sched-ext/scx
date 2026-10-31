@@ -3,9 +3,12 @@
  * Task lifecycle ops with adaptive slice plus reclaim.
  *
  * Running claims the segment start from zero with an unconditional
- * pid store. Only stopping charges. The snapshot counts live pids for
- * the on CPU gauge. Stopping claims the start once, charges the raw
- * segment to total runtime, advances vruntime by the scaled delta, folds
+ * pid store. Only stopping charges. A stall past 5s clamps the
+ * stopping delta to zero, so suspend plus resume never poisons the
+ * predictor plus the minimum plus the credit. The snapshot counts
+ * live pids for the on CPU gauge. Stopping claims the start once,
+ * charges the raw segment to total runtime, advances vruntime by the
+ * scaled delta, folds
  * the CPU minimum forward, then feeds the burst predictor average plus
  * deviation from the same delta with up plus down shifts plus half
  * deviation margin, then resumes a preempt-like head with start plus cur
@@ -60,13 +63,17 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	}
 	tctx = flow_lookup(p);
 	now = flow_now();
+	/* Fold a bad clock, so a zero or saturated read never stamps zero */
+	/* or max into the segment start. */
+	if (now == 0 || now == (u64)~0ULL)
+		now = 1;
 	if (likely(tctx)) {
-		/* Zero never marks a run, so a zero clock folds to one. */
-		/* The claim swaps from zero only, so a second running */
+		/* The stamp never reads zero or max after the fold above, */
+		/* so the claim swaps from zero only while a second running */
 		/* without a stop keeps the first start with no second use. */
 		/* The on CPU gauge lives in the snapshot with no BPF count, */
 		/* so this path holds no gauge add. */
-		stamp = now ? now : 1;
+		stamp = now;
 		__sync_val_compare_and_swap(&tctx->run_at,
 		    0, stamp);
 	}
@@ -205,10 +212,15 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		return;
 	}
-	if (flow_time_before(now, start))
+	/* Clamp the segment delta with a fold on bad stamps, then clamp an */
+	/* s2idle stall past 5s to zero, so a stale start never pollutes */
+	/* the predictor plus the minimum plus the credit below. S3 pauses */
+	/* monotonic with no BPF gap, so the boot gap reseeds instead. */
+	/* The zero delta skips the predictor plus the minimum fold through */
+	/* the gated charge, and the credit through its own delta gate. */
+	delta = flow_delta_clamp(now, start);
+	if (flow_gap_is_resume(delta))
 		delta = 0;
-	else
-		delta = now - start;
 	/* Every segment counts raw time while vruntime counts scaled time. */
 	/* The predictor average rises fast with shift 3 plus falls slow */
 	/* with shift 4, and the deviation widens fast with shift 2 plus */
