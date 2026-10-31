@@ -15,7 +15,9 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Monotonic clock in nanos for deadlines plus fair times. */
+/* Monotonic clock in nanos for deadlines plus fair times. Pauses */
+/* across S3, so BPF heals s2idle stalls here while userspace boot */
+/* time trips S3 with a reseed. */
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();

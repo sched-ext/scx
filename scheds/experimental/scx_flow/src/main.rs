@@ -51,6 +51,50 @@ use stats::Metrics;
 
 /* Binary name used in logs and stats. */
 const SCHEDULER_NAME: &str = "scx_flow";
+/* Resume gap in seconds shared with FLOW_RESUME_GAP_NS in intf.h. A loop */
+/* stall past this bound reads as a suspend plus resume gap, so the run */
+/* loop refreshes the topology view once while BPF clamps stale deltas. */
+/* Monotonic pauses across S3, so the boot gap trips S3 here. */
+const RESUME_GAP_SECS: u64 = 5;
+/* Boot clock id for suspend-aware gaps. Value 7 on Linux. */
+const CLOCK_BOOTTIME: i32 = 7;
+
+/// Boot time including suspend, else None on fault.
+/// Uses clock_gettime with no extra dep, so S3 trips the gap where
+/// Instant plus monotonic pause with no false trip on bad reads.
+fn boot_now() -> Option<Duration> {
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
+    }
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes a valid timespec on success.
+    let rc = unsafe { clock_gettime(CLOCK_BOOTTIME, &mut ts) };
+    if rc != 0 {
+        return None;
+    }
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return None;
+    }
+    Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+/// True when the boot gap passes the 5s resume bound.
+/// Pure for host injection with no clock use, so start at now minus
+/// 6s trips while a short stall stays quiet with wrap safety.
+fn boot_gap_exceeded(last: Duration, now: Duration) -> bool {
+    match now.checked_sub(last) {
+        Some(d) => d > Duration::from_secs(RESUME_GAP_SECS),
+        None => false,
+    }
+}
 /* CPU bound shared with the BPF header. */
 #[cfg(test)]
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
@@ -121,6 +165,8 @@ pub(crate) struct Scheduler<'a> {
     smt: Vec<bool>,
     /* One line topology summary for the page. */
     topology: String,
+    /* Seeded rows in rank order for the resume watch. */
+    seeded: Vec<(u32, u32, u32)>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -176,6 +222,7 @@ impl<'a> Scheduler<'a> {
             online_cpus,
             smt,
             topology,
+            seeded: rows,
         })
     }
 
@@ -208,6 +255,14 @@ impl<'a> Scheduler<'a> {
         /* Short tick keeps stats polls prompt while the page polls */
         /* once per second, so most ticks only refresh the bound */
         /* channel when the dashboard is on plus the queue has room. */
+        /* Resume watch on the loop tick: a stall past 5s reads as a */
+        /* suspend plus resume gap, so the topology view reseeds once */
+        /* with no hotplug use. BPF monotonic heals s2idle stalls via */
+        /* the 5s delta clamp, while boot time trips S3 where monotonic */
+        /* pauses plus long stalls reseed here. Manual check: run then */
+        /* echo mem > /sys/power/state, resume, expect one refresh. */
+        let mut last_tick = std::time::Instant::now();
+        let mut last_boot = boot_now();
         /* One BPF read serves both the stats reply plus the page. */
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(100)) {
@@ -234,6 +289,36 @@ impl<'a> Scheduler<'a> {
                     }
                 }
                 Err(e) => Err(e)?,
+            }
+            /* One resume check per tick keeps the reseed to one refresh */
+            /* per stall with no extra poll. */
+            let now = std::time::Instant::now();
+            let stalled = now.duration_since(last_tick);
+            last_tick = now;
+            let boot = boot_now();
+            let boot_stalled = match (last_boot, boot) {
+                (Some(l), Some(n)) => boot_gap_exceeded(l, n),
+                _ => false,
+            };
+            if boot.is_some() {
+                last_boot = boot;
+            }
+            if stalled > Duration::from_secs(RESUME_GAP_SECS) || boot_stalled {
+                if boot_stalled {
+                    info!("resume suspected on boot gap, refreshing topology");
+                } else {
+                    info!("resume suspected after {stalled:?}, refreshing topology");
+                }
+                if let Some(rows) = topology::reseed_if_changed(&mut self.seeded) {
+                    Self::seed_topo_with(&mut self.skel, &rows);
+                    self.online_cpus = rows.iter().map(|(cpu, _, _)| *cpu).collect();
+                    self.smt = rows
+                        .iter()
+                        .map(|(cpu, sib, _)| topology::is_smt_thread(*cpu, *sib))
+                        .collect();
+                    self.topology = topology::describe_topology(&rows);
+                    info!("Topology: {}", self.topology);
+                }
             }
         }
         let m = self.get_metrics();
@@ -346,7 +431,7 @@ mod tests {
     fn quantum_matches_header() {
         assert_eq!(
             crate::config::QUANTUM_NS,
-            crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS
         );
         assert_eq!(crate::config::QUANTUM_NS, 1_000_000);
         assert_eq!(crate::config::WEIGHT_BASE, 128);
@@ -356,16 +441,16 @@ mod tests {
 
     #[test]
     fn slot_matches_header() {
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE as u64, 0x5A00);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64, 0x5A01);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1042);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE, 0x5A00);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_OVERFLOW, 0x5A01);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS, 1042);
     }
 
     #[test]
     fn period_matches_header() {
         assert_eq!(
             crate::config::PERIOD_NS,
-            crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64
+            crate::bpf_intf::flow_consts_FLOW_PERIOD_NS
         );
         assert_eq!(crate::config::PERIOD_NS, 80_000_000);
     }
@@ -396,12 +481,12 @@ mod tests {
     #[test]
     fn fixed_red_matches_header() {
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64,
+            crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS,
             crate::config::RED_TOL_NS
         );
         assert_eq!(crate::config::RED_TOL_NS, 64_000);
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64,
+            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS,
             crate::config::RED_EMAX_NS
         );
         assert_eq!(crate::config::RED_EMAX_NS, 256_000);
@@ -410,12 +495,12 @@ mod tests {
     #[test]
     fn kick_rule_matches_header() {
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS,
             crate::config::PREEMPT_MARGIN_NS
         );
         assert_eq!(crate::config::PREEMPT_MARGIN_NS, 100_000);
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS,
             crate::config::PREEMPT_TAIL_NS
         );
         assert_eq!(crate::config::PREEMPT_TAIL_NS, 100_000);
@@ -425,8 +510,33 @@ mod tests {
     fn hint_matches_header() {
         assert_eq!(
             crate::config::HINT_MAX,
-            crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64
+            crate::bpf_intf::flow_consts_FLOW_HINT_MAX
         );
         assert_eq!(crate::config::HINT_MAX, 8192);
+    }
+
+    #[test]
+    fn resume_gap_matches_header() {
+        assert_eq!(RESUME_GAP_SECS, 5);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RESUME_GAP_NS,
+            RESUME_GAP_SECS * 1_000_000_000
+        );
+    }
+
+    #[test]
+    fn boot_gap_trips_on_6s_stall() {
+        // Injected boot gap of 6s trips S3 where monotonic pauses.
+        let last = Duration::from_secs(100);
+        let now = last + Duration::from_secs(6);
+        assert!(boot_gap_exceeded(last, now));
+        // Short 1s stall stays quiet with no reseed.
+        assert!(!boot_gap_exceeded(last, last + Duration::from_secs(1)));
+        // Exact 5s bound stays quiet, past trips with no wrap trip.
+        assert!(!boot_gap_exceeded(last, last + Duration::from_secs(5)));
+        assert!(!boot_gap_exceeded(now, last));
+        if let Some(t) = boot_now() {
+            assert!(t.as_secs() > 0);
+        }
     }
 }
