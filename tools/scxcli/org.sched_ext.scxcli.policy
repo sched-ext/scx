@@ -51,4 +51,16 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">run</annotate>
   </action>
+
+  <action id="org.sched_ext.scxcli.catalog">
+    <description>Change the sched_ext scheduler catalog</description>
+    <message>Authentication is required to change the scheduler catalog</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scxcli</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">catalog</annotate>
+  </action>
 </policyconfig>

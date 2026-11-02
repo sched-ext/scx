@@ -41,6 +41,14 @@ USAGE:
                                       for the next start (root, or pkexec)
     scxcli run SCHED [ARGS...]        Start a scheduler with these options
                                       (root, or pkexec)
+    scxcli catalog show [--shipped]   The catalog in use (or the shipped
+                                      one) as JSON, to edit and save back
+    scxcli catalog save               Install the catalog on standard input
+                                      as /etc/scx/catalog.json, whole
+                                      (root, or pkexec)
+    scxcli catalog reset              Remove /etc/scx/catalog.json, so the
+                                      shipped catalog is in use again
+                                      (root, or pkexec)
     scxcli -h | --help | -V | --version
 
 Exit codes: 0 success, 1 failure, 2 usage, 3 permission denied.
@@ -71,8 +79,16 @@ enum Command {
         sched: String,
         args: Vec<String>,
     },
+    Catalog(CatalogOp),
     Help,
     Version,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CatalogOp {
+    Show { shipped: bool },
+    Save,
+    Reset,
 }
 
 /// What `list` shows.
@@ -155,6 +171,23 @@ fn parse(args: &[String]) -> Result<Command> {
                 })
             }
             _ => usage("start takes at most one id; options go through run or a profile"),
+        },
+        // `save` takes the file on standard input and nothing on the
+        // command line, so scxcli never opens a path it was handed
+        // under the catalog action; the trusted path is the only one
+        // it writes.
+        "catalog" => match rest {
+            [op] if op == "show" => Ok(Command::Catalog(CatalogOp::Show { shipped: false })),
+            [op, flag] if op == "show" && flag == "--shipped" => {
+                Ok(Command::Catalog(CatalogOp::Show { shipped: true }))
+            }
+            [op] if op == "save" => Ok(Command::Catalog(CatalogOp::Save)),
+            [op, ..] if op == "save" => usage("catalog save takes the catalog on standard input"),
+            [op] if op == "reset" => Ok(Command::Catalog(CatalogOp::Reset)),
+            [op, ..] if op == "show" || op == "reset" => {
+                usage(format!("catalog {op} takes no other argument"))
+            }
+            _ => usage("catalog takes show [--shipped], save or reset"),
         },
         "run" => match rest {
             [] => usage("run takes a scheduler"),
@@ -250,6 +283,35 @@ fn execute(command: Command) -> Result<()> {
             let started = scx_catalog::run(&sched, &args)?;
             let (path, args) = started.launch.expect("run always launches");
             writeln!(out, "running {path} {}", args.join(" "))?;
+        }
+        Command::Catalog(CatalogOp::Show { shipped }) => {
+            write!(out, "{}", scx_catalog::admin::show(shipped)?)?;
+        }
+        Command::Catalog(CatalogOp::Save) => {
+            let (catalog, _) = scx_catalog::admin::read_catalog(std::io::stdin().lock())?;
+            scx_catalog::admin::save(&catalog)?;
+            writeln!(
+                out,
+                "saved {} with {} profiles; a running profile whose command changed is \
+started again with `start ID`",
+                scx_catalog::catalog::ADMIN_PATH,
+                catalog.recommended.len()
+            )?;
+        }
+        Command::Catalog(CatalogOp::Reset) => {
+            if scx_catalog::admin::reset()? {
+                writeln!(
+                    out,
+                    "removed {}; the shipped catalog is in use",
+                    scx_catalog::catalog::ADMIN_PATH
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "no {}; the shipped catalog was already in use",
+                    scx_catalog::catalog::ADMIN_PATH
+                )?;
+            }
         }
     }
     Ok(())
@@ -546,6 +608,35 @@ mod tests {
         assert!(is_usage(p(&["start", "../etc"])));
         assert!(is_usage(p(&["start", "a b"])));
         assert!(is_usage(p(&["start", ""])));
+    }
+
+    /// `save` reads standard input and refuses any argument, so that
+    /// nothing on a `pkexec scxcli catalog ...` command line names a
+    /// file for root to open.
+    #[test]
+    fn catalog_takes_show_save_or_reset_and_save_takes_no_path() {
+        assert_eq!(
+            p(&["catalog", "show"]).unwrap(),
+            Command::Catalog(CatalogOp::Show { shipped: false })
+        );
+        assert_eq!(
+            p(&["catalog", "show", "--shipped"]).unwrap(),
+            Command::Catalog(CatalogOp::Show { shipped: true })
+        );
+        assert_eq!(
+            p(&["catalog", "save"]).unwrap(),
+            Command::Catalog(CatalogOp::Save)
+        );
+        assert_eq!(
+            p(&["catalog", "reset"]).unwrap(),
+            Command::Catalog(CatalogOp::Reset)
+        );
+        assert!(is_usage(p(&["catalog"])));
+        assert!(is_usage(p(&["catalog", "save", "/tmp/x.json"])));
+        assert!(is_usage(p(&["catalog", "save", "-"])));
+        assert!(is_usage(p(&["catalog", "reset", "--force"])));
+        assert!(is_usage(p(&["catalog", "show", "--json"])));
+        assert!(is_usage(p(&["catalog", "edit"])));
     }
 
     #[test]

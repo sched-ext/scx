@@ -15,6 +15,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod admin;
 pub mod catalog;
 pub mod envfile;
 pub mod failure;
