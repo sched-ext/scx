@@ -103,13 +103,14 @@ fn schedulers_under(dir: &str) -> Vec<String> {
 /// `scheds/experimental` is experimental; a scheduler under
 /// `scheds/rust` may be experimental too when its own README says so
 /// (scx_chaos exists to misbehave, scx_forge is a base to be rewritten
-/// by an agent), so the list may hold more, never less. Every `stable`
-/// entry and every recommended scheduler lives under `scheds/rust`, and
-/// a place there is not stability: what the catalog calls stable it
-/// says by name. Adding or moving a scheduler without updating the
-/// catalog fails here, so the file cannot drift from the layout it
-/// describes, and the extras are recorded so that each is a decision
-/// rather than an oversight.
+/// by an agent), so the list may hold more, never less. Every
+/// `featured` and `stable` entry and every recommended scheduler lives
+/// under `scheds/rust`, and a place there is not stability: what the
+/// catalog calls stable it says by name. Adding or moving a scheduler
+/// without updating the catalog fails here, so the file cannot drift
+/// from the layout it describes, and the extras are recorded so that
+/// each is a decision rather than an oversight. The shipped catalog
+/// has no custom profiles: options are the administrator's.
 #[test]
 fn the_shipped_tiers_follow_the_tree() {
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services/catalog.json");
@@ -145,11 +146,30 @@ fn the_shipped_tiers_follow_the_tree() {
             "stable {sched} is not under scheds/rust"
         );
     }
+    // Featured is written out, not left to the plain profiles: the
+    // shipped file says which schedulers upstream recommends in so many
+    // words, and an override that copies it keeps that list even after
+    // the administrator rewrites the profiles.
+    assert!(
+        catalog.featured.is_some(),
+        "the shipped catalog lists featured explicitly"
+    );
+    for sched in catalog.featured() {
+        assert!(
+            rust.contains(&sched.to_owned()),
+            "featured {sched} is not under scheds/rust"
+        );
+    }
+    assert!(!catalog.has_custom_profiles());
     for entry in &catalog.recommended {
         if let Some(sched) = entry.sched() {
             assert!(
                 rust.contains(&sched.to_owned()),
                 "recommended {sched} is not under scheds/rust"
+            );
+            assert!(
+                catalog.is_featured(sched),
+                "recommended {sched} is not featured: the shipped profiles are upstream's picks"
             );
         }
     }

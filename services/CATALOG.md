@@ -1,11 +1,14 @@
 # The scheduler catalog
 
-The catalog is the scx maintainers' word on which schedulers a user
-should pick from. It has two lists: the recommended schedulers, shown
-first and started with one command, and the hidden ones, kept out of
-every list because they do not start without a configuration of their
-own or are test tools. Everything else that is installed is available in
-the full list.
+The catalog says what a user picks from and what the maintainers think
+of what is installed. Its `recommended` list holds the profiles: entries
+shown first and started with one command, each a scheduler with its own
+defaults or, in an administrator's catalog, a scheduler with options.
+Its `featured` list is the maintainers' word on which schedulers are
+worth reaching for, shown first in the full list. The hidden ones are
+kept out of every list because they do not start without a
+configuration of their own or are test tools. Everything else that is
+installed is available in the full list.
 
 This file is the contract between the catalog file, the `scx_catalog`
 library that owns it, the `scxcli` tool that every client drives, and the
@@ -27,68 +30,127 @@ and no D-Bus. The configuration is the unit's `EnvironmentFile`
   file exists it is used; the shipped one is read only when it does not.
   The two are never merged, so an override
   replaces the whole catalog and does not pick up upstream changes to the
-  entries it does not mention. A file that exists but cannot be used
+  entries it does not mention; `catalog show --shipped` prints the
+  shipped one for a client to compare or start a fresh copy from.
+  Clients write the override only through `scxcli catalog save` and
+  remove it with `scxcli catalog reset`; an administrator may also edit
+  it by hand as root. A file that exists but cannot be used
   (unreadable, invalid, untrusted, or a symlink whose target is missing)
   is an error, never a fallback to the shipped catalog: a broken override
   is still the administrator's configuration.
-- The format is JSON, version 1:
+- The format is JSON, version 2 (version 1 still loads; see below):
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "recommended": [
     { "id": "default", "label": "Default",
       "description": "The kernel's built-in scheduler (no sched_ext scheduler active)." },
     { "id": "scx_cosmos", "label": "Cosmos",
-      "description": "Keeps the system responsive under load." }
+      "description": "Keeps the system responsive under load." },
+    { "id": "latency", "label": "Low latency",
+      "description": "EEVDF with a short slice.",
+      "sched": "scx_eevdf", "args": ["--slice-us", "1600"] }
   ],
+  "featured": ["scx_cosmos", "scx_lavd", "scx_eevdf"],
   "hidden": ["scx_layered", "scx_mitosis"],
-  "stable": ["scx_bpfland", "scx_lavd"],
+  "stable": ["scx_bpfland"],
   "experimental": ["scx_flow", "scx_mlfq"]
 }
 ```
 
+The five lists, and what each holds:
+
+- `recommended` holds profiles: what users pick from. `default`, plain
+  profiles (a scheduler with its defaults) and, in the administrator's
+  catalog, custom profiles (a scheduler with options).
+- `featured` holds scheduler names: the schedulers the maintainers
+  recommend. They count as stable and come first in the full list.
+- `stable` holds scheduler names: the other schedulers the maintainers
+  stand behind.
+- `experimental` holds scheduler names: schedulers the maintainers do
+  not call stable, and say so.
+- `hidden` holds scheduler names: left out of every list.
+
+`recommended` and `featured` are two lists because they have two
+authors. `featured` is upstream's: which schedulers are worth reaching
+for, whoever installs them. `recommended` is the catalog's author's: in
+the shipped file the maintainers' picks, in an override whatever the
+administrator of that machine offers, options included. An override
+that starts as a copy of the shipped file keeps upstream's `featured`
+while its profiles change.
+
 Rules, checked by `scx_catalog::Catalog::validate` and so by every load:
 
-- `version` is 1.
-- `recommended` is a non-empty list. `hidden`, `stable` and
+- `version` is 1 or 2. `featured`, `sched` and `args` are what version
+  2 adds, and a version 1 file may use none of them, so that an older
+  tool reading a newer file reports an unsupported version rather than
+  an unknown key.
+- `recommended` is a non-empty list. `featured`, `hidden`, `stable` and
   `experimental` are lists, possibly empty or absent. Unknown keys are
   an error.
-- A recommended entry's `id` is `default` or a scheduler name: a bare
-  `scx_*` name of ASCII letters, digits, `_` and `-`, at most 64
-  characters. Never a path: the executable is found in systemd's default
-  search path (`systemd-path search-binaries-default`). Ids are unique in
-  the list.
+- A profile is plain when it has no `sched`. Its `id` is `default` or a
+  scheduler name: a bare `scx_*` name of ASCII letters, digits, `_` and
+  `-`, at most 64 characters. Never a path: the executable is found in
+  systemd's default search path (`systemd-path search-binaries-default`).
+  A plain profile starts its scheduler with the scheduler's own
+  defaults; `args` on it is absent or empty (in a version 2 file).
+- A profile is custom when it has `sched`. Its `id` is 1 to 64
+  lowercase ASCII letters, digits, `_` and `-`, starting with a letter
+  or digit (so it is never taken for an option), not `default` and not
+  starting with `scx_`, so that `start ID` can never be read as a
+  scheduler's name. `sched` is a scheduler name by the rule above, and
+  `args` holds at most 32 options, each 1 to 256 characters of ASCII
+  letters, digits and `-_=.,:/+` (the allowlist `run` applies). Several
+  custom profiles may share a scheduler.
+- Ids are unique in the list, profile ids and scheduler names together.
 - `label` is 1 to 64 characters and `description` 0 to 256 characters,
   both UTF-8 with no control characters.
 - `default` is always present and always first. It means the kernel's
   own scheduler: no sched_ext scheduler runs, and the unit is stopped and
-  disabled.
-- A hidden entry is a scheduler name by the same rule, unique, and not a
-  recommended one.
+  disabled. An override may change its label and description.
+- Custom profiles are accepted only from `/etc/scx/catalog.json`, under
+  the trust rules below: their options run as root on any user's
+  say-so, so they come only from the file nobody but root could have
+  written. The shipped catalog holds none, and one found there is an
+  error. A file named with `list --catalog` is read as is, custom
+  profiles included, since nothing starts from it.
+- A hidden entry is a scheduler name by the same rule, unique, and not
+  the scheduler of a plain profile. A custom profile may use a hidden
+  scheduler: that is how a hidden scheduler gets the configuration it
+  needs.
+- A featured entry is a scheduler name by the same rule, unique, and not
+  hidden, stable or experimental: it counts as stable on its own, and
+  each scheduler is in one tier list at most. The list's order is the
+  order the full list shows them in. A featured scheduler needs no
+  profile, and a plain profile's scheduler need not be featured. When
+  the key is absent the featured schedulers are those of the plain
+  profiles, in their order, and in a version 2 file that derived list
+  is held to the same rule (a plain profile's scheduler may not also be
+  in `stable`); a version 1 file, where that overlap was the norm, is
+  read as it was. The shipped catalog writes the list out.
 - A stable entry is a scheduler name by the same rule, unique. It is
-  the maintainers' word that they stand behind the scheduler; a
-  recommended scheduler counts as stable without being listed. In the
-  shipped catalog every stable entry lives under `scheds/rust`, and the
-  crate's tests hold it to that; a place there is not stability, so a
-  scheduler under `scheds/rust` that is not stable by its own account
-  is not listed here.
+  the maintainers' word that they stand behind the scheduler. In the
+  shipped catalog every featured and stable entry lives under
+  `scheds/rust`, and the crate's tests hold it to that; a place there is
+  not stability, so a scheduler under `scheds/rust` that is not stable
+  by its own account is not listed here.
 - An experimental entry is a scheduler name by the same rule, unique,
-  not a recommended one and not a stable one. It may also be hidden. In
-  the shipped catalog the list holds every scheduler under
-  `scheds/experimental`, and the ones under `scheds/rust` whose own
-  README says they are not for production (`scx_chaos`, built to
-  misbehave; `scx_forge`, a base meant to be rewritten); the tests
-  record those extras by name. Every scheduler in the tree has a tier on
-  record.
+  not the scheduler of a plain profile, not featured and not stable. It
+  may also be hidden. In the shipped catalog the list holds every
+  scheduler under `scheds/experimental`, and the ones under
+  `scheds/rust` whose own README says they are not for production
+  (`scx_chaos`, built to misbehave; `scx_forge`, a base meant to be
+  rewritten); the tests record those extras by name. Every scheduler in
+  the tree has a tier on record.
 - A scheduler the catalog names nowhere is unknown to it: installed,
   and that is all the list says. Nothing is stable by default, however
   it got installed. The tier is information for the lists, not a
   restriction: an experimental or unknown scheduler starts like any
   other.
-- A recommended entry starts its scheduler with the scheduler's own
-  defaults and no options. Options are the administrator's, through
-  `run`.
+- Profiles start with no options, except custom profiles in the
+  administrator's catalog. Any other options are the administrator's,
+  through `run`.
 
 The shipped catalog is a maintainer decision and changes as the
 schedulers change. Clients must not hard-code it. Hidden means hidden
@@ -194,8 +256,9 @@ Writing:
   then read from, not from a second lookup of the path. Otherwise every
   command that loads the catalog refuses, naming the file or directory.
   A `/etc/scx` that is itself a symlink, dangling or not, is a broken
-  configuration and an error, never "no override". Nothing writes that
-  file: an administrator edits it by hand, with the modes above.
+  configuration and an error, never "no override". `catalog save` is
+  what writes that file, with the modes above; an administrator may
+  also edit it by hand as root.
 - Known limitation, kept on purpose: the contract says `get` and `list`
   work for any user, which holds for the files as this tool creates
   them. An administrator who makes the environment file or the catalog
@@ -239,14 +302,17 @@ and whether it is recommended or hidden is the listing's business.
 ```
 scxcli list [recommended|all] [--json]   # any user
 scxcli get [--json]                      # any user
-scxcli start SCHED            # root, or polkit: allow_active=yes
+scxcli start ID               # root, or polkit: allow_active=yes
 scxcli start                  # root, or polkit: allow_active=yes
 scxcli stop                   # root, or polkit: allow_active=yes
 scxcli run SCHED [ARGS...]    # root, or polkit: auth_admin_keep
+scxcli catalog show [--shipped]          # any user
+scxcli catalog save           # root, or polkit: auth_admin_keep
+scxcli catalog reset          # root, or polkit: auth_admin_keep
 ```
 
 Clients that are not root run the privileged commands as
-`pkexec scxcli start SCHED`. scxcli does not escalate on its own.
+`pkexec scxcli start ID`. scxcli does not escalate on its own.
 
 - `list` and `list recommended` show the recommended entries with the
   current state; `list all` shows every installed scheduler the catalog
@@ -259,31 +325,51 @@ Clients that are not root run the privileged commands as
   since nothing privileged follows from it. `source` is then the file
   and `customized` false. No other command takes a catalog: `start` and
   `resume` consult the installed one, since the policy covers what that
-  one lists.
-- `start SCHED` takes exactly one argument: `default`, or a scheduler
-  from `list all` by name, started with its own defaults. What `list
-  all` would not show is refused by the same two tests the listing
-  applies: an `scx_*` executable that is not a scheduler (`scx_loader`,
-  `scx_forge_agent` and the other tools) is not a scheduler here either,
-  and a hidden scheduler is refused with a pointer to `run`. A path or
-  anything that is not a scheduler name is a usage error.
+  one lists. A client listing with `--catalog` therefore shows custom
+  profiles that `start ID` would not run as shown: the installed
+  catalog may have no such id, or another command under it. Such a
+  client does not start a custom profile from a listing it got that
+  way, and says so; `default` and plain profiles are the same command
+  under every catalog, so those it may start. Options never travel
+  from a listing to `start`: `start` takes an id and nothing else.
+- `start ID` takes exactly one argument: `default`; a scheduler from
+  `list all` by name, started with its own defaults; or a custom
+  profile by its id, started with the scheduler and options the
+  installed catalog gives it. What `list all` would not show is refused
+  by the same two tests the listing applies: an `scx_*` executable that
+  is not a scheduler (`scx_loader`, `scx_forge_agent` and the other
+  tools) is not a scheduler here either, and a hidden scheduler is
+  refused with a pointer to `run` and to profiles. A profile may name a
+  hidden scheduler, but not a tool. A path, or anything that is neither
+  a scheduler name nor a profile id in form, is a usage error; an id in
+  form that the catalog does not have is a failure.
 - `start` alone starts the unit again after `stop`. Because the shipped
   policy lets it run without a password, it starts only what `start
-  SCHED` could have written: `SCX_SCHEDULER` must resolve, through the
+  ID` could have written: `SCX_SCHEDULER` must resolve, through the
   same rules `start` and `run` use, to an executable in systemd's
-  default search path that `list all` would show (a scheduler, not
-  hidden); `SCX_FLAGS` must
-  be empty; no `SCX_*_OVERRIDE` may be in effect; and the environment
-  must have resolved. Anything else is refused, with the command that
-  does it with the right authority: `start SCHED`, which rewrites the
-  file and clears overrides, or `run` as an administrator for a
-  configuration with options. What was validated is the executable the
-  value resolves to; what the unit's shell would run is the value as
-  written, and a bare name is looked up in that shell's own PATH, which
-  a drop-in or an environment file can point elsewhere. So when the
-  file holds anything but the resolved absolute path, that path is
-  written into it first, exactly as `start SCHED` would have, and only
-  then is the unit started. `reset-failed` precedes the start.
+  default search path; no `SCX_*_OVERRIDE` may be in effect; the
+  environment must have resolved; `SCX_FLAGS` must be in the one form
+  `start` and `run` write, options separated by single spaces with
+  nothing around them, since the unit's shell splits the value on its
+  own rules (a no-break space is a separator to a Unicode reader and
+  part of a word to bash) and only that form is read the same way by
+  both; and then either `SCX_FLAGS` is empty and the scheduler is one
+  `list all` would show (a scheduler, not hidden), or the scheduler and
+  `SCX_FLAGS` are exactly the command of a custom profile in the
+  installed catalog, the same executable and the same options in the
+  same order. Anything else is refused, with the
+  command that does it with the right authority: `start ID`, which
+  rewrites the file and clears overrides, or `run` as an administrator
+  for a configuration with options no profile has. A profile edited
+  since the selection no longer matches and is refused the same way,
+  rather than started as something else. What was validated is the
+  executable the value resolves to; what the unit's shell would run is
+  the value as written, and a bare name is looked up in that shell's
+  own PATH, which a drop-in or an environment file can point elsewhere.
+  So when the file holds anything but the resolved absolute path, that
+  path is written into it first, with the options as they were, exactly
+  as `start ID` would have, and only then is the unit started.
+  `reset-failed` precedes the start.
 - `stop` stops the unit and changes nothing else: the selected scheduler
   stays in the file, `get` reports `default` running with it as `next`,
   and the next boot or `start` brings it back. It is for a baseline
@@ -300,7 +386,42 @@ Clients that are not root run the privileged commands as
   bash, which expands `$SCX_SCHEDULER $SCX_FLAGS` unquoted, and the
   allowlist exists so that nothing written survives that expansion as
   anything but the intended words.
-- There is no `restart`: `start SCHED` restarts the unit with the
+- `catalog show` prints the catalog in use (the override when there is
+  one, else the shipped file), rendered the way the crate writes it,
+  every list included, for a client to edit and send back whole; with
+  `--shipped`, the shipped catalog whatever is in use, so a client can
+  offer a fresh copy to start from or show what an override differs
+  in. `catalog save` reads a whole catalog on standard input, at most
+  64 KiB, takes no argument (any is a usage error, so scxcli never
+  opens a path it was handed under this action), validates it with the
+  administrator's rules (custom profiles allowed, since this is the
+  file they are allowed in) before anything is written, and writes it
+  as the crate renders it, not byte for byte as it came. The write
+  rules are stricter than the read rules: `/etc/scx` must be root's
+  and writable by nobody else, sticky or not, since anyone can add an
+  entry to a sticky world-writable directory, a symlink under the name
+  about to be written included, between any check and the write; and
+  a `/etc/scx` or `/etc/scx/catalog.json` that is a symlink is
+  refused, as is an existing file the read rules would refuse
+  (writing root's catalog into a place someone else controls would
+  hand them the password-free `start`). A missing `/etc/scx` is
+  created closed (0700, which the umask cannot widen) and then opened
+  to 0755, so there is no moment at which another user could put an
+  entry in it. The file goes through a scratch file under a fresh
+  name, `fsync`, and a rename over the path, which replaces whatever
+  directory entry is there, a link that appeared since the check
+  included, rather than writing through it. The file is always
+  written 0644, whatever an earlier override's mode: what this
+  command installs is read by `list` as any user. scxcli does not
+  restart anything: a profile whose command changed is the client's
+  to start again with `start ID`, and `get` says what runs meanwhile.
+  `catalog reset` removes the override, so
+  the shipped catalog is in use again; a missing override is not an
+  error, a `/etc/scx` that is a symlink is, and an override that is
+  itself a symlink is removed as the link it is. Clients run these as
+  `pkexec scxcli catalog save < edited.json`; `show` needs no
+  privilege and clients run it as themselves.
+- There is no `restart`: `start ID` restarts the unit with the
   scheduler, and `systemctl restart scx.service` restarts it with the
   file as it is. A `restart` of its own would have to choose between the
   running process and the file, which differ after a hand edit.
@@ -366,31 +487,46 @@ print the same object):
     { "id": "scx_cosmos", "label": "Cosmos", "description": "...",
       "path": "/usr/bin/scx_cosmos", "available": true },
     { "id": "scx_eevdf", "label": "EEVDF", "description": "...",
+      "available": false },
+    { "id": "latency", "label": "Low latency", "description": "...",
+      "sched": "scx_eevdf", "args": ["--slice-us", "1600"],
       "available": false }
   ],
   "all": [
     { "name": "scx_cosmos", "path": "/usr/bin/scx_cosmos",
-      "recommended": true, "tier": "stable" },
+      "recommended": true, "featured": true, "tier": "stable" },
     { "name": "scx_bpfland", "path": "/usr/bin/scx_bpfland",
-      "recommended": false, "tier": "stable" },
+      "recommended": false, "featured": false, "tier": "stable" },
     { "name": "scx_flow", "path": "/usr/bin/scx_flow",
-      "recommended": false, "tier": "experimental" },
+      "recommended": false, "featured": false, "tier": "experimental" },
     { "name": "scx_rake", "path": "/usr/local/bin/scx_rake",
-      "recommended": false, "tier": "unknown" }
+      "recommended": false, "featured": false, "tier": "unknown" }
   ],
   "config": "/etc/default/scx",
   "current": { ... the same object as get ... }
 }
 ```
 
-- `recommended` is the catalog's list, in its order. `available` is
-  whether the entry can be started here: `default` always, a scheduler
-  when it is installed in systemd's default search path, and `path` is
-  then the resolved executable.
+- `recommended` is the catalog's list of profiles, in its order.
+  `available` is whether the entry can be started here: `default`
+  always, a scheduler when it is installed in systemd's default search
+  path, and `path` is then the resolved executable. A custom profile
+  carries `sched`, its scheduler by name, and `args`, its options;
+  both keys are absent on a plain profile (`args` is then empty). The
+  command a profile stands for is `path` with `args`. The unit's file
+  holds that command and not the id, so a client that marks the
+  running or the selected profile compares the command: the scheduler
+  the kernel reports, or `next`, with exactly those options; a plain
+  profile matches with none. Two profiles with one command are both
+  marked, and which one was picked is not on record; an
+  administrator who wants them told apart gives them different
+  options.
 - `all` is every `scx_*` scheduler found in that search path, minus the
-  hidden ones, with whether each is recommended and its `tier`:
+  hidden ones, with whether a plain profile names it (`recommended`),
+  whether the catalog features it (`featured`; absent in older output
+  reads as false) and its `tier`:
   `stable`, `experimental`, or `unknown` when the catalog names the
-  scheduler nowhere. The recommended ones come first, in the catalog's
+  scheduler nowhere. The featured ones come first, in `featured`'s
   order, then the other stable ones by name, then the experimental ones
   by name, then the unknown ones by name. Clients show the list in this
   order and mark the tier; a client reading older output without the
@@ -406,22 +542,27 @@ slow poll for those alone.
 
 ## polkit
 
-scx ships `org.sched_ext.scxcli.policy` with three actions, told apart
+scx ships `org.sched_ext.scxcli.policy` with four actions, told apart
 by the `org.freedesktop.policykit.exec.argv1` annotation:
 
-| action                       | argv1   | default           |
-|------------------------------|---------|-------------------|
-| `org.sched_ext.scxcli.start` | `start` | `allow_active=yes`|
-| `org.sched_ext.scxcli.stop`  | `stop`  | `allow_active=yes`|
-| `org.sched_ext.scxcli.run`   | `run`   | `auth_admin_keep` |
+| action                         | argv1     | default           |
+|--------------------------------|-----------|-------------------|
+| `org.sched_ext.scxcli.start`   | `start`   | `allow_active=yes`|
+| `org.sched_ext.scxcli.stop`    | `stop`    | `allow_active=yes`|
+| `org.sched_ext.scxcli.run`     | `run`     | `auth_admin_keep` |
+| `org.sched_ext.scxcli.catalog` | `catalog` | `auth_admin_keep` |
 
-Starting needs no password because the caller passes only a name, the
-scheduler starts with its own defaults, and the executable comes from
-systemd's default search path and a catalog that an administrator
-controls; the risk in a scheduler is in its options, not in a binary
-under `/usr`. Stopping changes nothing about what runs as root. Starting
-a scheduler with arbitrary options, or a hidden one with the
-configuration it needs, changes what runs as root and needs an
-administrator. The policy is a separate file: a distribution that wants
-every action to need a password ships a stricter one or none, and scxcli
-then works only as root.
+Starting needs no password because the caller passes only an id: the
+scheduler starts with its own defaults, or with the options an
+administrator wrote into the trusted catalog for that id, and the
+executable comes from systemd's default search path; the risk in a
+scheduler is in its options, and the only options this path runs are
+the administrator's. Stopping changes nothing about what runs as root.
+Starting a scheduler with options of the caller's choosing, or a hidden
+one outside a profile, changes what runs as root and needs an
+administrator; so does changing the catalog, which decides what the
+password-free `start` offers from then on. `catalog show` falls under
+the same action when run through pkexec, but needs none of it and
+clients run it as themselves. The policy is a separate file: a
+distribution that wants every action to need a password ships a
+stricter one or none, and scxcli then works only as root.

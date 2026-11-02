@@ -15,6 +15,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod admin;
 pub mod catalog;
 pub mod envfile;
 pub mod failure;
@@ -26,11 +27,11 @@ pub mod state;
 pub mod systemd;
 
 pub use catalog::{
-    Catalog, DEFAULT_ID, FORMAT_VERSION, Loaded, Recommendation, Tier, is_customized, load,
-    load_file, load_shipped,
+    Catalog, DEFAULT_ID, FORMAT_VERSION, Loaded, MAX_PROFILE_ARGS, OLDEST_VERSION, Recommendation,
+    Tier, is_customized, load, load_file, load_shipped, validate_profile_id,
 };
 pub use listing::{Installed, Listing, Pick, list, list_with};
-pub use start::{Resumable, Started, installed, resumable, resume, run, start, stop};
+pub use start::{Resumable, Started, installed, plan, resumable, resume, run, start, stop};
 pub use state::{Current, Failure, Next, OUTPUT_VERSION, Running, Unit, current};
 
 /// Whether an error is a lack of privileges rather than a failure: a

@@ -734,9 +734,9 @@ mod tests {
     }
 
     /// The policy in the tree is what the install checks and ships: the
-    /// three actions of services/CATALOG.md, each naming the fixed path.
+    /// four actions of services/CATALOG.md, each naming the fixed path.
     #[test]
-    fn the_shipped_policy_has_the_three_actions_on_the_fixed_path() {
+    fn the_shipped_policy_has_the_four_actions_on_the_fixed_path() {
         let policy = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../scxcli/org.sched_ext.scxcli.policy"),
         )
@@ -744,7 +744,8 @@ mod tests {
         check_policy(&policy).unwrap();
         // Each action is bound to one subcommand by exec.argv1, and the
         // default for a console user follows it: starting and stopping
-        // without a password, running with options as an administrator.
+        // without a password, running with options and changing the
+        // catalog as an administrator.
         // A policy that bound `start` to `run` would pass check_policy
         // and silently hand `run` the password-free default.
         let actions: Vec<(&str, &str, &str)> = policy
@@ -772,6 +773,7 @@ mod tests {
                 ("org.sched_ext.scxcli.start", "start", "yes"),
                 ("org.sched_ext.scxcli.stop", "stop", "yes"),
                 ("org.sched_ext.scxcli.run", "run", "auth_admin_keep"),
+                ("org.sched_ext.scxcli.catalog", "catalog", "auth_admin_keep"),
             ]
         );
     }

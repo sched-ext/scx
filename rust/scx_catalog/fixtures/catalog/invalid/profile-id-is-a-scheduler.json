@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    },
+    {
+      "id": "scx_latency",
+      "label": "Low latency",
+      "sched": "scx_eevdf",
+      "args": ["--slice-us", "1600"]
+    }
+  ]
+}

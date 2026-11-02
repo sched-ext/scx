@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use scx_catalog::catalog::{DEFAULT_ID, validate_arg, validate_name, validate_sched};
+use scx_catalog::catalog::{DEFAULT_ID, validate_arg, validate_sched, validate_start_id};
 use scx_catalog::{Current, Listing, Tier};
 
 const USAGE: &str = "\
@@ -31,14 +31,23 @@ USAGE:
       --catalog PATH                  List with this catalog file instead
                                       of the installed one
     scxcli get [--json]               Show which scheduler is running
-    scxcli start SCHED                Start a scheduler from `list all` with
-                                      its defaults, or `default` for the
-                                      kernel's own (root, or pkexec)
+    scxcli start ID                   Start an entry of `list`: a profile
+                                      by id, a scheduler from `list all`
+                                      with its defaults, or `default` for
+                                      the kernel's own (root, or pkexec)
     scxcli start                      Start the selected scheduler again
                                       after `stop` (root, or pkexec)
     scxcli stop                       Stop the scheduler, keep the selection
                                       for the next start (root, or pkexec)
     scxcli run SCHED [ARGS...]        Start a scheduler with these options
+                                      (root, or pkexec)
+    scxcli catalog show [--shipped]   The catalog in use (or the shipped
+                                      one) as JSON, to edit and save back
+    scxcli catalog save               Install the catalog on standard input
+                                      as /etc/scx/catalog.json, whole
+                                      (root, or pkexec)
+    scxcli catalog reset              Remove /etc/scx/catalog.json, so the
+                                      shipped catalog is in use again
                                       (root, or pkexec)
     scxcli -h | --help | -V | --version
 
@@ -70,8 +79,16 @@ enum Command {
         sched: String,
         args: Vec<String>,
     },
+    Catalog(CatalogOp),
     Help,
     Version,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CatalogOp {
+    Show { shipped: bool },
+    Save,
+    Reset,
 }
 
 /// What `list` shows.
@@ -148,14 +165,29 @@ fn parse(args: &[String]) -> Result<Command> {
         "start" => match rest {
             [] => Ok(Command::Start { id: None }),
             [id] => {
-                if id != DEFAULT_ID {
-                    validate_name(id).map_err(|err| Usage(format!("{err:#}")))?;
-                }
+                validate_start_id(id).map_err(|err| Usage(format!("{err:#}")))?;
                 Ok(Command::Start {
                     id: Some(id.clone()),
                 })
             }
-            _ => usage("start takes at most one scheduler name; options go through run"),
+            _ => usage("start takes at most one id; options go through run or a profile"),
+        },
+        // `save` takes the file on standard input and nothing on the
+        // command line, so scxcli never opens a path it was handed
+        // under the catalog action; the trusted path is the only one
+        // it writes.
+        "catalog" => match rest {
+            [op] if op == "show" => Ok(Command::Catalog(CatalogOp::Show { shipped: false })),
+            [op, flag] if op == "show" && flag == "--shipped" => {
+                Ok(Command::Catalog(CatalogOp::Show { shipped: true }))
+            }
+            [op] if op == "save" => Ok(Command::Catalog(CatalogOp::Save)),
+            [op, ..] if op == "save" => usage("catalog save takes the catalog on standard input"),
+            [op] if op == "reset" => Ok(Command::Catalog(CatalogOp::Reset)),
+            [op, ..] if op == "show" || op == "reset" => {
+                usage(format!("catalog {op} takes no other argument"))
+            }
+            _ => usage("catalog takes show [--shipped], save or reset"),
         },
         "run" => match rest {
             [] => usage("run takes a scheduler"),
@@ -241,7 +273,9 @@ fn execute(command: Command) -> Result<()> {
         Command::Start { id: Some(id) } => {
             let started = scx_catalog::start(&id)?;
             match started.launch {
-                Some((path, _)) => writeln!(out, "started {}: {path}", started.id)?,
+                Some((path, args)) => {
+                    writeln!(out, "started {}", render_started(&started.id, &path, &args))?
+                }
                 None => writeln!(out, "default: scx.service stopped and disabled")?,
             }
         }
@@ -250,8 +284,48 @@ fn execute(command: Command) -> Result<()> {
             let (path, args) = started.launch.expect("run always launches");
             writeln!(out, "running {path} {}", args.join(" "))?;
         }
+        Command::Catalog(CatalogOp::Show { shipped }) => {
+            write!(out, "{}", scx_catalog::admin::show(shipped)?)?;
+        }
+        Command::Catalog(CatalogOp::Save) => {
+            let (catalog, _) = scx_catalog::admin::read_catalog(std::io::stdin().lock())?;
+            scx_catalog::admin::save(&catalog)?;
+            writeln!(
+                out,
+                "saved {} with {} profiles; a running profile whose command changed is \
+started again with `start ID`",
+                scx_catalog::catalog::ADMIN_PATH,
+                catalog.recommended.len()
+            )?;
+        }
+        Command::Catalog(CatalogOp::Reset) => {
+            if scx_catalog::admin::reset()? {
+                writeln!(
+                    out,
+                    "removed {}; the shipped catalog is in use",
+                    scx_catalog::catalog::ADMIN_PATH
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "no {}; the shipped catalog was already in use",
+                    scx_catalog::catalog::ADMIN_PATH
+                )?;
+            }
+        }
     }
     Ok(())
+}
+
+/// `scx_cosmos: /usr/bin/scx_cosmos`, or for a profile
+/// `latency: /usr/bin/scx_eevdf --slice-us 1600`.
+fn render_started(id: &str, path: &str, args: &[String]) -> String {
+    let mut text = format!("{id}: {path}");
+    for arg in args {
+        text.push(' ');
+        text.push_str(arg);
+    }
+    text
 }
 
 fn render_current(current: &Current) -> String {
@@ -324,20 +398,48 @@ fn running_name(current: &Current) -> Option<&str> {
     current.scheduler.as_deref()
 }
 
+/// Whether the profile's command is what runs: its scheduler, by the
+/// kernel's word, with exactly its options. The unit's file holds the
+/// command and not the id, so this is how a profile is told from the
+/// others on the same scheduler; of two profiles with one command, both
+/// are marked. `default` has no process to compare, it is the kernel's
+/// scheduler running and nothing attached.
+fn pick_running(pick: &scx_catalog::Pick, current: &Current) -> bool {
+    if pick.id == DEFAULT_ID {
+        return running_name(current) == Some(DEFAULT_ID);
+    }
+    let sched = pick.sched.as_deref().unwrap_or(&pick.id);
+    running_name(current) == Some(sched)
+        && current
+            .running
+            .as_ref()
+            .is_some_and(|r| r.args == pick.args)
+}
+
 fn render_recommended(listing: &Listing) -> String {
     let mut text = String::new();
-    let running = running_name(&listing.current);
     for pick in &listing.recommended {
-        let mark = if Some(pick.id.as_str()) == running {
+        let mark = if pick_running(pick, &listing.current) {
             '*'
         } else if pick.available {
             ' '
         } else {
             '-'
         };
+        let command = match &pick.sched {
+            Some(sched) => format!("{sched} {}", pick.args.join(" ")),
+            None => String::new(),
+        };
         text.push_str(&format!(
-            "{mark} {:<14} {:<10} {}\n",
-            pick.id, pick.label, pick.description
+            "{mark} {:<14} {:<10} {}{}\n",
+            pick.id,
+            pick.label,
+            pick.description,
+            if command.is_empty() {
+                command
+            } else {
+                format!(" [{}]", command.trim_end())
+            }
         ));
     }
     text.push_str(&format!(
@@ -372,14 +474,14 @@ fn render_all(listing: &Listing) -> String {
                 Tier::Experimental => "experimental",
                 Tier::Unknown => "unknown",
             },
-            if sched.recommended { "recommended" } else { "" },
+            if sched.featured { "featured" } else { "" },
             sched.path.display()
         ));
     }
     text.push_str(&format!(
-        "\n* running; stable schedulers first, experimental ones after them, then those the \
-catalog does not name; the catalog from {} hides schedulers that need a configuration of \
-their own, which `run` starts\n",
+        "\n* running; featured schedulers first, then the other stable ones, experimental \
+ones after them, then those the catalog does not name; the catalog from {} hides schedulers \
+that need a configuration of their own, which `run` or a profile starts\n",
         listing.source.display()
     ));
     text
@@ -464,7 +566,27 @@ mod tests {
     }
 
     #[test]
-    fn start_takes_default_or_one_scheduler_name() {
+    fn start_takes_default_one_scheduler_name_or_one_profile_id() {
+        // A profile id parses; whether the catalog has it is the
+        // start's business, not the parser's.
+        assert_eq!(
+            p(&["start", "latency"]).unwrap(),
+            Command::Start {
+                id: Some("latency".into())
+            }
+        );
+        assert_eq!(
+            render_started(
+                "latency",
+                "/usr/bin/scx_eevdf",
+                &["--slice-us".into(), "1600".into()]
+            ),
+            "latency: /usr/bin/scx_eevdf --slice-us 1600"
+        );
+        assert_eq!(
+            render_started("scx_cosmos", "/usr/bin/scx_cosmos", &[]),
+            "scx_cosmos: /usr/bin/scx_cosmos"
+        );
         assert_eq!(p(&["start"]).unwrap(), Command::Start { id: None });
         assert_eq!(
             p(&["start", "scx_cosmos"]).unwrap(),
@@ -481,11 +603,40 @@ mod tests {
         assert!(is_usage(p(&["start", "scx_cosmos", "scx_lavd"])));
         assert!(is_usage(p(&["start", "scx_lavd", "--performance"])));
         assert!(is_usage(p(&["start", "--json"])));
-        assert!(is_usage(p(&["start", "cosmos"])));
+        assert!(is_usage(p(&["start", "Cosmos"])));
         assert!(is_usage(p(&["start", "/usr/bin/scx_cosmos"])));
         assert!(is_usage(p(&["start", "../etc"])));
         assert!(is_usage(p(&["start", "a b"])));
         assert!(is_usage(p(&["start", ""])));
+    }
+
+    /// `save` reads standard input and refuses any argument, so that
+    /// nothing on a `pkexec scxcli catalog ...` command line names a
+    /// file for root to open.
+    #[test]
+    fn catalog_takes_show_save_or_reset_and_save_takes_no_path() {
+        assert_eq!(
+            p(&["catalog", "show"]).unwrap(),
+            Command::Catalog(CatalogOp::Show { shipped: false })
+        );
+        assert_eq!(
+            p(&["catalog", "show", "--shipped"]).unwrap(),
+            Command::Catalog(CatalogOp::Show { shipped: true })
+        );
+        assert_eq!(
+            p(&["catalog", "save"]).unwrap(),
+            Command::Catalog(CatalogOp::Save)
+        );
+        assert_eq!(
+            p(&["catalog", "reset"]).unwrap(),
+            Command::Catalog(CatalogOp::Reset)
+        );
+        assert!(is_usage(p(&["catalog"])));
+        assert!(is_usage(p(&["catalog", "save", "/tmp/x.json"])));
+        assert!(is_usage(p(&["catalog", "save", "-"])));
+        assert!(is_usage(p(&["catalog", "reset", "--force"])));
+        assert!(is_usage(p(&["catalog", "show", "--json"])));
+        assert!(is_usage(p(&["catalog", "edit"])));
     }
 
     #[test]
@@ -510,6 +661,52 @@ mod tests {
         assert!(is_usage(p(&["run", "scx_lavd", "-s 500"])));
         assert!(is_usage(p(&["run", "scx_lavd", "$(id)"])));
         assert!(is_usage(p(&["run", "scx_lavd", "--name=it's"])));
+    }
+
+    /// The running mark goes to the profile whose command runs, not
+    /// to every profile on that scheduler, and a custom profile shows
+    /// its command.
+    #[test]
+    fn the_recommended_list_marks_the_profile_whose_command_runs() {
+        let json = r#"{"version":2,"source":"/etc/scx/catalog.json","customized":true,
+            "recommended":[
+                {"id":"default","label":"Default","available":true},
+                {"id":"scx_eevdf","label":"EEVDF","path":"/usr/bin/scx_eevdf",
+                 "available":true},
+                {"id":"latency","label":"Low latency","sched":"scx_eevdf",
+                 "args":["--slice-us","1600"],"path":"/usr/bin/scx_eevdf",
+                 "available":true}
+            ],
+            "all":[{"name":"scx_eevdf","path":"/usr/bin/scx_eevdf",
+                    "recommended":true,"featured":true,"tier":"stable"}],
+            "current":{"version":2,"scheduler":"scx_eevdf",
+              "unit":{"active":true,"enabled":true},
+              "running":{"sched":"scx_eevdf","args":["--slice-us","1600"]},
+              "next":{"sched":"/usr/bin/scx_eevdf","args":["--slice-us","1600"],
+                      "override":false},
+              "kernel":{"state":"enabled","ops":"eevdf"},"failure":null}}"#;
+        let listing: Listing = serde_json::from_str(json).unwrap();
+        let text = render_recommended(&listing);
+        assert!(text.contains("* latency"), "{text}");
+        assert!(text.contains("  scx_eevdf"), "{text}");
+        assert!(text.contains("  default"), "{text}");
+        assert!(text.contains("[scx_eevdf --slice-us 1600]"), "{text}");
+        let all = render_all(&listing);
+        assert!(all.contains("featured"), "{all}");
+
+        // `default` runs with no process to compare: the kernel's own
+        // scheduler, `running` null. It keeps its mark, and no profile
+        // has one.
+        let mut stopped = listing.clone();
+        stopped.current.scheduler = Some(DEFAULT_ID.into());
+        stopped.current.running = None;
+        stopped.current.unit.active = false;
+        let text = render_recommended(&stopped);
+        assert!(text.contains("* default"), "{text}");
+        assert!(
+            !text.contains("* latency") && !text.contains("* scx_eevdf"),
+            "{text}"
+        );
     }
 
     #[test]

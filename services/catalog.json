@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "recommended": [
     {
       "id": "default",
@@ -27,6 +27,12 @@
       "description": "Improves gaming responsiveness."
     }
   ],
+  "featured": [
+    "scx_cosmos",
+    "scx_lavd",
+    "scx_eevdf",
+    "scx_cake"
+  ],
   "hidden": [
     "scx_layered",
     "scx_mitosis",
@@ -35,11 +41,7 @@
   "stable": [
     "scx_beerland",
     "scx_bpfland",
-    "scx_cake",
-    "scx_cosmos",
-    "scx_eevdf",
     "scx_flash",
-    "scx_lavd",
     "scx_layered",
     "scx_mitosis",
     "scx_p2dq",

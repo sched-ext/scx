@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    }
+  ],
+  "featured": ["scx_cosmos"]
+}

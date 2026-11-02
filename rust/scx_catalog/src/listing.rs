@@ -13,14 +13,25 @@ use crate::catalog::{Catalog, Loaded, Tier};
 use crate::state::{Current, OUTPUT_VERSION};
 use crate::systemd;
 
-/// One recommended entry, resolved.
+/// One profile of `recommended`, resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pick {
     pub id: String,
     pub label: String,
     #[serde(default)]
     pub description: String,
-    /// The executable the entry resolves to; absent for `default` and
+    /// A custom profile's scheduler, by name. Absent on a plain
+    /// profile, whose `id` is the scheduler, and on `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sched: Option<String>,
+    /// The options `start ID` would launch the scheduler with: a
+    /// custom profile's, and none for a plain profile. The command a
+    /// profile stands for is `path` and `args`, which is what a client
+    /// compares the running or selected command to; the id is not in
+    /// the unit's file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// The executable the profile resolves to; absent for `default` and
     /// for a scheduler that is not installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
@@ -34,7 +45,12 @@ pub struct Pick {
 pub struct Installed {
     pub name: String,
     pub path: PathBuf,
+    /// Whether a plain profile names it.
     pub recommended: bool,
+    /// Whether the catalog features it: the maintainers' pick, first
+    /// in the list.
+    #[serde(default)]
+    pub featured: bool,
     /// What the catalog says about it: `stable`, `experimental`, or
     /// `unknown` when it names the scheduler nowhere.
     pub tier: Tier,
@@ -56,7 +72,9 @@ pub struct Listing {
     pub current: Current,
 }
 
-/// Builds the recommended entries from the catalog and the scan.
+/// Builds the profiles from the catalog and the scan. A custom profile
+/// resolves its scheduler like a plain one does, hidden or not, so
+/// `available` and `path` say the same thing for both.
 pub fn picks(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Pick> {
     catalog
         .recommended
@@ -72,6 +90,8 @@ pub fn picks(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Pick> {
                 id: entry.id.clone(),
                 label: entry.label.clone(),
                 description: entry.description.clone(),
+                sched: entry.sched.clone(),
+                args: entry.args.clone(),
                 available: entry.sched().is_none() || path.is_some(),
                 path,
             }
@@ -79,12 +99,14 @@ pub fn picks(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Pick> {
         .collect()
 }
 
-/// The installed schedulers minus the hidden ones: the recommended ones
-/// first, in the catalog's order, then the other stable ones by name,
+/// The installed schedulers minus the hidden ones: the featured ones
+/// first, in `featured`'s order, then the other stable ones by name,
 /// then the experimental ones by name, then the ones the catalog does
 /// not name. The full list is what a user who skipped the recommended
 /// view scrolls through: the maintainers' picks should be the first
-/// thing in it and what nobody vouches for the last.
+/// thing in it and what nobody vouches for the last. The order is
+/// upstream's list, not the profiles: an override that rewrites the
+/// profiles does not reorder what upstream features.
 pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installed> {
     let mut shown: Vec<Installed> = installed
         .iter()
@@ -93,17 +115,18 @@ pub fn shown(catalog: &Catalog, installed: &[(String, PathBuf)]) -> Vec<Installe
             name: name.clone(),
             path: path.clone(),
             recommended: catalog.is_recommended(name),
+            featured: catalog.is_featured(name),
             tier: catalog.tier(name),
         })
         .collect();
     // By tier, rank and then name, not by rank alone: the scan happens
     // to come sorted, but the order is this function's contract, not
     // the scan's.
+    let featured = catalog.featured();
     shown.sort_by_cached_key(|s| {
-        let rank = catalog
-            .recommended
+        let rank = featured
             .iter()
-            .position(|r| r.id == s.name)
+            .position(|f| *f == s.name)
             .unwrap_or(usize::MAX);
         (s.tier, rank, s.name.clone())
     });
@@ -151,6 +174,8 @@ pub fn list_from(loaded: &Loaded) -> Result<Listing> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -191,6 +216,7 @@ mod tests {
                 ("scx_cosmos", true, true)
             ]
         );
+        assert!(picks.iter().all(|p| p.sched.is_none() && p.args.is_empty()));
         // Recommended first, in the catalog's order (eevdf before cosmos
         // although it sorts after it), then the other stable ones by
         // name, then the experimental ones by name, then what the catalog
@@ -216,5 +242,94 @@ mod tests {
         // output.
         let reversed: Vec<(String, PathBuf)> = installed.iter().rev().cloned().collect();
         assert_eq!(shown(&catalog, &reversed), ordered);
+    }
+
+    /// With `featured` written out, it is what orders the full list,
+    /// not the profiles: an administrator's override that offers eevdf
+    /// profiles first still shows upstream's featured order, and a
+    /// scheduler with a profile but not featured sorts by its tier.
+    #[test]
+    fn featured_orders_the_full_list_not_the_profiles() {
+        let catalog = Catalog::parse(
+            r#"{"version":2,"recommended":[
+                {"id":"default","label":"Default"},
+                {"id":"scx_eevdf","label":"EEVDF"},
+                {"id":"latency","label":"Low latency","sched":"scx_eevdf",
+                 "args":["--slice-us","1600"]},
+                {"id":"scx_rusty","label":"Rusty"}
+            ],
+            "featured":["scx_cosmos","scx_lavd","scx_eevdf"],
+            "stable":["scx_rusty","scx_bpfland"],
+            "experimental":["scx_flow"]}"#,
+        )
+        .unwrap();
+        let installed: Vec<(String, PathBuf)> = [
+            "scx_bpfland",
+            "scx_cosmos",
+            "scx_eevdf",
+            "scx_flow",
+            "scx_lavd",
+            "scx_rusty",
+        ]
+        .iter()
+        .map(|n| ((*n).to_owned(), PathBuf::from(format!("/usr/bin/{n}"))))
+        .collect();
+        assert_eq!(
+            shown(&catalog, &installed)
+                .iter()
+                .map(|s| (s.name.as_str(), s.recommended, s.tier))
+                .collect::<Vec<_>>(),
+            vec![
+                ("scx_cosmos", false, Tier::Stable),
+                ("scx_lavd", false, Tier::Stable),
+                ("scx_eevdf", true, Tier::Stable),
+                ("scx_bpfland", false, Tier::Stable),
+                ("scx_rusty", true, Tier::Stable),
+                ("scx_flow", false, Tier::Experimental),
+            ]
+        );
+        // A plain profile's scheduler is still available through the
+        // profile, whatever its place in the full list, and a custom
+        // profile carries its command: the resolved scheduler and the
+        // options, which is what a client matches the unit's state to.
+        let picks = picks(&catalog, &installed);
+        assert_eq!(picks.len(), 4);
+        assert!(picks.iter().all(|p| p.available));
+        let latency = &picks[2];
+        assert_eq!(
+            (
+                latency.id.as_str(),
+                latency.sched.as_deref(),
+                latency.path.as_deref(),
+                latency.args.as_slice()
+            ),
+            (
+                "latency",
+                Some("scx_eevdf"),
+                Some(Path::new("/usr/bin/scx_eevdf")),
+                ["--slice-us".to_owned(), "1600".to_owned()].as_slice()
+            )
+        );
+        let shown = shown(&catalog, &installed);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|s| (s.name.as_str(), s.featured))
+                .collect::<Vec<_>>(),
+            vec![
+                ("scx_cosmos", true),
+                ("scx_lavd", true),
+                ("scx_eevdf", true),
+                ("scx_bpfland", false),
+                ("scx_rusty", false),
+                ("scx_flow", false),
+            ]
+        );
+        // The JSON carries the command and the mark; a plain profile
+        // writes neither key.
+        let json = serde_json::to_value(&picks).unwrap();
+        assert_eq!(json[2]["sched"], "scx_eevdf");
+        assert_eq!(json[2]["args"][1], "1600");
+        assert!(json[1].get("sched").is_none() && json[1].get("args").is_none());
     }
 }

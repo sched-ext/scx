@@ -1,9 +1,10 @@
 {
-  "version": 2,
+  "version": 1,
   "recommended": [
     {
       "id": "default",
-      "label": "D"
+      "label": "D",
+      "sched": null
     }
   ]
 }
