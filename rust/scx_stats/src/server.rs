@@ -1,4 +1,3 @@
-use crate::StatsClient;
 use crate::{Meta, StatsData, StatsKind, StatsMeta};
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam::channel::{Receiver, RecvError, Select, Sender, unbounded};
@@ -7,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
+use std::net::Shutdown;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::spawn;
+use std::thread::{JoinHandle, spawn};
 
 pub trait StatsReader<Req, Res>:
     FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>
@@ -431,12 +432,12 @@ where
     }
 
     fn serve(
-        mut stream: UnixStream,
+        mut stream: &UnixStream,
         data: Arc<Mutex<StatsServerData<Req, Res>>>,
         inner_ch: ChannelPair<Req, Res>,
         exit: Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut stream_reader = BufReader::new(stream.try_clone()?);
+        let mut stream_reader = BufReader::new(stream);
         let mut open_ops = StatsOpenOps::new();
 
         loop {
@@ -469,11 +470,11 @@ where
     fn proxy(inner_ch: ChannelPair<Req, Res>, add_res: Receiver<ChannelPair<Res, Req>>) {
         let mut chs_cursor = 0;
         let mut chs = BTreeMap::<u64, ChannelPair<Res, Req>>::new();
-        let mut ch_to_add: Option<ChannelPair<Res, Req>> = None;
+        let mut chs_to_add = Vec::<ChannelPair<Res, Req>>::new();
         let mut idx_to_drop: Option<u64> = None;
 
         'outer: loop {
-            if let Some(new_ch) = ch_to_add.take() {
+            for new_ch in chs_to_add.drain(..) {
                 let idx = chs_cursor;
                 chs_cursor += 1;
                 chs.insert(idx, new_ch);
@@ -500,7 +501,7 @@ where
                 match oper.index() {
                     sel_idx if sel_idx == add_idx => match oper.recv(&add_res) {
                         Ok(ch) => {
-                            ch_to_add = Some(ch);
+                            chs_to_add.push(ch);
                             debug!("proxy: received new channel from add_res");
                             break 'select;
                         }
@@ -532,13 +533,39 @@ where
                             break 'outer;
                         }
 
-                        let resp = match inner_ch.res.recv() {
-                            Ok(v) => v,
-                            Err(RecvError) => break 'outer,
+                        // The response may never come if the scheduler is
+                        // exiting. Keep watching `add_res`, which disconnects
+                        // when the listener exits. A client that connects
+                        // meanwhile is queued.
+                        let resp = loop {
+                            let mut res_sel = Select::new();
+                            let res_idx = res_sel.recv(&inner_ch.res);
+                            res_sel.recv(&add_res);
+
+                            let res_oper = res_sel.select();
+                            if res_oper.index() == res_idx {
+                                match res_oper.recv(&inner_ch.res) {
+                                    Ok(v) => break v,
+                                    Err(RecvError) => break 'outer,
+                                }
+                            }
+                            match res_oper.recv(&add_res) {
+                                Ok(ch) => chs_to_add.push(ch),
+                                Err(RecvError) => {
+                                    debug!("proxy: add_res disconnected, terminating");
+                                    break 'outer;
+                                }
+                            }
                         };
 
                         if pair.req.send(resp).is_err() {
                             idx_to_drop = Some(*idx);
+                            break 'select;
+                        }
+                        // The queued channels are not in `sel` until it is
+                        // rebuilt. Break out now, or they go unserved until
+                        // some other event rebuilds it.
+                        if !chs_to_add.is_empty() {
                             break 'select;
                         }
                     }
@@ -551,7 +578,8 @@ where
         let inner_ch_copy = self.inner_ch.clone();
         let (add_req, add_res) = unbounded::<ChannelPair<Res, Req>>();
 
-        spawn(move || Self::proxy(inner_ch_copy, add_res));
+        let proxy = spawn(move || Self::proxy(inner_ch_copy, add_res));
+        let mut servers = Vec::<(UnixStream, JoinHandle<()>)>::new();
 
         for stream in self.listener.incoming() {
             if self.exit.load(Ordering::Relaxed) {
@@ -560,6 +588,14 @@ where
             }
             match stream {
                 Ok(stream) => {
+                    // Keep a copy to shut the connection down on exit.
+                    let stream_copy = match stream.try_clone() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("failed to clone stat connection ({e})");
+                            continue;
+                        }
+                    };
                     let data = self.data.clone();
                     let exit = self.exit.clone();
 
@@ -569,15 +605,50 @@ where
                         Err(e) => warn!("StatsServer::proxy() failed ({e})"),
                     }
 
-                    spawn(move || {
-                        if let Err(e) = Self::serve(stream, data, req_pair, exit) {
+                    let handle = spawn(move || {
+                        // A failure while exiting is expected, as the proxy is
+                        // gone.
+                        if let Err(e) = Self::serve(&stream, data, req_pair, exit.clone())
+                            && !exit.load(Ordering::Relaxed)
+                        {
                             warn!("stat communication errored ({e})");
                         }
+                        // Dropping `stream` closes one fd. The listener's copy
+                        // keeps the connection open, so a client that is still
+                        // connected when serve() fails would not see EOF.
+                        // shutdown() acts on the socket, not the fd.
+                        let _ = stream.shutdown(Shutdown::Both);
                     });
+
+                    // Prune the finished serve threads. Their stream copies
+                    // would otherwise keep an fd open per past connection until
+                    // the server is dropped. A finished thread has dropped
+                    // everything it captured, so its handle can be dropped
+                    // without a join.
+                    servers.retain(|(_, handle)| !handle.is_finished());
+                    servers.push((stream_copy, handle));
                 }
                 Err(e) => warn!("failed to accept stat connection ({e})"),
             }
         }
+
+        // Dropping `add_req` stops the proxy, which must happen before the
+        // serve threads are joined. One of them may be in a stats callback,
+        // waiting on the proxy for a response the scheduler won't send anymore.
+        // Only the proxy's exit fails that wait, so joining first would hang.
+        drop(add_req);
+
+        // Shutting a connection down wakes its serve thread out of a blocked
+        // read or write on the client. Join the serve threads and the proxy so
+        // that no stats callback is still running and every connection is
+        // released once drop() returns.
+        for (stream, _) in servers.iter() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        for (_, handle) in servers {
+            let _ = handle.join();
+        }
+        let _ = proxy.join();
     }
 }
 
@@ -596,6 +667,9 @@ where
     outer_ch: ChannelPair<Res, Req>,
     inner_ch: Option<ChannelPair<Req, Res>>,
     exit: Arc<AtomicBool>,
+
+    listener: Option<UnixListener>,
+    listener_thread: Option<JoinHandle<()>>,
 }
 
 impl<Req, Res> StatsServer<Req, Res>
@@ -615,6 +689,8 @@ where
             outer_ch: och,
             inner_ch: Some(ich),
             exit: Arc::new(AtomicBool::new(false)),
+            listener: None,
+            listener_thread: None,
         }
     }
 
@@ -659,6 +735,9 @@ where
 
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {path:?}"))?;
+        let listener_copy = listener
+            .try_clone()
+            .with_context(|| format!("cloning UNIX socket {path:?}"))?;
 
         let inner = StatsServerInner::new(
             listener,
@@ -667,7 +746,8 @@ where
             self.exit.clone(),
         );
 
-        spawn(move || inner.listen());
+        self.listener = Some(listener_copy);
+        self.listener_thread = Some(spawn(move || inner.listen()));
         Ok(self)
     }
 
@@ -683,8 +763,22 @@ where
 {
     fn drop(&mut self) {
         self.exit.store(true, Ordering::Relaxed);
-        if let Some(path) = self.path.as_ref() {
-            let _ = StatsClient::new().set_path(path).connect(None);
+
+        // Wake the listener out of accept(). Connecting to the socket path
+        // doesn't work once another server has bound the path. Shutting the
+        // listening socket down makes a blocked accept() return whatever the
+        // path points to now, through libc as UnixListener has no shutdown().
+        if let Some(listener) = self.listener.take() {
+            unsafe {
+                libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR);
+            }
+        }
+
+        // The listener joins the serve threads and the proxy before it returns.
+        // Once it is joined, no thread of the server is running, every sender
+        // of the request channel is gone and channels().1 is disconnected.
+        if let Some(handle) = self.listener_thread.take() {
+            let _ = handle.join();
         }
     }
 }
