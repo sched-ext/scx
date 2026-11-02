@@ -336,20 +336,48 @@ fn running_name(current: &Current) -> Option<&str> {
     current.scheduler.as_deref()
 }
 
+/// Whether the profile's command is what runs: its scheduler, by the
+/// kernel's word, with exactly its options. The unit's file holds the
+/// command and not the id, so this is how a profile is told from the
+/// others on the same scheduler; of two profiles with one command, both
+/// are marked. `default` has no process to compare, it is the kernel's
+/// scheduler running and nothing attached.
+fn pick_running(pick: &scx_catalog::Pick, current: &Current) -> bool {
+    if pick.id == DEFAULT_ID {
+        return running_name(current) == Some(DEFAULT_ID);
+    }
+    let sched = pick.sched.as_deref().unwrap_or(&pick.id);
+    running_name(current) == Some(sched)
+        && current
+            .running
+            .as_ref()
+            .is_some_and(|r| r.args == pick.args)
+}
+
 fn render_recommended(listing: &Listing) -> String {
     let mut text = String::new();
-    let running = running_name(&listing.current);
     for pick in &listing.recommended {
-        let mark = if Some(pick.id.as_str()) == running {
+        let mark = if pick_running(pick, &listing.current) {
             '*'
         } else if pick.available {
             ' '
         } else {
             '-'
         };
+        let command = match &pick.sched {
+            Some(sched) => format!("{sched} {}", pick.args.join(" ")),
+            None => String::new(),
+        };
         text.push_str(&format!(
-            "{mark} {:<14} {:<10} {}\n",
-            pick.id, pick.label, pick.description
+            "{mark} {:<14} {:<10} {}{}\n",
+            pick.id,
+            pick.label,
+            pick.description,
+            if command.is_empty() {
+                command
+            } else {
+                format!(" [{}]", command.trim_end())
+            }
         ));
     }
     text.push_str(&format!(
@@ -384,14 +412,14 @@ fn render_all(listing: &Listing) -> String {
                 Tier::Experimental => "experimental",
                 Tier::Unknown => "unknown",
             },
-            if sched.recommended { "recommended" } else { "" },
+            if sched.featured { "featured" } else { "" },
             sched.path.display()
         ));
     }
     text.push_str(&format!(
-        "\n* running; stable schedulers first, experimental ones after them, then those the \
-catalog does not name; the catalog from {} hides schedulers that need a configuration of \
-their own, which `run` starts\n",
+        "\n* running; featured schedulers first, then the other stable ones, experimental \
+ones after them, then those the catalog does not name; the catalog from {} hides schedulers \
+that need a configuration of their own, which `run` or a profile starts\n",
         listing.source.display()
     ));
     text
@@ -542,6 +570,52 @@ mod tests {
         assert!(is_usage(p(&["run", "scx_lavd", "-s 500"])));
         assert!(is_usage(p(&["run", "scx_lavd", "$(id)"])));
         assert!(is_usage(p(&["run", "scx_lavd", "--name=it's"])));
+    }
+
+    /// The running mark goes to the profile whose command runs, not
+    /// to every profile on that scheduler, and a custom profile shows
+    /// its command.
+    #[test]
+    fn the_recommended_list_marks_the_profile_whose_command_runs() {
+        let json = r#"{"version":2,"source":"/etc/scx/catalog.json","customized":true,
+            "recommended":[
+                {"id":"default","label":"Default","available":true},
+                {"id":"scx_eevdf","label":"EEVDF","path":"/usr/bin/scx_eevdf",
+                 "available":true},
+                {"id":"latency","label":"Low latency","sched":"scx_eevdf",
+                 "args":["--slice-us","1600"],"path":"/usr/bin/scx_eevdf",
+                 "available":true}
+            ],
+            "all":[{"name":"scx_eevdf","path":"/usr/bin/scx_eevdf",
+                    "recommended":true,"featured":true,"tier":"stable"}],
+            "current":{"version":2,"scheduler":"scx_eevdf",
+              "unit":{"active":true,"enabled":true},
+              "running":{"sched":"scx_eevdf","args":["--slice-us","1600"]},
+              "next":{"sched":"/usr/bin/scx_eevdf","args":["--slice-us","1600"],
+                      "override":false},
+              "kernel":{"state":"enabled","ops":"eevdf"},"failure":null}}"#;
+        let listing: Listing = serde_json::from_str(json).unwrap();
+        let text = render_recommended(&listing);
+        assert!(text.contains("* latency"), "{text}");
+        assert!(text.contains("  scx_eevdf"), "{text}");
+        assert!(text.contains("  default"), "{text}");
+        assert!(text.contains("[scx_eevdf --slice-us 1600]"), "{text}");
+        let all = render_all(&listing);
+        assert!(all.contains("featured"), "{all}");
+
+        // `default` runs with no process to compare: the kernel's own
+        // scheduler, `running` null. It keeps its mark, and no profile
+        // has one.
+        let mut stopped = listing.clone();
+        stopped.current.scheduler = Some(DEFAULT_ID.into());
+        stopped.current.running = None;
+        stopped.current.unit.active = false;
+        let text = render_recommended(&stopped);
+        assert!(text.contains("* default"), "{text}");
+        assert!(
+            !text.contains("* latency") && !text.contains("* scx_eevdf"),
+            "{text}"
+        );
     }
 
     #[test]
