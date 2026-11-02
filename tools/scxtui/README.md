@@ -21,17 +21,20 @@ configuration. There is no daemon and no D-Bus; the backend is
 
 ## Features
 
-- **Recommended view (default):** the catalog's recommended schedulers
-  with a line on each, the running one marked, a stopped or failed
-  selection marked differently, entries whose scheduler is not installed
-  shown disabled. Enter starts the selected one with its own defaults
-  (`default` stops the unit and disables it); `s` stops the unit and
-  keeps the selection for the next start or boot. With the shipped
-  polkit policy none of that asks for a password.
+- **Recommended view (default):** the catalog's profiles with a line
+  on each: a scheduler with its own defaults, or, in an administrator's
+  catalog, a scheduler with options under a name of its own, shown
+  with its command. The profile whose command runs is marked (of two
+  profiles on one scheduler, the one with the running options), a
+  stopped or failed selection marked differently, entries whose
+  scheduler is not installed shown disabled. Enter starts the selected
+  profile (`default` stops the unit and disables it); `s` stops the
+  unit and keeps the selection for the next start or boot. With the
+  shipped polkit policy none of that asks for a password.
 - **All schedulers (`A`):** every `scx_*` scheduler installed in
   systemd's default search path that the catalog does not hide: the
-  ones the catalog calls stable first, with the recommended ones
-  marked and on top, then the ones it calls experimental, then anything
+  featured ones first, in the catalog's order, then the other ones it
+  calls stable, then the ones it calls experimental, then anything
   installed that the catalog does not name, each group under its own
   divider. Enter starts the selected scheduler with its
   own defaults, without a password; `a` asks for its command-line
@@ -79,8 +82,12 @@ polkit policy and the catalog.
 scxtui's command line is `--help`, `--version` and `--catalog PATH`,
 which lists with the named catalog file instead of the installed one
 (`scxtui --catalog ./services/catalog.json` shows a checkout's catalog
-before it is installed); starting a scheduler still goes by the
-installed catalog, since the polkit policy covers what that one lists.
+before it is installed, or an override being drafted); starting still
+goes by the installed catalog, since the polkit policy covers what that
+one lists. A custom profile shown from such a file does not start from
+there, since what `start ID` would run is the installed catalog's, not
+the file's; `default` and plain profiles do, being the same command
+under every catalog.
 Scripts use scxcli directly: `scxcli get --json`, `scxcli list --json`,
 `pkexec scxcli start ID`. The scxctl-style `--cli` and
 `--export-profiles` of earlier versions are gone: the catalog is a plain

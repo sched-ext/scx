@@ -119,6 +119,10 @@ pub struct Message {
 
 pub struct App {
     backend: Box<dyn Backend>,
+    /// Listing with a catalog file of the caller's (`--catalog`): the
+    /// lists are that file's, and a custom profile in them is not what
+    /// the installed catalog would start under that id.
+    pub preview_catalog: bool,
     /// Last successful listing. Stays `None` after a failed read, with
     /// the failure in `listing_error`, so the panel shows "unknown" plus
     /// the reason instead of a stale snapshot.
@@ -152,6 +156,7 @@ impl App {
     pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
             backend,
+            preview_catalog: false,
             listing: None,
             listing_error: None,
             kernel: None,
@@ -510,7 +515,15 @@ kernel's default; the recommended ones are marked",
         let Some(name) = listing.current.scheduler.as_deref() else {
             return;
         };
-        if let Some(idx) = listing.recommended.iter().position(|p| p.id == name) {
+        // The profile whose command runs, by the command: a running
+        // `latency` lands on `latency`, not on the plain `scx_eevdf`
+        // above it. With no such profile (a `run`), the plain one.
+        let by_command = listing
+            .recommended
+            .iter()
+            .position(|p| is_running_pick(listing, p));
+        let by_name = listing.recommended.iter().position(|p| p.id == name);
+        if let Some(idx) = by_command.or(by_name) {
             self.selected = idx;
         }
         if let Some(idx) = listing.all.iter().position(|s| s.name == name) {
@@ -539,6 +552,19 @@ kernel's default; the recommended ones are marked",
         };
         if !pick.available {
             self.error(&format!("{} is not installed", pick.id));
+            return;
+        }
+        // The command on screen is this file's; what `start ID` runs
+        // is the installed catalog's, which may have no such id or
+        // another command under it. `default` and a plain profile are
+        // the same command under every catalog, so those start; a
+        // custom profile is only looked at here.
+        if self.preview_catalog && pick.is_custom() {
+            self.error(&format!(
+                "{} is a profile of the catalog file being previewed; the installed catalog \
+decides what `start {}` runs, so start it from scxtui without --catalog",
+                pick.id, pick.id
+            ));
             return;
         }
         let id = pick.id.clone();
@@ -660,12 +686,53 @@ pub fn is_running(listing: &Listing, id: &str) -> bool {
     listing.current.scheduler.as_deref() == Some(id)
 }
 
-/// Whether `id` is what the next start would run, for the lists'
-/// second marker: a selection that is stopped or failed.
-pub fn is_selected(listing: &Listing, id: &str) -> bool {
+/// Whether the profile's command is what runs: its scheduler, by the
+/// kernel's word, with exactly its options. Not every profile on that
+/// scheduler: `latency` running is not `scx_eevdf` with its defaults
+/// running, and the lists say which.
+pub fn is_running_pick(listing: &Listing, pick: &Pick) -> bool {
+    let current = &listing.current;
+    match pick.sched_name() {
+        None => current.scheduler.as_deref() == Some(DEFAULT_ID),
+        Some(sched) => {
+            current.scheduler.as_deref() == Some(sched)
+                && current
+                    .running
+                    .as_ref()
+                    .is_some_and(|r| pick.is_command(&r.sched, &r.args))
+        }
+    }
+}
+
+/// Whether the profile's command is what the next start would run,
+/// for the lists' second marker: a selection that is stopped or
+/// failed. Options that are no profile's are a `run`, and a `run` is
+/// not a selection.
+pub fn is_selected_pick(listing: &Listing, pick: &Pick) -> bool {
+    match (&listing.current.next, pick.sched_name()) {
+        (Some(next), Some(sched)) => {
+            !next.overridden && pick.is_command(sched, &next.args) && next.name() == sched
+        }
+        (Some(_), None) => false,
+        (None, sched) => sched.is_none(),
+    }
+}
+
+/// Whether `name` is what the next start would run, for the full
+/// list: with no options, or with a profile's. A `run` is not a
+/// selection.
+pub fn is_selected(listing: &Listing, name: &str) -> bool {
     match &listing.current.next {
-        Some(next) => !next.overridden && next.args.is_empty() && next.name() == id,
-        None => id == DEFAULT_ID,
+        Some(next) => {
+            !next.overridden
+                && next.name() == name
+                && (next.args.is_empty()
+                    || listing
+                        .recommended
+                        .iter()
+                        .any(|p| p.is_command(name, &next.args)))
+        }
+        None => name == DEFAULT_ID,
     }
 }
 
@@ -697,8 +764,19 @@ mod tests {
             id: id.into(),
             label: id.into(),
             description: String::new(),
+            sched: None,
+            args: Vec::new(),
             path: (id != DEFAULT_ID && available).then(|| format!("/usr/bin/{id}")),
             available,
+        }
+    }
+
+    fn profile(id: &str, sched: &str, args: &[&str]) -> Pick {
+        Pick {
+            sched: Some(sched.into()),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            path: Some(format!("/usr/bin/{sched}")),
+            ..pick(id, true)
         }
     }
 
@@ -707,6 +785,7 @@ mod tests {
             name: name.into(),
             path: format!("/usr/bin/{name}"),
             recommended,
+            featured: recommended,
             tier: crate::model::Tier::Stable,
         }
     }
@@ -720,6 +799,7 @@ mod tests {
                 pick("default", true),
                 pick("scx_cosmos", true),
                 pick("scx_eevdf", false),
+                profile("latency", "scx_cosmos", &["--slice-us", "1600"]),
             ],
             all: vec![
                 installed("scx_bpfland", false),
@@ -891,6 +971,14 @@ mod tests {
         assert!(app.message.as_ref().unwrap().is_error);
         assert_eq!(calls.borrow().len(), 1);
 
+        // A custom profile starts by its id, like any entry.
+        app.last_action = None;
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected_pick().unwrap().id, "latency");
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(calls.borrow().last(), Some(&Call::Start("latency".into())));
+
         // Default is an entry like any other: `start default`.
         app.last_action = None;
         app.on_key(key(KeyCode::Down));
@@ -922,7 +1010,9 @@ mod tests {
         let listing = app.listing.as_ref().unwrap();
         assert!(!listing.current.unit.active);
         assert!(is_running(listing, "default"));
+        assert!(is_running_pick(listing, &pick("default", true)));
         assert!(is_selected(listing, "scx_cosmos"));
+        assert!(is_selected_pick(listing, &pick("scx_cosmos", true)));
         assert!(!is_selected(listing, "default"));
 
         // Stopping with nothing running is a message, not a call.
@@ -940,11 +1030,89 @@ mod tests {
         assert!(is_selected(&l, "scx_cosmos"));
         l.current.next.as_mut().unwrap().args = vec!["-v".into()];
         assert!(!is_selected(&l, "scx_cosmos"), "a run is not a selection");
+        // A profile's options are a selection: of the profile in the
+        // recommended list, and of its scheduler in the full one.
+        l.current.next.as_mut().unwrap().args = vec!["--slice-us".into(), "1600".into()];
+        assert!(is_selected(&l, "scx_cosmos"));
+        assert!(is_selected_pick(&l, &l.recommended[3]));
+        assert!(
+            !is_selected_pick(&l, &l.recommended[1]),
+            "not the plain profile"
+        );
         l.current.next.as_mut().unwrap().args.clear();
         l.current.next.as_mut().unwrap().overridden = true;
         assert!(!is_selected(&l, "scx_cosmos"));
         l.current.next = None;
         assert!(is_selected(&l, "default"));
+    }
+
+    /// The running mark lands on the profile whose command runs and on
+    /// no other profile of that scheduler, and startup focuses it.
+    #[test]
+    fn a_running_profile_is_marked_and_focused_by_its_command() {
+        let Harness {
+            mut app, listing, ..
+        } = app();
+        {
+            let mut l = listing.borrow_mut();
+            let args = vec!["--slice-us".to_owned(), "1600".to_owned()];
+            l.current.running.as_mut().unwrap().args = args.clone();
+            l.current.next.as_mut().unwrap().args = args;
+        }
+        app.refresh();
+        app.sync_selection_to_running();
+        assert_eq!(app.selected_pick().unwrap().id, "latency");
+        let l = app.listing.as_ref().unwrap();
+        assert!(is_running_pick(l, &l.recommended[3]));
+        assert!(
+            !is_running_pick(l, &l.recommended[1]),
+            "cosmos with defaults is not running"
+        );
+        assert!(
+            is_running(l, "scx_cosmos"),
+            "the full list marks the scheduler"
+        );
+        // A `run` with options no profile has marks no profile; the
+        // focus falls back to the plain one.
+        {
+            let mut l = listing.borrow_mut();
+            l.current.running.as_mut().unwrap().args = vec!["-v".into()];
+        }
+        app.refresh();
+        app.sync_selection_to_running();
+        assert_eq!(app.selected_pick().unwrap().id, "scx_cosmos");
+        let l = app.listing.as_ref().unwrap();
+        assert!(l.recommended.iter().all(|p| !is_running_pick(l, p)));
+    }
+
+    /// With `--catalog`, Enter on a custom profile is refused, since
+    /// the installed catalog decides what `start ID` runs; a plain
+    /// profile and `default` are the same command under every catalog.
+    #[test]
+    fn a_previewed_catalogs_custom_profile_does_not_start() {
+        let Harness { mut app, calls, .. } = app();
+        app.preview_catalog = true;
+        app.selected = 3;
+        assert_eq!(app.selected_pick().unwrap().id, "latency");
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.pending_action.is_none());
+        let message = app.message.as_ref().unwrap();
+        assert!(
+            message.is_error && message.text.contains("previewed"),
+            "{}",
+            message.text
+        );
+        assert!(calls.borrow().is_empty());
+
+        app.selected = 1;
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(*calls.borrow(), vec![Call::Start("scx_cosmos".into())]);
+        app.last_action = None;
+        app.selected = 0;
+        app.on_key(key(KeyCode::Enter));
+        drain(&mut app);
+        assert_eq!(calls.borrow().last(), Some(&Call::Start("default".into())));
     }
 
     #[test]
@@ -1064,6 +1232,7 @@ mod tests {
                 name: name.into(),
                 path: format!("/usr/bin/{name}"),
                 recommended: false,
+                featured: false,
                 tier,
             };
             l.all = vec![
