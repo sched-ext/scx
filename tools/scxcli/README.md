@@ -18,8 +18,10 @@ scxcli list all [--json]          Every installed scheduler: stable,
   --catalog PATH                  List with this catalog file instead of
                                   the installed one
 scxcli get [--json]               Show which scheduler is running
-scxcli start SCHED                Start a scheduler from `list all` with its
-                                  defaults, or `default` for the kernel's own
+scxcli start ID                   Start an entry of `list`: a profile by id,
+                                  a scheduler from `list all` with its
+                                  defaults, or `default` for the kernel's
+                                  own
 scxcli start                      Start the selected scheduler again after
                                   `stop`
 scxcli stop                       Stop the scheduler, keep the selection for
@@ -29,10 +31,12 @@ scxcli run SCHED [ARGS...]        Start a scheduler with these options
 
 `list` and `get` work for any user. The rest need root, or polkit through
 `pkexec scxcli start scx_cosmos`; scxcli does not escalate on its own.
-With the shipped policy (`org.sched_ext.scxcli.policy`), starting a
-scheduler from the list with its defaults and stopping it need no
-password for a user at the console, and starting one with options asks
-for an administrator's.
+With the shipped policy (`org.sched_ext.scxcli.policy`), starting an
+entry of the list (a scheduler with its defaults, or a profile the
+administrator put in `/etc/scx/catalog.json` with the options of their
+choosing) and stopping it need no password for a user at the console,
+and starting a scheduler with options of your own asks for an
+administrator's.
 
 The contract (file format, selected state, how the running scheduler is
 detected, the JSON output, exit codes) is in
