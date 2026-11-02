@@ -751,6 +751,10 @@ pub fn set_config(open: &mut OpenObject, config: &[u64]) -> Result<()> {
 
 /// Attach the scheduler through its struct_ops map `ops`.
 pub fn attach(object: &mut Object, ops: &str) -> Result<Link> {
+    ensure!(
+        !compat::is_sched_ext_enabled().unwrap_or(false),
+        "another sched_ext scheduler is already running"
+    );
     object
         .maps_mut()
         .find(|map| map.name() == OsStr::new(ops))
