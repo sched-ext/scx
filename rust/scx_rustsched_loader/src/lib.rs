@@ -28,7 +28,8 @@ use libbpf_rs::{
     btf::{
         BtfType, HasSize, ReferencesType,
         types::{
-            Composite, Enum, Enum64, Func, FuncProto, Int, IntEncoding, MemberAttr, Ptr, Struct,
+            Array, Composite, Enum, Enum64, Func, FuncProto, Int, IntEncoding, MemberAttr, Ptr,
+            Struct,
         },
     },
 };
@@ -115,6 +116,83 @@ pub fn ops_member(
         .size();
     let start = offset as usize;
     Ok(start..start + size)
+}
+
+/// The byte range of the byte array `name` of the BPF object's struct_ops
+/// type `ops`, read off its BTF.
+fn ops_bytes_member(
+    object_name: &str,
+    object: &[u8],
+    ops: &str,
+    name: &str,
+) -> Result<std::ops::Range<usize>> {
+    let btf = Btf::from_raw(object_name, object)?.context("read BPF object BTF")?;
+    let local = btf
+        .type_by_name::<Struct<'_>>(ops)
+        .with_context(|| format!("find the BPF object's {ops}"))?;
+    let (field, offset) = member(&btf, local, name)?;
+    let array =
+        Array::try_from(field).map_err(|_| anyhow::anyhow!("{ops}.{name} is not an array"))?;
+    let element = Int::try_from(array.contained_type().skip_mods_and_typedefs())
+        .map_err(|_| anyhow::anyhow!("{ops}.{name} is not an array of bytes"))?;
+    ensure!(element.size() == 1, "{ops}.{name} is not an array of bytes");
+    let start = offset as usize;
+    Ok(start..start + array.capacity())
+}
+
+/// Append `suffix` to the NUL-terminated name in `field`, as much of it as
+/// fits with the terminating NUL. scx_utils' scx_ops_open!() does the same
+/// for the C schedulers.
+fn append_to_name(field: &mut [u8], suffix: &[u8]) {
+    let Some(last) = field.len().checked_sub(1) else {
+        return;
+    };
+    let end = field
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(last)
+        .min(last);
+    let take = suffix.len().min(last - end);
+    field[end..end + take].copy_from_slice(&suffix[..take]);
+    field[end + take] = 0;
+}
+
+/// The length of sched_ext_ops.name, SCX_OPS_NAME_LEN.
+const OPS_NAME_LEN: usize = 128;
+
+/// Append the scheduler's version to the ops name in the struct_ops map
+/// `ops`, so that /sys/kernel/sched_ext/root/ops and the tools reading it
+/// show it, as for the C schedulers: `reevdf_1.1.4_x86_64_unknown_linux_gnu`.
+fn set_ops_version(
+    name: &str,
+    open: &mut OpenObject,
+    object: &[u8],
+    ops: &str,
+    version: &str,
+) -> Result<()> {
+    if version.is_empty() {
+        return Ok(());
+    }
+    let range = ops_bytes_member(name, object, ops_type(ops), "name")?;
+    ensure!(
+        range.len() == OPS_NAME_LEN,
+        "{}.name is {} bytes, not SCX_OPS_NAME_LEN ({OPS_NAME_LEN})",
+        ops_type(ops),
+        range.len()
+    );
+    let mut map = open
+        .maps_mut()
+        .find(|map| map.name() == OsStr::new(ops))
+        .context("find the struct_ops map")?;
+    let field = map
+        .initial_value_mut()
+        .and_then(|data| data.get_mut(range))
+        .context("name beyond the struct_ops map")?;
+    append_to_name(
+        field,
+        scx_utils::build_id::ops_version_suffix(version).as_bytes(),
+    );
+    Ok(())
 }
 
 /// The byte ranges, in the BPF object's struct_ops type `ops`, of the
@@ -1541,6 +1619,10 @@ pub fn run<S: Scheduler>(
         None
     };
     let ops = select_ops(name, &mut open, bytes, cgroup, dump_len)?;
+    // Only what is shown: a name without the version must not stop the load.
+    if let Err(error) = set_ops_version(name, &mut open, bytes, ops, options.version) {
+        warn!("ops name left without the version: {error:#}");
+    }
     if options.timeout_ms != 0 {
         set_ops_timeout(name, &mut open, bytes, ops, options.timeout_ms)?;
     }
