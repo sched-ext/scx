@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Shared constants and helpers for the flow scheduler at 4.8.14.
+ * Shared constants and helpers for the flow scheduler.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine plus one value ordered
@@ -167,6 +167,11 @@ enum flow_consts {
 	/* fallback cheap while extending coverage with the same order. */
 	FLOW_BSF_MAX_PEERS = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
+	/* Resume gap of 5s. Deltas past this bound read as an s2idle */
+	/* plus long stall, so stopping clamps to zero while userspace */
+	/* reseeds the topology view. Monotonic pauses across S3, so S3 */
+	/* trips only the userspace boot gap. Stays past one period. */
+	FLOW_RESUME_GAP_NS = 5000000000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
 	/* sufficient pick falls to the lowest sufficient id. */
@@ -436,6 +441,10 @@ _Static_assert(FLOW_MAX_DSQS ==
 /* while five dispatch tiers name queues, so the counts differ by design. */
 _Static_assert(FLOW_PERIOD_NS == 4 * FLOW_SLICE_MAX_NS,
 	"period stays four times slice max");
+/* Resume gap stays past one period, so only a real stall trips the */
+/* resume path with no false trip on a long slice. */
+_Static_assert(FLOW_RESUME_GAP_NS > FLOW_PERIOD_NS,
+	"resume gap stays past one period");
 _Static_assert(FLOW_SLICE_MIN_NS < FLOW_SLICE_ULL_NS &&
 	FLOW_SLICE_ULL_NS < FLOW_SLICE_LL_NS &&
 	FLOW_SLICE_LL_NS < FLOW_SLICE_MLL_NS &&
@@ -476,6 +485,41 @@ static __always_inline u64 flow_sat_add(u64 a,
 	if (out < a)
 		return (u64)~0ULL;
 	return out;
+}
+/**
+ * flow_delta_clamp - clamped service delta from start to now.
+ * @now: current time in nanos.
+ * @start: segment start in nanos, zero or future folds to zero.
+ *
+ * A zero start means no claimed start while a start after now means
+ * a backward clock, so both read zero with wrap safety and no charge.
+ * A start at now reads zero through the subtract with no branch.
+ *
+ * Returns: saturated service in nanos, zero on bad stamps.
+ */
+static __always_inline u64 flow_delta_clamp(u64 now,
+	u64 start)
+{
+	if (start == 0)
+		return 0;
+	if (flow_time_before(now, start))
+		return 0;
+	return now - start;
+}
+/**
+ * flow_gap_is_resume - test one delta for a suspend plus resume gap.
+ * @delta: raw service in nanos already clamped by flow_delta_clamp.
+ *
+ * Deltas past the 5s bound read as an s2idle stall where monotonic
+ * still advances, so the caller clamps to zero with no predictor
+ * plus minimum plus credit pollution. S3 pauses monotonic, so S3
+ * trips only the userspace boot gap with a reseed.
+ *
+ * Returns: true when past the resume bound, else false.
+ */
+static __always_inline bool flow_gap_is_resume(u64 delta)
+{
+	return delta > (u64)FLOW_RESUME_GAP_NS;
 }
 /**
  * flow_weight_clamp - clamp one share into range.

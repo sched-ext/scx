@@ -68,6 +68,27 @@ pub fn init_topology() -> Vec<(u32, u32, u32)> {
     fallback_rows()
 }
 
+/// True when two topology snapshots hold the same rows.
+/// Compares in rank order with no sort, so the caller keeps the seeded
+/// order while a reorder still counts as changed with one reseed.
+pub fn topo_rows_equal(a: &[(u32, u32, u32)], b: &[(u32, u32, u32)]) -> bool {
+    a == b
+}
+
+/// Fresh rows when the host view changed since the seed, else None.
+/// Refreshes through the shared discovery path with the same bounds,
+/// so a resume that offlines CPUs reseeds with no hotplug use.
+/// Updates the held snapshot on change, so the caller seeds the BPF
+/// view once per change with no extra poll.
+pub fn reseed_if_changed(prev: &mut Vec<(u32, u32, u32)>) -> Option<Vec<(u32, u32, u32)>> {
+    let next = topo_rows();
+    if topo_rows_equal(prev, &next) {
+        return None;
+    }
+    *prev = next.clone();
+    Some(next)
+}
+
 /// Primary bitmap text for the start log in rank order.
 /// Best effort with empty on fault, so a failed read never traps.
 pub fn write_primary_bitmap(rows: &[(u32, u32, u32)]) -> String {
@@ -103,9 +124,7 @@ pub fn write_llc_bitmaps() -> Vec<String> {
 }
 
 /// Short topology line for the start log.
-/// Shows cpus seeded with primary plus llcs counts, so the 4.8.14 start
-/// log carries primary plus llcs past the old cpus seeded line with no
-/// hot-path use.
+/// Shows cpus seeded with primary plus llcs counts with no hot-path use.
 pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
     let primary = write_primary_bitmap(rows);
     let llcs = write_llc_bitmaps();
@@ -285,5 +304,31 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), rows.len());
+    }
+
+    #[test]
+    fn equal_rows_match_in_rank_order() {
+        let a = vec![(0, u32::MAX, 0), (1, 0, 0)];
+        assert!(topo_rows_equal(&a, &a.clone()));
+        assert!(topo_rows_equal(&[], &[]));
+        assert!(!topo_rows_equal(&a, &[(0, u32::MAX, 0)]));
+        assert!(!topo_rows_equal(&a, &[(1, 0, 0), (0, u32::MAX, 0)]));
+        assert!(!topo_rows_equal(&a, &[(0, u32::MAX, 1), (1, 0, 0)]));
+    }
+
+    #[test]
+    fn reseed_reports_change_once() {
+        let live = topo_rows();
+        let mut prev = live.clone();
+        assert!(reseed_if_changed(&mut prev).is_none());
+        assert!(topo_rows_equal(&prev, &live));
+        let mut empty = Vec::new();
+        match reseed_if_changed(&mut empty) {
+            Some(next) => {
+                assert_eq!(next, live);
+                assert_eq!(empty, live);
+            }
+            None => assert!(live.is_empty()),
+        }
     }
 }

@@ -41,22 +41,6 @@ static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_
 	scx_bpf_dsq_insert_vtime(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, key, enq_flags);
 }
 /**
- * flow_tier_insert_hint - tier join from saved combined drain.
- * @p: task to join, null is ignored by the insert helpers.
- * @cpu: target CPU for the drain gate.
- * @vtime: fair time used for order plus the drain gate.
- * @now: current time in nanos.
- * @local_q: saved own local depth, non-positive means empty.
- * @node_q: saved node depth, non-positive means empty.
- *
- * Takes the local tier when the saved combined drain finishes before
- * the fair time, else the node tier when live, else the machine tier, so
- * a busy node keeps the task local. Escalation follows the combined drain
- * with mask wins on dispatch drain. Strict PRIQ holds without favoring
- * batch, so the earliest key wins in every tier. Like fair.c, the
- * earliest key wins, unlike rt.c, no fixed priority holds.
- */
-/**
  * flow_take_sleep - true sleep plus wait stamp in one shared copy.
  * @tctx: task state with wait stamp to read plus overwrite.
  * @now: current time in nanos.
@@ -81,6 +65,22 @@ static __noinline u64 flow_take_sleep(struct flow_task_ctx *tctx, u64 now,
 	tctx->wait_at = now;
 	return sleep;
 }
+/**
+ * flow_tier_insert_hint - tier join from saved combined drain.
+ * @p: task to join, null is ignored by the insert helpers.
+ * @cpu: target CPU for the drain gate.
+ * @vtime: fair time used for order plus the drain gate.
+ * @now: current time in nanos.
+ * @local_q: saved own local depth, non-positive means empty.
+ * @node_q: saved node depth, non-positive means empty.
+ *
+ * Takes the local tier when the saved combined drain finishes before
+ * the fair time, else the node tier when live, else the machine tier, so
+ * a busy node keeps the task local. Escalation follows the combined drain
+ * with mask wins on dispatch drain. Strict PRIQ holds without favoring
+ * batch, so the earliest key wins in every tier. Like fair.c, the
+ * earliest key wins, unlike rt.c, no fixed priority holds.
+ */
 static __always_inline void flow_tier_insert_hint(struct task_struct *p,
 	s32 cpu, u64 vtime, u64 now, s32 local_q, s32 node_q)
 {
