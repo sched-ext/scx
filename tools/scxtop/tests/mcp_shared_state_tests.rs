@@ -26,28 +26,6 @@ fn create_sched_switch_event(
     next_dsq_id: u64,
     prev_dsq_id: u64,
 ) -> bpf_event {
-    create_sched_switch_event_with_wakeup(
-        cpu,
-        timestamp_ns,
-        prev_pid,
-        next_pid,
-        next_comm,
-        next_dsq_id,
-        prev_dsq_id,
-        0,
-    )
-}
-
-fn create_sched_switch_event_with_wakeup(
-    cpu: u32,
-    timestamp_ns: u64,
-    prev_pid: u32,
-    next_pid: u32,
-    next_comm: &str,
-    next_dsq_id: u64,
-    prev_dsq_id: u64,
-    next_wakeup_ts: u64,
-) -> bpf_event {
     let mut event: bpf_event = unsafe { MaybeUninit::zeroed().assume_init() };
     event.r#type = bpf_intf::event_type_SCHED_SWITCH as i32;
     event.cpu = cpu;
@@ -58,7 +36,6 @@ fn create_sched_switch_event_with_wakeup(
         event.event.sched_switch.next_pid = next_pid;
         event.event.sched_switch.next_dsq_id = next_dsq_id;
         event.event.sched_switch.prev_dsq_id = prev_dsq_id;
-        event.event.sched_switch.next_wakeup_ts = next_wakeup_ts;
 
         // Copy command name
         let comm_bytes = next_comm.as_bytes();
@@ -66,6 +43,11 @@ fn create_sched_switch_event_with_wakeup(
         event.event.sched_switch.next_comm[..len].copy_from_slice(&comm_bytes[..len]);
     }
 
+    event
+}
+
+fn with_wakeup_ts(mut event: bpf_event, next_wakeup_ts: u64) -> bpf_event {
+    event.event.sched_switch.next_wakeup_ts = next_wakeup_ts;
     event
 }
 
@@ -200,14 +182,8 @@ fn test_wakeup_latency_calculation() {
     stats.enable_tracking();
 
     // Switch at t=1500000 with wakeup_ts=1000000 (latency = 500000)
-    let switch = create_sched_switch_event_with_wakeup(
-        0,
-        1500000,
-        100,
-        200,
-        "test_proc",
-        u64::MAX,
-        u64::MAX,
+    let switch = with_wakeup_ts(
+        create_sched_switch_event(0, 1500000, 100, 200, "test_proc", u64::MAX, u64::MAX),
         1000000,
     );
     stats.update_from_event(&switch);
@@ -233,40 +209,22 @@ fn test_multiple_latency_samples() {
     stats.enable_tracking();
 
     // First switch with wakeup_ts (latency = 500000)
-    let switch1 = create_sched_switch_event_with_wakeup(
-        0,
-        1500000,
-        100,
-        200,
-        "test_proc",
-        u64::MAX,
-        u64::MAX,
+    let switch1 = with_wakeup_ts(
+        create_sched_switch_event(0, 1500000, 100, 200, "test_proc", u64::MAX, u64::MAX),
         1000000,
     );
     stats.update_from_event(&switch1);
 
     // Second switch with wakeup_ts (latency = 300000)
-    let switch2 = create_sched_switch_event_with_wakeup(
-        0,
-        2300000,
-        100,
-        200,
-        "test_proc",
-        u64::MAX,
-        u64::MAX,
+    let switch2 = with_wakeup_ts(
+        create_sched_switch_event(0, 2300000, 100, 200, "test_proc", u64::MAX, u64::MAX),
         2000000,
     );
     stats.update_from_event(&switch2);
 
     // Third switch with wakeup_ts (latency = 700000)
-    let switch3 = create_sched_switch_event_with_wakeup(
-        0,
-        3700000,
-        100,
-        200,
-        "test_proc",
-        u64::MAX,
-        u64::MAX,
+    let switch3 = with_wakeup_ts(
+        create_sched_switch_event(0, 3700000, 100, 200, "test_proc", u64::MAX, u64::MAX),
         3000000,
     );
     stats.update_from_event(&switch3);
@@ -344,14 +302,8 @@ fn test_get_cpu_stats_json() {
     let wakeup = create_sched_wakeup_event(0, 1000000, 200, "test");
     stats.update_from_event(&wakeup);
 
-    let switch = create_sched_switch_event_with_wakeup(
-        0,
-        1500000,
-        100,
-        200,
-        "test",
-        u64::MAX,
-        u64::MAX,
+    let switch = with_wakeup_ts(
+        create_sched_switch_event(0, 1500000, 100, 200, "test", u64::MAX, u64::MAX),
         1000000,
     );
     stats.update_from_event(&switch);
