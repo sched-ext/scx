@@ -218,9 +218,10 @@ struct Opts {
     no_use_em: bool,
 
     /// Do not keep tasks on their NUMA home node. By default, on a machine
-    /// with more than one NUMA node, a task's home node comes from what the
-    /// kernel's NUMA balancing measured before the scheduler attached or
-    /// from where it first ran, and the CPU pick prefers an idle core on it.
+    /// with more than one NUMA node, a task's home node comes from its memory
+    /// policy, from what the kernel's NUMA balancing measured before the
+    /// scheduler attached or from where it first ran, and the CPU pick
+    /// prefers an idle core on it.
     #[clap(long = "no-numa-locality", action = clap::ArgAction::SetTrue)]
     no_numa_locality: bool,
 

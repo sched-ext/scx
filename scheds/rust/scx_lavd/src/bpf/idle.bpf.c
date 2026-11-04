@@ -1037,6 +1037,15 @@ s32 pick_idle_cpu_at_fork(struct pick_ctx *ctx)
 	 */
 	if (ctx->p->pid != ctx->p->tgid)
 		return -ENOENT;
+
+	/*
+	 * A child inherits its parent's memory policy and cpuset, and
+	 * ops.select_cpu() reads both before it picks a CPU. A new task
+	 * whose policy or cpuset names one node therefore has a home
+	 * already, and the home pick places it instead of this rule.
+	 */
+	if (get_task_home_node(ctx->taskc) >= 0)
+		return -ENOENT;
 	l_nid = cpu_to_numa_id(ctx->prev_cpu);
 	if (l_nid < 0)
 		return -ENOENT;

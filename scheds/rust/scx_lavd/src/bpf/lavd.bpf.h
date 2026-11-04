@@ -233,7 +233,8 @@ struct task_ctx {
 	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	pinned_demand;		/* demand added to cpuperf_pinned */
 	s16	numa_nid;		/* NUMA home node, NUMA_NO_NODE if none */
-	u8	__pad0[2];
+	u8	numa_policy;		/* the home comes from a memory policy or cpuset */
+	u8	__pad0;
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */
@@ -265,6 +266,7 @@ struct task_ctx {
 	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+	u64	numa_pol_clk;		/* last memory policy refresh */
 
 	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
 	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
