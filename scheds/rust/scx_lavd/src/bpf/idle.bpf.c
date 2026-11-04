@@ -836,10 +836,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 {
 	struct cpdom_ctx *mig_cpdc;
 	s64 mig_cpdom, nr_nbr, gain;
-	s32 cpu = -ENOENT;
+	s32 cpu;
 	bool ct_enabled = xmig_min_gain_ns > 0; /* Userspace forces this to 0 on a homogeneous machine. */
+	bool nbr_has_idle = false;
 	u64 ct_s;
-	bool via_idle = false;
 	int i, j;
 
 	/*
@@ -857,13 +857,17 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	 * wake-ups, not load balancing, so it leaves the stealer and stealee
 	 * flags alone.
 	 *
-	 * On a heterogeneous system the estimate decides instead: the task
-	 * must finish on the neighbor sooner by more than xmig_min_gain_ns,
-	 * idle core or not. An idle core does not qualify by itself, since a
-	 * compute-heavy task would finish later on a slow idle core than in a
-	 * fast queue; and a neighbor whose queue finishes the task clearly
-	 * sooner qualifies even without an idle core, in which case the task
-	 * joins that queue. An idle CPU is preferred when the neighbor has one.
+	 * On a heterogeneous system the estimate also has to agree: the task
+	 * must finish on the neighbor sooner by more than xmig_min_gain_ns.
+	 * An idle core does not qualify by itself, since a compute-heavy task
+	 * would finish later on a slow idle core than in a fast queue.
+	 *
+	 * Either way, only a neighbor with an idle CPU qualifies. The task
+	 * never joins a busy neighbor's queue: the estimate assumes the task
+	 * is served last, but a more urgent task can skip the line, so a queue
+	 * that looks shorter may well finish the task later. With an idle CPU
+	 * to land on, the task starts right away and the estimate only has to
+	 * compare run times.
 	 *
 	 * Note that when a system is under-loaded, task donation works better
 	 * than task stealing because DSQs are mostly empty (i.e., it is hard
@@ -871,6 +875,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	 *
 	 * Return the first hit, at the nearest distance. Scanning farther
 	 * distances after a hit would overwrite it and leak the claim.
+	 *
+	 * Return -EBUSY when no neighbor has any idle CPU, not even a
+	 * partially idle one, so the caller can skip another walk that cannot
+	 * succeed, and -ENOENT when some neighbor does but none qualifies.
 	 */
 	if (ct_enabled)
 		ct_s = calc_comp_time_on_cpdom(ctx->taskc->avg_runtime_invr, cpdc);
@@ -891,6 +899,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			if (unlikely(!mig_cpdc))
 				continue;
 
+			if (!cpdom_has_idle_cpu(mig_cpdom))
+				continue;
+			nbr_has_idle = true;
+
 			if (ct_enabled) {
 				gain = comp_time_gain(
 					ctx->taskc->avg_runtime_invr, ct_s,
@@ -905,21 +917,12 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope);
 			if (cpu >= 0) {
 				*is_idle = true;
-				via_idle = true;
 				goto found;
-			}
-
-			if (ct_enabled) {
-				cpu = find_sticky_cpu_at_cpdom(ctx, -ENOENT, mig_cpdom);
-				if (cpu >= 0) {
-					*is_idle = false;
-					goto found;
-				}
 			}
 		}
 	}
 
-	return cpu;
+	return nbr_has_idle ? -ENOENT : -EBUSY;
 
 found:
 	/*
@@ -930,9 +933,8 @@ found:
 		WRITE_ONCE(mig_cpdc->is_stealer, false);
 		WRITE_ONCE(cpdc->is_stealee, false);
 	}
-	debugln("migrate: neighbor %s[pid%d] cpdom%llu -> cpdom%llu cpu%d via=%s",
-		ctx->p->comm, ctx->p->pid, cpdc->id, mig_cpdc->id, cpu,
-		via_idle ? "idle-cpu" : "queue");
+	debugln("migrate: neighbor %s[pid%d] cpdom%llu -> cpdom%llu cpu%d",
+		ctx->p->comm, ctx->p->pid, cpdc->id, mig_cpdc->id, cpu);
 	return cpu;
 }
 
@@ -943,7 +945,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	s32 cpu = -ENOENT, sticky_cpu;
 	s64 sticky_cpdom = -ENOENT;
 	struct cpdom_ctx *cpdc;
-	bool sticky_has_idle;
+	bool sticky_has_idle, nbr_busy = false;
 
 	/*
 	 * At the high level, the idle CPU selection policy considers the
@@ -1183,10 +1185,10 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 *
 	 * Consider donating the task to a neighbor: as before, only if the
 	 * sticky domain is a stealee, the neighbor a stealer, and the neighbor
-	 * has a fully idle core in the task's active/overflow set, or, on a
-	 * heterogeneous system, if the task would finish there clearly sooner
-	 * (see migrate_to_neighbor()). Each neighbor now gates itself on its
-	 * own idle mask.
+	 * has a fully idle core in the task's active/overflow set and, on a
+	 * heterogeneous system, only if the task would finish there clearly
+	 * sooner (see migrate_to_neighbor()). Each neighbor now gates itself
+	 * on its own idle mask.
 	 */
 	if ((nr_cpdoms > 1) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
@@ -1195,6 +1197,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 					  is_idle);
 		if (cpu >= 0)
 			goto unlock_out;
+		nbr_busy = cpu == -EBUSY;
 	}
 	/* NOTE: There is no fully idle CPU in the neighboring domain. */
 
@@ -1229,8 +1232,10 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 * a bursty wake-up (ops.select_cpu() only) rather than queue on the
 	 * sticky domain. On a heterogeneous system, the completion-time
 	 * estimate picks the neighbor instead, as for the donation above.
+	 * Skip the walk when the donation already found no idle CPU in any
+	 * neighbor.
 	 */
-	if ((nr_cpdoms > 1) &&
+	if ((nr_cpdoms > 1) && !nbr_busy &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]))) {
 		bool aggressive = test_task_flag(ctx->taskc,
 						 LAVD_FLAG_MIGRATION_AGGRESSIVE) &&
