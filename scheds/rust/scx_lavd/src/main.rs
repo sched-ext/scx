@@ -217,6 +217,12 @@ struct Opts {
     #[clap(long = "no-use-em", action = clap::ArgAction::SetTrue)]
     no_use_em: bool,
 
+    /// Do not keep tasks on their NUMA home node. By default, on a machine
+    /// with more than one NUMA node, a task's home node is the node it first
+    /// ran on, and the CPU pick prefers an idle core on it.
+    #[clap(long = "no-numa-locality", action = clap::ArgAction::SetTrue)]
+    no_numa_locality: bool,
+
     /// Do not boost futex holders.
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
     no_futex_boost: bool,
@@ -769,6 +775,15 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    /// NUMA nodes in a sysfs node list such as has_cpu or has_memory;
+    /// empty when the list cannot be read.
+    fn numa_nodes(attr: &str) -> Vec<usize> {
+        std::fs::read_to_string(format!("/sys/devices/system/node/{attr}"))
+            .ok()
+            .and_then(|list| scx_utils::read_cpulist(list.trim()).ok())
+            .unwrap_or_default()
+    }
+
     fn init_globals(
         skel: &mut OpenBpfSkel,
         opts: &Opts,
@@ -803,6 +818,16 @@ impl<'a> Scheduler<'a> {
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
         rodata.no_force_steal_limit = opts.no_force_steal_limit as u8;
+        // Locality needs more than one node with CPUs, each with memory of
+        // its own: a CPU-only node has nothing to keep local.
+        let cpu_nodes = Self::numa_nodes("has_cpu");
+        let mem_nodes = Self::numa_nodes("has_memory");
+        let numa_on = !opts.no_numa_locality
+            && order.nr_numa > 1
+            && cpu_nodes.len() > 1
+            && cpu_nodes.iter().all(|n| mem_nodes.contains(n));
+        rodata.numa_on = numa_on as u8;
+        info!("NUMA locality: {}", if numa_on { "on" } else { "off" });
         rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
 
         rodata.no_wake_sync = opts.no_wake_sync;

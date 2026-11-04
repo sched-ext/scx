@@ -236,6 +236,12 @@ const volatile u8	no_ovrflw_extend;
  */
 const volatile u64	warm_cpu_ns = 0;
 
+/* The compute domains of each NUMA node, listed at ops.init(). */
+struct numa_ctx		numa_ctxs[LAVD_NUMA_ID_MAX];
+
+/* Keep tasks on their NUMA home node; set when more than one node has CPUs and each has memory. */
+const volatile u8	numa_on = 0;
+
 /*
  * Skip periodic load balancing when average system utilization is below this
  * threshold. The value is pre-scaled by userspace. 0 = disabled.
@@ -2433,6 +2439,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	/* Per-CPU warmth is task+CPU private -- never inherit it. */
 	taskc->cpu_heat = 0;
 	taskc->last_stopping_clk = scx_bpf_now();
+	set_task_home_node(taskc, NUMA_NO_NODE);
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);
@@ -2542,6 +2549,8 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 static s32 init_cpdoms(u64 now)
 {
 	struct cpdom_ctx *cpdomc;
+	struct numa_ctx *numac;
+	u32 nr;
 	int err;
 
 	for (int i = 0; i < LAVD_CPDOM_MAX_NR; i++) {
@@ -2557,6 +2566,15 @@ static s32 init_cpdoms(u64 now)
 			continue;
 
 		cpdomc->vuln_thresh = LAVD_VULN_THRESH_INIT;
+
+		/*
+		 * List the domain under its NUMA node.
+		 */
+		numac = MEMBER_VPTR(numa_ctxs, [cpdomc->numa_id]);
+		if (numac && (nr = numac->nr_cpdoms) < LAVD_CPDOM_MAX_NR) {
+			numac->cpdom_ids[nr] = i;
+			numac->nr_cpdoms = nr + 1;
+		}
 
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
