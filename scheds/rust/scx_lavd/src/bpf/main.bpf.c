@@ -241,6 +241,7 @@ struct numa_ctx		numa_ctxs[LAVD_NUMA_ID_MAX];
 
 /* Keep tasks on their NUMA home node; set when more than one node has CPUs and each has memory. */
 const volatile u8	numa_on = 0;
+const volatile u32	numa_imb_nr = 1;
 
 /*
  * Skip periodic load balancing when average system utilization is below this
@@ -1826,6 +1827,13 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		return;
 	}
 
+	/*
+	 * A new task makes its home where it first runs. A kernel thread
+	 * has no memory of its own to stay near.
+	 */
+	if (numa_on && get_task_home_node(taskc) < 0 && !is_kernel_task(p))
+		set_task_home_node(taskc, cpu_to_numa_id(cpuc->cpu_id));
+
 	unaccount_queued_load(taskc);
 	unaccount_queued_load_pcpu(taskc);
 
@@ -2288,6 +2296,24 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	scx_bpf_reenqueue_local();
 }
 
+/*
+ * An exec drops the old address space. The new one is first touched on
+ * the CPU the exec runs on, so that becomes the home. Nothing is moved
+ * here: a new program was placed when it was forked, as a rule a moment
+ * before its exec. Runs as @p.
+ */
+SEC("?tp_btf/sched_process_exec")
+int BPF_PROG(lavd_numa_exec, struct task_struct *p, pid_t old_pid,
+	     struct linux_binprm *bprm)
+{
+	task_ctx *taskc = find_task_ctx(p);
+
+	if (!taskc)
+		return 0;
+	set_task_home_node(taskc, cpu_to_numa_id(bpf_get_smp_processor_id()));
+	return 0;
+}
+
 SEC("?tp_btf/sched_switch")
 int BPF_PROG(lavd_sched_switch, bool preempt,
 	     struct task_struct *prev, struct task_struct *next,
@@ -2440,6 +2466,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->cpu_heat = 0;
 	taskc->last_stopping_clk = scx_bpf_now();
 	set_task_home_node(taskc, NUMA_NO_NODE);
+	/* At attach the memory was first touched where the task is. */
+	if (numa_on && !args->fork && !is_kernel_task(p))
+		set_task_home_node(taskc, cpu_to_numa_id(scx_bpf_task_cpu(p)));
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);

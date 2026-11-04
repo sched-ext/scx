@@ -784,6 +784,26 @@ impl<'a> Scheduler<'a> {
             .unwrap_or_default()
     }
 
+    /// Tasks a node may run before a new process looks at another node: the
+    /// number of LLCs in a node, or an eighth of its CPUs when it has a
+    /// single LLC.
+    fn numa_imb_nr(order: &CpuOrder) -> u32 {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut nodes: BTreeMap<usize, (BTreeSet<usize>, usize)> = BTreeMap::new();
+        for (k, v) in order.cpdom_map.iter() {
+            let node = nodes.entry(k.numa_adx).or_default();
+            node.0.insert(k.llc_adx);
+            node.1 += v.cpu_ids.len();
+        }
+        nodes
+            .values()
+            .map(|(llcs, cpus)| if llcs.len() > 1 { llcs.len() } else { cpus / 8 })
+            .min()
+            .unwrap_or(1)
+            .max(1) as u32
+    }
+
     fn init_globals(
         skel: &mut OpenBpfSkel,
         opts: &Opts,
@@ -827,7 +847,11 @@ impl<'a> Scheduler<'a> {
             && cpu_nodes.len() > 1
             && cpu_nodes.iter().all(|n| mem_nodes.contains(n));
         rodata.numa_on = numa_on as u8;
+        rodata.numa_imb_nr = Self::numa_imb_nr(order);
         info!("NUMA locality: {}", if numa_on { "on" } else { "off" });
+        if numa_on {
+            compat::cond_tracepoint_enable("sched:sched_process_exec", &skel.progs.lavd_numa_exec)?;
+        }
         rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
 
         rodata.no_wake_sync = opts.no_wake_sync;
