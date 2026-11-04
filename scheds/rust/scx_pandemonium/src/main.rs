@@ -15,7 +15,6 @@ mod bpf_intf;
 mod log;
 mod adaptive;
 mod chaos;
-mod cli;
 mod scheduler;
 mod topology;
 mod tuning;
@@ -26,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 use scheduler::Scheduler;
 use scx_utils::build_id;
@@ -41,9 +40,6 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
     about = "PANDEMONIUM -- ADAPTIVE LINUX SCHEDULER"
 )]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<SubCmd>,
-
     #[arg(short, long)]
     verbose: bool,
 
@@ -64,24 +60,6 @@ struct Cli {
     no_adaptive: bool,
 }
 
-#[derive(Subcommand)]
-enum SubCmd {
-    /// Internal: interactive wakeup probe (Python test harness use)
-    #[command(hide = true)]
-    Probe,
-
-    /// Internal: CPU-pinned stress worker (Python test harness use)
-    #[command(hide = true)]
-    StressWorker(StressWorkerArgs),
-}
-
-#[derive(Parser)]
-struct StressWorkerArgs {
-    /// CPU to pin the stress worker to
-    #[arg(long)]
-    cpu: u32,
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -90,25 +68,7 @@ fn main() -> Result<()> {
     let nr_cpus = cli.nr_cpus;
     let no_adaptive = cli.no_adaptive;
 
-    if cli.version {
-        println!(
-            "scx_pandemonium {}",
-            build_id::full_version(env!("CARGO_PKG_VERSION"))
-        );
-        return Ok(());
-    }
-
-    match cli.command {
-        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive),
-        Some(SubCmd::Probe) => {
-            cli::probe::run_probe();
-            Ok(())
-        }
-        Some(SubCmd::StressWorker(args)) => {
-            cli::stress::run_stress_worker(args.cpu);
-            Ok(())
-        }
-    }
+    run_scheduler(verbose, dump_log, nr_cpus, no_adaptive)
 }
 
 fn run_scheduler(
@@ -179,7 +139,7 @@ fn run_scheduler(
         }
 
         let should_restart = if no_adaptive {
-            // BPF-ONLY MODE: SCHEDULER RUNS WITH DEFAULT KNOBS, NO RUST TUNING
+            // BPF-ONLY MODE: SCHEDULER RUNS THE TOPOLOGY BASE KNOBS, NO RUST TUNING
             // STILL PRINTS STATS SO BENCHMARKS GET TELEMETRY FOR BOTH PHASES
             log_info!("PANDEMONIUM IS ACTIVE (BPF ONLY, CTRL+C TO EXIT)");
             let mut prev = scheduler::PandemoniumStats::default();
@@ -333,10 +293,9 @@ fn run_scheduler(
                 0
             };
             println!(
-                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} steal={} spill={} kick_declined={} stay_cost_held={} stay_move_taken={} dispatches={}",
+                "[KNOBS] regime=BPF slice_ns={} batch_ns={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} steal={} spill={} kick_declined={} dispatches={}",
                 knobs.slice_ns,
                 knobs.batch_slice_ns,
-                knobs.preempt_thresh_ns,
                 l2_cum_b,
                 l2_cum_i,
                 x_scatter_pct,
@@ -351,8 +310,6 @@ fn run_scheduler(
                 final_stats.nr_steal,
                 final_stats.nr_spill_kick_preempt,
                 final_stats.nr_kick_declined,
-                final_stats.nr_stay_cost_held,
-                final_stats.nr_stay_move_taken,
                 final_stats.nr_dispatches,
             );
 

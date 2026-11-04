@@ -1,0 +1,11 @@
+[
+  {
+    "id": "pandemonium-bpf",
+    "label": "PANDEMONIUM, BPF only",
+    "description": "PANDEMONIUM without its adaptive layer.",
+    "sched": "scx_pandemonium",
+    "args": [
+      "--no-adaptive"
+    ]
+  }
+]

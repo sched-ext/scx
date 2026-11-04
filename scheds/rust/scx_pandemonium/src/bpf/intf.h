@@ -1,14 +1,21 @@
 // PANDEMONIUM SHARED INTERFACE
-// CONSTANTS AND STRUCTURES SHARED BETWEEN BPF (C23) AND RUST
+// CONSTANTS AND STRUCTURES SHARED BETWEEN BPF AND RUST
 
 #ifndef __INTF_H
 #define __INTF_H
 
-// BINDGEN/SCX COMPATIBILITY: provide kernel types unconditionally.
-// vmlinux.h also typedefs these in BPF context; C11+ permits
-// duplicate compatible typedefs, so no conflict.
-typedef unsigned long long u64;
+// THE BPF SIDE GETS THESE FROM vmlinux.h. A BINDINGS PASS PARSES THIS HEADER
+// ALONE, SO IT DEFINES THEM ITSELF WHEN vmlinux.h HAS NOT.
+#ifndef __VMLINUX_H__
 typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef unsigned long long u64;
+typedef signed char s8;
+typedef short s16;
+typedef int s32;
+typedef long long s64;
+#endif
 
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
@@ -28,9 +35,7 @@ typedef unsigned char u8;
 // SINGLE-ELEMENT BPF_MAP_TYPE_ARRAY, UPDATED EVERY 50-1000MS
 struct tuning_knobs {
 	u64 slice_ns;           // BASE TIME SLICE (DEFAULT 1MS)
-	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
-	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
 	u64 codel_thresh_ns;    // tick() PER-CPU SOJOURN SCAN THRESHOLD (SET BY RUST)
 	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (DEFAULT 1MS)
 	u64 topology_tau_ns;    // FIEDLER TIME CONSTANT, CAPACITY-AWARE IN N.
@@ -70,8 +75,9 @@ struct pandemonium_stats {
 	u64 nr_overflow_rescue; // DISPATCHES BY try_service_aged_overflow AT
 	                        // codel_target_ns (STEP 2)
 	// CROSS-DOMAIN LANDINGS BY PLACEMENT PATH, INDEXED BY XDOM_* BELOW.
-	// THE ADAPTIVE LAYER SUMS XDOM_SEL_* + XDOM_ENQ_T1 AS THE MWU SCATTER
-	// LOSS; XDOM_STEAL AND XDOM_STEP5 ARE EXCLUDED FROM IT.
+	// THE [KNOBS] LINE's scatter_pct SUMS THE PLACEMENT PATHS XDOM_SEL_* AND
+	// XDOM_ENQ_T*; THE WORK-CONSERVATION PATHS XDOM_STEAL AND XDOM_STEP5 ARE
+	// EXCLUDED FROM IT.
 	u64 nr_cross_domain[8];
 	u64 nr_osc_park;        // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK)
 	u64 nr_spill_kick_preempt; // select_cpu SEATS REDIRECTED OFF AN IDLE PICK
@@ -80,15 +86,36 @@ struct pandemonium_stats {
 	                        // CROSS- AND SAME-DOMAIN
 	u64 nr_kick_declined;   // requeue_kick_flag RETURNING KICK_NONE,
 	                        // SELF-TARGETED ONLY. NO KFUNC WAS CALLED
-	u64 nr_stay_cost_held;  // anchor_stay_beats_move REFUSING THE
-	                        // anchor -> target MOVE
-	u64 nr_stay_move_taken; // THE SAME EDGE ADMITTED. HELD + TAKEN IS EVERY
-	                        // anchor -> target DECISION THE WAKE PATH MADE
-	// PER-CPU RUNNABLE DEPTH, ACCUMULATED AT TICK RATE. USERSPACE DIFFERENCES
-	// BOTH FIELDS FOR AN INTERVAL MEAN, AS wake_lat_sum/wake_lat_samples DO.
-	// MONOTONIC; NEVER RESET IN BPF.
-	u64 rq_depth_sum;
-	u64 rq_depth_samples;
+};
+
+// PER-CPU QUEUE RING. EACH TICK ADDS THIS CPU'S OWN DSQ DEPTH, ITS DOMAIN
+// QUEUE'S DEPTH AND ITS LOCAL DSQ'S DEPTH INTO THE SLOT FOR THE CURRENT BUCKET
+// (epoch = ktime / depth_bucket_ns), AND EVERY running() ADDS THE RUN, WHETHER
+// IT ENDED A WAKE, AND THE QUEUE WAIT IT ENDED, SO EVERY CPU SAMPLES ONE TIME
+// GRID AND THE 1HZ LOOP READS EVERY SAMPLE INSTEAD OF ONE MEAN PER SECOND. A
+// SLOT WHOSE epoch IS NOT THE ONE ASKED FOR HOLDS AN EARLIER LAP OR A CPU THAT
+// NEITHER TICKED NOR RAN ANYTHING, AND READS ABSENT. domain IS THE CPU'S
+// OVERFLOW DOMAIN, SO USERSPACE FOLDS A DOMAIN'S CPUS FROM WHAT BPF ACTUALLY
+// SAMPLED. POWER OF TWO.
+#define DEPTH_RING_SLOTS 512
+
+struct depth_slot {
+	u64 epoch;
+	u32 ticks;
+	u32 own;                // SUM OF THIS CPU'S DSQ DEPTH OVER ticks
+	u32 dom;                // SUM OF ITS DOMAIN QUEUE'S DEPTH OVER ticks
+	u32 loc;                // SUM OF ITS LOCAL DSQ'S DEPTH OVER ticks
+	u32 runs;               // TASKS THAT STARTED RUNNING HERE IN THE BUCKET
+	u32 wakes;              // OF THOSE, THE RUNS THAT ENDED A WAKE: ARRIVALS
+	u32 wait_us;            // SUM OF THE QUEUE WAITS THOSE RUNS ENDED, IN US:
+	                        // THE QUEUE CLOCK, INSERT (OR WAKE) TO RUNNING
+	u32 _pad;
+};
+
+struct depth_ring {
+	u32 domain;
+	u32 _pad;
+	struct depth_slot slot[DEPTH_RING_SLOTS];
 };
 
 // XDOM PATH INDICES FOR pandemonium_stats.nr_cross_domain[] (DIAGNOSTIC).
