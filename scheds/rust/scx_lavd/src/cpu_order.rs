@@ -540,21 +540,6 @@ const MAX_EQPD_COMBINATIONS: u128 = 100_000;
 
 impl<'a> EnergyModelOptimizer<'a> {
     fn new(em: &'a EnergyModel, cpus_pf: &'a Vec<CpuId>) -> EnergyModelOptimizer<'a> {
-        let tot_perf = em.perf_total();
-
-        let eq_pds = Self::sort_eq_pds(em, cpus_pf);
-        let max_nr_cpus: Vec<usize> = eq_pds
-            .iter()
-            .map(|perf_doms| perf_doms.iter().map(|pd| pd.span.weight()).sum())
-            .collect();
-        let nr_cpus_combinations = Self::gen_nr_cpus_combinations(&max_nr_cpus);
-
-        let pdss_infos: BTreeMap<usize, RefCell<HashSet<PDSetInfo<'a>>>> = BTreeMap::new();
-        let pdss_infos = pdss_infos.into();
-
-        let perf_pdsi: BTreeMap<usize, PDSetInfo<'a>> = BTreeMap::new();
-        let perf_pdsi = perf_pdsi.into();
-
         let mut pd_cpu_order: BTreeMap<usize, RefCell<Vec<usize>>> = BTreeMap::new();
         let mut cpus_topological_order: Vec<usize> = vec![];
         for cpuid in cpus_pf.iter() {
@@ -570,6 +555,32 @@ impl<'a> EnergyModelOptimizer<'a> {
             }
             cpus_topological_order.push(cpuid.cpu_adx);
         }
+
+        let eq_pds = Self::sort_eq_pds(em, cpus_pf, &pd_cpu_order);
+        let tot_perf: usize = eq_pds
+            .iter()
+            .flatten()
+            .map(|pd| {
+                let (_, ps) = pd.perf_table.last_key_value().unwrap();
+                ps.performance * pd_cpu_order[&pd.id].borrow().len()
+            })
+            .sum();
+        let max_nr_cpus: Vec<usize> = eq_pds
+            .iter()
+            .map(|perf_doms| {
+                perf_doms
+                    .iter()
+                    .map(|pd| pd_cpu_order[&pd.id].borrow().len())
+                    .sum()
+            })
+            .collect();
+        let nr_cpus_combinations = Self::gen_nr_cpus_combinations(&max_nr_cpus);
+
+        let pdss_infos: BTreeMap<usize, RefCell<HashSet<PDSetInfo<'a>>>> = BTreeMap::new();
+        let pdss_infos = pdss_infos.into();
+
+        let perf_pdsi: BTreeMap<usize, PDSetInfo<'a>> = BTreeMap::new();
+        let perf_pdsi = perf_pdsi.into();
 
         let perf_cpu_order: BTreeMap<usize, PerfCpuOrder> = BTreeMap::new();
         let perf_cpu_order = perf_cpu_order.into();
@@ -1005,7 +1016,11 @@ impl<'a> EnergyModelOptimizer<'a> {
     /// Collect the member performance domains of each equivalence performance
     /// domain of @em, ordering both the members and the equivalence performance
     /// domains by CPU preference. See @EnergyModelOptimizer::eq_pds.
-    fn sort_eq_pds(em: &'a EnergyModel, cpus_pf: &'a [CpuId]) -> Vec<Vec<&'a PerfDomain>> {
+    fn sort_eq_pds(
+        em: &'a EnergyModel,
+        cpus_pf: &'a [CpuId],
+        pd_cpu_order: &BTreeMap<usize, RefCell<Vec<usize>>>,
+    ) -> Vec<Vec<&'a PerfDomain>> {
         let ranks = Self::rank_perf_doms(cpus_pf);
         let rank_of = |pd: &PerfDomain| ranks.get(&pd.id).copied().unwrap_or(usize::MAX);
 
@@ -1013,11 +1028,16 @@ impl<'a> EnergyModelOptimizer<'a> {
             .eq_perf_doms
             .values()
             .map(|eq_pd| {
-                let mut perf_doms: Vec<&'a PerfDomain> =
-                    eq_pd.perf_doms.iter().map(|pd| pd.as_ref()).collect();
+                let mut perf_doms: Vec<&'a PerfDomain> = eq_pd
+                    .perf_doms
+                    .iter()
+                    .map(|pd| pd.as_ref())
+                    .filter(|pd| pd_cpu_order.contains_key(&pd.id))
+                    .collect();
                 perf_doms.sort_by_key(|pd| rank_of(pd));
                 perf_doms
             })
+            .filter(|perf_doms| !perf_doms.is_empty())
             .collect();
 
         // An equivalence performance domain is as preferred as its most
@@ -1166,7 +1186,7 @@ impl<'a> EnergyModelOptimizer<'a> {
                 }
 
                 // A performance domain contributes at most its own CPUs.
-                let take = remaining.min(pd.span.weight());
+                let take = remaining.min(self.pd_cpu_order[&pd.id].borrow().len());
                 for _ in 0..take {
                     pds_set.push(PDS::new(pd, ps));
                 }
@@ -1489,7 +1509,7 @@ mod tests {
     #[test]
     fn test_hybrid_combinations() {
         let em = energy_model(&[8, 16, 4]);
-        let cpus_pf = vec![];
+        let cpus_pf = cpu_pref_order(&(0..28).collect::<Vec<_>>());
         let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
 
         // (8 + 1) * (16 + 1) * (4 + 1) - 1
@@ -1505,7 +1525,7 @@ mod tests {
     #[test]
     fn test_uncollapsed_combinations_fall_back_to_runs() {
         let em = energy_model(&[1; 24]);
-        let cpus_pf = vec![];
+        let cpus_pf = cpu_pref_order(&(0..24).collect::<Vec<_>>());
         let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
 
         // 24 forward runs, 24 backward runs, and 24 single runs, of which the
@@ -1527,10 +1547,35 @@ mod tests {
     #[test]
     fn test_uniform_combinations() {
         let em = energy_model(&[8]);
-        let cpus_pf = vec![];
+        let cpus_pf = cpu_pref_order(&(0..8).collect::<Vec<_>>());
         let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
 
         assert_eq!(emo.nr_cpus_combinations.len(), 8);
         assert_eq!(emo.gen_pds_combinations(100.0).len(), 8);
+    }
+
+    /// A processor of 4 P-cores and 4 E-cores, with CPU 3 and all E-cores
+    /// offline. An Intel hybrid processor gives every CPU its own
+    /// performance domain, so taking a CPU offline leaves a performance
+    /// domain with no online CPU and the E-cores an equivalence performance
+    /// domain with none. Both are left out of the combinations, so only the
+    /// 3 P-cores are considered.
+    #[test]
+    fn test_offline_perf_domains() {
+        let em = energy_model(&[4, 4]);
+        let cpus_pf = cpu_pref_order(&[0, 1, 2]);
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let pd_ids: Vec<Vec<usize>> = emo
+            .eq_pds
+            .iter()
+            .map(|perf_doms| perf_doms.iter().map(|pd| pd.id).collect())
+            .collect();
+        assert_eq!(pd_ids, vec![vec![0, 1, 2]]);
+
+        assert_eq!(emo.nr_cpus_combinations.len(), 3);
+
+        // Building CPU order table used to panic here.
+        EnergyModelOptimizer::get_perf_cpu_order_table(&em, &cpus_pf);
     }
 }
