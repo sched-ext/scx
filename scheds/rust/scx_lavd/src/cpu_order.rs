@@ -836,14 +836,17 @@ impl<'a> EnergyModelOptimizer<'a> {
                 }
             };
 
+            // Remove the old base before inserting its extension since both
+            // can have the same performance value and removing after
+            // inserting would drop the extension.
+            if let Some(del_pdsi) = del_pdsi {
+                self.perf_pdsi.borrow_mut().remove(&del_pdsi.performance);
+            }
+
             if let Some(best_pdsi) = best_pdsi {
                 self.perf_pdsi
                     .borrow_mut()
                     .insert(best_pdsi.performance, best_pdsi);
-            }
-
-            if let Some(del_pdsi) = del_pdsi {
-                self.perf_pdsi.borrow_mut().remove(&del_pdsi.performance);
             }
         }
 
