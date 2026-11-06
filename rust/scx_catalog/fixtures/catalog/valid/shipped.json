@@ -56,6 +56,7 @@
     "scx_mavd",
     "scx_mlfq",
     "scx_nitosis",
+    "scx_panda",
     "scx_rburst",
     "scx_reevdf",
     "scx_rlfifo",

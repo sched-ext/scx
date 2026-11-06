@@ -1,0 +1,26 @@
+[package]
+name = "scx_panda"
+version = "0.2.3"
+edition = "2024"
+rust-version = "1.91"
+description = "A sched_ext scheduler built from discarded ideas and unspent potential: CoDel sojourn ordering, effective-resistance distance pricing and a per-task run habit read as a price, every decision in BPF"
+license = "GPL-2.0-only"
+
+[lib]
+name = "scx_panda"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scx_panda"
+path = "src/main.rs"
+
+[dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.4" }
+libbpf-rs = { version = "=0.27.2" }
+libc = "0.2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+
+[build-dependencies]
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.4" }
