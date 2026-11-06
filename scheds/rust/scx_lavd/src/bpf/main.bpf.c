@@ -309,7 +309,8 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	}
 }
 
-static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
+static u64 calc_time_slice(struct task_struct *p, task_ctx *taskc,
+			   struct cpu_ctx *cpuc)
 {
 	/*
 	 * Calculate the time slice of @taskc to run on @cpuc.
@@ -356,8 +357,15 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 		 * to LAVD_SLICE_BOOST_MAX (not infinite) because we want to
 		 * revisit if the task is placed on the best CPU at least
 		 * every LAVD_SLICE_BOOST_MAX interval.
+		 *
+		 * Don't fully boost affinitized tasks as can_boost_slice()
+		 * only looks at system-wide load. A few tasks hogging a small
+		 * set of allowed CPUs look like an idle system. Their waiters
+		 * aren't counted in nr_pinned_tasks or the local DSQ, so the
+		 * boosted slice doesn't get cut short and they can wait up to
+		 * LAVD_SLICE_BOOST_MAX.
 		 */
-		if (can_boost_slice()) {
+		if (can_boost_slice() && !is_affinitized(p)) {
 			/*
 			 * Add a bit of bonus so that a task, which takes a
 			 * bit longer than average, can still finish the job.
@@ -1322,7 +1330,7 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 	/*
 	 * Refill the time slice.
 	 */
-	scx_bpf_task_set_slice(prev, calc_time_slice(taskc_prev, cpuc));
+	scx_bpf_task_set_slice(prev, calc_time_slice(prev, taskc_prev, cpuc));
 
 	/*
 	 * Reset prev task's lock and futex boost count
@@ -1767,7 +1775,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * Calculate the task's time slice here,
 	 * as it depends on the system load.
 	 */
-	scx_bpf_task_set_slice(p, calc_time_slice(taskc, cpuc));
+	scx_bpf_task_set_slice(p, calc_time_slice(p, taskc, cpuc));
 
 	/*
 	 * Update the current logical clock.
