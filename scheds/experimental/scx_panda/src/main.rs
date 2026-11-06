@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Will Clingan
 // scx_panda -- A SCHED_EXT SCHEDULER BUILT FROM DISCARDED IDEAS AND UNSPENT
 // POTENTIAL
 //

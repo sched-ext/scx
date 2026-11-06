@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Will Clingan
 // scx_panda LOADER
 // OPEN, SIZE, LOAD, FILL, ATTACH, READ COUNTERS, READ THE EXIT. NOTHING HERE
 // DECIDES ANYTHING ABOUT SCHEDULING.

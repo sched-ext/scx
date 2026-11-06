@@ -1,6 +1,6 @@
 [package]
 name = "scx_panda"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.91"
 description = "A sched_ext scheduler built from discarded ideas and unspent potential: CoDel sojourn ordering, effective-resistance distance pricing and a per-task run habit read as a price, every decision in BPF"

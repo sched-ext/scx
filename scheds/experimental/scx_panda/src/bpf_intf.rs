@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Will Clingan
 // MIRROR OF src/bpf/intf.h CONSTANTS. KEEP IN SYNC WITH THE C HEADER.
 // THE STATIC ASSERT IN scheduler.rs CATCHES MAX_AFFINITY_CANDIDATES
 // DRIFT AT COMPILE TIME.

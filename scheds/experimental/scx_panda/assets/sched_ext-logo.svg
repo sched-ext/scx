@@ -1,0 +1,37 @@
+<!--
+  CITATION
+  Title:      sched_ext logo (mark only, the octopus)
+  Owner:      the sched_ext project, https://sched-ext.com/
+  Source:     https://sched-ext.com/img/scx_Logo_Color.svg
+  Repository: https://github.com/sched-ext/sched-ext.com
+  License:    GPL-2.0, the license of that repository (its LICENSE file);
+              no separate artwork license or author is stated by the project
+  Retrieved:  2026-11-06
+  Modified:   the embedded ICC colour profile (U.S. Web Coated (SWOP) v2),
+              the Inkscape and sodipodi editor metadata and the <defs> block
+              holding them were removed; the drawing elements, the viewBox
+              and the colours are unchanged
+  Used by:    scx_panda, https://github.com/wllclngn/scx_panda, to mark
+              what the scheduler runs on; not covered by scx_panda's license
+-->
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" id="svg1" width="281.84933" height="284.94934" viewBox="0 0 281.84933 284.94934">
+<metadata>
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+           xmlns:dc="http://purl.org/dc/elements/1.1/"
+           xmlns:cc="http://creativecommons.org/ns#">
+    <cc:Work rdf:about="">
+      <dc:title>sched_ext logo</dc:title>
+      <dc:creator>the sched_ext project</dc:creator>
+      <dc:source>https://sched-ext.com/img/scx_Logo_Color.svg</dc:source>
+      <dc:rights>GPL-2.0, https://github.com/sched-ext/sched-ext.com</dc:rights>
+      <dc:date>2026-11-06</dc:date>
+      <cc:license rdf:resource="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"/>
+    </cc:Work>
+  </rdf:RDF>
+</metadata>
+
+  <g id="layer-MC0" transform="translate(-909.36)">
+    <path id="path13" d="M 0,0 C 0.1,-0.01 0.19,-0.01 0.29,-0.01 H 0 Z" style="fill:#000000;fill-opacity:1;fill-rule:nonzero;stroke:none" transform="matrix(1.3333333,0,0,-1.3333333,993.716,151.57867)" clip-path="url(#clipPath14)" />
+    <path id="path15" d="m 0,0 c -4.41,0 -7.98,3.57 -7.98,7.98 0,4.41 3.57,7.98 7.98,7.98 4.41,0 7.98,-3.57 7.98,-7.98 C 7.98,3.57 4.41,0 0,0 m 81.14,15.96 c 4.41,0 7.98,-3.57 7.98,-7.98 C 89.12,3.57 85.55,0 81.14,0 c -4.41,0 -7.98,3.57 -7.98,7.98 0,4.41 3.57,7.98 7.98,7.98 M 93.06,-71.2 H 61.42 c -1.93,0 -3.5,1.58 -3.5,3.5 v 56.58 h 7.67 V -46.1 c 0,-9.11 7.39,-16.5 16.5,-16.5 h 36.82 c 0,7.18 -5.82,13 -13,13 H 82.09 c -1.93,0 -3.5,1.58 -3.5,3.5 v 9.31 h 23.76 c 9.11,0 16.5,7.39 16.5,16.5 v 13.58 c -7.18,0 -13,-5.82 -13,-13 v -0.58 c 0,-1.92 -1.58,-3.5 -3.5,-3.5 H 78.59 v 12.67 h 0.73 c 0.1,0 0.19,0 0.29,0.01 10.39,0.15 18.75,8.62 18.75,19.04 0,10.42 -8.36,18.88 -18.75,19.03 v 10.15 c 0,21.28 -17.25,38.53 -38.54,38.53 -0.42,0 -0.83,-0.01 -1.24,-0.02 -0.39,0.01 -0.79,0.02 -1.2,0.02 C 17.34,75.64 0.09,58.39 0.09,37.11 v -9.59 c 0,-0.32 -0.24,-0.56 -0.55,-0.58 -10.13,-0.43 -18.2,-8.78 -18.2,-19.01 0,-10.42 8.36,-18.89 18.75,-19.04 0.1,-0.01 0.19,-0.01 0.29,-0.01 h 0.73 v -12.09 c 0,-0.32 -0.25,-0.58 -0.58,-0.58 h -22.6 c -1.12,0 -2.14,0.46 -2.88,1.2 -0.74,0.74 -1.2,1.76 -1.2,2.88 0,7.18 -5.82,13 -13,13 v -13 c 0,-9.43 7.65,-17.08 17.08,-17.08 h 22.6 c 0.33,0 0.58,-0.26 0.58,-0.58 v -8.15 c 0,-2.24 -1.83,-4.08 -4.08,-4.08 h -23.24 c -6.97,0 -12.67,-5.5 -12.98,-12.4 -0.02,-0.33 0.26,-0.6 0.58,-0.6 h 35.64 c 9.44,0 17.08,7.65 17.08,17.08 v 33.82 c 0,0.32 0.26,0.58 0.58,0.58 h 6.51 c 0.33,0 0.58,-0.26 0.58,-0.58 v -55.42 c 0,-2.24 -1.83,-4.08 -4.08,-4.08 h -31.06 c -6.97,0 -12.67,-5.5 -12.98,-12.4 -0.02,-0.33 0.26,-0.6 0.58,-0.6 H 17.7 c 9.44,0 17.08,7.65 17.08,17.08 v 55.42 c 0,0.32 0.26,0.58 0.58,0.58 h 9.56 V -67.7 c 0,-9.11 7.39,-16.5 16.5,-16.5 h 44.64 c 0,7.18 -5.82,13 -13,13" style="fill:#18ad9e;fill-opacity:1;fill-rule:nonzero;stroke:none" transform="matrix(1.3333333,0,0,-1.3333333,997.13853,136.76827)" clip-path="url(#clipPath16)" />
+  </g>
+</svg>

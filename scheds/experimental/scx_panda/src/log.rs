@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Will Clingan
 // TIMESTAMPED [HH:MM:SS] [LEVEL] LOGGING
 
 pub fn _timestamp() -> String {

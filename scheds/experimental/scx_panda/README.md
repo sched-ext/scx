@@ -1,4 +1,6 @@
-# 🐼
+# <img src="assets/sched_ext-logo.svg" alt="sched_ext" height="72"> <img src="assets/panda.svg" alt="panda" height="72">
+
+*scx_panda: It's been to Hell and back.*
 
 scx_panda is a Linux CPU scheduler built from discarded ideas and unspent
 potential. It runs on the kernel's `sched_ext` class, which lets a scheduler
@@ -122,6 +124,54 @@ it as experimental in scx's catalog, and on a later one it replaces the crate
 where the checkout has it. `--dry-run` shows what it would do without
 touching cargo or the network. It commits nothing.
 
+## Credits
+
+None of the three ideas is new on its own. What scx_panda adds is the
+refusal to turn any of them into a rule.
+
+- The queue clock and its target are CoDel: Kathleen Nichols and Van
+  Jacobson, "Controlling Queue Delay", ACM Queue, 2012, and RFC 8289 by
+  Nichols, Jacobson, McGregor and Iyengar. The target's motion between its
+  bounds is a damped harmonic oscillator, standard control.
+- Distance as effective resistance is resistance distance: D. J. Klein and
+  M. Randić, Journal of Mathematical Chemistry, 1993. The spectral side is
+  M. Fiedler, "Algebraic connectivity of graphs", Czechoslovak Mathematical
+  Journal, 1973. The loader's solvers follow Christiano, Kelner, Mądry,
+  Spielman and Teng (STOC 2011) and Chen, Kyng, Liu, Peng, Probst Gutenberg
+  and Sachdeva (FOCS 2022); the exact small-graph form is the spanning
+  two-forest ratio of Barrett, Evans and Francis.
+- The run habit is an exponentially weighted moving average of service per
+  run, standard practice in schedulers for decades; no novelty is claimed
+  for it, only for reading it as a price and never as a class.
+- sched_ext is the Linux kernel's extensible scheduler class by Tejun Heo,
+  David Vernet and the sched-ext contributors; the BPF program is written
+  against scx's common headers, which keep their own copyright.
+- The mechanisms themselves come from PANDEMONIUM's record, the author's
+  earlier scheduler, and from silica, the author's record before it: What
+  converged there was kept, what the record said failed was not rebuilt.
+### Images
+
+Both images at the top belong to other projects and are not covered by this
+repository's license. Each SVG carries the same citation inside it.
+
+- **sched_ext logo**, the mark alone. Owner: The sched_ext project,
+  [sched-ext.com](https://sched-ext.com/). Source:
+  [sched-ext.com/img/scx_Logo_Color.svg](https://sched-ext.com/img/scx_Logo_Color.svg),
+  whose repository is
+  [sched-ext/sched-ext.com](https://github.com/sched-ext/sched-ext.com),
+  licensed GPL-2.0; the project states no separate artwork license or
+  author. Retrieved 2026-11-06. Stored as `assets/sched_ext-logo.svg` with the
+  embedded print colour profile and editor metadata removed and the drawing
+  unchanged. It marks what this scheduler runs on.
+- **Panda face**, Unicode U+1F43C, from Google's
+  [Noto Emoji](https://github.com/googlefonts/noto-emoji), release
+  [v2.042](https://github.com/googlefonts/noto-emoji/releases/tag/v2.042),
+  file `svg/emoji_u1f43c.svg`. Owner: Google LLC, the Noto Emoji project.
+  License: [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0),
+  the license the project's README places its image resources under; its
+  text is `assets/LICENSE-noto-emoji`. Retrieved 2026-11-06. Stored as
+  `assets/panda.svg` with the drawing unchanged. It is this project's mark.
+
 ## License
 
-GPL-2.0-only.
+GPL-2.0-only. Copyright (c) 2026 Will Clingan.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Will Clingan
 // scx_panda SHARED INTERFACE
 // CONSTANTS AND STRUCTURES SHARED BETWEEN BPF AND THE LOADER
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Will Clingan
 // scx_panda CPU TOPOLOGY
 // READS SYSFS ONCE AT STARTUP AND ON HOTPLUG, COMPUTES THE R_eff TABLES, THE
 // DOMAIN TREE AND tau, AND FILLS THE BPF MAPS. THIS IS THE CONTENT OF THE
@@ -425,7 +427,10 @@ impl CpuTopology {
     // PART THE L3 RUNG COINCIDES WITH THE SOCKET RUNG.
     //
     // O(n^3) FOR n CPUs, WHICH IS TRIVIAL AT STARTUP FOR n <= 256.
-    // REFERENCE: Christiano-Kelner-Madry-Spielman-Teng (STOC 2011),
+    // REFERENCE: RESISTANCE DISTANCE IS KLEIN AND RANDIC (J. MATH. CHEM.
+    //            1993); ALGEBRAIC CONNECTIVITY AND ITS EIGENVECTOR ARE
+    //            FIEDLER (CZECH. MATH. J. 1973); THE SOLVERS FOLLOW
+    //            Christiano-Kelner-Madry-Spielman-Teng (STOC 2011) AND
     //            Chen-Kyng-Liu-Peng-Gutenberg-Sachdeva (FOCS 2022)
 
     // STIFF L2 RUNG: SMT siblings SHARE L2, so a move between them costs ~0 cache.
