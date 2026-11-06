@@ -331,6 +331,47 @@ static int calc_nr_active_cpus(void)
 	return nr_cpu_ids;
 }
 
+/*
+ * Kick an idle CPU of @cpdom_id, a domain with queued tasks and no CPU in
+ * the active or overflow set. Without the kick, no CPU consumes them.
+ *
+ * Such a case can happen in the race below between concurrent ops.enqueue()
+ * and ops.dispatch(). The key reason is that the kernel defers the actual
+ * insert into the DSQ until ops.enqueue() returns. So CPU X finds the queue
+ * empty and goes idle, while CPU E saw X busy and did not kick it.
+ *
+ *   CPU E (enqueuer)                   CPU X (domain D, uncovered)
+ *   ----------------                   ---------------------------
+ *   ops.enqueue(p), targeting X        runs its last task
+ *     pick D's DSQ (insert deferred)
+ *     X's hint clear, no kick
+ *                                      ops.dispatch(): D's DSQs empty
+ *                                      ops.update_idle(true):
+ *                                        set X's hint
+ *                                        D's DSQs empty, no kick
+ *   direct_dispatch(): p in D's DSQ
+ *                                      idle with the hint set
+ *
+ * Nothing else kicks X afterwards. The sys_stat resync kicks only idle CPUs
+ * without the hint, core compaction kicks only CPUs in either set, and
+ * wakeups go to active CPUs, not to an uncovered domain.
+ */
+static void kick_uncovered_cpdom(u64 cpdom_id)
+{
+	struct bpf_cpumask *i_mask;
+	u32 cpu;
+
+	i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom_id]);
+	if (!i_mask) {
+		return;
+	}
+
+	cpu = bpf_cpumask_first(cast_mask(i_mask));
+	if (cpu < nr_cpu_ids) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
+}
+
 __weak
 int do_core_compaction(void)
 {
@@ -468,6 +509,19 @@ int do_core_compaction(void)
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
 		WRITE_ONCE(cpdomc->cap_sum_active_cpus, cpdomc->cap_sum_temp);
 		WRITE_ONCE(cpdomc->cap_sum_temp, 0);
+
+		/*
+		 * A domain no CPU covers can hold a task that every idle CPU
+		 * of it missed. Kick one to drain it (see
+		 * kick_uncovered_cpdom() for the race).
+		 */
+		if (use_cpdom_dsq() &&
+		    nr_cpdoms > 1 && !cpdomc->nr_active_cpus &&
+		    !READ_ONCE(cpdomc->nr_overflow_cpus) &&
+		    (scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id)) ||
+		     scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdom_id)))) {
+			kick_uncovered_cpdom(cpdom_id);
+		}
 
 		if (cpdomc->nr_active_cpus)
 			nr_active_cpdoms++;
