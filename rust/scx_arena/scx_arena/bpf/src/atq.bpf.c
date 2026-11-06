@@ -96,13 +96,11 @@ int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena
 {
 	int ret;
 
-	ret = scx_atq_lock(atq);
-	if (ret)
-		return ret;
+	scx_spin_lock(&atq->lock);
 
 	ret = scx_atq_insert_vtime_unlocked(atq, taskc, vtime);
 
-	scx_atq_unlock(atq);
+	scx_spin_unlock(&atq->lock);
 
 	return ret;
 }
@@ -156,13 +154,11 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
 	int ret;
 
-	ret = scx_atq_lock(atq);
-	if (ret)
-		return ret;
+	scx_spin_lock(&atq->lock);
 
 	ret = scx_atq_remove_internal(atq, taskc, false);
 
-	scx_atq_unlock(atq);
+	scx_spin_unlock(&atq->lock);
 
 	return ret;
 }
@@ -174,18 +170,16 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 	u64 taskc_ptr;
 	int ret;
 
-	ret = scx_atq_lock(atq);
-	if (ret)
-		return (u64)NULL;
+	scx_spin_lock(&atq->lock);
 
 	if (!scx_atq_nr_queued(atq)) {
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 		return (u64)NULL;
 	}
 
 	ret = rb_least(atq->tree, NULL, &taskc_ptr);
 	if (ret) {
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 
 		if (ret != -ENOENT)
 			bpf_printk("%s: error %d", __func__, ret);
@@ -195,7 +189,7 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 	taskc = (scx_task_common *)taskc_ptr;
 	ret = rb_remove_node(atq->tree, &taskc->node);
 	if (ret) {
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 		bpf_printk("%s: failed to remove least node: %d", __func__, ret);
 		return (u64)NULL;
 	}
@@ -207,7 +201,7 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 
 	taskc->atq = NULL;
 
-	scx_atq_unlock(atq);
+	scx_spin_unlock(&atq->lock);
 
 	return taskc_ptr;
 }
@@ -216,20 +210,17 @@ __hidden
 u64 scx_atq_peek(scx_atq_t *atq)
 {
 	u64 vtime, taskc_ptr;
-	int ret;
 
-	ret = scx_atq_lock(atq);
-	if (ret)
-		return (u64)NULL;
+	scx_spin_lock(&atq->lock);
 
 	if (!scx_atq_nr_queued(atq)) {
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 		return (u64)NULL;
 	}
 
-	ret = rb_least(atq->tree, &vtime, &taskc_ptr);
+	rb_least(atq->tree, &vtime, &taskc_ptr);
 
-	scx_atq_unlock(atq);
+	scx_spin_unlock(&atq->lock);
 
 	return taskc_ptr;
 }
@@ -265,18 +256,15 @@ int scx_atq_task_detach(scx_task_common __arg_arena *taskc)
 			continue;
 		}
 
-		if ((ret = scx_atq_lock(atq))) {
-			bpf_printk("Failed to lock ATQ for task");
-			return ret;
-		}
+		scx_spin_lock(&atq->lock);
 
 		if (taskc->atq != atq) {
-			scx_atq_unlock(atq);
+			scx_spin_unlock(&atq->lock);
 			continue;
 		}
 
 		ret = scx_atq_remove_internal(atq, taskc, true);
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 		if (ret)
 			return ret;
 		break;
@@ -304,18 +292,15 @@ int scx_atq_task_fini(scx_task_common __arg_arena *taskc)
 		if (!atq || atq == (scx_atq_t *)SCX_ATQ_DEAD)
 			return 0;
 
-		if ((ret = scx_atq_lock(atq))) {
-			bpf_printk("Failed to lock ATQ for task");
-			return ret;
-		}
+		scx_spin_lock(&atq->lock);
 
 		if (taskc->atq != atq) {
-			scx_atq_unlock(atq);
+			scx_spin_unlock(&atq->lock);
 			continue;
 		}
 
 		ret = scx_atq_remove_unlocked(taskc->atq, taskc);
-		scx_atq_unlock(atq);
+		scx_spin_unlock(&atq->lock);
 		return ret ? ret : 1;
 	}
 

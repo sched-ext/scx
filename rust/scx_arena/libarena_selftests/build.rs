@@ -12,8 +12,8 @@ fn main() {
     let mut builder = scx_cargo::BpfBuilder::new().unwrap();
 
     builder
-        .add_include_path(assets.include_dir().to_str().unwrap())
-        .add_include_path(assets.libarena_include_dir().to_str().unwrap());
+        .add_include_path(assets.libarena_include_dir().to_str().unwrap())
+        .add_include_path(assets.include_dir().to_str().unwrap());
     for flag in assets.libarena_cflags() {
         builder.add_cflag(flag);
     }

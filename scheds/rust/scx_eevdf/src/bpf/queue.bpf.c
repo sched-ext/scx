@@ -9,7 +9,7 @@
  * The queue
  * ---------
  *
- * Every cid owns one EDQ (lib/edq.h): an AVL tree ordered by virtual
+ * Every cid owns one EDQ (lib/edq.h): a red-black tree ordered by virtual
  * deadline and augmented, in every subtree, with the least eligible
  * vruntime and the shortest request under it. That augmentation is what
  * makes the EEVDF pick one descent instead of a walk:

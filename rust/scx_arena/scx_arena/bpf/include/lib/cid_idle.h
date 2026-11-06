@@ -3,7 +3,7 @@
 #pragma once
 
 #include <lib/cid_topology.h>
-#include <lib/arena_map.h>
+#include <libarena/common.h>
 
 /*
  * CID idle tracking for sched_ext schedulers
