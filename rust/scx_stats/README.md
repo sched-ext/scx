@@ -7,7 +7,16 @@ loading them.
 This library provides an easy way to define statistics and access them
 through a UNIX domain socket. While this library is developed for SCX
 schedulers, it can be used elsewhere as the only baked-in assumption is the
-default UNIX domain socket path which can be overridden.
+default UNIX domain socket path which can be overridden. The base directory
+defaults to `/var/run/scx`, set `SCX_STATS_BASE_PATH` to use another
+directory. For example, Android has no `/var/run`, so point both the
+scheduler and the client at a writable directory:
+
+```sh
+# Start the scheduler. The socket is created at
+# /data/local/tmp/scx/root/stats.
+SCX_STATS_BASE_PATH=/data/local/tmp/scx scx_SCHEDNAME
+```
 
 Statistics are defined as structs. A statistics struct can contain the
 following fields:
