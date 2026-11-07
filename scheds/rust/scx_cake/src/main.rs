@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// scx_cake — a clean-slate sched_ext scheduler.
+// scx_cake — a sched_ext CPU scheduler tuned for games.
 //
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
@@ -54,7 +54,7 @@ fn configure_acquire_census(skel: &mut OpenBpfSkel<'_>, probe_on: bool) {
     }
 }
 
-/// scx_cake: a gaming-first sched_ext scheduler.
+/// scx_cake: a sched_ext CPU scheduler tuned for games.
 #[derive(Debug, PartialEq, Eq, Parser)]
 #[command(after_help = toggle_help())]
 struct Opts {
@@ -65,12 +65,6 @@ struct Opts {
     /// Save device wake-to-running histograms and IRQ sample counters as CSV at exit.
     #[clap(long, value_name = "NEW_CSV")]
     signal_report: Option<std::path::PathBuf>,
-
-    /// Lean idle claim (custom kernel): off, on, or lazy (on plus the deferred
-    /// core-word clear) [default: lazy]. Missing support falls back to the
-    /// regular claim; only an explicit request warns.
-    #[clap(long, value_enum)]
-    lean_idle: Option<LeanIdle>,
 
     /// Require native CTZ/POPCNT. By default, detect support at startup and fall back.
     #[clap(long)]
@@ -131,24 +125,6 @@ enum KernelSignals {
     On,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-enum LeanIdle {
-    #[default]
-    Off,
-    On,
-    Lazy,
-}
-
-/// The ops flags a --lean-idle mode asks for; zero when the kernel lacks them.
-fn lean_idle_flags(requested: LeanIdle, lean: u64, lazy: u64) -> u64 {
-    match requested {
-        LeanIdle::Off => 0,
-        LeanIdle::On => lean,
-        LeanIdle::Lazy if lean != 0 && lazy != 0 => lean | lazy,
-        LeanIdle::Lazy => 0,
-    }
-}
-
 fn signal_mode(requested: KernelSignals, supported: bool) -> (bool, bool) {
     (
         supported && requested != KernelSignals::Off,
@@ -207,15 +183,6 @@ fn aggregate_signal_counters(per_cpu: &[Vec<u8>]) -> Result<Vec<u64>> {
 #[cfg(test)]
 mod signal_tests {
     use super::*;
-
-    #[test]
-    fn lean_idle_asks_only_for_flags_the_kernel_has() {
-        assert_eq!(lean_idle_flags(LeanIdle::Off, 1 << 10, 1 << 11), 0);
-        assert_eq!(lean_idle_flags(LeanIdle::On, 1 << 10, 1 << 11), 1 << 10);
-        assert_eq!(lean_idle_flags(LeanIdle::Lazy, 1 << 10, 1 << 11), 3 << 10);
-        assert_eq!(lean_idle_flags(LeanIdle::On, 0, 0), 0);
-        assert_eq!(lean_idle_flags(LeanIdle::Lazy, 1 << 10, 0), 0);
-    }
 
     #[test]
     fn modes_preserve_fallback_and_observation_does_not_enable_policy() {
@@ -368,30 +335,17 @@ impl<'a> Scheduler<'a> {
         if opts.kernel_signals != KernelSignals::Off && !signal_support {
             warn!("Kernel signal v1 support absent; using existing Cake policy");
         }
-        // Lazy is the default: KovaaK's 10-12, quiet and loaded, no metric worse than off.
-        let lean_idle = opts.lean_idle.unwrap_or(LeanIdle::Lazy);
-        let lean_flags = lean_idle_flags(
-            lean_idle,
-            compat::read_enum("scx_ops_flags", "SCX_OPS_LEAN_IDLE").unwrap_or(0),
-            compat::read_enum("scx_ops_flags", "SCX_OPS_LEAN_IDLE_LAZY_SMT").unwrap_or(0),
-        );
-        let lean_asked = opts.lean_idle.is_some_and(|m| m != LeanIdle::Off);
-        if lean_flags != 0 || lean_asked {
-            info!("Lean idle    requested={lean_idle:?} flags={lean_flags:#x}");
-        }
-        if lean_flags == 0 && lean_asked {
-            warn!("Lean idle claim absent from this kernel; using the regular claim");
-        }
-
         // The startup banner is cake's only telemetry, one-shot: version, machine
         // shape, compiled constants, and the fast paths the running kernel provides.
         let topo = Topology::new().context("failed to read topology")?;
         let physical = topo.all_cores.len();
         let total = topo.all_cpus.len();
 
-        let slice_us = bpf_intf::consts_SLICE_NS as u64 / bpf_intf::consts_NSEC_PER_USEC as u64;
+        let usec = bpf_intf::consts_NSEC_PER_USEC as u64;
+        let slice_us = bpf_intf::consts_SLICE_NS as u64 / usec;
+        let grant_us = bpf_intf::consts_CAKE_GRANT_CAP_NS as u64 / usec;
         let queued_wakeup = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP != 0;
-        let dsq_peek = compat::ksym_exists("scx_bpf_dsq_peek").unwrap_or(false);
+        let dsq_peek = dsq_peek_native();
 
         let NativeBitops {
             ctz: native_ctz,
@@ -462,9 +416,6 @@ impl<'a> Scheduler<'a> {
             prog.set_autoattach(false);
         }
 
-        // Linux CPU numbering does not guarantee that an SMT sibling is cpu +/-
-        // nr_cpus/2: populate the BPF lookup from sysfs topology. -1 means no online
-        // sibling, and the fallback uses the kernel idle picker.
         let rodata = skel
             .maps
             .rodata_data
@@ -598,7 +549,8 @@ impl<'a> Scheduler<'a> {
         if one_word && rank_words.len() > 1 {
             rodata.cake_rank_tiers = rank_words.len() as u32;
             rodata.cpu_perf_known = rank_words.iter().fold(0, |all, word| all | word);
-            for (slot, word) in rodata.cpu_perf_tier.iter_mut().zip(rank_words) {
+            let ranks = skel.maps.data_cake_ranks_data.as_mut().unwrap();
+            for (slot, word) in ranks.cpu_perf_tier.iter_mut().zip(rank_words) {
                 *slot = word;
             }
         }
@@ -631,16 +583,16 @@ impl<'a> Scheduler<'a> {
             }
         }
         if opts.verbose {
-            info!("   slice   {slice_us}µs, {total} per-CPU vtime queues + one wake pool per LLC");
+            info!(
+                "   slice   grants to {grant_us}µs, kthreads {slice_us}µs, {total} per-CPU vtime queues + one wake pool per LLC"
+            );
         }
-        // cake calls scx_bpf_dsq_peek() unconditionally; on a kernel without
-        // the ksym the load fails outright, so "MISSING" is the honest word.
         let kernel_line = format!(
             "   kernel  queued_wakeup {}, dsq_peek {}",
             if queued_wakeup { "on" } else { "UNSUPPORTED" },
-            if dsq_peek { "native" } else { "MISSING" }
+            if dsq_peek { "native" } else { "iterator" }
         );
-        if !queued_wakeup || !dsq_peek {
+        if !queued_wakeup {
             warn!("{kernel_line}");
         } else if opts.verbose {
             info!("{kernel_line}");
@@ -664,58 +616,43 @@ impl<'a> Scheduler<'a> {
             info!("   toggle  all at default");
         }
 
-        // Hardware-anchored thresholds: measured, never derived from the slice.
-        // Clamped so a probe perturbed by host load cannot mis-tune.
+        // The hop p99 sets the tick predictor horizon. It never sets cake_handoff_max_ns:
+        // a clean ping-pong does not measure a contended handoff.
         match probe_handoff_hop_ns() {
             Some(probe) => {
-                // The admission threshold IS the tail of a genuine handoff, used directly.
-                // DIAGNOSTIC ONLY: driving cake_handoff_max_ns from this probe cost
-                // mutex-handoff 35%; it measures a clean ping-pong, not contended handoffs.
                 let (med, p99) = (probe.median, probe.p99);
                 let hm = rodata.cake_handoff_max_ns;
-                // The probe's p99 is the pick-to-landing horizon the tick predictor needs;
-                // a hop past a quarter tick would call every CPU tick-soon: off.
+                // A hop past a quarter tick would call every CPU tick-soon: off.
                 let hop_max = rodata.cake_tick_ns / 4;
-                rodata.cake_wake_hop_ns = if p99 <= hop_max {
+                rodata.cake_wake_hop_ns = if rodata.cake_tick_ns == 0 {
+                    0
+                } else if p99 <= hop_max {
                     p99
                 } else {
                     warn!("   probe   hop p99 {p99}ns exceeds {hop_max}ns; tick predictor off");
                     0
                 };
                 if opts.verbose {
-                    info!(
-                        "Handoff      Hop median {med} ns / p99 {p99} ns; handoff limit {hm} ns (diagnostic)"
-                    );
+                    info!("Handoff      Hop median {med} ns / p99 {p99} ns; handoff limit {hm} ns");
                 }
             }
             None => {
-                log::warn!("   probe   handoff probe failed (diagnostic only)");
+                warn!("   probe   handoff probe failed; tick predictor off");
             }
         }
 
-        // Interrupt sinks are measured live, never guessed: per-CPU handler-time
-        // share off the run loop, cut at the distribution's widest gap. Nothing is
-        // sampled at attach (that measures launch), so the scheduler starts sink-free.
-
-        let siblings = &mut rodata.cpu_sibling;
-        siblings.fill(-1);
-        for core in topo.all_cores.values() {
-            let cpu_ids: Vec<usize> = core.cpus.keys().copied().collect();
-
-            if cpu_ids.len() < 2 {
-                continue;
-            }
-            for (idx, cpu) in cpu_ids.iter().copied().enumerate() {
-                let sibling = cpu_ids[(idx + 1) % cpu_ids.len()];
-
-                anyhow::ensure!(
-                    cpu < siblings.len() && sibling <= i32::MAX as usize,
-                    "CPU topology id exceeds Cake's compiled sibling map"
-                );
-                siblings[cpu] = sibling as i32;
-            }
-        }
-        if let Some((shift, left, right)) = smt_fold(siblings) {
+        // Linux CPU numbering does not guarantee that an SMT sibling is cpu +/-
+        // nr_cpus/2: populate the BPF lookups from sysfs topology.
+        let core_cpus = topo
+            .all_cores
+            .values()
+            .map(|core| core.cpus.keys().copied().collect::<Vec<usize>>());
+        fill_core_maps(
+            core_cpus,
+            &mut rodata.cpu_sibling,
+            &mut rodata.cake_core_mates,
+        )?;
+        if let Some((shift, left, right)) = smt_fold(&rodata.cpu_sibling) {
             rodata.cake_smt_shift = shift;
             rodata.cake_smt_left = left;
             rodata.cake_smt_right = right;
@@ -879,7 +816,10 @@ impl<'a> Scheduler<'a> {
         if signals_enabled {
             skel.struct_ops.cake_ops_mut().flags |= signal_flag;
         }
-        skel.struct_ops.cake_ops_mut().flags |= lean_flags;
+        // One-word hosts claim on their own word: the kernel can stop updating its masks.
+        if one_word {
+            skel.struct_ops.cake_ops_mut().flags &= !*compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+        }
         if idle_exit_max_ns == 0 {
             skel.progs.cake_cpu_idle.set_autoload(false);
         }
@@ -953,7 +893,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         info!("🍰 Running");
-        // ops.init chose the task-age clock; say which under -v.
+        // Say which task-age clock the loader chose, under -v.
         let tick_ns = skel.maps.rodata_data.as_ref().map_or(0, |r| r.cake_tick_ns);
         if opts.verbose {
             if tick_ns > 0 {
@@ -1013,7 +953,7 @@ impl<'a> Scheduler<'a> {
                         .zip(&b)
                         .enumerate()
                         .filter(|(_, (x, y))| **x != 0 && **y != 0)
-                        .map(|(i, (x, y))| format!("slot{}.{}:{x}/{y}", i / 2, i % 2))
+                        .map(|(cpu, (x, y))| format!("cpu{cpu}:{x}/{y}"))
                         .collect();
                     info!(
                         "   irq     in-handler depth stuck on {} CPU(s) at {polls} s {}",
@@ -1076,13 +1016,13 @@ impl<'a> Scheduler<'a> {
             let bands: Vec<String> = (0..bss.cake_acquire_hist.len())
                 .map(|b| format!("{}us", 1u64 << b))
                 .collect();
-            info!("   g93     bands (>=) {}", bands.join(" "));
+            info!("   release bands (>=) {}", bands.join(" "));
             for (path, name) in ["non-immed", "immed", "slice-0"].iter().enumerate() {
                 let row: Vec<String> = bss.cake_release_census[path]
                     .iter()
                     .map(|v| v.to_string())
                     .collect();
-                info!("   g93     release {:9} {}", name, row.join(" "));
+                info!("   release {:9} {}", name, row.join(" "));
             }
             let reasons: Vec<String> = bss
                 .cake_release_reason
@@ -1090,7 +1030,7 @@ impl<'a> Scheduler<'a> {
                 .map(|v| v.to_string())
                 .collect();
             info!(
-                "   g93     release by reason rt/dl/stop/unknown {}",
+                "   release by reason rt/dl/stop/unknown {}",
                 reasons.join(" ")
             );
             let holds: Vec<String> = bss
@@ -1098,7 +1038,7 @@ impl<'a> Scheduler<'a> {
                 .iter()
                 .map(|v| v.to_string())
                 .collect();
-            info!("   g93     hold      {}", holds.join(" "));
+            info!("   release hold      {}", holds.join(" "));
             // Observe-only histograms: bands summed over CPUs, the antimode split
             // (the emptiest band between the two largest modes) and the median band.
             let shift = bpf_intf::consts_CAKE_HIST_SHIFT;
@@ -1304,7 +1244,7 @@ impl<'a> Scheduler<'a> {
             let sel = tot[0].max(1) as f64;
             for (i, name) in NAMES.iter().enumerate() {
                 info!(
-                    "   arms    {name:<13} {:>12}  {:>6.2}% of select",
+                    "   census  {name:<13} {:>12}  {:>6.2}% of select",
                     tot[i],
                     tot[i] as f64 * 100.0 / sel
                 );
@@ -1322,8 +1262,9 @@ impl<'a> Scheduler<'a> {
                 .iter()
                 .map(|v| *v as i64)
                 .collect();
-            for (pool, left) in pending.iter().enumerate().filter(|(_, v)| **v != 0) {
-                warn!("   pool    {pool}: {left} tokens left at exit; a pool token leaked");
+            // Bypass wipes pooled tasks' tags before ops.disable, so a positive count is normal.
+            for (pool, left) in pending.iter().enumerate().filter(|(_, v)| **v < 0) {
+                warn!("   pool    {pool}: pending {left} at exit; more tokens returned than taken");
             }
             if self.verbose {
                 info!(
@@ -1480,11 +1421,9 @@ fn sink_words<const N: usize>(set: &[bool]) -> [u64; N] {
 
 /// One host's wake+block+switch hop, as a distribution rather than a mean.
 struct HandoffProbe {
-    /// Typical hop — the switch-cost anchor for the preempt-protect window.
+    /// Typical hop, logged under -v.
     median: u64,
-    /// Tail of a GENUINE handoff: the admission threshold itself, not a base to
-    /// multiply. A mean-derived cut loses the real handoffs that land above the
-    /// mean; the dose-response wanted a high firing rate, hence a high percentile.
+    /// Tail hop: the tick predictor's pick-to-landing horizon.
     p99: u64,
 }
 
@@ -1582,6 +1521,8 @@ fn sinks_by_widest_gap(deltas: &[u64]) -> Option<Vec<bool>> {
 /// windows is published, released after UNFLAG_POLLS below it (a loading screen
 /// must not flap the mask). An unchanged set doubles the interval up to
 /// INTERVAL_MAX; a disagreeing window resets to tick rate. All four are counts.
+/// Nothing is sampled at attach (that measures launch), so the scheduler starts
+/// sink-free.
 struct SinkMonitor {
     /// Last accepted read; deltas span the full gap between accepted reads,
     /// so a slower cadence measures a longer, smoother window.
@@ -1739,6 +1680,23 @@ fn coarse_tick_ns() -> u64 {
     } else {
         0
     }
+}
+
+/// Major and minor of a kernel release such as "7.3.1-1-cachyos".
+fn release_version(release: &str) -> (u32, u32) {
+    let mut fields = release
+        .trim()
+        .split(['.', '-'])
+        .map(|f| f.parse().unwrap_or(0));
+    (fields.next().unwrap_or(0), fields.next().unwrap_or(0))
+}
+
+/// Whether __COMPAT_scx_bpf_dsq_peek calls the kfunc: it needs the ksym and the
+/// v7.1 FIFO fix, and uses the DSQ iterator otherwise.
+fn dsq_peek_native() -> bool {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+
+    release_version(&release) >= (7, 1) && compat::ksym_exists("scx_bpf_dsq_peek").unwrap_or(false)
 }
 
 /// cpuidle exit latency per state index (ns, enabled states only) from cpu0's
@@ -2111,6 +2069,40 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Publish each core's threads to the BPF lookups: `siblings` rings them, -1
+/// meaning no online sibling, and `mates` holds every other thread of a CPU
+/// below id 64, the idle word's range.
+fn fill_core_maps(
+    cores: impl Iterator<Item = Vec<usize>>,
+    siblings: &mut [i32],
+    mates: &mut [u64; 64],
+) -> Result<()> {
+    siblings.fill(-1);
+    mates.fill(0);
+    for cpu_ids in cores {
+        if cpu_ids.len() < 2 {
+            continue;
+        }
+        let core_word = cpu_ids
+            .iter()
+            .filter(|&&cpu| cpu < 64)
+            .fold(0u64, |word, &cpu| word | (1u64 << cpu));
+        for (idx, cpu) in cpu_ids.iter().copied().enumerate() {
+            let sibling = cpu_ids[(idx + 1) % cpu_ids.len()];
+
+            anyhow::ensure!(
+                cpu < siblings.len() && sibling <= i32::MAX as usize,
+                "CPU topology id exceeds Cake's compiled sibling map"
+            );
+            siblings[cpu] = sibling as i32;
+            if cpu < 64 {
+                mates[cpu] = core_word & !(1u64 << cpu);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Factor the narrow sibling map into two shifts when every edge has the
 /// same distance. Irregular numbering keeps the exact per-CPU lookup.
 fn smt_fold(siblings: &[i32]) -> Option<(u32, u64, u64)> {
@@ -2422,82 +2414,443 @@ mod tests {
         sinks_by_widest_gap,
     };
 
+    // Synthetic CPU layouts, as each core's thread ids.
+    fn pairs_at(cores: usize, stride: usize) -> Vec<Vec<usize>> {
+        (0..cores).map(|core| vec![core, core + stride]).collect()
+    }
+
+    fn adjacent_pairs(cores: usize) -> Vec<Vec<usize>> {
+        (0..cores)
+            .map(|core| vec![2 * core, 2 * core + 1])
+            .collect()
+    }
+
+    fn singles(cores: usize) -> Vec<Vec<usize>> {
+        (0..cores).map(|core| vec![core]).collect()
+    }
+
+    // Hybrid: SMT pairs, then CPUs with no sibling.
+    fn pairs_then_singles(pairs: usize, lone: usize) -> Vec<Vec<usize>> {
+        let mut cores = adjacent_pairs(pairs);
+        cores.extend((0..lone).map(|core| vec![2 * pairs + core]));
+        cores
+    }
+
+    // Offlined threads and mixed distances: no single shift expresses this.
+    fn uneven_layout() -> Vec<Vec<usize>> {
+        vec![vec![0, 1], vec![2, 5], vec![3], vec![4, 7], vec![6]]
+    }
+
+    fn four_threads(cores: usize) -> Vec<Vec<usize>> {
+        (0..cores)
+            .map(|core| (4 * core..4 * core + 4).collect())
+            .collect()
+    }
+
+    fn core_mask(core: &[usize]) -> u64 {
+        core.iter().fold(0u64, |mask, &cpu| mask | (1u64 << cpu))
+    }
+
+    /// cake_own_cores() in cake.bpf.c, over the loader's rodata.
+    fn own_cores(w: u64, fold: Option<(u32, u64, u64)>, mates: &[u64; 64]) -> u64 {
+        match fold {
+            Some((0, _, _)) => w,
+            Some((shift, left, right)) => {
+                w & (((w & left) << shift) | ((w & right) >> shift) | !(left | right))
+            }
+            None => (0..64)
+                .filter(|&cpu| w & (1u64 << cpu) != 0 && mates[cpu] & !w == 0)
+                .fold(0u64, |cores, cpu| cores | (1u64 << cpu)),
+        }
+    }
+
+    /// Every subset up to 16 CPUs; above that the boundaries and a fixed-seed sample.
+    fn probe_words(cores: &[Vec<usize>]) -> Vec<u64> {
+        let all = cores.iter().fold(0u64, |mask, core| mask | core_mask(core));
+        let mut words = vec![0, all];
+        if all.count_ones() <= 16 {
+            let mut subset = all;
+            while subset != 0 {
+                words.push(subset);
+                subset = (subset - 1) & all;
+            }
+            return words;
+        }
+        for core in cores {
+            words.push(core_mask(core));
+            words.push(all & !core_mask(core));
+            words.extend(core.iter().map(|&cpu| all & !(1u64 << cpu)));
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            words.push(state & all);
+        }
+        words
+    }
+
+    // Catches a whole-core word that disagrees with the real threads of a core on
+    // some numbering, which sends wakes to a busy core's sibling.
+    #[test]
+    fn whole_core_word_matches_brute_force_on_every_layout() -> anyhow::Result<()> {
+        let layouts = [
+            ("siblings at +N", pairs_at(16, 16), Some(16)),
+            ("adjacent siblings", adjacent_pairs(8), Some(1)),
+            ("no SMT", singles(16), Some(0)),
+            ("one CPU", singles(1), Some(0)),
+            ("one core, two threads", vec![vec![0, 1]], Some(1)),
+            ("pairs plus singles", pairs_then_singles(8, 8), Some(1)),
+            ("uneven", uneven_layout(), None),
+            ("four threads a core", four_threads(4), None),
+            ("64 ids at +32, bit 63", pairs_at(32, 32), Some(32)),
+            ("64 ids adjacent, bit 63", adjacent_pairs(32), Some(1)),
+        ];
+        for (name, cores, shift) in layouts {
+            let mut siblings = [-1i32; 64];
+            let mut mates = [0u64; 64];
+            super::fill_core_maps(cores.iter().cloned(), &mut siblings, &mut mates)?;
+            let fold = super::smt_fold(&siblings);
+            assert_eq!(fold.map(|(s, _, _)| s), shift, "{name}");
+            for w in probe_words(&cores) {
+                let expected = cores
+                    .iter()
+                    .map(|core| core_mask(core))
+                    .filter(|&mask| w & mask == mask)
+                    .fold(0u64, |all, mask| all | mask);
+                assert_eq!(own_cores(w, fold, &mates), expected, "{name} word {w:#x}");
+            }
+        }
+        Ok(())
+    }
+
+    // Each of these raises "built-in idle tracking is disabled" and ejects cake on a
+    // host without KEEP_BUILTIN_IDLE. Substrings: the _node and __ forms count too.
+    const BUILTIN_IDLE_KFUNCS: [&str; 6] = [
+        "scx_bpf_pick_idle_cpu",
+        "scx_bpf_test_and_clear_cpu_idle",
+        "scx_bpf_get_idle_cpumask",
+        "scx_bpf_get_idle_smtmask",
+        "scx_bpf_select_cpu_dfl",
+        "scx_bpf_select_cpu_and",
+    ];
+
+    // Exit latencies a host with a cpuidle driver reports.
+    const IDLE_STATES_NS: [u64; 3] = [1_000, 18_000, 350_000];
+
+    // Room for any program's level 2 log: untouched pages cost nothing, an overflow refuses the
+    // load, and libbpf's own buffer would verify the largest program once per doubling.
+    const VERIFIER_LOG_BYTES: usize = 256 << 20;
+
+    // One CPU layout as the loader would describe it to BPF.
+    struct LoadShape {
+        name: &'static str,
+        cores: Vec<Vec<usize>>,
+        llcs: usize,
+        // Distinct core preference levels, best first; one level means no ranking.
+        ranks: usize,
+        // Cores from this index on are little, which the loader acts on with one LLC.
+        little_from: Option<usize>,
+        idle_states: &'static [u64],
+        // Read the walked calls from a level 2 log, which costs seconds a shape.
+        check_calls: bool,
+        // Possible CPU ids when hotplug headroom runs past the present ones.
+        possible: Option<usize>,
+    }
+
+    fn load_shape(
+        name: &'static str,
+        cores: Vec<Vec<usize>>,
+        llcs: usize,
+        ranks: usize,
+    ) -> LoadShape {
+        LoadShape {
+            name,
+            cores,
+            llcs,
+            ranks,
+            little_from: None,
+            idle_states: &IDLE_STATES_NS,
+            check_calls: false,
+            possible: None,
+        }
+    }
+
+    // Fill rodata as Scheduler::init does for this layout; the load check must see its paths.
+    fn fill_shape_rodata(
+        ro: &mut super::bpf_skel::types::rodata,
+        ranks: &mut super::bpf_skel::types::data_cake_ranks,
+        shape: &LoadShape,
+    ) -> anyhow::Result<()> {
+        let cores = &shape.cores;
+        let cpus = cores.iter().flatten().max().unwrap() + 1;
+        let one_word = cpus <= 64;
+        let placed: Vec<(usize, usize)> = cores
+            .iter()
+            .enumerate()
+            .flat_map(|(core, threads)| {
+                let llc = core * shape.llcs / cores.len();
+                threads.iter().map(move |&cpu| (cpu, llc))
+            })
+            .collect();
+        let native = super::NativeBitops::detect();
+        ro.cake_native_ctz = native.ctz;
+        ro.cake_native_popcnt = native.popcnt;
+        ro.nr_cpu_span = shape.possible.unwrap_or(cpus) as u32;
+        ro.cake_one_word = u8::from(one_word);
+        ro.cake_tick_ns = super::coarse_tick_ns();
+        ro.cake_wake_hop_ns = ro.cake_tick_ns / 8;
+        for (slot, ns) in ro.cake_idle_state_ns.iter_mut().zip(shape.idle_states) {
+            *slot = *ns;
+        }
+        ro.cake_idle_exit_max_ns = shape.idle_states.iter().copied().max().unwrap_or(0);
+        if let (true, 1, Some(big)) = (one_word, shape.llcs, shape.little_from) {
+            ro.cake_cap_tiers = 1;
+            ro.cake_cap_word = cores[..big].iter().fold(0, |w, core| w | core_mask(core));
+        }
+        if one_word && shape.ranks > 1 {
+            ro.cake_rank_tiers = shape.ranks as u32;
+            for (index, core) in cores.iter().enumerate() {
+                let mask = core_mask(core);
+                ro.cpu_perf_known |= mask;
+                ranks.cpu_perf_tier[index * shape.ranks / cores.len()] |= mask;
+            }
+        }
+        super::fill_core_maps(
+            cores.iter().cloned(),
+            &mut ro.cpu_sibling,
+            &mut ro.cake_core_mates,
+        )?;
+        if let Some((shift, left, right)) = super::smt_fold(&ro.cpu_sibling) {
+            ro.cake_smt_shift = shift;
+            ro.cake_smt_left = left;
+            ro.cake_smt_right = right;
+        }
+        ro.steal_order_live = u8::from(cpus <= super::bpf_intf::consts_STEAL_SPAN as usize);
+        ro.nr_steal_cpus = (placed.len() - 1) as u32;
+        let max_llcs = if one_word {
+            super::bpf_intf::consts_MAX_LLCS as usize
+        } else {
+            1
+        };
+        let layout = LlcLayout::build(&placed, max_llcs);
+        let mut per_llc = vec![0u32; shape.llcs];
+        for &(_, llc) in &placed {
+            per_llc[llc] += 1;
+        }
+        ro.cpu_llc_domain.fill(u16::MAX);
+        ro.cpu_llc_word.fill(u64::MAX);
+        for &(cpu, llc) in &placed {
+            ro.cpu_llc_id[cpu] = layout.dense[&llc];
+            ro.cpu_llc_domain[cpu] = layout.domain[&llc];
+            ro.cpu_llc_word[cpu] = layout.word[&llc];
+            ro.cpu_llc_online3[cpu] = per_llc[llc] * 3;
+        }
+        ro.nr_llcs = layout.nr_llcs;
+        ro.nr_cpu_online3 = placed.len() as u32 * 3;
+        let die_max = per_llc.iter().copied().max().unwrap_or(0);
+        ro.cake_claim_tries = (die_max / 4).max(super::bpf_intf::consts_CLAIM_TRIES_MIN);
+        Ok(())
+    }
+
+    fn verified_insns(fd: std::os::fd::BorrowedFd) -> u32 {
+        use libbpf_rs::libbpf_sys::{bpf_obj_get_info_by_fd, bpf_prog_info};
+        use std::os::fd::AsRawFd;
+
+        let mut len = size_of::<bpf_prog_info>() as u32;
+        let mut info = bpf_prog_info::default();
+        // SAFETY: info is valid for len bytes, and the kernel writes no further.
+        let ret =
+            unsafe { bpf_obj_get_info_by_fd(fd.as_raw_fd(), (&raw mut info).cast(), &mut len) };
+        if ret == 0 { info.verified_insns } else { 0 }
+    }
+
+    // The calls the verifier walked, so what rodata left reachable. Level 2 first lists every
+    // insn, dead ones too; the last list has a column that ": (85) call " cannot match.
+    fn walked_calls(
+        log: &[u8],
+        calls: &mut std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        let log = std::ffi::CStr::from_bytes_until_nul(log)?.to_string_lossy();
+        let walk = log
+            .rsplit_once("Live regs before insn:\n")
+            .map_or(&*log, |(_, walk)| walk);
+        for line in walk.lines() {
+            let call = line.split_once(": (85) call ").map(|(_, call)| call);
+            if let Some((name, _)) = call.and_then(|call| call.split_once('#')) {
+                calls.insert(name.to_string());
+            }
+        }
+        Ok(())
+    }
+
     // Load only: synthetic topology exposes paths pruned on the build host.
     // Never attach struct_ops or tracepoints, or execute the synthetic policy.
+    // Catches a verifier rejection on a CPU layout we do not own, and a one-word
+    // path that still reaches a kfunc needing builtin idle.
     #[test]
     #[ignore = "requires BPF load capabilities and a sched_ext kernel"]
     fn verifier_load_topologies() -> anyhow::Result<()> {
         use super::BpfSkelBuilder;
+        use libbpf_rs::AsRawLibbpf;
+        use libbpf_rs::libbpf_sys::bpf_program__set_log_buf;
+        use libbpf_rs::skel::{OpenSkel, Skel};
         use scx_utils::{scx_ops_load, scx_ops_open};
         use std::mem::MaybeUninit;
+        use std::os::fd::AsFd;
 
-        libbpf_rs::set_print(Some((libbpf_rs::PrintLevel::Warn, |_, message| {
-            eprint!("{message}");
-        })));
+        let mut wide_uneven = uneven_layout();
+        wide_uneven.extend((8..72).map(|cpu| vec![cpu]));
+        let shapes = [
+            LoadShape {
+                check_calls: true,
+                ..load_shape("this host, 16 at +8, 7 ranks", pairs_at(8, 8), 1, 7)
+            },
+            LoadShape {
+                idle_states: &[],
+                ..load_shape("this host, no cpuidle driver", pairs_at(8, 8), 1, 7)
+            },
+            LoadShape {
+                check_calls: true,
+                possible: Some(256),
+                ..load_shape("16 at +8, 256 possible", pairs_at(8, 8), 1, 7)
+            },
+            load_shape("this host, SMT off, 7 ranks", singles(8), 1, 7),
+            load_shape("8 no SMT, 8 ranks", singles(8), 1, 8),
+            load_shape("4 no SMT, 4 ranks", singles(4), 1, 4),
+            load_shape("16 no SMT, 2 LLCs, 16 ranks", singles(16), 2, 16),
+            load_shape("16 at +8, no ranks", pairs_at(8, 8), 1, 1),
+            load_shape("1 CPU", singles(1), 1, 1),
+            load_shape("1 core 2 threads", vec![vec![0, 1]], 1, 1),
+            load_shape("2 no SMT, no ranks", singles(2), 1, 1),
+            load_shape("12 adjacent, 3 ranks", adjacent_pairs(6), 1, 3),
+            load_shape("16 adjacent, 2 LLCs, 8 ranks", adjacent_pairs(8), 2, 8),
+            load_shape("24 at +12, 2 LLCs, 12 ranks", pairs_at(12, 12), 2, 12),
+            LoadShape {
+                check_calls: true,
+                ..load_shape("32 at +16, 2 LLCs, 16 ranks", pairs_at(16, 16), 2, 16)
+            },
+            load_shape("48 at +24, 4 LLCs, 24 ranks", pairs_at(24, 24), 4, 24),
+            load_shape("64 at +32, 4 LLCs, 32 ranks", pairs_at(32, 32), 4, 32),
+            load_shape("64 at +32, 16 LLCs, 32 ranks", pairs_at(32, 32), 16, 32),
+            LoadShape {
+                possible: Some(1024),
+                ..load_shape(
+                    "64 at +32, 16 LLCs, 32 ranks, 1024 possible",
+                    pairs_at(32, 32),
+                    16,
+                    32,
+                )
+            },
+            load_shape("64 no SMT, 8 LLCs, no ranks", singles(64), 8, 1),
+            LoadShape {
+                little_from: Some(8),
+                ..load_shape(
+                    "32 hybrid, 8 pairs 16 singles",
+                    pairs_then_singles(8, 16),
+                    1,
+                    3,
+                )
+            },
+            LoadShape {
+                little_from: Some(4),
+                ..load_shape("8 hybrid, no SMT", singles(8), 1, 2)
+            },
+            load_shape(
+                "22 hybrid, 2 LLCs, 4 ranks",
+                pairs_then_singles(6, 10),
+                2,
+                4,
+            ),
+            load_shape("uneven, no ranks", uneven_layout(), 1, 1),
+            load_shape("uneven, 2 LLCs, 3 ranks", uneven_layout(), 2, 3),
+            load_shape("4 threads a core, 2 LLCs, 4 ranks", four_threads(4), 2, 4),
+            LoadShape {
+                check_calls: true,
+                ..load_shape("72 at +36, 2 LLCs", pairs_at(36, 36), 2, 1)
+            },
+            load_shape("72 uneven", wide_uneven, 1, 1),
+            load_shape("96 at +48, 4 LLCs", pairs_at(48, 48), 4, 1),
+            load_shape("128 at +64, 8 LLCs", pairs_at(64, 64), 8, 1),
+            load_shape("1024 at +512", pairs_at(512, 512), 1, 1),
+        ];
         let mut failures = Vec::new();
-        let steal_span = super::bpf_intf::consts_STEAL_SPAN as usize;
-        for (cpus, llcs) in [
-            (1usize, 1usize),
-            (16, 1),
-            (32, 1),
-            (32, 2),
-            (64, 16),
-            (48, 4),
-            (96, 4),
-            (128, 8),
-            (128, 1),
-            (1024, 1),
-        ] {
+        for shape in &shapes {
+            let one_word = shape.cores.iter().flatten().max().unwrap() < &64;
             let mut object = MaybeUninit::uninit();
             let builder = BpfSkelBuilder::default();
             let mut skel = scx_ops_open!(builder, &mut object, cake_ops, None)?;
-            let one_word = cpus <= 64;
-            let cores = cpus.div_ceil(2);
-            let ro = skel.maps.rodata_data.as_mut().unwrap();
-            ro.nr_cpu_span = cpus as u32;
-            ro.nr_llcs = llcs as u32;
-            ro.cake_one_word = u8::from(one_word);
-            ro.cake_rank_tiers = if one_word { cores as u32 } else { 0 };
-            ro.cake_claim_tries = ((cpus / llcs.max(1)) as u32 / 4).max(4);
-            ro.cpu_perf_known = if one_word { u64::MAX >> (64 - cpus) } else { 0 };
-            ro.cpu_sibling.fill(-1);
-            ro.cpu_llc_domain.fill(u16::MAX);
-            ro.cake_smt_shift = if cpus == 1 { 0 } else { cores.min(64) as u32 };
-            if cores < 64 {
-                ro.cake_smt_left = u64::MAX >> (64 - cores);
-                ro.cake_smt_right = ro.cake_smt_left << cores;
+            fill_shape_rodata(
+                skel.maps.rodata_data.as_mut().unwrap(),
+                skel.maps.data_cake_ranks_data.as_mut().unwrap(),
+                shape,
+            )?;
+            super::configure_acquire_census(&mut skel, false);
+            if one_word {
+                skel.struct_ops.cake_ops_mut().flags &=
+                    !*scx_utils::compat::SCX_OPS_KEEP_BUILTIN_IDLE;
             }
-            ro.steal_order_live = u8::from(llcs > 1 && cpus <= steal_span);
-            ro.nr_steal_cpus = (cpus - 1) as u32;
-            for cpu in 0..cpus {
-                let domain = (cpu % cores) / (cores / llcs);
-                if cpus > 1 {
-                    ro.cpu_sibling[cpu] = (cpu ^ cores) as i32;
-                }
-                ro.cpu_llc_id[cpu] = domain as u8;
-                ro.cpu_llc_domain[cpu] = domain as u16;
-                if one_word {
-                    ro.cpu_perf_tier[cpu % cores] |= 1u64 << cpu;
-                }
-                for peer in 0..cpus.min(64) {
-                    if (peer % cores) / (cores / llcs) == domain {
-                        ro.cpu_llc_word[cpu] |= 1u64 << peer;
-                    }
-                }
-                if ro.steal_order_live != 0 {
-                    for peer in 1..cpus {
-                        ro.cpu_steal_order[cpu * steal_span + peer - 1] =
-                            ((cpu + peer) % cpus) as u16;
-                    }
+            if shape.idle_states.is_empty() || !one_word {
+                skel.progs.cake_cpu_idle.set_autoload(false);
+            }
+            let mut logs = Vec::new();
+            if shape.check_calls {
+                for mut prog in skel.open_object_mut().progs_mut() {
+                    let mut log = vec![0u8; VERIFIER_LOG_BYTES];
+                    prog.set_log_level(2);
+                    // SAFETY: log stays allocated and unmoved through the load below.
+                    let ret = unsafe {
+                        bpf_program__set_log_buf(
+                            prog.as_libbpf_object().as_ptr(),
+                            log.as_mut_ptr().cast(),
+                            log.len() as u64,
+                        )
+                    };
+                    anyhow::ensure!(ret == 0, "{}: log buffer refused", shape.name);
+                    logs.push(log);
                 }
             }
-            match scx_ops_load!(skel, cake_ops, uei) {
-                Ok(loaded) => {
-                    eprintln!("verifier accepted: {cpus} CPUs, {llcs} LLCs");
-                    drop(loaded);
+            let started = std::time::Instant::now();
+            let loaded = match scx_ops_load!(skel, cake_ops, uei) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    failures.push(format!("{}: {error:#}", shape.name));
+                    continue;
                 }
-                Err(error) => failures.push(format!("{cpus} CPUs, {llcs} LLCs: {error:#}")),
             };
+            let largest = loaded
+                .object()
+                .progs()
+                .filter(|prog| prog.autoload())
+                .map(|prog| (verified_insns(prog.as_fd()), prog.name().to_owned()))
+                .max();
+            eprintln!(
+                "{}: largest {largest:?} in {:.2} s",
+                shape.name,
+                started.elapsed().as_secs_f32()
+            );
+            if !shape.check_calls {
+                continue;
+            }
+            let mut calls = std::collections::BTreeSet::new();
+            for log in &logs {
+                walked_calls(log, &mut calls)?;
+            }
+            let reached = |kfunc: &str| calls.iter().any(|call| call.contains(kfunc));
+            let builtin: Vec<&str> = BUILTIN_IDLE_KFUNCS
+                .into_iter()
+                .filter(|kfunc| reached(kfunc))
+                .collect();
+            if !reached("scx_bpf_kick_cpu") {
+                failures.push(format!("{}: no walked calls in the log", shape.name));
+            }
+            if one_word && !builtin.is_empty() {
+                failures.push(format!("{}: one-word path reaches {builtin:?}", shape.name));
+            }
+            if !one_word && !builtin.contains(&"scx_bpf_test_and_clear_cpu_idle") {
+                failures.push(format!("{}: the wide claim was not walked", shape.name));
+            }
         }
         anyhow::ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(())
@@ -2739,8 +3092,17 @@ mod tests {
         assert_eq!(flagged(&hot), vec![13]);
     }
 
-    /// The 2026-10-04 appsim census; `taci_win` as read while still attached.
-    fn census_1004(taci_win: u64) -> (Vec<&'static str>, Vec<u64>) {
+    /// The banner must not say native below the release where compat calls the kfunc.
+    #[test]
+    fn release_version_reads_major_and_minor() {
+        assert_eq!(super::release_version("7.3.1-1-cachyos\n"), (7, 3));
+        assert!(super::release_version("7.0.12") < (7, 1));
+        assert!(super::release_version("6.19-rc1") < (7, 1));
+        assert_eq!(super::release_version(""), (0, 0));
+    }
+
+    /// An appsim census; `taci_win` as read while still attached.
+    fn appsim_census(taci_win: u64) -> (Vec<&'static str>, Vec<u64>) {
         let rows = [
             ("select_calls", 3071675),
             ("home_warm", 813870),
@@ -2772,14 +3134,14 @@ mod tests {
 
     #[test]
     fn census_identities_hold_on_a_frozen_read() {
-        let (names, tot) = census_1004(3078811);
+        let (names, tot) = appsim_census(3078811);
         assert!(super::census_violations(&names, &tot).is_empty());
     }
 
     #[test]
     fn census_identities_catch_a_read_taken_while_attached() {
         // Two wins landed between the total and its sites.
-        let (names, tot) = census_1004(3078809);
+        let (names, tot) = appsim_census(3078809);
         let broken = super::census_violations(&names, &tot);
         assert_eq!(broken.len(), 1, "{broken:?}");
         assert!(broken[0].starts_with("taci_win 3078809"), "{broken:?}");
@@ -2787,7 +3149,7 @@ mod tests {
 
     #[test]
     fn census_identities_report_wins_above_tries_and_missing_names() {
-        let (names, mut tot) = census_1004(3078811);
+        let (names, mut tot) = appsim_census(3078811);
         let groove = names.iter().position(|n| *n == "taciw_groove").unwrap();
         tot[groove] = 4743;
         let broken = super::census_violations(&names, &tot);

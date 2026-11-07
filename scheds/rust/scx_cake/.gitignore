@@ -27,14 +27,10 @@ docs/research/**/build/
 
 # Benchmark binaries and local captures
 bench/*
-!bench/.gitignore
 !bench/README.md
 !bench/*.sh
 !bench/*.c
-!bench/scx_cake_bench_capture.sh
-!bench/scx_cake_bench_suite.sh
-!bench/scx_cake_policy_bench.sh
-!bench/scx_cake_game_diag_extract.py
+!bench/capture_preflight.py
 !bench/fnspills.py
 !bench/comment_lint.py
 !bench/review_regressions.py

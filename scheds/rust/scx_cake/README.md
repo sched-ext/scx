@@ -74,7 +74,6 @@ build machine, and falls back when a feature is missing.
 |---|---|---|
 | Cached rq clock in `ops.running` | stock 6.14 or newer | `scx_bpf_now()` |
 | Native CTZ/POPCNT | patch 1, and x86 BMI1 and POPCNT | portable bit math |
-| Lean idle claim, `lazy` by default | patch 2 | regular idle claim, no warning |
 | Direct DSQ index | patch 3, kernel side only | hash lookup |
 | `--kernel-signals` (input and fence wakes, IRQ time) | patch 4 | reports it unavailable and runs normally |
 
@@ -145,7 +144,7 @@ Each step is a sched_ext callback in
 | `cake_yield` | a task calls `sched_yield` | keeps or zeroes the slice |
 | `cake_running`, `cake_stopping` | a task starts or stops running | stamps the run, charges its virtual runtime |
 | `cake_cpu_release` | a higher scheduling class takes the CPU | re-enqueues the CPU's waiting local tasks so idle CPUs can serve them |
-| `cake_update_idle` | a CPU goes idle or wakes | serves pool work that arrived as it went idle; tracks idle CPUs past ID 63 |
+| `cake_update_idle` | a CPU goes idle or wakes | serves pool work that arrived as it went idle; keeps cake's idle word, or tracks idle CPUs past ID 63 on wide hosts |
 
 The full rules, with every route and threshold, are in
 [DESIGN.md](./DESIGN.md#-where-work-goes).
@@ -221,7 +220,6 @@ Testing:
 |---|---|---|
 | `--toggle NAME=0\|1` | | set a toggle; repeatable, the last one wins |
 | `--handoff-ns NS` | `1464` | change the handoff floor: the slice floor, serial handoff, sub-handoff and deep-idle cutoffs |
-| `--lean-idle off\|on\|lazy` | `lazy` | lean idle claim (patch 2); warns only when asked for explicitly and missing |
 | `--native-bitops` | auto | require native CTZ/POPCNT; fail without them |
 | `--portable-bitops` | off | force portable CTZ/POPCNT |
 | `--native-ring` | off | native-CTZ queue scan; only for hosts with one LLC and at most 64 CPU IDs |

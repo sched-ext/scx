@@ -53,8 +53,8 @@ flowchart TD
     L --> C["CPU runs the task"]
 ```
 
-Affinity applies everywhere. An idle-mask read is only a candidate list; **the atomic
-idle claim decides**. Kicks and preempt requests only notify a CPU.
+Affinity applies everywhere. A read of the idle word or mask is only a candidate list;
+**the atomic idle claim decides**. Kicks and preempt requests only notify a CPU.
 
 ### 1️⃣ CPU selection (`select_cpu`)
 
@@ -74,12 +74,8 @@ flowchart LR
 **Clean idle pick** (enqueue uses it too): one-word hosts rank the task's LLC as above
 in two passes, first skipping IRQ-busy CPUs and those with a tick due. If
 every claim loses, multi-LLC hosts give up (the caller offers the work to another LLC)
-and single-LLC hosts ask the kernel picker, which wide hosts always use: a whole idle
-core, then any idle CPU.
-
-> [!NOTE]
-> With 🧩 lean `lazy`, a just-claimed CPU's core still reads as whole-idle until it
-> runs, so more wakes keep their warm home ([STATE: why lazy wins](./STATE.md#why-lazy-wins)).
+and single-LLC hosts walk the idle word again. Wide hosts ask the kernel picker. Both
+take a whole idle core, then any idle CPU.
 
 ### 2️⃣ Enqueue (selection did not place it)
 
@@ -146,6 +142,7 @@ flowchart TD
 |---|---|
 | ID span | counts sparse and offline IDs, not just online CPUs |
 | Steal order | same LLC, then LLCs with the same cache size, then the rest; within each, SMT sibling first, then the following IDs, wrapping. Precomputed below ID 128; wider hosts walk a ring |
+| Idle word | one-word hosts: cake keeps its own word of really idle CPUs, changed only by `ops.update_idle` and the dispatch re-arm, and runs without `SCX_OPS_KEEP_BUILTIN_IDLE`, so the kernel stops updating its masks. A claim sets a bit in a second word on the same line, cleared when that CPU next goes idle. Claimable is idle and not claimed; the whole-core read ignores claims, so a claimed core stays whole until that CPU runs. Wide hosts keep the kernel's masks and picker |
 | Claim tries | max(4, online CPUs in the widest LLC / 4) |
 | Preferred LLC | multi-LLC one-word hosts: the most big cores; on a V-cache pair, the cache LLC in AMD `cache` mode, else the other; otherwise the largest cache (`cache` mode) or highest platform preference. The mode is re-read every second |
 | Deep idle | one-word hosts avoid a CPU in an idle state slower to exit than the handoff floor |

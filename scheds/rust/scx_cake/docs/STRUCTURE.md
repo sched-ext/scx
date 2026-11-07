@@ -12,7 +12,6 @@ Where things live (checked 2026-10-20). Tracked files: `git ls-files scheds/rust
 | `veristat/` | verifier fixture (`9950x.json`), not a topology certification |
 | `docs/` | references and dated evidence · `research/<topic>/` investigations · `archive/` settled history · `meeting/` HTML page |
 | `cake` | `cake build`: locked release build into the workspace `target/` |
-| `.cargo/config.toml` | `target-cpu=native` for Rust builds started inside this folder |
 | `../../../cakebench` | benchmark entry point; runs the sibling `scx_cake_bench` repo |
 | `../../../target/` | builds and test arms (`cake_receipt_builds/`) |
 | `scx_cake_bench/` (sibling repo) | measurement tools, `runs/` raw data, `history/` |
