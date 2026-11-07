@@ -1,0 +1,44 @@
+{
+  "audit": [
+    "auditd",
+    "systemd-journ",
+    "pipewire",
+    "wireplumber",
+    "pulseaudio"
+  ],
+  "interactive": [
+    "wayland",
+    "hyprland",
+    "sway",
+    "kwin",
+    "gnome-shell",
+    "Xorg",
+    "alacritty",
+    "kitty",
+    "firefox",
+    "chrome",
+    "steam",
+    "gamescope"
+  ],
+  "io": [
+    "systemd-resolved",
+    "dbus-broker",
+    "postgres",
+    "redis-server"
+  ],
+  "network": [
+    "sshd",
+    "nginx",
+    "caddy",
+    "wireguard"
+  ],
+  "compute": [
+    "gcc",
+    "clang",
+    "rustc",
+    "make",
+    "ninja",
+    "cargo",
+    "ffmpeg"
+  ]
+}
