@@ -9,7 +9,7 @@ include = ["src/**", "bpf/**", "build.rs"]
 
 [dependencies]
 anyhow = "1"
-libarena-rs = { version = "0.3.2", optional = true, features = ["build-support", "compat"] }
+libarena-rs = { version = "0.3.3", optional = true, features = ["build-support", "compat"] }
 libc = "0.2"
 libbpf-rs = "=0.27.2"
 libbpf-sys = "=1.7.0"
