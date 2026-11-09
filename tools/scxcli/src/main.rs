@@ -348,6 +348,15 @@ fn render_current(current: &Current) -> String {
     // what a partial read found. The last failed start is reported on
     // its own line below and not pinned on this configuration, which
     // may not be the one that failed.
+    // Whether there will be a next start at boot goes on the same line,
+    // since it is the first question after a switch and the unit's
+    // `enabled` answers it: set by `start ID`, cleared by `start
+    // default` or a hand `systemctl disable`.
+    let boot = if current.unit.enabled {
+        "starts at boot"
+    } else {
+        "not at boot"
+    };
     match (&current.config_error, &current.next) {
         (Some(_), _) => text.push_str("configured: unknown\n"),
         (None, Some(next)) => {
@@ -368,9 +377,12 @@ fn render_current(current: &Current) -> String {
             } else {
                 "not running"
             };
-            text.push_str(&format!("configured: {what} ({note})\n"));
+            text.push_str(&format!("configured: {what} ({note}, {boot})\n"));
         }
-        (None, None) => text.push_str("configured: nothing\n"),
+        (None, None) if current.unit.enabled => {
+            text.push_str("configured: nothing (scx.service enabled, nothing to run at boot)\n");
+        }
+        (None, None) => text.push_str(&format!("configured: nothing ({boot})\n")),
     }
     match &current.kernel {
         Some(k) => text.push_str(&format!(
@@ -721,7 +733,7 @@ mod tests {
         assert!(text.contains("state: default (kernel scheduler)\n"));
         // The failure is the unit's last run, not necessarily this
         // configuration's: it gets its own line and no verdict here.
-        assert!(text.contains("configured: /usr/bin/scx_cosmos (not running)\n"));
+        assert!(text.contains("configured: /usr/bin/scx_cosmos (not running, starts at boot)\n"));
         assert!(!text.contains("failed to start"));
         assert!(text.contains("last start failed (exit-code/1): boom"));
 
@@ -744,7 +756,21 @@ mod tests {
             "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
             "kernel":{"state":"enabled","ops":"cosmos"},"failure":null}"#;
         let current: Current = serde_json::from_str(json).unwrap();
-        assert!(render_current(&current).contains("configured: /usr/bin/scx_cosmos (running)\n"));
+        assert!(
+            render_current(&current)
+                .contains("configured: /usr/bin/scx_cosmos (running, starts at boot)\n")
+        );
+        // Running now, but disabled by hand: it will not come back.
+        let json = r#"{"version":2,"scheduler":"scx_cosmos",
+            "unit":{"active":true,"enabled":false},
+            "running":{"sched":"scx_cosmos","args":[]},
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"enabled","ops":"cosmos"},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(
+            render_current(&current)
+                .contains("configured: /usr/bin/scx_cosmos (running, not at boot)\n")
+        );
         // The unit's process is up but the kernel has nothing attached
         // yet: not running, whatever the process says.
         let json = r#"{"version":2,"scheduler":null,
@@ -754,13 +780,30 @@ mod tests {
             "kernel":{"state":"disabled","ops":null},"failure":null}"#;
         let current: Current = serde_json::from_str(json).unwrap();
         assert!(
-            render_current(&current).contains("configured: /usr/bin/scx_cosmos (not running)\n")
+            render_current(&current)
+                .contains("configured: /usr/bin/scx_cosmos (not running, starts at boot)\n")
         );
 
         let json = r#"{"version":2,"scheduler":null,
             "unit":{"active":false,"enabled":false},"running":null,"next":null,
             "kernel":{"state":"enabled","ops":"rusty"},"failure":null}"#;
         let current: Current = serde_json::from_str(json).unwrap();
-        assert!(render_current(&current).contains("outside scx.service"));
+        let text = render_current(&current);
+        assert!(text.contains("outside scx.service"));
+        // After `start default`: nothing configured and no start at
+        // boot; a cleared file under an enabled unit (a hand edit: the
+        // unit starts at boot, runs nothing and exits) is called out.
+        assert!(
+            text.contains("configured: nothing (not at boot)\n"),
+            "{text}"
+        );
+        let json = r#"{"version":2,"scheduler":"default",
+            "unit":{"active":false,"enabled":true},"running":null,"next":null,
+            "kernel":{"state":"disabled","ops":null},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(
+            render_current(&current)
+                .contains("configured: nothing (scx.service enabled, nothing to run at boot)\n")
+        );
     }
 }
