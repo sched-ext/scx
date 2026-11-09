@@ -120,12 +120,13 @@ No additional steps needed here other than what is mentioned in the main README.
 
 ## Nix
 
-From NixOS 24.11 onwards, `scx` is available on Nixpkgs. Using a kernel of version 6.12+ or later is required.
+[From 26.11](https://github.com/NixOS/nixpkgs/pull/582812) users needs to migrate it to scx-loader instead. Using a kernel of version 6.12+ or later is required.
 
 ```nix
 {
-  services.scx.enable = true;
-  services.scx.scheduler = "scx_lavd"; # default is "scx_rustland"
+  services.scx-loader.enable = true;
+  # see other options: https://github.com/bahrom04-lab/scx/blob/main/scheds/README.md
+  services.scx-loader.config.default_sched = "scx_bpfland";
   boot.kernelPackages = pkgs.linuxPackages_latest;
 }
 ```
