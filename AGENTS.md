@@ -179,13 +179,14 @@ description.
 
 ## Updating vmlinux.h
 
-scheds/vmlinux/arch/ holds one BTF dump per architecture (arm, arm64, mips,
-powerpc, riscv, s390 and x86). A dump is named vmlinux-<version>-g<sha12>.h
-after `git describe --tags --abbrev=0 --match='v*'` and the kernel commit,
-and vmlinux.h in the same directory is a symlink to it.
-scheds/vmlinux/vmlinux.h links to arch/x86/vmlinux.h and never changes.
-Builds read rust/scx_utils/vmlinux.tar.zst rather than the directory, so
-every update regenerates the tarball and commits it together with the dumps.
+scheds/vmlinux/arch/ holds one BTF dump per architecture (arm, arm64,
+loongarch, mips, powerpc, riscv, s390 and x86). A dump is named
+vmlinux-<version>-g<sha12>.h after `git describe --tags --abbrev=0
+--match='v*'` and the kernel commit, and vmlinux.h in the same directory
+is a symlink to it. scheds/vmlinux/vmlinux.h links to arch/x86/vmlinux.h
+and never changes. Builds read rust/scx_utils/vmlinux.tar.zst rather than
+the directory, so every update regenerates the tarball and commits it
+together with the dumps.
 
 The builds need pahole 1.22 or newer, bpftool and zstd, plus the cross
 toolchains below. The kernel.org crosstool nolibc toolchains work where the
@@ -243,6 +244,7 @@ CONFIG_NUMA_BALANCING and CONFIG_CPUSETS, all =y except the first.
 | --- | --- |
 | arm | arm-linux-gnueabi- |
 | arm64 | aarch64-linux-gnu- |
+| loongarch | loongarch64-linux-gnu- |
 | mips | mips64-linux-gnu- |
 | powerpc | powerpc64le-linux-gnu- |
 | riscv | riscv64-linux-gnu- |
