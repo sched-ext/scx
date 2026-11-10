@@ -58,7 +58,13 @@ pub struct UnitInfo {
     /// `LoadState=loaded`: the unit exists.
     pub loaded: bool,
     pub active: bool,
+    /// `UnitFileState=enabled`: systemd starts the unit at boot.
     pub enabled: bool,
+    /// `UnitFileState=enabled-runtime` (`systemctl enable --runtime`):
+    /// started like an enabled unit until the next boot, when the
+    /// enablement is gone. Neither flag for `disabled`, `masked`,
+    /// `static` and the rest.
+    pub enabled_runtime: bool,
     pub main_pid: Option<u32>,
     /// `Result=` of the last run: `success`, `exit-code`, `signal`,
     /// `start-limit-hit`, ...
@@ -133,7 +139,8 @@ pub fn parse_unit_info(output: &str) -> UnitInfo {
         } else if let Some(value) = line.strip_prefix("ActiveState=") {
             info.active = matches!(value.trim(), "active" | "activating" | "reloading");
         } else if let Some(value) = line.strip_prefix("UnitFileState=") {
-            info.enabled = matches!(value.trim(), "enabled" | "enabled-runtime");
+            info.enabled = value.trim() == "enabled";
+            info.enabled_runtime = value.trim() == "enabled-runtime";
         } else if let Some(value) = line.strip_prefix("MainPID=") {
             info.main_pid = value.trim().parse().ok().filter(|pid| *pid != 0);
         } else if let Some(value) = line.strip_prefix("Result=") {
@@ -745,7 +752,18 @@ EnvironmentFiles=/etc/default/scx (ignore_errors=no)\n\
 EnvironmentFiles=/etc/scx.d/local (ignore_errors=yes)\n\
 UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
         let info = parse_unit_info(output);
-        assert!(info.loaded && info.active && info.enabled);
+        assert!(info.loaded && info.active && info.enabled && !info.enabled_runtime);
+        // `enable --runtime` is not enabled at boot, and is told apart.
+        let runtime = parse_unit_info(
+            &output.replace("UnitFileState=enabled", "UnitFileState=enabled-runtime"),
+        );
+        assert!(!runtime.enabled && runtime.enabled_runtime);
+        for state in ["disabled", "masked", "static", "linked"] {
+            let other = parse_unit_info(
+                &output.replace("UnitFileState=enabled", &format!("UnitFileState={state}")),
+            );
+            assert!(!other.enabled && !other.enabled_runtime, "{state}");
+        }
         assert_eq!(info.main_pid, Some(4242));
         assert_eq!(info.result, "success");
         assert_eq!(info.exec_main_status, Some(0));

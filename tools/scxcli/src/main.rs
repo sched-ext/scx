@@ -354,6 +354,8 @@ fn render_current(current: &Current) -> String {
     // default` or a hand `systemctl disable`.
     let boot = if current.unit.enabled {
         "starts at boot"
+    } else if current.unit.enabled_runtime {
+        "enabled until reboot only"
     } else {
         "not at boot"
     };
@@ -379,8 +381,10 @@ fn render_current(current: &Current) -> String {
             };
             text.push_str(&format!("configured: {what} ({note}, {boot})\n"));
         }
-        (None, None) if current.unit.enabled => {
-            text.push_str("configured: nothing (scx.service enabled, nothing to run at boot)\n");
+        (None, None) if current.unit.enabled || current.unit.enabled_runtime => {
+            text.push_str(&format!(
+                "configured: nothing (scx.service {boot}, nothing to run)\n"
+            ));
         }
         (None, None) => text.push_str(&format!("configured: nothing ({boot})\n")),
     }
@@ -760,6 +764,17 @@ mod tests {
             render_current(&current)
                 .contains("configured: /usr/bin/scx_cosmos (running, starts at boot)\n")
         );
+        // `enable --runtime`: enabled until the reboot, and said so.
+        let json = r#"{"version":2,"scheduler":"scx_cosmos",
+            "unit":{"active":true,"enabled":false,"enabled_runtime":true},
+            "running":{"sched":"scx_cosmos","args":[]},
+            "next":{"sched":"/usr/bin/scx_cosmos","args":[],"override":false},
+            "kernel":{"state":"enabled","ops":"cosmos"},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(
+            render_current(&current)
+                .contains("configured: /usr/bin/scx_cosmos (running, enabled until reboot only)\n")
+        );
         // Running now, but disabled by hand: it will not come back.
         let json = r#"{"version":2,"scheduler":"scx_cosmos",
             "unit":{"active":true,"enabled":false},
@@ -803,7 +818,31 @@ mod tests {
         let current: Current = serde_json::from_str(json).unwrap();
         assert!(
             render_current(&current)
-                .contains("configured: nothing (scx.service enabled, nothing to run at boot)\n")
+                .contains("configured: nothing (scx.service starts at boot, nothing to run)\n")
         );
+        // The same under a runtime enablement, and under an override:
+        // never "at boot" for an enablement that the reboot removes.
+        let json = r#"{"version":2,"scheduler":"default",
+            "unit":{"active":false,"enabled":false,"enabled_runtime":true},
+            "running":null,"next":null,
+            "kernel":{"state":"disabled","ops":null},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        let text = render_current(&current);
+        assert!(
+            text.contains(
+                "configured: nothing (scx.service enabled until reboot only, nothing to run)\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("at boot"), "{text}");
+        let json = r#"{"version":2,"scheduler":"scx_rburst",
+            "unit":{"active":true,"enabled":false,"enabled_runtime":true},
+            "running":{"sched":"scx_rburst","args":[]},
+            "next":{"sched":"scx_rburst","args":[],"override":true},
+            "kernel":{"state":"enabled","ops":"rburst"},"failure":null}"#;
+        let current: Current = serde_json::from_str(json).unwrap();
+        assert!(render_current(&current).contains(
+            "configured: scx_rburst (SCX_*_OVERRIDE in effect, enabled until reboot only)\n"
+        ));
     }
 }
