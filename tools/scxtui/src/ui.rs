@@ -297,17 +297,47 @@ fn state_line(current: &Current) -> (String, Color) {
     }
 }
 
-/// What the configuration says the unit runs, and whether that is what
-/// runs now. One line, since the file and the next start are the same
-/// thing unless an override is in effect, which the line then says.
+/// The Configured line: what the next start would run (the file, or an
+/// override, which the line then says), whether that is what runs now,
+/// and whether there will be a next start at boot. The last is the
+/// first thing a user who just switched wants to know; the answer is
+/// the unit's `enabled`, which `start ID` sets and `start default` or a
+/// hand `systemctl disable` clear, and it belongs next to the
+/// configuration it applies to. `enable --runtime` is said as what it
+/// is, since it looks enabled to `systemctl status` and is gone after
+/// the reboot.
 fn configured_line(current: &Current) -> (String, Color) {
+    let boot = if current.unit.enabled {
+        "starts at boot"
+    } else if current.unit.enabled_runtime {
+        "enabled until reboot only"
+    } else {
+        "not at boot"
+    };
     let Some(next) = &current.next else {
-        return ("nothing".to_owned(), Color::White);
+        // Nothing to run: after `start default`, or a cleared file.
+        // `start default` also disables the unit; an enabled one with
+        // nothing to run is a hand edit, and when it starts it runs
+        // nothing (`exec` of an empty expansion is a no-op to bash)
+        // and exits, which is pointless enough for a colour. The
+        // enablement is said in the same words as everywhere else on
+        // this line, so a runtime one does not read as "at boot".
+        return if current.unit.enabled || current.unit.enabled_runtime {
+            (
+                format!("nothing (scx.service {boot}, nothing to run)"),
+                Color::Yellow,
+            )
+        } else {
+            (format!("nothing ({boot})"), Color::White)
+        };
     };
     let what = format!("{} {}", strip_prefix(next.name()), format_flags(&next.args));
     let what = what.trim_end();
     if next.overridden {
-        return (format!("{what} (SCX_*_OVERRIDE in effect)"), Color::Yellow);
+        return (
+            format!("{what} (SCX_*_OVERRIDE in effect, {boot})"),
+            Color::Yellow,
+        );
     }
     // "running" takes the kernel's word as well as the unit's: the
     // unit's process exists before its scheduler is attached, and
@@ -319,11 +349,13 @@ fn configured_line(current: &Current) -> (String, Color) {
             .is_some_and(|r| r.sched == next.name() && r.args == next.args);
     // "not running" and no more: `failure` is the unit's last run,
     // which may have been another configuration, and the Last start
-    // line below reports it on its own.
-    if running {
-        (format!("{what} (running)"), Color::White)
-    } else {
-        (format!("{what} (not running)"), Color::Yellow)
+    // line below reports it on its own. A running scheduler that will
+    // not come back at boot is the one surprise worth a colour, and a
+    // runtime enablement is that surprise with a delay.
+    match (running, current.unit.enabled) {
+        (true, true) => (format!("{what} (running, {boot})"), Color::White),
+        (true, false) => (format!("{what} (running, {boot})"), Color::Yellow),
+        (false, _) => (format!("{what} (not running, {boot})"), Color::Yellow),
     }
 }
 
@@ -728,6 +760,150 @@ mod tests {
                 first: true
             }
         );
+    }
+
+    /// The Configured line answers "will it come back after a reboot"
+    /// next to the configuration it applies to, from the unit's
+    /// `enabled`, and tells a scheduler that runs now but will not come
+    /// back from one that will.
+    #[test]
+    fn the_configured_line_says_whether_the_unit_starts_at_boot() {
+        let current = |scheduler: Option<&str>,
+                       active: bool,
+                       enabled: bool,
+                       running: Option<&str>,
+                       next: Option<(&str, bool)>| {
+            let json = serde_json::json!({
+                "version": 2,
+                "scheduler": scheduler,
+                "unit": {"active": active, "enabled": enabled, "enabled_runtime": false},
+                "running": running.map(|s| serde_json::json!({"sched": s, "args": []})),
+                "next": next.map(|(s, o)| serde_json::json!({"sched": s, "args": [], "override": o})),
+                "kernel": {"state": "enabled", "ops": scheduler.filter(|s| *s != DEFAULT_ID).map(|s| s.trim_start_matches("scx_"))},
+                "failure": null,
+            });
+            serde_json::from_value::<Current>(json).unwrap()
+        };
+        let line = |c: &Current| configured_line(c).0;
+        let colour = |c: &Current| configured_line(c).1;
+
+        // Running and enabled: the ordinary case after `start ID`.
+        let c = current(
+            Some("scx_cosmos"),
+            true,
+            true,
+            Some("scx_cosmos"),
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (running, starts at boot)");
+        assert_eq!(colour(&c), Color::White);
+        // Running, but `systemctl disable` was run by hand: it will not
+        // come back, which is the surprise worth a colour.
+        let c = current(
+            Some("scx_cosmos"),
+            true,
+            false,
+            Some("scx_cosmos"),
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (running, not at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // Stopped with `s`: the selection stays and so does the boot.
+        let c = current(
+            Some(DEFAULT_ID),
+            false,
+            true,
+            None,
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (not running, starts at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // Stopped and disabled by hand.
+        let c = current(
+            Some(DEFAULT_ID),
+            false,
+            false,
+            None,
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (not running, not at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // An override in effect is said first; the boot still applies,
+        // and an override on a disabled unit is exactly "runs now, not
+        // after a reboot".
+        let c = current(
+            Some("scx_lavd"),
+            true,
+            true,
+            Some("scx_lavd"),
+            Some(("scx_lavd", true)),
+        );
+        assert_eq!(line(&c), "lavd (SCX_*_OVERRIDE in effect, starts at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        let c = current(
+            Some("scx_lavd"),
+            true,
+            false,
+            Some("scx_lavd"),
+            Some(("scx_lavd", true)),
+        );
+        assert_eq!(line(&c), "lavd (SCX_*_OVERRIDE in effect, not at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // After `start default`: nothing configured, unit disabled.
+        let c = current(Some(DEFAULT_ID), false, false, None, None);
+        assert_eq!(line(&c), "nothing (not at boot)");
+        assert_eq!(colour(&c), Color::White);
+        // `systemctl enable --runtime`: enabled to every tool that looks,
+        // and gone after the reboot. Said as what it is, and coloured
+        // like "not at boot", which after the reboot it is.
+        let mut c = current(
+            Some("scx_cosmos"),
+            true,
+            false,
+            Some("scx_cosmos"),
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        c.unit.enabled_runtime = true;
+        assert_eq!(line(&c), "cosmos (running, enabled until reboot only)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // The same enablement under an override, and with nothing to
+        // run: the line never says "at boot" for a runtime enablement.
+        let mut c = current(
+            Some("scx_lavd"),
+            true,
+            false,
+            Some("scx_lavd"),
+            Some(("scx_lavd", true)),
+        );
+        c.unit.enabled_runtime = true;
+        assert_eq!(
+            line(&c),
+            "lavd (SCX_*_OVERRIDE in effect, enabled until reboot only)"
+        );
+        assert_eq!(colour(&c), Color::Yellow);
+        let mut c = current(Some(DEFAULT_ID), false, false, None, None);
+        c.unit.enabled_runtime = true;
+        assert_eq!(
+            line(&c),
+            "nothing (scx.service enabled until reboot only, nothing to run)"
+        );
+        assert_eq!(colour(&c), Color::Yellow);
+        assert!(!line(&c).contains("at boot"));
+        // Older output without the field reads as not runtime-enabled.
+        let older: Current = serde_json::from_str(
+            r#"{"version":2,"scheduler":"default","unit":{"active":false,"enabled":true},
+            "running":null,"next":null,"kernel":{"state":"disabled","ops":null},"failure":null}"#,
+        )
+        .unwrap();
+        assert!(!older.unit.enabled_runtime);
+        // A cleared file under an enabled unit: it starts at boot, runs
+        // nothing and exits.
+        let c = current(Some(DEFAULT_ID), false, true, None, None);
+        assert_eq!(
+            line(&c),
+            "nothing (scx.service starts at boot, nothing to run)"
+        );
+        assert_eq!(colour(&c), Color::Yellow);
     }
 
     #[test]
