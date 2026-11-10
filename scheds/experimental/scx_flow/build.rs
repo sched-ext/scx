@@ -33,6 +33,17 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .build()
+        .add_source("src/bpf/lib/arena.bpf.c")
+        .add_source("src/bpf/lib/common.bpf.c")
+        .add_source("src/bpf/lib/atq.bpf.c")
+        .add_source("src/bpf/lib/edq.bpf.c")
+        .add_source("src/bpf/lib/bitmap.bpf.c")
+        .add_source("src/bpf/lib/cpumask.bpf.c")
+        .add_source("src/bpf/lib/minheap.bpf.c")
+        .add_source("src/bpf/lib/rbtree.bpf.c")
+        .add_source("src/bpf/lib/sdt_alloc.bpf.c")
+        .add_source("src/bpf/lib/sdt_task.bpf.c")
+        .add_source("src/bpf/lib/topology.bpf.c")
+        .compile_link_gen()
         .unwrap();
 }
