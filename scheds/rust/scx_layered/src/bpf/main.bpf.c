@@ -416,6 +416,23 @@ static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
 	}
 }
 
+/*
+ * The number of tasks that layered_enqueue() sent to the DSQ of @layer_id on
+ * @llc_id and that haven't started running since. scx_bpf_dsq_nr_queued()
+ * can't stand in for this. scx_bpf_dsq_insert[_vtime]() from ops.enqueue()
+ * only records the target DSQ and the kernel queues the task after the
+ * callback returns, so a task being enqueued is not on the DSQ yet.
+ */
+static u32 layer_llc_nr_queued(u32 layer_id, u32 llc_id)
+{
+	struct llc_ctx *llcc;
+
+	if (layer_id >= MAX_LAYERS || !(llcc = lookup_llc_ctx(llc_id)))
+		return 0;
+
+	return READ_ONCE(llcc->nr_queued[layer_id]);
+}
+
 static void layer_llc_drain_enable(struct layer *layer, u32 llc_id)
 {
 	u32 nid = llc_node_id(llc_id);
@@ -599,12 +616,12 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	 * full MB in the above layer->cpus_seq update. This is interlocked with
 	 * layered_enqueue() to guarantee that a task is never left in an empty
 	 * LLC without draining enabled. Either they see 0 nr_llcs_cpus and
-	 * enable drain or we see the task it enqueued and enable drain.
+	 * enable drain or we see the task it counted and enable drain.
 	 */
 	bpf_for(llc_id, 0, nr_llcs) {
 		if (layer->nr_llc_cpus[llc_id])
 			layer_llc_drain_disable(layer, llc_id);
-		else if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer->id, llc_id)))
+		else if (layer_llc_nr_queued(layer_id, llc_id))
 			layer_llc_drain_enable(layer, llc_id);
 	}
 
@@ -1860,6 +1877,7 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 		return;
 
 	__sync_fetch_and_sub(&llcc->queued_runtime[layer_id], taskc->runtime_avg);
+	__sync_fetch_and_sub(&llcc->nr_queued[layer_id], 1);
 	taskc->qrt_layer_id = MAX_LAYERS;
 	taskc->qrt_llc_id = MAX_LLCS;
 }
@@ -2173,6 +2191,7 @@ preempt_xnuma_done: ;
 
 	taskc->qrt_layer_id = layer_id;
 	taskc->qrt_llc_id = llc_id;
+	__sync_fetch_and_add(&llcc->nr_queued[layer_id], 1);
 	queued_runtime = __sync_fetch_and_add(&llcc->queued_runtime[layer_id],
 					      taskc->runtime_avg);
 	queued_runtime += taskc->runtime_avg;
@@ -2193,9 +2212,9 @@ preempt_xnuma_done: ;
 	lstat_inc(LSTAT_ENQ_DSQ, layer, cpuc);
 
 	/*
-	 * Interlocked with refresh_cpumasks(). scx_bpf_dsq_insert[_vtime]()
-	 * always goes through spin lock/unlock and has enough barriers to
-	 * guarantee that either they see the task we enqueeud or we see zero
+	 * Interlocked with refresh_cpumasks(). @p is not on the DSQ until this
+	 * callback returns, but the atomic llcc->nr_queued increment above
+	 * guarantees that either they see the task we counted or we see zero
 	 * nr_llc_cpus.
 	 *
 	 * Also interlocked with opportunistic disabling in
@@ -2529,12 +2548,13 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 		 * consuming as we can race against enabling and end up turning
 		 * off draining and leave the new task in the unserviced DSQ.
 		 *
-		 * Instead, turn it off if it's likely that the DSQ is going to
-		 * be empty after consuming and re-enable afterwards if
-		 * necessary to guarantee that draining never stays disabled
-		 * with tasks in the DSQ.
+		 * Instead, turn it off when no task is in or on its way to the
+		 * DSQ and re-enable afterwards if necessary to guarantee that
+		 * draining never stays disabled with such a task around. A
+		 * consumed task stays counted until it starts running, so this
+		 * happens on an attempt after the one that empties the DSQ.
 		 */
-		if (scx_bpf_dsq_nr_queued(dsq_id) <= 1) {
+		if (!layer_llc_nr_queued(layer->id, llc_id)) {
 			layer_llc_drain_disable(layer, llc_id);
 			disabled = true;
 		}
@@ -2548,7 +2568,7 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 		 * CPUs and re-enable unnecessarily. Doesn't matter. Will be
 		 * re-tried on the next draining attempt.
 		 */
-		if (disabled && scx_bpf_dsq_nr_queued(dsq_id))
+		if (disabled && layer_llc_nr_queued(layer->id, llc_id))
 			layer_llc_drain_enable(layer, llc_id);
 
 		if (consumed) {
