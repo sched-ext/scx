@@ -87,7 +87,7 @@ use scx_utils::Topology;
 use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
 use serde_json::Value as JsonValue;
-use sysinfo::System;
+use sysinfo::{CpuRefreshKind, RefreshKind, System};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -238,7 +238,8 @@ impl<'a> App<'a> {
         action_tx: UnboundedSender<Action>,
         skel: BpfSkel<'a>,
     ) -> Result<Self> {
-        let topo = Topology::new()?;
+        let mut topo = Topology::new()?;
+        topo.split_cpuless_nodes();
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
@@ -347,7 +348,9 @@ impl<'a> App<'a> {
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
 
         // Create System object and spawn background thread for CPU frequency refresh
-        let sys = Arc::new(StdMutex::new(System::new_all()));
+        let sys = Arc::new(StdMutex::new(System::new_with_specifics(
+            RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing().with_frequency()),
+        )));
         let sys_clone = sys.clone();
         let tick_rate_ms = config.tick_rate_ms();
         let should_quit = Arc::new(AtomicBool::new(false));
@@ -495,7 +498,8 @@ impl<'a> App<'a> {
         layered_enabled: bool,
         action_tx: UnboundedSender<Action>,
     ) -> Result<Self> {
-        let topo = Topology::new()?;
+        let mut topo = Topology::new()?;
+        topo.split_cpuless_nodes();
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
@@ -614,7 +618,9 @@ impl<'a> App<'a> {
         let hw_pressure = false;
 
         // Create System object and spawn background thread for CPU frequency refresh
-        let sys = Arc::new(StdMutex::new(System::new_all()));
+        let sys = Arc::new(StdMutex::new(System::new_with_specifics(
+            RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing().with_frequency()),
+        )));
         let sys_clone = sys.clone();
         let tick_rate_ms = config.tick_rate_ms();
         let should_quit = Arc::new(AtomicBool::new(false));
@@ -1726,8 +1732,9 @@ impl<'a> App<'a> {
                     .topo
                     .nodes
                     .keys()
-                    .map(|node_id| {
-                        self.node_sparkline(*node_id, stats.max, *node_id == num_nodes - 1)
+                    .enumerate()
+                    .map(|(i, node_id)| {
+                        self.node_sparkline(*node_id, stats.max, i == num_nodes - 1)
                     })
                     .collect();
 
