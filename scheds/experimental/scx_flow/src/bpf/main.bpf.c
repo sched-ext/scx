@@ -2,16 +2,16 @@
 /*
  * Flow scheduler entry.
  *
- * Thin glue that pulls in area headers in order and declares
- * the ops table. Each CPU owns one upstream queue in deadline order
- * and there is one fallback
- * queue in FIFO order. Queues hold bounded at 64 total.
- * Ties leave in insertion order. Deadline order sets the queue with
- * preempts for shared tasks with an earlier deadline. Queues come from
- * the upstream deadline library and placement follows the
- * upstream topology library. Tables are written once, so a CPU that
- * arrives late needs a restart to be seen. Settings live in the
- * shared header.
+ * Thin glue that pulls in area headers in order and declares the ops
+ * table. Each CPU owns one tree in deadline order and there is one
+ * fallback queue in FIFO order. Trees hold with depth bound at
+ * RB_MAX_DEPTH. Trees hold without bound on live task count. Ties leave
+ * in insertion order with ties right in RB_DUPLICATE-compatible order.
+ * Deadline order sets the tree with idle wakes for shared tasks plus a
+ * guarded preempt on a much earlier deadline. Trees use the plain BST
+ * form. Placement follows the upstream topology library. Tables are
+ * written once. A CPU that arrives late needs a restart to be seen.
+ * Settings live in the shared header.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -19,7 +19,6 @@
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include <bpf_arena_common.bpf.h>
-#include <lib/edq.h>
 #include <lib/topology.h>
 #include "intf.h"
 char _license[] SEC("license") = "GPL";

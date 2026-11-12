@@ -6,6 +6,7 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 pub mod cli;
+pub mod lstopo;
 pub mod metrics;
 pub mod run;
 #[path = "stats.rs"]

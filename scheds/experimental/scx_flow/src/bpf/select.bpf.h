@@ -9,8 +9,14 @@
  * view. Ties keep the first CPU in fixed order. Within the same LLC
  * the scan favors the same cluster, with the tie favor kept even
  * when threads share cores and only the fast pick gated on single
- * threads. No sibling probe runs and each CPU stands single with
- * fail closed choice. Every check returns minus one on failure.
+ * threads. Tiers stay L1 greater than L2 greater than L3, so the same
+ * cluster wins inside the same LLC before the wider LLC and node fall
+ * back in fixed order. Short form is L1>L2>L3. No sibling probe runs
+ * and each CPU stands single with fail closed choice. Inside the same
+ * cache tiers ties prefer larger buckets first within tier with known
+ * priority matching the drain, else fixed order covers unknown sizes.
+ * Group tier reads l2 and LLC tier reads l3 after one seed lookup.
+ * Every check returns minus one on failure.
  * Masks are tested again before each wake, so a task is never kicked
  * toward a CPU outside its current mask. Frequency follows core
  * busyness and never steers placement.
@@ -51,17 +57,30 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 		return false;
 	return topo_contains(topo_all, cpu) ? true : false;
 }
+/* Unknown cluster reads as all ones, so group zero stays a valid match.
+ * The value never collides with a seeded group id, which stays small. */
+#define FLOW_CCX_UNKNOWN 0xFFFFFFFFU
 static __always_inline s32 flow_first_allowed(struct task_struct *p)
 {
 	u32 first;
+	u32 c;
 	if (!p || !p->cpus_ptr)
 		return -1;
 	first = bpf_cpumask_first(p->cpus_ptr);
-	if (!flow_cpu_live(first))
-		return -1;
-	if (!flow_cpu_allowed((s32)first, p))
-		return -1;
-	return (s32)first;
+	if (flow_cpu_ok(first) && flow_cpu_live(first) && flow_cpu_allowed((s32)first, p))
+		return (s32)first;
+	/* The first mask bit can be offline while a later bit stays usable.
+	 * Scan the mask in fixed order for the first allowed live CPU, so
+	 * only tasks with no usable CPU fall back to minus one. Bounded scan
+	 * within the CPU bound with mask plus live checks only and no widening. */
+	bpf_for(c, 0, FLOW_MAX_CPUS) {
+		if (!flow_cpu_live(c))
+			continue;
+		if (!flow_cpu_allowed((s32)c, p))
+			continue;
+		return (s32)c;
+	}
+	return -1;
 }
 static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 {
@@ -92,22 +111,93 @@ static __always_inline u32 flow_cpu_ccx(u32 cpu)
 	u32 key = cpu;
 	struct flow_cpu_ctx *cc;
 	if (!flow_cpu_ok(cpu))
+		return (u32)FLOW_CCX_UNKNOWN;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!cc)
+		return (u32)FLOW_CCX_UNKNOWN;
+	return READ_ONCE(cc->ccx_id);
+}
+/* Same cluster match on the seed view with the seed flag gate. Both group
+ * ids must be known, so unknown reads as all ones never match and fixed
+ * order covers them. The seed flag stays always on with init one and no
+ * userspace seed as an interim, so the gate stays for a later seed without
+ * changing the match. */
+/* Size buckets read as u8 with zero meaning unknown. A miss reads
+ * unknown, so unknown sizes keep fixed order with no match. */
+static __always_inline u8 flow_cpu_l2bkt(u32 cpu)
+{
+	u32 key = cpu;
+	struct flow_cpu_ctx *cc;
+	if (!flow_cpu_ok(cpu))
 		return 0;
 	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
 	if (!cc)
 		return 0;
-	return READ_ONCE(cc->ccx_id);
+	return READ_ONCE(cc->l2_bkt);
+}
+static __always_inline u8 flow_cpu_l3bkt(u32 cpu)
+{
+	u32 key = cpu;
+	struct flow_cpu_ctx *cc;
+	if (!flow_cpu_ok(cpu))
+		return 0;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!cc)
+		return 0;
+	return READ_ONCE(cc->l3_bkt);
+}
+/* Larger check with the both known gate. Unknown sizes never match,
+ * so fixed order covers them. Compares promote to int per C rules with
+ * identical result and no extra budget. */
+static __always_inline bool flow_cache_larger(u8 a, u8 b)
+{
+	if (!a || !b)
+		return false;
+	return a > b;
+}
+/* Coalesced seed view with one map lookup for cluster plus both buckets.
+ * Group tier picks l2 and LLC tier picks l3 after the score, so one lookup
+ * covers both with no extra loop. A miss reads unknown with no match. */
+struct flow_cpu_view {
+	u32 ccx;
+	u8 l2;
+	u8 l3;
+};
+static __always_inline struct flow_cpu_view flow_cpu_view(u32 cpu)
+{
+	struct flow_cpu_view v = { (u32)FLOW_CCX_UNKNOWN, 0, 0 };
+	u32 key = cpu;
+	struct flow_cpu_ctx *cc;
+	if (!flow_cpu_ok(cpu))
+		return v;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!cc)
+		return v;
+	v.ccx = READ_ONCE(cc->ccx_id);
+	v.l2 = READ_ONCE(cc->l2_bkt);
+	v.l3 = READ_ONCE(cc->l3_bkt);
+	return v;
+}
+static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
+{
+	if (!use)
+		return false;
+	if (cx == (u32)FLOW_CCX_UNKNOWN || hint == (u32)FLOW_CCX_UNKNOWN)
+		return false;
+	return cx == hint;
 }
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 hint = prev_cpu;
 	s32 tgt;
 	int hint_llc = -1;
-	u32 hint_ccx = 0;
+	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
 	bool have_hint_topo = false;
 	s32 best = -1;
 	int best_score = 99;
 	bool best_same = false;
+	u8 best_bkt = 0;
+	bool have_best_bkt = false;
 	bool use_ccx;
 	bool smt_on;
 	u32 c;
@@ -139,9 +229,12 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	bpf_for(c, 0, FLOW_MAX_CPUS) {
 		u32 l;
 		u32 cx;
+		u8 cb = 0;
 		int score;
+		int pre;
 		int vllc;
 		bool same_node = false;
+		struct flow_cpu_view vw;
 		if (!flow_cpu_live(c))
 			continue;
 		if (!flow_cpu_allowed((s32)c, p))
@@ -150,39 +243,63 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		if (vllc < 0 || !flow_llc_ok((u32)vllc))
 			continue;
 		l = (u32)vllc;
-		cx = flow_cpu_ccx(c);
 		if (hint_node && topo_contains(hint_node, c))
 			same_node = true;
-		score = 3;
+		pre = 3;
 		if (have_hint_topo) {
 			if (hint_llc >= 0 && l == (u32)hint_llc)
-				score = 0;
+				pre = 0;
 			else if (same_node)
-				score = 1;
+				pre = 1;
 			else
-				score = 2;
-			if (!smt_on && use_ccx && hint_llc >= 0 &&
-			    l == (u32)hint_llc && cx == hint_ccx)
-				score = -1;
+				pre = 2;
 		} else if (flow_is_primary(0)) {
-			score = 2;
+			/* Intentional: no hint topo falls back to the node tier.
+			 * The zero arg is the single node default with no widening.
+			 * No core walk runs here by design; each CPU stands single. */
+			pre = 2;
 		}
+		if (pre > best_score)
+			continue;
+		vw = flow_cpu_view(c);
+		cx = vw.ccx;
+		score = pre;
+		if (have_hint_topo && !smt_on && hint_llc >= 0 &&
+		    l == (u32)hint_llc && flow_ccx_match(use_ccx, cx, hint_ccx))
+			score = -1;
+		/* Tier bucket split: group tier reads l2 and LLC tier reads l3.
+		 * Seeds stay equal today so the split is harmless, and a future
+		 * level divergence stays correct. Buckets fetch only for
+		 * competitive tiers with no extra lookup elsewhere. */
+		if (score == -1)
+			cb = vw.l2;
+		else if (score == 0)
+			cb = vw.l3;
 		if (score < best_score) {
 			best_score = score;
 			best = (s32)c;
-			best_same = have_hint_topo && use_ccx && cx == hint_ccx;
-			if (score == -1)
-				break;
-			if (score == 0 && (!use_ccx || best_same))
-				break;
+			best_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
+			best_bkt = cb;
+			have_best_bkt = cb ? true : false;
 		} else if (score == best_score) {
-			/* Tie favor stays even with threads on; only the fast pick is gated. */
-			bool cur_same = have_hint_topo && use_ccx && cx == hint_ccx;
+			/* Tie favor stays even with threads on; only the fast pick is gated.
+			 * Inside the cache tiers the tie then prefers larger buckets first
+			 * within tier with known priority matching the drain, else fixed
+			 * order keeps unknown sizes. A known bucket replaces an unknown
+			 * best and larger replaces smaller with equal keeping fixed order.
+			 * The full scan stays bounded with no early break
+			 * so the largest known bucket wins. */
+			bool cur_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
 			if (cur_same && !best_same) {
 				best = (s32)c;
 				best_same = true;
-				if (score == 0)
-					break;
+				best_bkt = cb;
+				have_best_bkt = cb ? true : false;
+			} else if (cur_same == best_same && score <= 0 && have_hint_topo &&
+				   cb && (!have_best_bkt || flow_cache_larger(cb, best_bkt))) {
+				best = (s32)c;
+				best_bkt = cb;
+				have_best_bkt = true;
 			}
 		}
 	}
