@@ -68,7 +68,7 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
 pub fn collect(skel: &BpfSkel<'_>) -> Metrics {
     use libbpf_rs::MapCore;
     let mut out = Metrics::default();
-    for llc in 0..crate::bpf_intf::flow_consts_FLOW_MAX_LLCS {
+    for llc in 0..(crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u32) {
         let key = llc.to_ne_bytes();
         let val = match skel
             .maps
@@ -96,7 +96,7 @@ pub fn collect(skel: &BpfSkel<'_>) -> Metrics {
 pub fn collect_per_llc(skel: &BpfSkel<'_>) -> Vec<(u32, Metrics)> {
     use libbpf_rs::MapCore;
     let mut out: Vec<(u32, Metrics)> = Vec::new();
-    for llc in 0..crate::bpf_intf::flow_consts_FLOW_MAX_LLCS {
+    for llc in 0..(crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u32) {
         let key = llc.to_ne_bytes();
         let val = match skel
             .maps

@@ -6,7 +6,13 @@
  * never drops below zero. It uses a short compare and swap loop.
  * When the loop loses, a saturating atomic step keeps the floor
  * with no plain store, so a decrement is not lost under contention.
- * An unknown offset does nothing.
+ * An unknown offset does nothing. Shared plus fallback inserts count
+ * the gauge with fallback inserts also counting fallback. Dequeue
+ * drops the gauge on cancel. Exit drops the gauge only when the queued
+ * bit shows pending. Running clears ownership with no gauge move.
+ * A duplicate requeue counts the duplicate counter only with no gauge
+ * move. The thirteen counters keep their order for the userspace
+ * reader with no new counter.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -54,6 +60,8 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
 }
+/* Guard kept helper with no caller in tree. Counts fallback plus
+ * the given tail with no new counter. */
 static __always_inline void flow_fb_inc(u32 llc, u64 tail_off)
 {
 	flow_stat_inc(llc, 2);

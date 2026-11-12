@@ -36,7 +36,6 @@ fn main() {
         .add_source("src/bpf/lib/arena.bpf.c")
         .add_source("src/bpf/lib/common.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
-        .add_source("src/bpf/lib/edq.bpf.c")
         .add_source("src/bpf/lib/bitmap.bpf.c")
         .add_source("src/bpf/lib/cpumask.bpf.c")
         .add_source("src/bpf/lib/minheap.bpf.c")

@@ -1,6 +1,6 @@
 [package]
 name = "scx_flow"
-version = "5.2.14"
+version = "5.2.22"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2024"
 rust-version = "1.91"
