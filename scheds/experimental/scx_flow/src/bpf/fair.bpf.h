@@ -229,8 +229,8 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 /* Smoothed pricing folds five run observables with one shared shift gain.
  * Burst length plus ring durations plus ring stamps plus run sum plus kept
  * range feed one effective duration with shift only and saturation. The gain
- * stays at one quarter for all five criteria with no per criterion tuning.
- * New value equals old minus the quarter of old plus the quarter of sample.
+ * stays at three quarters of sample for all five criteria with no per criterion tuning.
+ * New value equals old plus three times sample shifted right by two.
  * A zero sample freezes with no move. A zero old takes the sample as init.
  * Saturation uses the shared cap helper with slice caps where bounded. A
  * backward clock freezes prune and close with no ring move. The smoothed
@@ -251,7 +251,7 @@ static __always_inline u64 flow_ewma_next(u64 old, u64 sample)
 		return old;
 	if (!old)
 		return sample;
-	return old - (old >> 2) + (sample >> 2);
+	return (old + 3 * sample) >> 2;
 }
 /* Smoothed reference for the enqueue known path with a BSS fold count.
  * Unknown tasks return zero with a freeze count, so the caller keeps
