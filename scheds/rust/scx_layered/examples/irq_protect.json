@@ -1,0 +1,42 @@
+[
+	{
+		"name": "nccl",
+		"comment": "Latency-critical collective comm threads. Their CPUs are kept clear of IRQs.",
+		"matches": [
+			[{ "CommPrefix": "nccl" }],
+			[{ "CommPrefix": "NCCL" }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range": [4, 8],
+				"util_range": [0.2, 0.8],
+				"growth_algo": "RandomTopo",
+				"preempt": true,
+				"irq_protect": true
+			}
+		}
+	},
+	{
+		"name": "gpu_workers",
+		"comment": "Other threads that have touched a GPU fd (cuda launchers, data movers).",
+		"matches": [
+			[{ "UsedGpuTid": true }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range": [4, 32],
+				"util_range": [0.3, 0.9],
+				"growth_algo": "RandomTopo"
+			}
+		}
+	},
+	{
+		"name": "rest",
+		"matches": [[]],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]
