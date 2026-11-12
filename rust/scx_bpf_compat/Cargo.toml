@@ -7,7 +7,6 @@ description = "BPF compatibility testing utilities for sched_ext"
 license = "GPL-2.0-only"
 authors = ["Jake Hillion <jake@hillion.co.uk>"]
 repository = "https://github.com/sched-ext/scx"
-homepage = "https://github.com/sched-ext/scx"
 
 [package.metadata.scx]
 ci.use_clippy = true
