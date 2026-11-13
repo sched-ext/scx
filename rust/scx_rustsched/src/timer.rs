@@ -23,16 +23,19 @@
 //! the hrtimer from there: it queues an irq_work, a self-IPI per arming.
 //! From the callback itself, with interrupts on, it arms directly.
 
-use core::ffi::c_void;
+use core::{cell::UnsafeCell, ffi::c_void};
 
 use crate::helpers;
 
 const CLOCK_MONOTONIC: u64 = 1;
 
-/// struct bpf_timer.
+/// struct bpf_timer. The kernel changes it while a callback holds a
+/// `&Timer`, hence the `UnsafeCell`, as for `Task`. It wraps the words
+/// rather than the struct, since the verifier finds the timer in a map
+/// value by the name bpf_timer.
 #[repr(C)]
 pub struct bpf_timer {
-    opaque: [u64; 2],
+    opaque: UnsafeCell<[u64; 2]>,
 }
 
 /// A timer map's value.
@@ -46,7 +49,7 @@ impl Timer {
     /// armed. A timer that was never set up stays as it is.
     #[inline(always)]
     pub fn start(&self, delta: u64) {
-        unsafe { start((self as *const Timer).cast_mut(), delta) };
+        unsafe { start(self.timer.opaque.get().cast(), delta) };
     }
 }
 
