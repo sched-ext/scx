@@ -20,15 +20,12 @@ log = "0.4"
 nvml-wrapper = { version = "0.12", optional = true }
 nvml-wrapper-sys = { version = "0.9", optional = true }
 paste = "1"
-regex = "1"
 scx_stats = { path = "../scx_stats", version = "1.1.4" }
 serde = { version = "1", features = ["derive"] }
 sscanf = "0.5"
 zbus = { version = "5", optional = true }
 num = "0.4"
-tempfile = "3"
 tracing = "0.1"
-tracing-subscriber = "0.3"
 libc = "0.2"
 nix = { version = "0.31", features = ["resource"] }
 
