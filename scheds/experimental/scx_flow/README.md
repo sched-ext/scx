@@ -2,17 +2,7 @@
 
 ## What
 
-scx_flow orders tasks by deadline. Each per-CPU queue holds tasks in
-deadline order with equal deadlines in insertion order, plus one fallback
-queue in FIFO order. Running tasks pay for burnt time. Virtual deadline adds
-a burst scaled slice step to the floored time. Steady tasks price by the kept
-max run length with short tasks keeping the burst path with a floor slice and long tasks in one slice quanta.
-Unknown tasks keep the burst path. An insert miss keeps the newcomer in
-fallback in FIFO order with no evict. Stopping plus tick keep the burst
-and run state with guarded preempt and no reclaim. Dispatch drains local first,
-then same LLC, then same node, then remote. Wakeups wake idle targets, plus a
-guarded preempt on a much earlier Virtual deadline. Queues hold without bound.
-Slice is fixed at 1ms, and hotplug needs restart.
+scx_flow orders tasks by virtual deadline using per-CPU arena binary search trees (bounded at depth 32 with right-chained ties in insertion order) plus one fallback FIFO DSQ. Running tasks pay for burnt time scaled by nice weight. Unpredicted tasks run pure EEVDF with a 1ms slice quantum and bounded virtual lag credit. Steady predicted tasks (tracked via shift-only EWMA over an 8-slot run history ring) receive a custom slice quantum [62.5us, 1ms] and an EEVDF virtual deadline complemented by Highest Response Ratio Next (HRRN) wait-over-service attenuation. Placement prefers idle cores across cache tiers (L1 > L2 > L3, breaking ties by larger cache size buckets) and drains in the same topological order. Wakeups ramp idle targets to max frequency before kicking and use guarded preemption (gated by deadline gap, minimum runtime granularity, and remaining slice tail) at most once per run.
 
 ## Typical Use Cases
 

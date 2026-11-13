@@ -165,7 +165,7 @@ static __always_inline u64 flow_rb_deadline(s64 vd)
  * scaled sum stays at most twice the step with two hundred million as
  * the top at weight one. The general path keeps the hi guard plus the
  * saturating add with no wrap. */
-static __always_inline s64 flow_fair_charge(s64 base, u64 used, u32 w)
+static __noinline s64 flow_fair_charge(s64 base, u64 used, u32 w)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
 	u64 st = flow_fair_step(w);
@@ -197,67 +197,74 @@ static __always_inline u64 flow_burst_clamp(u64 burst_ns)
 		return (u64)FLOW_SLICE_FLOOR_NS;
 	return burst_ns;
 }
-static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
-{
-	u64 b = flow_burst_clamp(burst_ns);
-	s64 vd = flow_fair_charge(floored, b, w);
-	if (vd <= floored)
-		return flow_fair_cap_add(floored, 1);
-	return vd;
-}
-/* Track the last run length. An overrun snaps to one slice. A run
- * that ends early while still runnable only moves up past the old
- * value by a quarter of the gap and holds otherwise, since the stop cut the
- * run short. A sleep moves by a quarter toward the run length. */
-static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
-					     u64 cur, bool runnable)
-{
-	u64 b = flow_burst_clamp(old_burst);
-	u64 u = total_used;
-	if (u > (u64)FLOW_SLICE_MIN_NS)
-		u = (u64)FLOW_SLICE_MIN_NS;
-	if (!cur)
-		return (u64)FLOW_SLICE_MIN_NS;
-	if (runnable) {
-		if (u > b)
-			b = b - (b >> 2) + (u >> 2);
-		return flow_burst_clamp(b);
-	}
-	b = b - (b >> 2) + (u >> 2);
-	return flow_burst_clamp(b);
-}
-/* Smoothed pricing folds five run observables with one shared shift gain.
- * Burst length plus ring durations plus ring stamps plus run sum plus kept
- * range feed one effective duration with shift only and saturation. The gain
- * stays at one quarter for all five criteria with no per criterion tuning.
- * New value equals old minus the quarter of old plus the quarter of sample.
- * A zero sample freezes with no move. A zero old takes the sample as init.
- * Saturation uses the shared cap helper with slice caps where bounded. A
- * backward clock freezes prune and close with no ring move. The smoothed
- * reference derives from the kept max in the ring with zero new bytes. The
- * effective value keeps the larger of reference and burst with a slice cap.
- * Order holds since a larger effective value never yields an earlier virtual
- * deadline. The global fold counts recalc passes in BSS only with no wire
- * bytes. Read the counters with a BSS dump. Enqueue prices stable tasks by
- * the smoothed reference through the shared charge path with unknown tasks
- * keeping the burst path. Lag clamp stays on the kick path with no pricing
- * use there. */
+/* Smoothed EWMA step: (old + 3 * sample) >> 2.
+ * Placed above flow_burst_update so all five observables share it. */
 u64 m_ewma_fold;
 u64 m_ewma_sat;
 u64 m_ewma_freeze;
+
 static __always_inline u64 flow_ewma_next(u64 old, u64 sample)
 {
 	if (!sample)
 		return old;
 	if (!old)
 		return sample;
-	return old - (old >> 2) + (sample >> 2);
+	return (old + 3ULL * sample) >> 2;
+}
+
+static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
+{
+	u64 b = flow_burst_clamp(burst_ns);
+	s64 vd = flow_fair_charge(floored, b, w);
+
+	if (vd <= floored)
+		return flow_fair_cap_add(floored, 1);
+	return vd;
+}
+
+/* Stage 1 True EEVDF Virtual deadline for unpredicted tasks (sref == 0).
+ * Grants the full 1ms slice quantum and deducts bounded virtual lag credit
+ * (scaled across [FLOW_SLICE_FLOOR_NS, FLOW_SLICE_MIN_NS]) from the request
+ * offset. A zero-lag CPU hog or brand-new task pays the full 1ms step. */
+static __noinline s64 flow_eevdf_vd(s64 floored, u64 lag_ns, u32 w)
+{
+	u64 clamped_lag = lag_ns > (u64)FLOW_LAG_MAX_NS ?
+			  (u64)FLOW_LAG_MAX_NS : lag_ns;
+	u64 max_credit = (u64)FLOW_SLICE_MIN_NS - (u64)FLOW_SLICE_FLOOR_NS;
+	u64 credit = (clamped_lag * max_credit) / (u64)FLOW_LAG_MAX_NS;
+	u64 req_q = (u64)FLOW_SLICE_MIN_NS - credit;
+	s64 vd = flow_fair_charge(floored, flow_burst_clamp(req_q), w);
+
+	if (vd <= floored)
+		return flow_fair_cap_add(floored, 1);
+	return vd;
+}
+
+/* Observable 1: Track burst length using shared shift-only EWMA. */
+static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
+					     u64 cur, bool runnable)
+{
+	u64 b = flow_burst_clamp(old_burst);
+	u64 u = total_used;
+
+	if (!cur && u < (u64)FLOW_SLICE_MIN_NS)
+		u = (u64)FLOW_SLICE_MIN_NS;
+	if (u > (u64)FLOW_SLICE_MIN_NS)
+		u = (u64)FLOW_SLICE_MIN_NS;
+
+	if (runnable) {
+		if (u > b)
+			b = flow_ewma_next(u, b);
+		return flow_burst_clamp(b);
+	}
+	b = flow_ewma_next(b, u);
+	return flow_burst_clamp(b);
 }
 /* Smoothed reference for the enqueue known path with a BSS fold count.
  * Unknown tasks return zero with a freeze count, so the caller keeps
  * the burst path. Stable tasks price by this value with no clock and
  * no scan. */
-static __always_inline u64 flow_smoothed_ref(struct flow_task_ctx *t)
+static __noinline u64 flow_smoothed_ref(struct flow_task_ctx *t)
 {
 	u64 ref;
 	if (!t)
@@ -274,7 +281,7 @@ static __always_inline u64 flow_smoothed_ref(struct flow_task_ctx *t)
  * plus burst with max and slice cap. Larger input never yields an earlier
  * virtual deadline. Saturation at the slice cap counts in BSS. Enqueue
  * feeds this value to the shared charge path. */
-static __always_inline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
+static __noinline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
 {
 	u64 b = flow_burst_clamp(burst_ns);
 	u64 e = ref > b ? ref : b;
@@ -284,7 +291,7 @@ static __always_inline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
 	}
 	return e;
 }
-static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
+static __noinline s64 flow_seq_floor(u32 llc, s64 v)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
 	int i;
@@ -310,25 +317,21 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 		if (__sync_val_compare_and_swap(&flow_llc_seq[llc], last, next) == last)
 			return want;
 	}
-	{
-		s64 last = READ_ONCE(flow_llc_seq[llc]);
-		s64 want = v;
-		if (want <= last) {
-			if (last == vmax)
-				want = last;
-			else
-				want = last + 1;
-			flow_llc_seq[llc] = want;
-		}
-		return want;
+	s64 last = READ_ONCE(flow_llc_seq[llc]);
+
+	if (v <= last) {
+		if (last >= vmax - 1)
+			return vmax;
+		return __sync_add_and_fetch(&flow_llc_seq[llc], 1LL);
 	}
+	return v;
 }
  /* Recent run lengths with close stamps. The ring holds eight pairs
   * with the next slot masked by seven. Total holds the current run
   * sum capped at thirty seconds. Prune drops stamps past the window
   * and freezes on a zero or backward clock. Close pushes the sum on
   * sleep only, so tasks that never sleep stay unknown. The stable
-  * flag needs four kept plus a four second span plus a tight range
+  * flag needs four kept plus a four millisecond span plus a tight range
   * with short tasks stable under the floor. Enqueue reads the cached
   * flag with no clock and no scan. Integer only with bounded scans. */
 static __always_inline void flow_run_reset(struct flow_task_ctx *t)
@@ -365,23 +368,27 @@ static __always_inline void flow_run_add(struct flow_task_ctx *t, u64 delta)
 	else
 		t->run_total = cur + delta;
 }
-static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
+static __noinline void flow_run_recalc(struct flow_task_ctx *t)
 {
 	u64 min_d = 0;
 	u64 max_d = 0;
 	u64 min_s = 0;
 	u64 max_s = 0;
 	u64 kept = 0;
+	u64 s_min_d;
+	u64 s_max_d;
 	bool have = false;
 	int i;
+
 	if (!t)
 		return;
 	__sync_fetch_and_add(&m_ewma_fold, 1ULL);
 	/* Keep each run-history access at a fixed offset for the verifier. */
-#pragma unroll
+	#pragma unroll
 	for (i = 0; i < 8; i++) {
 		u64 d = READ_ONCE(t->run_dur[i]);
 		u64 s = READ_ONCE(t->run_stamp[i]);
+
 		if (!d || !s)
 			continue;
 		if (!have) {
@@ -409,9 +416,13 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
 	}
-	t->run_min = min_d;
-	t->run_max = max_d;
-	if (max_d < (u64)FLOW_SLICE_FLOOR_NS) {
+	s_min_d = flow_ewma_next(READ_ONCE(t->run_min), min_d);
+	s_max_d = flow_ewma_next(READ_ONCE(t->run_max), max_d);
+	if (s_max_d < s_min_d)
+		s_max_d = s_min_d;
+	t->run_min = s_min_d;
+	t->run_max = s_max_d;
+	if (s_max_d < (u64)FLOW_SLICE_FLOOR_NS) {
 		t->run_known = 1;
 		__sync_fetch_and_add(&m_ewma_sat, 1ULL);
 		return;
@@ -426,7 +437,8 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
 	}
-	if (max_d < min_d || max_d - min_d > (min_d >> 3)) {
+	/* 25% tolerance on EWMA-smoothed min/max range */
+	if (s_max_d - s_min_d > (s_min_d >> 2)) {
 		t->run_known = 0;
 		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
@@ -434,7 +446,7 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 	t->run_known = 1;
 	__sync_fetch_and_add(&m_ewma_sat, 1ULL);
 }
-static __always_inline void flow_run_prune(struct flow_task_ctx *t, u64 now)
+static __noinline void flow_run_prune(struct flow_task_ctx *t, u64 now)
 {
 	u64 win;
 	int i;
@@ -459,12 +471,16 @@ static __always_inline void flow_run_prune(struct flow_task_ctx *t, u64 now)
 	}
 	flow_run_recalc(t);
 }
-static __always_inline void flow_run_close(struct flow_task_ctx *t, u64 now)
+static __noinline void flow_run_close(struct flow_task_ctx *t, u64 now)
 {
 	u64 tot;
 	u64 win;
+	u32 head;
 	u32 idx;
+	u32 prev_idx;
+	u64 prev_d;
 	int i;
+
 	if (!t || !now)
 		return;
 	tot = READ_ONCE(t->run_total);
@@ -475,37 +491,24 @@ static __always_inline void flow_run_close(struct flow_task_ctx *t, u64 now)
 		tot = win;
 	for (i = 0; i < 8; i++) {
 		u64 s = READ_ONCE(t->run_stamp[i]);
+
 		if (s && s > now)
 			return;
 	}
-	idx = READ_ONCE(t->run_head) & 7U;
-	if (idx >= 8U)
-		return;
-	t->run_dur[idx] = tot;
+	head = READ_ONCE(t->run_head);
+	idx = head & 7U;
+	prev_idx = (head - 1U) & 7U;
+	prev_d = READ_ONCE(t->run_dur[prev_idx]);
+	t->run_dur[idx] = flow_ewma_next(prev_d, tot);
 	t->run_stamp[idx] = now;
-	t->run_head++;
+	t->run_head = head + 1U;
 	t->run_total = 0;
 	flow_run_recalc(t);
 }
 /* Guard kept helper with no caller in tree. Reads the kept max when
- * stable else zero for later use. */
-static __always_inline u64 flow_run_ref(struct flow_task_ctx *t)
-{
-	if (!t)
-		return 0;
-	if (!READ_ONCE(t->run_known))
-		return 0;
-	return READ_ONCE(t->run_max);
-}
-static __always_inline u64 flow_run_eff(u64 ref, u64 burst_ns)
-{
-	u64 b = flow_burst_clamp(burst_ns);
-	u64 e = ref > b ? ref : b;
-	if (e > (u64)FLOW_SLICE_MIN_NS)
-		e = (u64)FLOW_SLICE_MIN_NS;
-	return e;
-}
-static __always_inline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
+ * stable else zero for later use. Removed as dead twin of the smoothed
+ * reference path. Enqueue uses flow_smoothed_ref only. */
+static __noinline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
 {
 	s64 vd = flow_fair_charge(floored, eff, w);
 	if (vd <= floored)
@@ -527,40 +530,26 @@ static __always_inline bool hrrn_ready(struct flow_task_ctx *t, u64 sref, u64 ef
 	       W != 0 && W <= (u64)FLOW_RUN_WIN_NS && w != 0 &&
 	       w != (u32)FLOW_CGROUP_WEIGHT_INVALID;
 }
-/* Single response due time with wait over service. The step comes from
- * the weight only with no tuning. Service stays in the floor through
- * slice range with clamp only. Wait stays capped at the run window
- * with min only and no clock and no scan. The response is step times
- * service over wait plus service with zero plus denominator guards.
- * Zero wait keeps max boost with full step. Max wait keeps min boost
- * with a small scaled term. The sum stays bounded at twice the step
- * with saturation through the shared cap helper and no wrap. The
- * caller passes service plus wait from existing locals with no new
- * storage and no ring walk. This keeps pure arithmetic with integer
- * only and no extra state. */
-static __always_inline s64 vd_HRRN(s64 floored, u64 W, u64 S, u32 w)
+/* Stage 2 Complementary EEVDF + HRRN Virtual deadline.
+ * Computes the EEVDF custom-quantum offset base_off = charge(0, S, w) first,
+ * then attenuates it by the inverse HRRN response ratio S / (W_clamped + S). */
+static __noinline s64 vd_HRRN(s64 floored, u64 W, u64 S, u32 w)
 {
-	u64 step = flow_fair_step(w);
-	u64 s = S;
-	u64 win = W;
+	u64 s = flow_burst_clamp(S);
+	u64 win = W > (u64)FLOW_LAG_MAX_NS ? (u64)FLOW_LAG_MAX_NS : W;
+	u64 base_off;
 	u64 denom;
 	u64 resp;
-	if (!step)
-		step = (u64)FLOW_SLICE_MIN_NS;
-	if (!s)
-		return flow_fair_cap_add(floored, 1);
-	if (s < (u64)FLOW_SLICE_FLOOR_NS)
-		s = (u64)FLOW_SLICE_FLOOR_NS;
-	if (s > (u64)FLOW_SLICE_MIN_NS)
-		s = (u64)FLOW_SLICE_MIN_NS;
-	if (win > (u64)FLOW_RUN_WIN_NS)
-		win = (u64)FLOW_RUN_WIN_NS;
+
+	base_off = (u64)flow_fair_charge(0, s, w);
+	if (!base_off)
+		base_off = 1;
 	denom = win + s;
 	if (!denom)
 		return flow_fair_cap_add(floored, 1);
-	resp = step * s / denom;
-	if (resp > step)
-		resp = step;
+	resp = (base_off * s) / denom;
+	if (resp > base_off)
+		resp = base_off;
 	if (!resp)
 		resp = 1;
 	return flow_fair_cap_add(floored, resp);

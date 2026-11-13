@@ -77,7 +77,7 @@ enum flow_consts {
 	FLOW_LAG_MAX_NS = 8000000ULL,
 	FLOW_RB_MAX_DEPTH = 32ULL,
 	FLOW_RUN_WIN_NS = 30000000000ULL,
-	FLOW_RUN_SPAN_NS = 4000000000ULL,
+	FLOW_RUN_SPAN_NS = 4000000ULL, /* 4ms span across ring enables 60-1000Hz tasks */
 	FLOW_RUN_NEED = 4ULL,
 	FLOW_RUN_RING = 8ULL,
 	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
@@ -102,7 +102,7 @@ enum flow_consts {
  * seven. Pruned counts stale drops. Min plus max hold the kept range.
  * Known marks a stable range for the hard path. Total holds the
  * current run sum capped at thirty seconds. A stable range needs four
- * kept entries over a four second span inside a thirty second window
+ * kept entries over a four millisecond span inside a thirty second window
  * with a tight range check. A zero or backward clock freezes with no
  * ring move. The state holds two
  * hundred sixteen bytes. */

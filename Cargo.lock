@@ -6041,7 +6041,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flow"
-version = "5.2.22"
+version = "5.2.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -6058,6 +6058,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
+ "tiny_http",
 ]
 
 [[package]]

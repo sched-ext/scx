@@ -29,6 +29,27 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include <lib/sdt_alloc.h>
+/* Owner tree lookup plus empty probe shared with enqueue and dispatch.
+ * Lives here so select can reuse the same helper with no duplicate. */
+static __always_inline struct flow_rb_root __arena *flow_rb_for_cpu(s32 tgt)
+{
+	if (tgt < 0 || !flow_cpu_ok((u32)tgt))
+		return 0;
+	if ((u64)(u32)tgt >= scx_bpf_nr_cpu_ids())
+		return 0;
+	/* No live gate here so offline roots still reap. Enqueue callers gate
+	 * live explicitly and fall back to FIFO for offline targets. No new
+	 * insert lands offline. */
+	if (!flow_rb_roots)
+		return 0;
+	return &flow_rb_roots[(u32)tgt];
+}
+static __always_inline bool flow_rb_empty(struct flow_rb_root __arena *r)
+{
+	if (!r)
+		return true;
+	return READ_ONCE(r->root) == 0;
+}
 static __always_inline bool flow_is_pinned(struct task_struct *p)
 {
 	if (!p)
@@ -60,7 +81,7 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 /* Unknown cluster reads as all ones, so group zero stays a valid match.
  * The value never collides with a seeded group id, which stays small. */
 #define FLOW_CCX_UNKNOWN 0xFFFFFFFFU
-static __always_inline s32 flow_first_allowed(struct task_struct *p)
+static __noinline s32 flow_first_allowed(struct task_struct *p)
 {
 	u32 first;
 	u32 c;
@@ -82,13 +103,48 @@ static __always_inline s32 flow_first_allowed(struct task_struct *p)
 	}
 	return -1;
 }
-static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
+static __noinline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 {
 	if (!p || !p->cpus_ptr)
 		return -1;
 	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint))
 		return hint;
 	return flow_first_allowed(p);
+}
+/* A busy core runs at max and an idle core runs at half. The call
+ * stays on one live core and never sends zero. Shared here so enqueue
+ * and dispatch use one helper with no duplicate max path. The gate
+ * also bounds the id by the live ids and skips a remote target while
+ * a queue lock is held, so the set never trips the invalid target
+ * exit. Kick stays allowed for a valid target while the set skips.
+ * Caller must hold the target runqueue lock for a remote set, else the call skips. */
+static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
+{
+	u32 perf;
+	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
+		return;
+	if ((u64)cpu >= scx_bpf_nr_cpu_ids())
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	if (bpf_ksym_exists(scx_bpf_cpu_rq)) {
+		struct rq *locked = scx_bpf_locked_rq();
+		if (locked) {
+			struct rq *target = scx_bpf_cpu_rq((s32)cpu);
+			if (!target || target != locked)
+				return;
+		}
+	} else {
+		struct rq *locked = scx_bpf_locked_rq();
+		if (locked && cpu != bpf_get_smp_processor_id())
+			return;
+	}
+	perf = (u32)SCX_CPUPERF_ONE;
+	if (idle)
+		perf = (u32)(SCX_CPUPERF_ONE / 2);
+	if (!perf)
+		return;
+	scx_bpf_cpuperf_set((s32)cpu, perf);
 }
 static __always_inline bool flow_is_primary(u32 node)
 {
@@ -188,8 +244,8 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 }
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	const struct cpumask *idle_mask;
 	s32 hint = prev_cpu;
-	s32 tgt;
 	int hint_llc = -1;
 	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
 	bool have_hint_topo = false;
@@ -210,9 +266,18 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	scx_arena_subprog_init();
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
-	tgt = flow_constrained_target(hint, p);
-	if (tgt >= 0)
-		return tgt;
+	if (flow_is_pinned(p))
+		return flow_constrained_target(hint, p);
+	idle_mask = scx_bpf_get_idle_cpumask();
+	if (!idle_mask)
+		return flow_constrained_target(hint, p);
+	/* Read-only idle check: keeps the idle bit intact for flow_enqueue to kick */
+	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint) &&
+	    bpf_cpumask_test_cpu((u32)hint, idle_mask) &&
+	    flow_rb_empty(flow_rb_for_cpu(hint))) {
+		scx_bpf_put_cpumask(idle_mask);
+		return hint;
+	}
 	if (hint >= 0 && flow_cpu_ok((u32)hint) && topo_all &&
 	    topo_contains(topo_all, (u32)hint)) {
 		hint_llc = flow_hint_llc(hint);
@@ -238,6 +303,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		if (!flow_cpu_live(c))
 			continue;
 		if (!flow_cpu_allowed((s32)c, p))
+			continue;
+		if (!bpf_cpumask_test_cpu(c, idle_mask))
+			continue;
+		if (!flow_rb_empty(flow_rb_for_cpu((s32)c)))
 			continue;
 		vllc = topo_cpu_to_llc_id(c);
 		if (vllc < 0 || !flow_llc_ok((u32)vllc))
@@ -267,10 +336,6 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		if (have_hint_topo && !smt_on && hint_llc >= 0 &&
 		    l == (u32)hint_llc && flow_ccx_match(use_ccx, cx, hint_ccx))
 			score = -1;
-		/* Tier bucket split: group tier reads l2 and LLC tier reads l3.
-		 * Seeds stay equal today so the split is harmless, and a future
-		 * level divergence stays correct. Buckets fetch only for
-		 * competitive tiers with no extra lookup elsewhere. */
 		if (score == -1)
 			cb = vw.l2;
 		else if (score == 0)
@@ -303,9 +368,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			}
 		}
 	}
+	scx_bpf_put_cpumask(idle_mask);
 	/* The mask can change while scanning, check the pick again. */
 	if (best >= 0 && flow_cpu_allowed(best, p))
 		return best;
-	return flow_first_allowed(p);
+	return flow_constrained_target(hint, p);
 }
 #endif
