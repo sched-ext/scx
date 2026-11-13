@@ -6226,7 +6226,6 @@ dependencies = [
  "glob",
  "hex",
  "lazy_static",
- "libbpf-cargo 0.27.2",
  "libbpf-rs 0.27.2",
  "libc",
  "log",
@@ -6241,10 +6240,7 @@ dependencies = [
  "serde",
  "sscanf",
  "tar",
- "tempfile",
  "tracing",
- "version-compare",
- "walkdir",
  "zbus",
 ]
 
