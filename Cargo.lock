@@ -6058,7 +6058,6 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
- "tiny_http",
 ]
 
 [[package]]

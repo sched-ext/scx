@@ -1082,14 +1082,25 @@ mod tests {
                 }
             }
         }
-        Node {
-            id,
-            distance: vec![10, 10],
-            llcs,
-            span: Cpumask::new(),
-            all_cores,
-            all_cpus,
-        }
+        // Build on a live Node value instead of a struct literal so this
+        // helper keeps compiling whether or not scx_utils enables the
+        // optional gpu-topology feature. Workspace feature unification can
+        // add fields such as `gpus` that a literal cannot name portably.
+        // Every field the tests observe is overwritten below; `gpus` keeps
+        // the live value and stays inert because scx_flow never reads it.
+        let mut node = Topology::new()
+            .expect("mk_node needs live topology")
+            .nodes
+            .into_values()
+            .next()
+            .expect("live topology has at least one node");
+        node.id = id;
+        node.distance = vec![10, 10];
+        node.llcs = llcs;
+        node.span = Cpumask::new();
+        node.all_cores = all_cores;
+        node.all_cpus = all_cpus;
+        node
     }
 
     fn mk_topo(nodes: BTreeMap<usize, Node>) -> Topology {
