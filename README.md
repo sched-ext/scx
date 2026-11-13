@@ -21,14 +21,8 @@ The following are a few highlights of this repository.
   motivation), please refer to the [overview document](OVERVIEW.md).
 - For a description of the schedulers shipped with this tree, please refer to
   the [schedulers document](scheds/README.md).
-- The following video is the [`scx_rustland`](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rustland)
-  scheduler which makes most scheduling decisions in userspace `Rust` code showing
-  better FPS in terraria while kernel is being compiled. This doesn't mean that
-  `scx_rustland` is a better scheduler but does demonstrate how safe and easy it is to
-  implement a scheduler which is generally usable and can outperform the default
-  scheduler in certain scenarios.
-
-[scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
+- For writing schedulers in Rust BPF, see the
+  [`scx_rustsched` framework](rust/scx_rustsched/README.md).
 
 `sched_ext` is supported by the upstream kernel starting from version 6.12. Both
 Meta and Google are fully committed to `sched_ext` and Meta is in the process of
@@ -238,18 +232,6 @@ $ scx_lavd --monitor 5
 |       12 |      1292 |         3 |         1 |      8510 |   37.6028 |   2.42068 |  99.1304 |      100 |  62.8907 |      100 |      100 |  62.8907 | performance |          100 |            0 |            0 |
 |       13 |      2208 |         3 |         1 |      6142 |   33.3442 |   2.39336 |  98.7626 |      100 |  60.2084 |      100 |      100 |  60.2084 | performance |          100 |            0 |            0 |
 |       14 |       941 |         3 |         1 |      5223 |    31.323 |     1.704 |   99.215 |  100.019 |  59.1614 |      100 |  100.019 |  59.1614 | performance |          100 |            0 |            0 |
-```
-
-- `scx_rustland`
-
-```shell
-$ scx_rustland --monitor 5
-[RustLand] tasks -> r:  1/4  w: 3 /3  | pf: 0     | dispatch -> u: 4     k: 0     c: 0     b: 0     f: 0     | cg: 0
-[RustLand] tasks -> r:  1/4  w: 2 /2  | pf: 0     | dispatch -> u: 28385 k: 0     c: 0     b: 0     f: 0     | cg: 0
-[RustLand] tasks -> r:  0/4  w: 4 /0  | pf: 0     | dispatch -> u: 25288 k: 0     c: 0     b: 0     f: 0     | cg: 0
-[RustLand] tasks -> r:  0/4  w: 2 /0  | pf: 0     | dispatch -> u: 30580 k: 0     c: 0     b: 0     f: 0     | cg: 0
-[RustLand] tasks -> r:  0/4  w: 2 /0  | pf: 0     | dispatch -> u: 30824 k: 0     c: 0     b: 0     f: 0     | cg: 0
-[RustLand] tasks -> r:  1/4  w: 1 /1  | pf: 0     | dispatch -> u: 33178 k: 0     c: 0     b: 0     f: 0     | cg: 0
 ```
 
 ## systemd services

@@ -282,11 +282,9 @@ steps, and the details that trip them up:
    check that nothing else is staged. The maintainer signs the commit with a
    GPG key CachyOS recognizes: `git commit -S -s -m 'versions: bump versions
    for X.Y.Z <Month> <YYYY> release'`.
-3. Run `cargo publish --workspace --dry-run --exclude scx_rlfifo --exclude
-   scx_rustland`. Those two crates are excluded because the rustland-core
-   builder writes into the source directory. `--allow-dirty` is needed when
-   the dry run precedes the bump commit. Until something is published, fixes
-   can be amended.
+3. Run `cargo publish --workspace --dry-run`. `--allow-dirty` is needed
+   when the dry run precedes the bump commit. Until something is published,
+   fixes can be amended.
 4. Push the branch, open the pull request and wait for CI to pass.
 5. `python3 cargo-publish.py` publishes every crate. It needs owner
    permissions on every crate and a token with the publish-new scope. `cargo

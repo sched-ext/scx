@@ -49,8 +49,8 @@ variables `SCX_SCHEDULER_OVERRIDE` and `SCX_FLAGS_OVERRIDE`.
 Example:
 
 ```
-systemctl set-environment SCX_SCHEDULER_OVERRIDE=scx_rustland
-systemctl set-environment SCX_FLAGS_OVERRIDE="-s 10000"
+systemctl set-environment SCX_SCHEDULER_OVERRIDE=scx_lavd
+systemctl set-environment SCX_FLAGS_OVERRIDE="--slice-max-us 10000"
 systemctl restart scx
 ```
 

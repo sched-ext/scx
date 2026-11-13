@@ -2,7 +2,7 @@
 set -eou pipefail
 
 PGO_TMPDIR=${1:-/tmp/pgo-data}
-SCHED=${2:-scx_rustland}
+SCHED=${2:-scx_bpfland}
 PGO_DUR=${3:-30}
 
 rm -rf "$PGO_TMPDIR"
