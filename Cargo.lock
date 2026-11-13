@@ -743,19 +743,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
-name = "cgroupfs"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fec72c8f99a7f541817bd12ef19a4a58931b00f475e4fb7143a8831541083d35"
-dependencies = [
- "below-common",
- "nix 0.29.0",
- "openat",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4148,12 +4135,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "maplit"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5613,15 +5594,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rlimit"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "rmesg"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5846,7 +5818,6 @@ dependencies = [
  "libc",
  "scx_cargo",
  "scx_utils",
- "simplelog",
  "tar",
 ]
 
@@ -6087,7 +6058,6 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
- "tiny_http",
 ]
 
 [[package]]
@@ -6141,9 +6111,7 @@ dependencies = [
  "libbpf-rs 0.27.2",
  "libc",
  "nix 0.31.3",
- "ordered-float 5.5.1",
  "plain",
- "rlimit",
  "scx_arena",
  "scx_cargo",
  "scx_stats",
@@ -6208,9 +6176,7 @@ dependencies = [
  "libbpf-rs 0.27.2",
  "libc",
  "nix 0.31.3",
- "ordered-float 5.5.1",
  "plain",
- "rlimit",
  "scx_arena",
  "scx_cargo",
  "scx_stats",
@@ -6228,18 +6194,14 @@ version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
- "cgroupfs",
  "clap",
- "clap_main",
  "crossbeam",
  "ctrlc",
  "inotify",
- "itertools 0.14.0",
  "ktstr",
  "lazy_static",
  "libbpf-rs 0.27.2",
  "libc",
- "maplit",
  "nix 0.31.3",
  "regex",
  "scx_cargo",
@@ -6280,18 +6242,14 @@ version = "1.1.4"
 dependencies = [
  "anyhow",
  "bitvec",
- "cgroupfs",
  "clap",
- "clap_main",
  "crossbeam",
  "ctrlc",
  "inotify",
- "itertools 0.14.0",
  "ktstr",
  "lazy_static",
  "libbpf-rs 0.27.2",
  "libc",
- "maplit",
  "nix 0.31.3",
  "scx_arena",
  "scx_cargo",
@@ -6318,14 +6276,12 @@ dependencies = [
  "lazy_static",
  "libbpf-rs 0.27.2",
  "libc",
- "ordered-float 5.5.1",
  "scx_arena",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
  "serde",
- "sorted-vec",
  "static_assertions",
  "tracing",
  "tracing-subscriber",
@@ -6338,7 +6294,6 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "flate2",
  "libbpf-rs 0.27.2",
  "libc",
  "regex",
@@ -6355,7 +6310,6 @@ dependencies = [
  "include_dir",
  "procfs",
  "regex",
- "scx_utils",
  "serde",
  "serde_json",
  "tempfile",
@@ -6424,7 +6378,6 @@ dependencies = [
  "libbpf-rs 0.27.2",
  "libc",
  "log",
- "ordered-float 5.5.1",
  "plain",
  "procfs",
  "scx_cargo",
@@ -6569,7 +6522,6 @@ dependencies = [
  "buddy_system_allocator",
  "libbpf-rs 0.27.2",
  "scx_cargo",
- "scx_utils",
 ]
 
 [[package]]
@@ -8650,7 +8602,6 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
- "toml",
 ]
 
 [[package]]
