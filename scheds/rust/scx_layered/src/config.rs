@@ -71,6 +71,26 @@ pub enum LayerPlacement {
     Floating,
 }
 
+/// Action to take while a layer exceeds its memory-bandwidth limit.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub enum LayerMembwLimitAction {
+    /// Prevent growth on the pressured NUMA node while still allowing normal
+    /// utilization-driven shrinking.
+    #[default]
+    Hold,
+    /// Actively reduce the layer's CPU allocation on the pressured NUMA node.
+    Shrink,
+}
+
+/// Per-NUMA-node memory-bandwidth policy for a layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerMembwLimit {
+    /// Low and high fractions of the NUMA node's memory-bandwidth capacity.
+    pub utilization_range: (f64, f64),
+    /// Action to take after the high watermark is reached.
+    pub action: LayerMembwLimitAction,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayerMatch {
     CgroupPrefix(String),
@@ -157,6 +177,10 @@ pub struct LayerCommon {
     pub xnuma_threshold: (f64, f64),
     #[serde(default = "default_xnuma_threshold_delta")]
     pub xnuma_threshold_delta: (f64, f64),
+    /// Optional per-node memory-bandwidth limit. Bandwidth is attributed to
+    /// layers proportionally using their task-attributed PMU proxy counts.
+    #[serde(default)]
+    pub membw_limit: Option<LayerMembwLimit>,
 }
 
 fn default_xnuma_threshold() -> (f64, f64) {

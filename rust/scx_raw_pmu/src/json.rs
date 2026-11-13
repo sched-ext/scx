@@ -193,7 +193,10 @@ impl PMUManager {
             let record = record?;
             let regex = record.get(0).expect("no regex found in csv");
             let codename = record.get(2).expect("no codename found in csv");
-            let re = Regex::new(regex)?;
+            // Mapfile patterns describe the whole tuple, as in perf. An
+            // unanchored match lets AuthenticAMD-25-11 (Zen 4) match the
+            // Zen 3 pattern through its AuthenticAMD-25-1 prefix.
+            let re = Regex::new(&format!("^(?:{regex})$"))?;
 
             if re.is_match(tuple) {
                 return Ok(codename.to_string());
@@ -254,5 +257,24 @@ impl PMUManager {
 
         let resource_dir = ResourceDir::new_filesystem(dataroot.clone());
         Self::new_with_resource_dir(resource_dir, dataroot.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codename(tuple: &str) -> String {
+        PMUManager::spec_dir(&ResourceDir::default(), "x86", tuple).unwrap()
+    }
+
+    #[test]
+    fn spec_dir_matches_whole_tuple() {
+        assert_eq!(codename("AuthenticAMD-25-1"), "amdzen3");
+        assert_eq!(codename("AuthenticAMD-25-21"), "amdzen3");
+        assert_eq!(codename("AuthenticAMD-25-11"), "amdzen4");
+        assert_eq!(codename("AuthenticAMD-25-A0"), "amdzen4");
+        assert_eq!(codename("AuthenticAMD-23-31"), "amdzen2");
+        assert_eq!(codename("AuthenticAMD-23-1"), "amdzen1");
     }
 }

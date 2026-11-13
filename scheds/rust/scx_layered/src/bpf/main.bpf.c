@@ -60,6 +60,10 @@ const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 const volatile bool percpu_kthread_preempt_all = false;
 const volatile u64 membw_event = 0;
+/* Optional fills from remote NUMA nodes; membw_event then counts local fills. */
+const volatile u64 membw_far_event = 0;
+/* Optional L2 prefetches which miss the L3, not covered by demand fills. */
+const volatile u64 membw_pf_event = 0;
 volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
@@ -147,6 +151,15 @@ static inline s32 sibling_cpu(s32 cpu)
 		return *sib;
 	else
 		return -1;
+}
+
+/*
+ * Confined layers, and Grouped layers while userspace caps them for memory
+ * bandwidth, keep their tasks on the layer's own CPUs.
+ */
+static __always_inline bool layer_is_confined(struct layer *layer)
+{
+	return layer->kind == LAYER_KIND_CONFINED || READ_ONCE(layer->membw_confined);
 }
 
 static __always_inline struct layer *lookup_layer(u32 id)
@@ -1305,7 +1318,7 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 	if (!layer->preempt || !layer->preempt_first)
 		return false;
 
-	if (layer->kind == LAYER_KIND_CONFINED &&
+	if (layer_is_confined(layer) &&
 	    !bpf_cpumask_test_cpu(cand, layered_cpumask))
 		return false;
 
@@ -1390,7 +1403,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (!is_float && (p->nr_cpus_allowed == 1 || is_migration_disabled(p))) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			if (layer->kind == LAYER_KIND_CONFINED &&
+			if (layer_is_confined(layer) &&
 			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
 				lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 			return prev_cpu;
@@ -1424,7 +1437,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		bool has_idle;
 		const struct cpumask *idle_cpumask __free(idle_cpumask) = scx_bpf_get_idle_cpumask();
 
-		if (layer->kind == LAYER_KIND_CONFINED) {
+		if (layer_is_confined(layer)) {
 			has_idle = bpf_cpumask_intersects(layered_cpumask, idle_cpumask);
 		} else {
 			maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
@@ -1468,7 +1481,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * effectively saturated.  fully_allocated lets userspace override
 	 * when there's no room to grow.
 	 */
-	bool can_use_open = layer->kind != LAYER_KIND_CONFINED &&
+	bool can_use_open = !layer_is_confined(layer) &&
 		(!layer->idle_confined ||
 		 READ_ONCE(layer->check_no_idle) ||
 		 READ_ONCE(layer->fully_allocated));
@@ -1962,7 +1975,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			goto skip_ddsp;
 
 		/* Non-confined layers can run anywhere. */
-		if (layer->kind != LAYER_KIND_CONFINED)
+		if (!layer_is_confined(layer))
 			goto do_ddsp;
 
 		struct cpu_ctx *target_cpuc = lookup_cpu_ctx(cpu);
@@ -2063,7 +2076,7 @@ preempt_xnuma_done: ;
 	    is_scheduler_task(p)) {
 		struct cpumask *layer_cpumask;
 
-		if (layer->kind == LAYER_KIND_CONFINED &&
+		if (layer_is_confined(layer) &&
 		    (layer_cpumask = lookup_layer_cpumask(taskc->layer_id)) &&
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
@@ -2250,12 +2263,18 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 {
 	s32 task_lid;
 	u64 used;
-	u64 bytes;
+	u64 bytes, far_bytes = 0, pf_bytes = 0;
 
 	/* Try to get the memory bandwidth, actively ignore the error if we fail. */
 	if (scx_pmu_read(p, membw_event, &bytes, true))
 		bytes = 0;
-	bytes *= 64;
+	if (membw_far_event && scx_pmu_read(p, membw_far_event, &far_bytes, true))
+		far_bytes = 0;
+	if (membw_pf_event && scx_pmu_read(p, membw_pf_event, &pf_bytes, true))
+		pf_bytes = 0;
+	far_bytes *= 64;
+	pf_bytes *= 64;
+	bytes = bytes * 64 + far_bytes + pf_bytes;
 
 	used = now - cpuc->used_at;
 	if (!used)
@@ -2292,6 +2311,8 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
 	}
+	cpuc->layer_membw_far_agg[task_lid] += far_bytes;
+	cpuc->layer_membw_pf_agg[task_lid] += pf_bytes;
 
 	if (taskc->pinned_node < MAX_NUMA_NODES)
 		cpuc->node_pinned_usage[task_lid] += used;
@@ -2312,7 +2333,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		goto no;
 
 	/* Confined tasks must not keep running on a non-layer CPU */
-	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer->id)
+	if (layer_is_confined(layer) && cpuc->layer_id != layer->id)
 		goto no;
 
 	/* does it wanna? */
@@ -2377,7 +2398,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		 * CPU. If confined, keep running if and only if the layer has
 		 * idle CPUs.
 		 */
-		if (layer->kind != LAYER_KIND_CONFINED) {
+		if (!layer_is_confined(layer)) {
 			has_idle = !bpf_cpumask_empty(idle_cpumask);
 		} else {
 			struct cpumask *layer_cpumask;
@@ -2606,7 +2627,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	 * where the layer has no CPUs.
 	 */
 	if (!rescue_stranded &&
-	    layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
+	    layer_is_confined(layer) && cpuc->layer_id != layer_id)
 		return false;
 
 	skip_remote_node = layer->skip_remote_node;
@@ -4759,11 +4780,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			return ret;
 	}
 
+	/*
+	 * Install order defines each event's index in scx_pmu_map and must
+	 * match the order userspace opens the perf fds in.
+	 */
+	if (membw_far_event) {
+		ret = scx_pmu_install(membw_far_event);
+		if (ret)
+			return ret;
+	}
+	if (membw_pf_event) {
+		ret = scx_pmu_install(membw_pf_event);
+		if (ret)
+			return ret;
+	}
+
 	return 0;
 }
 
 void BPF_STRUCT_OPS(layered_exit, struct scx_exit_info *ei)
 {
+	if (membw_pf_event)
+		scx_pmu_uninstall(membw_pf_event);
+	if (membw_far_event)
+		scx_pmu_uninstall(membw_far_event);
 	if (membw_event)
 		scx_pmu_uninstall(membw_event);
 
