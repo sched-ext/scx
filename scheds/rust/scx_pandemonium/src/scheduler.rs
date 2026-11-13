@@ -9,7 +9,7 @@ use libbpf_rs::MapCore;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 
 use crate::bpf_skel::*;
-use crate::tuning::{OscillatorState, TuningKnobs};
+use crate::tuning::{OscillatorState, Regime, TuningKnobs, scaled_regime_knobs};
 use scx_pandemonium::event::EventLog;
 
 // SCX EXIT CODES (FROM KERNEL)
@@ -48,7 +48,7 @@ pub struct PandemoniumStats {
     pub longrun_mode_active: u64,
     pub nr_overflow_rescue: u64,
     // CROSS-DOMAIN SCATTER ATTRIBUTION (PER XDOM_* PATH) -- MATCHES nr_cross_domain[8] IN
-    // intf.h. PLACEMENT-SIDE PATHS FEED THE MWU SCATTER LOSS PATHWAY.
+    // intf.h. THE PLACEMENT-SIDE PATHS (0..6) SUM TO THE [KNOBS] LINE's scatter_pct.
     pub nr_cross_domain: [u64; 8],
     // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK WRITER; intf.h nr_osc_park)
     pub nr_osc_park: u64,
@@ -60,11 +60,6 @@ pub struct PandemoniumStats {
     // domain half, which on a two-domain box is the minority. Every steal is a
     // migration by definition, so this is the dispatch side's share of the count.
     pub nr_steal: u64,
-    // THE anchor -> target EDGE, BOTH OUTCOMES (intf.h nr_stay_cost_held /
-    // nr_stay_move_taken). The cost is the only priced term on the wake path's
-    // own move and nothing incremented when it fired, so "holds everything home"
-    // and "never runs" were indistinguishable from outside. Read as a ratio: the
-    // pair is every decision, the first is the refusals.
     // REFUSED REQUEUE KICKS, SELF-TARGETED (intf.h nr_kick_declined). The bottom
     // rung of the kick ladder: the price refused the act, not just its strength,
     // and only where this CPU is the one that will dispatch. Read beside
@@ -72,27 +67,48 @@ pub struct PandemoniumStats {
     // one, or the kick rate reports IPIs that were never issued. Its magnitude is
     // what says whether the self-only subset is worth keeping.
     pub nr_kick_declined: u64,
-    pub nr_stay_cost_held: u64,
-    pub nr_stay_move_taken: u64,
-    // PER-CPU RUNNABLE DEPTH (intf.h rq_depth_sum / rq_depth_samples).
-    // Monotonic accumulators sampled at tick rate; difference BOTH across an
-    // interval and divide for the mean depth on that CPU, exactly as
-    // wake_lat_sum/wake_lat_samples are already consumed. Read per-CPU via
-    // read_stats_percpu() -- folding these to a total discards the spatial
-    // dimension that is the entire reason they exist.
-    pub rq_depth_sum: u64,
-    pub rq_depth_samples: u64,
+}
+
+// PER-CPU QUEUE RING (intf.h struct depth_ring). One slot per bucket of the
+// BPF-side time grid; a slot is current for an epoch only when its epoch
+// matches. A slot with no ticks carries no depth sample, and one with no runs
+// carries no queue-clock sample: absent, not an empty queue.
+pub const DEPTH_RING_SLOTS: usize = 512;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DepthSlot {
+    pub epoch: u64,
+    pub ticks: u32,
+    pub own: u32,
+    pub dom: u32,
+    pub loc: u32,
+    pub runs: u32,
+    pub wakes: u32,
+    pub wait_us: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DepthRing {
+    pub domain: u32,
+    pub _pad: u32,
+    pub slot: [DepthSlot; DEPTH_RING_SLOTS],
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
 // 184 (base, after the structurally empty latcrit l2 pair) + 8*8 (nr_cross_domain)
 // + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) + 8 (nr_steal)
-// + 8 (nr_kick_declined) + 8 (nr_stay_cost_held) + 8 (nr_stay_move_taken)
-// + 8 (rq_depth_sum) + 8 (rq_depth_samples) = 312.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 312);
+// + 8 (nr_kick_declined) = 280.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 280);
+// 8 (domain + pad) + 512 * 40 (epoch, ticks, own, dom, loc, runs, wakes,
+// wait_us, pad) = 20488.
+const _: () = assert!(std::mem::size_of::<DepthRing>() == 20488);
 // 88 - 16 (lat_cri_thresh_high/_low, removed with the classifier that read them)
-// - 8 (spill_temp_q16, computed every tick and consumed by nothing).
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 64);
+// - 8 (spill_temp_q16, computed every tick and consumed by nothing)
+// - 8 (affinity_mode) - 8 (preempt_thresh_ns), both read nowhere in BPF = 48.
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 48);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
 // bpf_intf.rs MUST KEEP THE SAME VALUE; IF THE TWO SIDES DRIFT, THE
@@ -156,9 +172,10 @@ impl<'a> Scheduler<'a> {
         rodata.__SCX_DSQ_FLAG_LOCAL_ON = SCX_DSQ_FLAG_LOCAL_ON;
         rodata.__SCX_DSQ_INVALID = SCX_DSQ_FLAG_BUILTIN;
         rodata.__SCX_DSQ_GLOBAL = SCX_DSQ_FLAG_BUILTIN | 1;
-        rodata.__SCX_DSQ_LOCAL = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON;
-        rodata.__SCX_DSQ_LOCAL_ON = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON | 1;
+        rodata.__SCX_DSQ_LOCAL = SCX_DSQ_FLAG_BUILTIN | 2;
+        rodata.__SCX_DSQ_LOCAL_ON = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON;
         rodata.__SCX_DSQ_LOCAL_CPU_MASK = 0xFFFFFFFF;
+        rodata.__SCX_TASK_QUEUED = 1;
 
         // POPULATE SCX_KICK_* ENUM VALUES
         rodata.__SCX_KICK_IDLE = 1;
@@ -226,6 +243,26 @@ impl<'a> Scheduler<'a> {
         out
     }
 
+    // PER-CPU DEPTH RINGS, ONE PER POSSIBLE CPU, INDEXED BY CPU. One map read a
+    // second carries every tick's sample since the last one.
+    pub fn read_depth_rings(&self) -> Vec<DepthRing> {
+        let key = 0u32.to_ne_bytes();
+        let percpu_vals = match self
+            .skel
+            .maps
+            .depth_ring
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(v)) => v,
+            _ => return Vec::new(),
+        };
+        percpu_vals
+            .iter()
+            .filter(|v| v.len() >= std::mem::size_of::<DepthRing>())
+            .map(|v| unsafe { std::ptr::read_unaligned(v.as_ptr() as *const DepthRing) })
+            .collect()
+    }
+
     // THE REDUCE. Separated from the read so the fold is testable without a
     // live BPF map, and so every not-a-sum field is stated in one place:
     // batch_sojourn_ns and longrun_mode_active take a MAX across CPUs (a
@@ -271,14 +308,6 @@ impl<'a> Scheduler<'a> {
                 total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
                 total.nr_steal += stats.nr_steal;
                 total.nr_kick_declined += stats.nr_kick_declined;
-                total.nr_stay_cost_held += stats.nr_stay_cost_held;
-                total.nr_stay_move_taken += stats.nr_stay_move_taken;
-                // Folded so the aggregate stays complete, but the SUMMED value
-                // is close to meaningless -- it is the total depth seen across
-                // every CPU. The per-CPU pair is the point; read it from
-                // read_stats_percpu() and never from here.
-                total.rq_depth_sum += stats.rq_depth_sum;
-                total.rq_depth_samples += stats.rq_depth_samples;
             }
         }
 
@@ -295,11 +324,9 @@ impl<'a> Scheduler<'a> {
     // FIELDS THAT MUST BE IDENTICAL ON EVERY CPU.
     //
     // tuning_knobs_map is per-CPU, which makes divergence expressible -- and
-    // for these three it would be a defect rather than a feature. tau and
+    // for these two it would be a defect rather than a feature. tau and
     // codel_eq are topology-owned and drive tau-scaling, which every CPU
-    // re-derives from the same constant; affinity_mode decides how a TASK is
-    // placed, so a task would change placement depending on which CPU last
-    // looked at it.
+    // re-derives from the same constant.
     //
     // Broadcast rather than trusted: the writer overwrites these in every slot
     // from slot 0, so a caller cannot diverge them by omission.
@@ -311,7 +338,6 @@ impl<'a> Scheduler<'a> {
         for k in rest.iter_mut() {
             k.topology_tau_ns = first.topology_tau_ns;
             k.codel_eq_ns = first.codel_eq_ns;
-            k.affinity_mode = first.affinity_mode;
         }
     }
 
@@ -323,10 +349,9 @@ impl<'a> Scheduler<'a> {
         self.write_tuning_knobs_percpu(&vec![*knobs; n])
     }
 
-    // WRITE PER-CPU KNOBS. The per-CPU fields (slice, preempt window, batch and
-    // burst ceilings, the CoDel rescue threshold) may differ per slot; the six
-    // global fields are broadcast from slot 0 regardless of what the caller put
-    // in the others.
+    // WRITE PER-CPU KNOBS. The per-CPU fields (slice, batch and burst ceilings,
+    // the CoDel rescue threshold) may differ per slot; the two global fields are
+    // broadcast from slot 0 regardless of what the caller put in the others.
     pub fn write_tuning_knobs_percpu(&self, per_cpu: &[TuningKnobs]) -> Result<()> {
         let n = libbpf_rs::num_possible_cpus()?;
         let mut vals: Vec<TuningKnobs> = (0..n)
@@ -348,13 +373,19 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // WRITE TOPOLOGY-OWNED FIELDS (tau_ns + codel_eq_ns), PRESERVING OTHERS.
-    // CALLED AT TOPOLOGY DETECT AND ON HOTPLUG. READ-MODIFY-WRITE BECAUSE THE
-    // tuning_knobs_map IS A SINGLE-ENTRY STRUCT AND PARTIAL UPDATES AREN'T A
-    // libbpf CONCEPT -- BUT WE NEED A NARROW SETTER SO TOPOLOGY CHANGES DON'T
-    // STOMP ON WHATEVER THE ADAPTIVE LOOP'S LATEST KNOB VALUES ARE.
-    pub fn write_topology_fields(&self, tau_ns: u64, codel_eq_ns: u64) -> Result<()> {
-        let mut knobs = self.read_tuning_knobs();
+    // WRITE THE TOPOLOGY-OWNED KNOBS: tau_ns, codel_eq_ns AND THE BASE SET,
+    // WHICH IS A FUNCTION OF tau ALONE (scaled_regime_knobs AT THE STARTUP
+    // REGIME). THE BASE IS TOPOLOGY, SO --no-adaptive RUNS IT TOO AND THE TWO
+    // ARMS DIFFER BY THE LOOP ALONE. CALLED AT TOPOLOGY DETECT AND ON HOTPLUG: A
+    // HOTPLUG RESETS THE ADAPTIVE LOOP'S KNOBS TO THE NEW BASE, AND ITS NEXT
+    // RETUNE RE-DERIVES FROM THERE. A ZERO tau (NO SPECTRUM) WRITES THE TWO
+    // TOPOLOGY FIELDS ALONE AND LEAVES THE REST AS THEY ARE.
+    pub fn write_topology_fields(&self, tau_ns: u64, codel_eq_ns: u64, nr_cpus: u64) -> Result<()> {
+        let mut knobs = if tau_ns > 0 {
+            scaled_regime_knobs(Regime::Mixed, nr_cpus, tau_ns)
+        } else {
+            self.read_tuning_knobs()
+        };
         knobs.topology_tau_ns = tau_ns;
         knobs.codel_eq_ns = codel_eq_ns;
         self.write_tuning_knobs(&knobs)
@@ -362,14 +393,10 @@ impl<'a> Scheduler<'a> {
 
     // READ BPF OSCILLATOR STATE FROM BSS/DATA SECTIONS.
     //
-    // Unused since MWU was removed, and kept deliberately. MWU read this to
-    // avoid double-correcting: two controllers both adapting on
-    // global_rescue_count would fight. That hazard is GONE -- the BPF
-    // oscillator is now the only thing adapting on rescue count, and the graph
-    // derives from depth, shape and persistence instead. The accessor stays
-    // because the live-R_eff work reads the same maps.
-    // MWU GATES ITS RESCUE-DRIVEN PATHWAYS ON THIS SO IT DOESN'T
-    // DOUBLE-CORRECT WHEN THE BPF DAMPED OSCILLATOR HAS ALREADY MOVED.
+    // The BPF oscillator is the only thing adapting on rescue count. The
+    // adaptive loop reads where it sits so a knob write defers while the
+    // oscillator is already responding (OscillatorState::responding): two
+    // controllers on the same error would fight.
     pub fn read_oscillator_state(&self) -> OscillatorState {
         let bss = match self.skel.maps.bss_data.as_ref() {
             Some(b) => b,
@@ -514,17 +541,6 @@ impl<'a> Scheduler<'a> {
         if let Some(data) = self.skel.maps.data_data.as_mut() {
             data.affinity_domain_peers = peers;
         }
-    }
-
-    // POPULATE L2 SIBLINGS MAP ENTRY
-    pub fn write_l2_sibling(&self, group_id: u32, slot: u32, cpu: u32) -> Result<()> {
-        let key = (group_id * 8 + slot).to_ne_bytes();
-        let val = cpu.to_ne_bytes();
-        self.skel
-            .maps
-            .l2_siblings
-            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
-        Ok(())
     }
 
     // POPULATE RESISTANCE AFFINITY RANK MAP

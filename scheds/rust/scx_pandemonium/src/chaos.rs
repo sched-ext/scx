@@ -1,11 +1,5 @@
 // PANDEMONIUM CHAOS PRIMITIVES
 // PURE-RUST RAW-WINDOW STATISTICS USED BY THE ADAPTIVE LAYER.
-//
-// EVERY PUBLIC ITEM IN THIS MODULE IS PART OF THE CHAOS API SURFACE:
-// SOME ARE CONSUMED BY THE BINARY (adaptive.rs), SOME BY TESTS, AND
-// SOME ARE EXPORTED CONSTANTS FOR DIAGNOSTICS / FUTURE EXPANSION.
-// CARGO'S DEAD-CODE LINT FIRES PER COMPILATION TARGET; SILENCE IT.
-#![allow(dead_code)]
 
 // EVERY MEASURE IS COMPUTED FROM THE RAW SAMPLE WINDOW EACH CALL. NO
 // ACCUMULATOR CARRIES STATE BETWEEN TICKS.
@@ -33,19 +27,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // CRITICAL VALUES
 
-// LN(3/2). IID HVG DEGREE-DISTRIBUTION CHARACTERISTIC EXPONENT.
-// EXPOSED FOR DIAGNOSTICS / FUTURE USE; NOT USED AS A DIRECT THRESHOLD.
-pub const HVG_LN_3_2: f64 = 0.405_465_108_108_164_4;
-
 // HVG MEAN-DEGREE THRESHOLDS. IID RANDOM SATURATES AT 4 - 2/N; PURELY
 // PERIODIC SEQUENCES STAY NEAR 2. THE TWO THRESHOLDS BELOW DEFINE A
 // DEAD ZONE FOR THE MIXED REGIME. THE BAND ITSELF IS THE HYSTERESIS:
 // A WINDOW MUST CROSS IT ENTIRELY TO CHANGE THE VERDICT.
 pub const HVG_LAMBDA_PERIODIC_MAX: f64 = 2.6;
 pub const HVG_LAMBDA_CHAOTIC_MIN: f64 = 3.4;
-
-// IID-ASYMPTOTE HVG ENTROPY: LN(3) + 2*LN(3/2) ~= 1.910.
-pub const HVG_S_IID: f64 = 1.910_543_686_807_036;
 
 // BANDT-POMPE D=3 PATTERN COUNT.
 pub const BP_D3_PATTERNS: usize = 6;
@@ -82,9 +69,10 @@ pub const RQA_LMIN: usize = 2;
 // ADAPTIVE QUIESCENCE GATE.
 pub const RQA_DET_STEADY_MIN: f64 = 0.90;
 
-// BELOW THIS WINDOW FILL, rqa_det RETURNS None (INSUFFICIENT DATA --
-// NEVER LET THE GATE FREEZE ON A HALF-FILLED WINDOW).
-pub const RQA_MIN_SAMPLES: usize = 8;
+// BELOW THIS WINDOW FILL, rqa_det RETURNS None (INSUFFICIENT DATA). 64 IS
+// WHERE sublimation's rqa LENS FIRST REPORTS; AT 63 IT IS UNAVAILABLE. THE
+// ADAPTIVE LOOP GIVES IT A 64-SAMPLE idle WINDOW OF ITS OWN.
+pub const RQA_MIN_SAMPLES: usize = 64;
 
 // RAW WINDOW
 // FIXED-SIZE RING BUFFER OF f64 SAMPLES. NO HEAP ALLOC AT STEADY STATE.
@@ -124,16 +112,18 @@ impl<const N: usize> RawWindow<N> {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.filled
-    }
-
     pub fn is_empty(&self) -> bool {
         self.filled == 0
     }
 
-    pub fn capacity(&self) -> usize {
-        N
+    // THE NEWEST M SAMPLES AS A WINDOW OF THEIR OWN, OLDEST FIRST: for an
+    // estimator whose cost grows faster than the window it reads.
+    pub fn newest<const M: usize>(&self) -> RawWindow<M> {
+        let mut out = RawWindow::<M>::new();
+        for x in self.iter().skip(self.filled.saturating_sub(M)) {
+            out.push(x);
+        }
+        out
     }
 
     // YIELD SAMPLES IN INSERTION ORDER (OLDEST -> NEWEST).
@@ -143,15 +133,6 @@ impl<const N: usize> RawWindow<N> {
             win: self,
             pos: 0,
             start,
-        }
-    }
-
-    pub fn last(&self) -> Option<f64> {
-        if self.filled == 0 {
-            None
-        } else {
-            let i = (self.head + N - 1) % N;
-            Some(self.buf[i])
         }
     }
 }
@@ -186,6 +167,19 @@ pub fn mean<const N: usize>(w: &RawWindow<N>) -> f64 {
         s += x;
     }
     s / w.filled as f64
+}
+
+// SAMPLE STANDARD DEVIATION. None BELOW TWO SAMPLES.
+pub fn stdev<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
+    if w.filled < 2 {
+        return None;
+    }
+    let m = mean(w);
+    let mut ss = 0.0;
+    for x in w.iter() {
+        ss += (x - m) * (x - m);
+    }
+    Some((ss / (w.filled - 1) as f64).sqrt())
 }
 
 // HORIZONTAL VISIBILITY GRAPH
@@ -517,13 +511,6 @@ fn confidence(filled: usize, math_min: usize, stat_floor: usize) -> f64 {
 // LAG-1 NEEDS ENOUGH PAIRS THAT ONE OUTLIER CANNOT SET THE ANSWER.
 pub const ACF1_MIN_SAMPLES: usize = 8;
 
-pub fn lag1_autocorr<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
-    if w.filled < ACF1_MIN_SAMPLES {
-        return None;
-    }
-    lag1_autocorr_raw(w)
-}
-
 // Unfloored body -- the priced form supplies its own minimum.
 fn lag1_autocorr_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     let n = w.filled;
@@ -575,13 +562,6 @@ fn lag1_autocorr_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
 
 pub const BURSTINESS_MIN_SAMPLES: usize = 4;
 
-pub fn kim_jo_burstiness<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
-    if w.filled < BURSTINESS_MIN_SAMPLES {
-        return None;
-    }
-    kim_jo_burstiness_raw(w)
-}
-
 // Unfloored body -- the priced form supplies its own minimum.
 fn kim_jo_burstiness_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
     let n = w.filled;
@@ -620,6 +600,89 @@ fn kim_jo_burstiness_raw<const N: usize>(w: &RawWindow<N>) -> Option<f64> {
         return None;
     }
     Some(((sp * r - sm) / denom).clamp(-1.0, 1.0))
+}
+
+// FANO-FACTOR BURSTINESS AND PERSISTENCE: ONE ARRIVAL COUNTER, TWO LENSES.
+//
+// Kim-Jo's B is a statistic of the gaps between events. The queue ring carries
+// arrivals per bucket, not gaps, and Kim-Jo fed a level series reduces to a
+// coefficient-of-variation test (B < 0 exactly when CV < 1). For a renewal
+// process the Fano factor of the counts, F = var / mean, tends to the squared
+// CV of the gaps, so
+//   B = (sqrt(F) - 1) / (sqrt(F) + 1)
+// reads the same burstiness from the counts. For a fractal point process F
+// grows with the counting window as T^(2H - 1), so the slope of log F against
+// log T over aggregates of 1, 2, 4, ... buckets reads the Hurst exponent of the
+// same stream (the Allan-factor reading). A window with no arrivals has
+// nothing to read: None.
+
+// Sample (n-1) Fano factor of xs, None when the mean is not positive or the
+// counts are flat.
+fn fano(xs: &[f64]) -> Option<f64> {
+    let n = xs.len();
+    if n < 2 {
+        return None;
+    }
+    let mean = xs.iter().sum::<f64>() / n as f64;
+    if mean <= 1e-12 {
+        return None;
+    }
+    let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64;
+    if var <= 1e-12 {
+        return None;
+    }
+    Some(var / mean)
+}
+
+pub fn fano_burstiness_priced<const N: usize>(w: &RawWindow<N>) -> Option<Priced> {
+    let mut s: [f64; N] = [0.0; N];
+    for (k, x) in w.iter().enumerate() {
+        s[k] = x;
+    }
+    let f = fano(&s[..w.filled])?;
+    let r = f.sqrt();
+    Some(Priced {
+        value: ((r - 1.0) / (r + 1.0)).clamp(-1.0, 1.0),
+        confidence: confidence(w.filled, BURSTINESS_MATH_MIN, BURSTINESS_MIN_SAMPLES),
+    })
+}
+
+// The slope needs at least three aggregation levels with eight aggregates
+// each (a window of 32); it is worth full weight at six levels (256).
+const FANO_H_LEVELS_FULL: usize = 6;
+pub fn fano_hurst_priced<const N: usize>(w: &RawWindow<N>) -> Option<Priced> {
+    let mut s: [f64; N] = [0.0; N];
+    for (k, x) in w.iter().enumerate() {
+        s[k] = x;
+    }
+    let n = w.filled;
+    let mut agg: [f64; N] = [0.0; N];
+    let (mut sx, mut sy, mut sxx, mut sxy, mut pts) = (0.0, 0.0, 0.0, 0.0, 0usize);
+    let mut k = 1;
+    while n / k >= 8 {
+        let m = n / k;
+        for (j, a) in agg.iter_mut().enumerate().take(m) {
+            *a = s[j * k..(j + 1) * k].iter().sum();
+        }
+        if let Some(f) = fano(&agg[..m]) {
+            let (x, y) = ((k as f64).ln(), f.ln());
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+            pts += 1;
+        }
+        k *= 2;
+    }
+    if pts < 3 {
+        return None;
+    }
+    let p = pts as f64;
+    let slope = (p * sxy - sx * sy) / (p * sxx - sx * sx);
+    Some(Priced {
+        value: ((slope + 1.0) / 2.0).clamp(0.0, 1.0),
+        confidence: confidence(pts, 2, FANO_H_LEVELS_FULL),
+    })
 }
 
 // VEITCH-ABRY HURST (WAVELET-VARIANCE / LOGSCALE-DIAGRAM ESTIMATOR)
@@ -788,13 +851,6 @@ fn standardize<const N: usize>(w: &RawWindow<N>, out: &mut [f64; N]) -> Option<u
     Some(n)
 }
 
-pub fn pecora_carroll<const N: usize>(x: &RawWindow<N>, y: &RawWindow<N>) -> Option<f64> {
-    if x.filled.min(y.filled) < PC_MIN_SAMPLES {
-        return None;
-    }
-    pecora_carroll_raw(x, y)
-}
-
 // Unfloored body -- the priced form supplies its own minimum.
 fn pecora_carroll_raw<const N: usize>(x: &RawWindow<N>, y: &RawWindow<N>) -> Option<f64> {
     let n = x.filled.min(y.filled);
@@ -861,10 +917,12 @@ fn pecora_carroll_raw<const N: usize>(x: &RawWindow<N>, y: &RawWindow<N>) -> Opt
 // STATISTICS get thin. The old floors survive as the confidence ceiling: at the
 // old gate the reading is worth its full weight, below it a proportional share.
 //
-// Hurst is the exception and stays gated at 16. Its floor is not statistical --
-// the wavelet fit needs three octaves with two coefficients each, and a window
-// of 8 yields two usable octaves, which is a line through two points rather
-// than a regression. There is no weakly-known answer there; there is no answer.
+// Hurst stays gated at 16, and that floor is not statistical -- the wavelet
+// fit needs three octaves with two coefficients each, and a window of 8 yields
+// two usable octaves, which is a line through two points rather than a
+// regression. There is no weakly-known answer there; there is no answer. Above
+// the gate it is priced like the rest, reaching full weight at 64, where
+// sublimation's spectral lens first reports.
 
 // A single pair is enough to define lag-1; eight is where it stops being noise.
 const ACF1_MATH_MIN: usize = 3;
@@ -909,11 +967,13 @@ pub fn pecora_carroll_priced<const N: usize>(x: &RawWindow<N>, y: &RawWindow<N>)
     })
 }
 
-// Hurst: gated, not priced. See above.
+// Hurst: gated at 16, priced to 64. See above.
+const HURST_FULL_SAMPLES: usize = 64;
 pub fn veitch_abry_hurst_priced<const N: usize>(w: &RawWindow<N>) -> Option<Priced> {
+    let n = w.filled;
     veitch_abry_hurst(w).map(|v| Priced {
         value: v,
-        confidence: 1.0,
+        confidence: confidence(n, HURST_MIN_SAMPLES - 1, HURST_FULL_SAMPLES),
     })
 }
 
@@ -921,8 +981,7 @@ pub fn veitch_abry_hurst_priced<const N: usize>(w: &RawWindow<N>) -> Option<Pric
 //
 // MONOTONIC COUNTER OF "WINDOW IS CHAOTIC" CROSSINGS. INCREMENT WHEN
 // HVG ENTROPY CROSSES LN(3/2) UPWARD OR WHEN PERMUTATION ENTROPY
-// CROSSES BP_H_HIGH UPWARD. EXPOSED FOR THE TELEMETRY LINE AND
-// FOR THE COMMITTED MWU PATHWAY THAT GATES OFF CROSSINGS.
+// CROSSES BP_H_HIGH UPWARD. EXPOSED FOR THE TELEMETRY LINE.
 #[derive(Default, Debug)]
 pub struct ChaosCounter(AtomicU64);
 

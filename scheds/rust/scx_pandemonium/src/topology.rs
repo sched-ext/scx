@@ -190,10 +190,8 @@ impl CpuTopology {
         // QEMU/KVM):
         //   1. CPU-0 ALIASING: A FAILED READ THAT ASSIGNS l2_domain[cpu] = cpu
         //      AS A SYNTHETIC ID NEVER REGISTERED IN l2_groups CAN COLLIDE
-        //      WITH A REAL GROUP ID; populate_l2_siblings_map NEVER WRITES
-        //      THAT SLOT, SO THE BPF SIDE READS THE MAP'S ZERO-INIT AND
-        //      find_idle_l2_sibling SILENTLY TREATS CPU 0 AS EVERYONE'S L2
-        //      SIBLING.
+        //      WITH A REAL GROUP ID, AND cache_domain THEN FILES THAT CPU IN
+        //      ANOTHER GROUP'S L2.
         //   2. ORDER DEPENDENCE: IF cpu A's READ TRANSIENTLY FAILS BUT cpu B's
         //      SUCCEEDS AND LISTS A AS A GENUINE SIBLING ("A,B"), THE TWO ARE
         //      NEVER UNIFIED -- AN ARTIFACT OF PROCESSING ORDER ALONE.
@@ -329,7 +327,7 @@ impl CpuTopology {
     // BOUNDED BY WRITE TIME ALONE -- INTERLEAVING THE O(n^3)
     // EIGENDECOMPOSITION OR THE DOMAIN-TREE CUTS BETWEEN WRITES WOULD STRETCH
     // THAT WINDOW FOR NOTHING. WRITE ORDER:
-    // cache_domain + l2_siblings (USED TOGETHER), THE AFFINITY-RANK FAMILY,
+    // cache_domain, THE AFFINITY-RANK FAMILY,
     // cpu_domain, AND THE TUNING KNOBS LAST -- THE "GO" SIGNAL THAT TRIGGERS
     // BPF'S OWN tau-SCALED RE-DERIVATION.
     pub fn detect_and_populate(sched: &mut Scheduler, nr_cpus: usize) -> Result<TopologySpectrum> {
@@ -345,9 +343,6 @@ impl CpuTopology {
 
         if let Err(e) = topo.populate_bpf_map(sched) {
             log_warn!("CACHE TOPOLOGY MAP WRITE FAILED: {}", e);
-        }
-        if let Err(e) = topo.populate_l2_siblings_map(sched) {
-            log_warn!("L2 SIBLINGS MAP WRITE FAILED: {}", e);
         }
         if let Err(e) = topo.populate_affinity_rank_map(
             sched,
@@ -376,7 +371,9 @@ impl CpuTopology {
                    idle-search floor)",
             dom_peers
         );
-        if let Err(e) = sched.write_topology_fields(spectrum.tau_ns, spectrum.codel_eq_ns) {
+        if let Err(e) =
+            sched.write_topology_fields(spectrum.tau_ns, spectrum.codel_eq_ns, nr_cpus as u64)
+        {
             log_warn!("TOPOLOGY KNOB WRITE FAILED: {}", e);
         }
         Ok(spectrum)
@@ -418,21 +415,6 @@ impl CpuTopology {
             }
         }
         sched.write_nr_overflow_domains(seen.len() as u32);
-        Ok(())
-    }
-
-    // WRITE L2 SIBLINGS FLAT ARRAY TO BPF MAP
-    // l2_siblings[group_id * 8 + slot] = cpu_id, SENTINEL u32::MAX MARKS END
-    pub fn populate_l2_siblings_map(&self, sched: &Scheduler) -> Result<()> {
-        const MAX_L2_SIBLINGS: usize = 8;
-        for (gid, members) in self.l2_groups.iter().enumerate() {
-            for (slot, &cpu) in members.iter().enumerate().take(MAX_L2_SIBLINGS) {
-                sched.write_l2_sibling(gid as u32, slot as u32, cpu)?;
-            }
-            if members.len() < MAX_L2_SIBLINGS {
-                sched.write_l2_sibling(gid as u32, members.len() as u32, u32::MAX)?;
-            }
-        }
         Ok(())
     }
 
