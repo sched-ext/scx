@@ -24,12 +24,7 @@ use crate::files::rewrite_file;
 pub const UNIT: &str = "scx.service";
 
 /// `scx_`-prefixed executables that are not schedulers.
-const NOT_SCHEDULERS: [&str; 4] = [
-    "scx_loader",
-    "scx_characterize",
-    "scx_forge_agent",
-    "scx_rustland_core",
-];
+const NOT_SCHEDULERS: [&str; 3] = ["scx_loader", "scx_characterize", "scx_forge_agent"];
 
 /// Whether a name is one the scan would list: an `scx_*` name that is
 /// not one of the known non-schedulers. The one test the listing and
@@ -822,8 +817,8 @@ UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
             strs(&["X=a\\b\tc\u{1b}[0mA"])
         );
         assert_eq!(
-            parse_manager_environment("LANG=C\nSCX_SCHEDULER_OVERRIDE=scx_rustland\n"),
-            pairs(&[("LANG", "C"), ("SCX_SCHEDULER_OVERRIDE", "scx_rustland")])
+            parse_manager_environment("LANG=C\nSCX_SCHEDULER_OVERRIDE=scx_lavd\n"),
+            pairs(&[("LANG", "C"), ("SCX_SCHEDULER_OVERRIDE", "scx_lavd")])
         );
     }
 

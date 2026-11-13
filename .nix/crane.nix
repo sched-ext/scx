@@ -8,7 +8,6 @@
 , libclang
 , elfutils
 , libbpf-git
-, libseccomp
 , protobuf
 , zlib
 , zstd
@@ -42,7 +41,6 @@ let
     buildInputs = [
       elfutils
       libbpf-git
-      libseccomp
       protobuf
       zlib
       zstd

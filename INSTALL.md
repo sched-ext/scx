@@ -15,7 +15,7 @@ $ sudo do-release-upgrade
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev libbpf-dev pahole
+$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libbpf-dev pahole
 ```
 
 #### Build the scx schedulers from source
@@ -125,7 +125,7 @@ From NixOS 24.11 onwards, `scx` is available on Nixpkgs. Using a kernel of versi
 ```nix
 {
   services.scx.enable = true;
-  services.scx.scheduler = "scx_lavd"; # default is "scx_rustland"
+  services.scx.scheduler = "scx_lavd";
   boot.kernelPackages = pkgs.linuxPackages_latest;
 }
 ```

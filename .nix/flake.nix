@@ -127,7 +127,6 @@
               gnumake
               jq
               libbpf-git
-              libseccomp
               pkg-config
               protobuf
               virtme-ng
@@ -211,7 +210,6 @@
               isort
               jq
               libbpf-git
-              libseccomp.lib
               llvmPackages.libclang
               llvmPackages.libllvm
               pkg-config
@@ -254,7 +252,6 @@
                   elfutils.out
                   zlib
                   zstd.out
-                  libseccomp.lib
                 ]))) + "'")
               ]
             ] ++ (lib.mapAttrsToList (key: val: "--set ${key} \"${val}\"") build-env-vars));
