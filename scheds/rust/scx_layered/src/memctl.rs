@@ -36,9 +36,35 @@ const BYTES_PER_CAS: u64 = 64;
 
 struct Counter {
     node: usize,
+    bytes_per_count: u64,
     fd: OwnedFd,
     // (value, time_enabled, time_running) at the previous read.
     prev: [u64; 3],
+}
+
+/// Grace SCF reads count 32-byte beats, while writes count bytes directly.
+/// CMEM events count traffic served by this socket's CPU memory, including
+/// other sockets' requests. GPU and PCIe traffic have separate PMUs.
+fn grace_events(pmu: &Path) -> Result<[(u64, u64); 2]> {
+    let event = |name: &str| -> Result<u64> {
+        let path = pmu.join("events").join(name);
+        let spec = fs::read_to_string(&path)?;
+        let value = spec
+            .trim()
+            .strip_prefix("event=0x")
+            .with_context(|| format!("{}: unsupported event encoding {spec:?}", path.display()))?;
+        u64::from_str_radix(value, 16)
+            .with_context(|| format!("{}: invalid event encoding", path.display()))
+    };
+    // Do not assume the event selector layout on a different SCF version.
+    let format = fs::read_to_string(pmu.join("format/event"))?;
+    if format.trim() != "config:0-32" {
+        bail!("{}: unsupported SCF event format {format:?}", pmu.display());
+    }
+    Ok([
+        (event("cmem_rd_data")?, 32),
+        (event("cmem_wr_total_bytes")?, 1),
+    ])
 }
 
 pub struct MemCtlCounters {
@@ -66,8 +92,8 @@ fn read_counter(fd: &OwnedFd) -> Result<[u64; 3]> {
 }
 
 impl MemCtlCounters {
-    /// Open one CAS counter per AMD UMC and map each to the NUMA node of
-    /// the CPU that perf reads it on.
+    /// Open AMD UMC CAS or Grace SCF CMEM counters and map each to the
+    /// NUMA node of the CPU that perf reads it on.
     pub fn open(topo: &Topology) -> Result<Self> {
         // A UMC PMU exposes a single CPU per package in its cpumask, so a
         // counter can only be mapped to a node when packages and nodes are
@@ -84,7 +110,11 @@ impl MemCtlCounters {
 
         let mut pmus: Vec<_> = fs::read_dir(PMU_DEVICES)?
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("amd_umc_"))
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("amd_umc_") || name.starts_with("nvidia_scf_pmu_")
+            })
             .map(|entry| entry.path())
             .collect();
         pmus.sort();
@@ -94,14 +124,38 @@ impl MemCtlCounters {
 
         let mut counters = Vec::with_capacity(pmus.len());
         for pmu in &pmus {
-            let (cpu, fd) = Self::open_counter(pmu)?;
-            let node = topo
-                .all_cpus
-                .get(&cpu)
-                .map(|cpu| cpu.node_id)
-                .with_context(|| format!("{}: CPU {cpu} is not in the topology", pmu.display()))?;
-            let prev = read_counter(&fd)?;
-            counters.push(Counter { node, fd, prev });
+            let events = if pmu
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("nvidia_scf_pmu_")
+            {
+                // The ARM proxy does not distinguish local and remote
+                // fills, so it cannot apportion multi-node CMEM traffic.
+                if topo.nodes.len() != 1 {
+                    bail!("Grace SCF bandwidth attribution requires a single NUMA node");
+                }
+                grace_events(pmu)?.to_vec()
+            } else {
+                vec![(AMD_UMC_CAS_CMD_ALL, BYTES_PER_CAS)]
+            };
+            for (event, bytes_per_count) in events {
+                let (cpu, fd) = Self::open_counter(pmu, event)?;
+                let node = topo
+                    .all_cpus
+                    .get(&cpu)
+                    .map(|cpu| cpu.node_id)
+                    .with_context(|| {
+                        format!("{}: CPU {cpu} is not in the topology", pmu.display())
+                    })?;
+                let prev = read_counter(&fd)?;
+                counters.push(Counter {
+                    node,
+                    bytes_per_count,
+                    fd,
+                    prev,
+                });
+            }
         }
 
         let nr_nodes = topo.nodes.len();
@@ -118,7 +172,7 @@ impl MemCtlCounters {
         })
     }
 
-    fn open_counter(pmu: &Path) -> Result<(usize, OwnedFd)> {
+    fn open_counter(pmu: &Path, event: u64) -> Result<(usize, OwnedFd)> {
         let pmu_type = fs::read_to_string(pmu.join("type"))?
             .trim()
             .parse::<u32>()
@@ -134,7 +188,7 @@ impl MemCtlCounters {
         let mut attr = perf::bindings::perf_event_attr {
             size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
             type_: pmu_type,
-            config: AMD_UMC_CAS_CMD_ALL,
+            config: event,
             read_format: (perf::bindings::PERF_FORMAT_TOTAL_TIME_ENABLED
                 | perf::bindings::PERF_FORMAT_TOTAL_TIME_RUNNING) as u64,
             ..Default::default()
@@ -154,7 +208,7 @@ impl MemCtlCounters {
 
     /// Return cumulative DRAM bytes per NUMA node. Each counter's delta is
     /// scaled by enabled/running time, so perf multiplexing with other users
-    /// of the same UMC extrapolates instead of silently undercounting.
+    /// of the same PMU extrapolates instead of silently undercounting.
     pub fn read_node_bytes(&mut self) -> Result<Vec<u64>> {
         let mut multiplexed = false;
         for counter in &mut self.counters {
@@ -164,7 +218,7 @@ impl MemCtlCounters {
             let running = cur[2].saturating_sub(counter.prev[2]);
             counter.prev = cur;
 
-            let cas = if running == 0 {
+            let count = if running == 0 {
                 // Never scheduled during the interval; nothing to scale.
                 multiplexed |= enabled > 0;
                 0
@@ -174,8 +228,8 @@ impl MemCtlCounters {
             } else {
                 value
             };
-            self.node_bytes[counter.node] =
-                self.node_bytes[counter.node].saturating_add(cas.saturating_mul(BYTES_PER_CAS));
+            self.node_bytes[counter.node] = self.node_bytes[counter.node]
+                .saturating_add(count.saturating_mul(counter.bytes_per_count));
         }
 
         if multiplexed && !self.warned_multiplexed {
@@ -186,5 +240,71 @@ impl MemCtlCounters {
         }
 
         Ok(self.node_bytes.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Feed perf's read format through pipes so the byte conversion and
+    // incremental multiplex scaling can be checked without hardware PMUs.
+    fn counter(bytes_per_count: u64) -> (Counter, OwnedFd) {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (
+            Counter {
+                node: 0,
+                bytes_per_count,
+                fd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+                prev: [100, 100, 100],
+            },
+            unsafe { OwnedFd::from_raw_fd(fds[1]) },
+        )
+    }
+
+    fn sample(fd: &OwnedFd, value: [u64; 3]) {
+        let size = std::mem::size_of_val(&value);
+        assert_eq!(
+            unsafe { libc::write(fd.as_raw_fd(), value.as_ptr().cast(), size) },
+            size as isize
+        );
+    }
+
+    #[test]
+    fn grace_read_beats_and_write_bytes_accumulate_with_multiplexing() {
+        let (read, read_fd) = counter(32);
+        let (write, write_fd) = counter(1);
+        let mut counters = MemCtlCounters {
+            counters: vec![read, write],
+            node_bytes: vec![0],
+            warned_multiplexed: false,
+        };
+        sample(&read_fd, [110, 200, 200]);
+        sample(&write_fd, [164, 200, 200]);
+        assert_eq!(counters.read_node_bytes().unwrap(), vec![384]);
+
+        // Scale only this interval's counts, then apply each event's unit.
+        sample(&read_fd, [120, 300, 250]);
+        sample(&write_fd, [228, 300, 250]);
+        assert_eq!(counters.read_node_bytes().unwrap(), vec![1152]);
+        assert!(counters.warned_multiplexed);
+
+        // A PMU that never ran supplies no usable delta.
+        sample(&read_fd, [120, 400, 250]);
+        sample(&write_fd, [228, 400, 250]);
+        assert_eq!(counters.read_node_bytes().unwrap(), vec![1152]);
+    }
+
+    #[test]
+    fn amd_cas_remains_64_bytes() {
+        let (counter, fd) = counter(BYTES_PER_CAS);
+        let mut counters = MemCtlCounters {
+            counters: vec![counter],
+            node_bytes: vec![0],
+            warned_multiplexed: false,
+        };
+        sample(&fd, [110, 200, 200]);
+        assert_eq!(counters.read_node_bytes().unwrap(), vec![640]);
     }
 }

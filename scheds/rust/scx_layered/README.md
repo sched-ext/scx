@@ -177,6 +177,10 @@ The node total comes from `--node-membw-source`:
   writes, including prefetches, writebacks, DMA, and remote-socket accesses to
   the node's memory, which matches what node capacity describes. Packages that
   span multiple NUMA nodes (NPS2/NPS4) are not supported.
+  On single-NUMA-node NVIDIA Grace systems, this source uses SCF CMEM reads
+  (`cmem_rd_data`, 32 bytes per count) and writes (`cmem_wr_total_bytes`).
+  These count traffic served by CPU memory, including prefetches and
+  writebacks. GPU and PCIe traffic monitored by separate PMUs is excluded.
 - `resctrl`: root-group MBM, with L3 monitoring domains grouped by NUMA node.
   MBM counts traffic leaving each L3 regardless of where it is served, so a
   node's total includes its CPUs' remote accesses and, on AMD, cache-to-cache
@@ -203,8 +207,14 @@ With `resctrl` totals, which are counted on the requesting CPU's node, the
 whole proxy stays there. Other CPUs count a single event and attribute all
 fills to the CPU's node.
 
+On ARM, the kernel-advertised `l3d_cache_refill` event supplies the core proxy.
+On Grace it includes streaming read traffic brought in by hardware prefetches.
+Systems with multiple ARM core PMU types are not supported. Grace SCF totals
+are currently supported only with one NUMA node, since this core proxy cannot
+distinguish local and remote fills.
+
 This attribution is an estimate. Writebacks and non-temporal stores are not
-seen by any core-side event, and on CPUs without the prefetch event neither are
+measured directly by the core proxies. Demand-fill-only proxies also omit
 hardware prefetches. Layers dominated by such traffic are under-attributed, and
 the difference is charged to other layers on the same node. DMA is not
 attributed to any layer. A future resctrl-per-layer mode can provide stronger

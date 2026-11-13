@@ -51,6 +51,7 @@ use once_cell::sync::OnceCell;
 use regex::Regex;
 use scx_layered::alloc::{LayerAlloc, LayerDemand, WaterFillEntry, unified_alloc, water_fill};
 use scx_layered::*;
+#[cfg(not(target_arch = "aarch64"))]
 use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
 use scx_utils::CoreType;
@@ -681,7 +682,7 @@ struct Opts {
     node_membw_capacity_gb: Option<f64>,
 
     /// Source of per-NUMA-node memory-bandwidth totals. memctl counts DRAM
-    /// reads and writes at the memory controllers (AMD UMC). resctrl uses
+    /// reads and writes using AMD UMC or single-node Grace SCF. resctrl uses
     /// root-group MBM, which counts traffic leaving each L3, including
     /// remote and cache-to-cache transfers. auto prefers memctl.
     #[clap(long, value_enum, default_value_t = NodeMembwSourceKind::Auto)]
@@ -5949,7 +5950,8 @@ impl MembwEvents {
 }
 
 // Set up the counters.
-fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<MembwEvents> {
+#[cfg(not(target_arch = "aarch64"))]
+fn membw_events() -> Result<MembwEvents> {
     let pmumanager = PMUManager::new()?;
     let codename = &pmumanager.codename as &str;
 
@@ -5984,11 +5986,46 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<MembwEvents> {
         info!("memory-bandwidth PMU proxy: {name} on {codename} (config={config:#x})");
         Ok(config)
     };
-    let events = MembwEvents {
+    Ok(MembwEvents {
         near: config(near)?,
         far: far.map(config).transpose()?,
         prefetch: prefetch.map(config).transpose()?,
-    };
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+fn membw_events() -> Result<MembwEvents> {
+    // Use the kernel's advertised architectural event. PMUManager's CPU
+    // identification and event decoding currently assume x86 JSON fields.
+    let mut pmus = std::fs::read_dir("/sys/bus/event_source/devices")?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("armv8_pmuv3_")
+        });
+    let pmu = pmus.next().context("no ARM PMUv3 core PMU found")?;
+    if pmus.next().is_some() {
+        bail!("memory-bandwidth tracking requires a single ARM core PMU type");
+    }
+    let spec = std::fs::read_to_string(pmu.path().join("events/l3d_cache_refill"))?;
+    let config = u64::from_str_radix(
+        spec.trim()
+            .strip_prefix("event=0x")
+            .context("invalid ARM L3 refill event encoding")?,
+        16,
+    )?;
+    info!("memory-bandwidth PMU proxy: l3d_cache_refill (config={config:#x})");
+    Ok(MembwEvents {
+        near: config,
+        far: None,
+        prefetch: None,
+    })
+}
+
+fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<MembwEvents> {
+    let events = membw_events()?;
 
     // Install the counters in the BPF map
     let rodata = skel.maps.rodata_data.as_mut().unwrap();
