@@ -1,5 +1,14 @@
 pub use serde_json;
 
+use std::path::PathBuf;
+
+pub(crate) fn default_stats_base_path() -> PathBuf {
+    std::env::var_os("SCX_STATS_BASE_PATH")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/run/scx"))
+}
+
 mod stats;
 pub use stats::{
     Meta, StatsAttr, StatsData, StatsField, StatsFieldAttrs, StatsKind, StatsMeta, StatsMetaAux,
