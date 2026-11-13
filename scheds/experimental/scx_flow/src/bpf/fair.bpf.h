@@ -377,6 +377,8 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 	if (!t)
 		return;
 	__sync_fetch_and_add(&m_ewma_fold, 1ULL);
+	/* Keep each run-history access at a fixed offset for the verifier. */
+#pragma unroll
 	for (i = 0; i < 8; i++) {
 		u64 d = READ_ONCE(t->run_dur[i]);
 		u64 s = READ_ONCE(t->run_stamp[i]);
