@@ -32,6 +32,7 @@ members = [
     "scheds/experimental/scx_maestro",
     "scheds/experimental/scx_mavd",
     "scheds/experimental/scx_mlfq",
+    "scheds/experimental/scx_panda",
     "scheds/experimental/scx_reevdf",
     "scheds/experimental/scx_rburst",
     "scheds/experimental/scx_rlocal",
