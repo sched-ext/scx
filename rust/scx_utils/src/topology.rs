@@ -759,7 +759,7 @@ fn smallest_full_capacity_span(domains: &[Cpumask], capacities: &BTreeMap<usize,
 /// TopoCtx is a helper struct used to build a topology.
 struct TopoCtx {
     /// Mapping of NUMA node core ids
-    node_core_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
+    node_core_kernel_ids: BTreeMap<(usize, usize, isize, usize), usize>,
     /// Mapping of NUMA node LLC ids
     node_llc_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of L2 ids
@@ -937,7 +937,7 @@ fn create_insert_cpu(
     let num_cores = topo_ctx.node_core_kernel_ids.len();
     let core_id = topo_ctx
         .node_core_kernel_ids
-        .entry((node.id, package_id, core_kernel_id))
+        .entry((node.id, package_id, cluster_id, core_kernel_id))
         .or_insert(num_cores);
 
     let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
