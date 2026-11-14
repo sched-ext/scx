@@ -2,17 +2,7 @@
 
 ## What
 
-scx_flow orders tasks by deadline. Each per-CPU queue holds tasks in
-deadline order with equal deadlines in insertion order, plus one fallback
-queue in FIFO order. Running tasks pay for burnt time. Virtual deadline adds
-a burst scaled slice step to the floored time. Steady tasks price by the kept
-max run length with short tasks keeping the burst path with a floor slice and long tasks in one slice quanta.
-Unknown tasks keep the burst path. An insert miss keeps the newcomer in
-fallback in FIFO order with no evict. Stopping plus tick keep the burst
-and run state with guarded preempt and no reclaim. Dispatch drains local first,
-then same LLC, then same node, then remote. Wakeups wake idle targets, plus a
-guarded preempt on a much earlier Virtual deadline. Queues hold without bound.
-Slice is fixed at 1ms, and hotplug needs restart.
+scx_flow is a knob-free latency score scheduler on sched_ext. Each LLC owns one kernel virtual deadline DSQ for shared tasks and each CPU owns one for pinned tasks, plus one fallback FIFO DSQ. Wakeups inherit scores between wakers and workers with log scale runtime compression, and long bursts cost more virtual time. Placement claims idle cores atomically (largest L3 for urgent tasks > core group > LLC > node) with direct local dispatch on won idle CPUs and in place slice continuation. Slices stay bounded and track a ten millisecond window with boost for long frame runs, and urgent tasks shorten a peer's slice with no interrupt. Active cores run at maximum frequency and idle cores decay to half on a timer.
 
 ## Typical Use Cases
 

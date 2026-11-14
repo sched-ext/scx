@@ -1,311 +1,97 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Placement for the flow scheduler.
+ * Wakeup placement for the flow scheduler.
  *
- * The pick first tries the previous CPU when it is allowed and
- * online. Otherwise it scans once and prefers the same LLC, then
- * the same node, then a distant CPU. Cache and node identity come
- * from the upstream topology tree with cluster hints from the seed
- * view. Ties keep the first CPU in fixed order. Within the same LLC
- * the scan favors the same cluster, with the tie favor kept even
- * when threads share cores and only the fast pick gated on single
- * threads. Tiers stay L1 greater than L2 greater than L3, so the same
- * cluster wins inside the same LLC before the wider LLC and node fall
- * back in fixed order. Short form is L1>L2>L3. No sibling probe runs
- * and each CPU stands single with fail closed choice. Inside the same
- * cache tiers ties prefer larger buckets first within tier with known
- * priority matching the drain, else fixed order covers unknown sizes.
- * Group tier reads l2 and LLC tier reads l3 after one seed lookup.
- * Every check returns minus one on failure.
- * Masks are tested again before each wake, so a task is never kicked
- * toward a CPU outside its current mask. Frequency follows core
- * busyness and never steers placement.
+ * The kernel's idle CPU picker already walks the topology in the order
+ * flow wants: the previous CPU if its core is fully idle, a fully idle
+ * core in the same LLC, then in the same node, then anywhere, and only
+ * then partially idle cores. Flow adds two steps in front of it.
+ *
+ * On a CPU whose LLCs differ in size, a latency critical task that last
+ * ran outside of the largest LLC first tries a fully idle core in it, so
+ * that the tasks that matter most for responsiveness keep their working
+ * set in the biggest cache. Then, when the LLCs are split into smaller
+ * core groups, a fully idle core in the group of the previous CPU is
+ * tried.
+ *
+ * A wakeup that wins an idle CPU goes straight to its local DSQ, and the
+ * kernel then skips ops.enqueue() for that wakeup.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #ifndef __FLOW_SELECT_BPF_H
 #define __FLOW_SELECT_BPF_H
-#include "intf.h"
+
 #include "maps.bpf.h"
-#include "stats.bpf.h"
-#include <lib/sdt_alloc.h>
-static __always_inline bool flow_is_pinned(struct task_struct *p)
+#include "fair.bpf.h"
+
+static __always_inline void flow_tag_wakeup(struct flow_task_ctx *t, u64 wake_flags)
 {
-	if (!p)
-		return false;
-	if (p->nr_cpus_allowed == 1)
-		return true;
-	return is_migration_disabled(p);
+	u32 flags = t->flags & ~(FLOW_FLAG_SYNC_WAKEUP | FLOW_FLAG_HARDIRQ_WAKEUP |
+				 FLOW_FLAG_SOFTIRQ_WAKEUP);
+
+	if (wake_flags & SCX_WAKE_SYNC)
+		flags |= FLOW_FLAG_SYNC_WAKEUP;
+	if (bpf_in_hardirq() || bpf_in_nmi())
+		flags |= FLOW_FLAG_HARDIRQ_WAKEUP;
+	else if (bpf_in_serving_softirq())
+		flags |= FLOW_FLAG_SOFTIRQ_WAKEUP;
+	t->flags = flags;
 }
-static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
+
+static bool flow_wants_big_cache(const struct flow_task_ctx *t, s32 prev_cpu)
 {
-	u32 c;
-	if (!p || !p->cpus_ptr)
-		return false;
-	if (cpu < 0)
-		return false;
-	c = (u32)cpu;
-	if (!flow_cpu_ok(c))
-		return false;
-	return bpf_cpumask_test_cpu(c, p->cpus_ptr);
+	return flow_has_big_cache &&
+	       t->lat_cri >= READ_ONCE(flow_sys_stat.avg_lat_cri) &&
+	       !bpf_cpumask_test_cpu(prev_cpu, cast_mask(&flow_big_cache_cpumask));
 }
-static __always_inline bool flow_cpu_live(u32 cpu)
+
+/* Claim an idle CPU for @p, or return a negative value if there is none. */
+static s32 flow_pick_idle_cpu(struct task_struct *p, const struct flow_task_ctx *t,
+			      s32 prev_cpu, u64 wake_flags)
 {
-	if (!flow_cpu_ok(cpu))
-		return false;
-	if (!topo_all)
-		return false;
-	return topo_contains(topo_all, cpu) ? true : false;
-}
-/* Unknown cluster reads as all ones, so group zero stays a valid match.
- * The value never collides with a seeded group id, which stays small. */
-#define FLOW_CCX_UNKNOWN 0xFFFFFFFFU
-static __always_inline s32 flow_first_allowed(struct task_struct *p)
-{
-	u32 first;
-	u32 c;
-	if (!p || !p->cpus_ptr)
-		return -1;
-	first = bpf_cpumask_first(p->cpus_ptr);
-	if (flow_cpu_ok(first) && flow_cpu_live(first) && flow_cpu_allowed((s32)first, p))
-		return (s32)first;
-	/* The first mask bit can be offline while a later bit stays usable.
-	 * Scan the mask in fixed order for the first allowed live CPU, so
-	 * only tasks with no usable CPU fall back to minus one. Bounded scan
-	 * within the CPU bound with mask plus live checks only and no widening. */
-	bpf_for(c, 0, FLOW_MAX_CPUS) {
-		if (!flow_cpu_live(c))
-			continue;
-		if (!flow_cpu_allowed((s32)c, p))
-			continue;
-		return (s32)c;
+	s32 cpu;
+
+	if (flow_wants_big_cache(t, prev_cpu)) {
+		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
+					     cast_mask(&flow_big_cache_cpumask),
+					     SCX_PICK_IDLE_CORE);
+		if (cpu >= 0)
+			return cpu;
 	}
-	return -1;
+	if (flow_nr_groups > flow_nr_llcs && flow_cpu_valid(prev_cpu)) {
+		struct bpf_cpumask *group;
+
+		group = MEMBER_VPTR(flow_group_cpumask, [flow_cpu_group[prev_cpu]]);
+		if (group) {
+			cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
+						     cast_mask(group), SCX_PICK_IDLE_CORE);
+			if (cpu >= 0)
+				return cpu;
+		}
+	}
+	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
 }
-static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
-{
-	if (!p || !p->cpus_ptr)
-		return -1;
-	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint))
-		return hint;
-	return flow_first_allowed(p);
-}
-static __always_inline bool flow_is_primary(u32 node)
-{
-	return node == 0;
-}
-static __always_inline int flow_hint_llc(s32 hint)
-{
-	int v;
-	if (hint < 0 || !flow_cpu_ok((u32)hint))
-		return -1;
-	if (!topo_all)
-		return -1;
-	v = topo_cpu_to_llc_id((u32)hint);
-	if (v < 0 || !flow_llc_ok((u32)v))
-		return -1;
-	return v;
-}
-static __always_inline u32 flow_cpu_ccx(u32 cpu)
-{
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-	if (!flow_cpu_ok(cpu))
-		return (u32)FLOW_CCX_UNKNOWN;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return (u32)FLOW_CCX_UNKNOWN;
-	return READ_ONCE(cc->ccx_id);
-}
-/* Same cluster match on the seed view with the seed flag gate. Both group
- * ids must be known, so unknown reads as all ones never match and fixed
- * order covers them. The seed flag stays always on with init one and no
- * userspace seed as an interim, so the gate stays for a later seed without
- * changing the match. */
-/* Size buckets read as u8 with zero meaning unknown. A miss reads
- * unknown, so unknown sizes keep fixed order with no match. */
-static __always_inline u8 flow_cpu_l2bkt(u32 cpu)
-{
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-	if (!flow_cpu_ok(cpu))
-		return 0;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return 0;
-	return READ_ONCE(cc->l2_bkt);
-}
-static __always_inline u8 flow_cpu_l3bkt(u32 cpu)
-{
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-	if (!flow_cpu_ok(cpu))
-		return 0;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return 0;
-	return READ_ONCE(cc->l3_bkt);
-}
-/* Larger check with the both known gate. Unknown sizes never match,
- * so fixed order covers them. Compares promote to int per C rules with
- * identical result and no extra budget. */
-static __always_inline bool flow_cache_larger(u8 a, u8 b)
-{
-	if (!a || !b)
-		return false;
-	return a > b;
-}
-/* Coalesced seed view with one map lookup for cluster plus both buckets.
- * Group tier picks l2 and LLC tier picks l3 after the score, so one lookup
- * covers both with no extra loop. A miss reads unknown with no match. */
-struct flow_cpu_view {
-	u32 ccx;
-	u8 l2;
-	u8 l3;
-};
-static __always_inline struct flow_cpu_view flow_cpu_view(u32 cpu)
-{
-	struct flow_cpu_view v = { (u32)FLOW_CCX_UNKNOWN, 0, 0 };
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-	if (!flow_cpu_ok(cpu))
-		return v;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return v;
-	v.ccx = READ_ONCE(cc->ccx_id);
-	v.l2 = READ_ONCE(cc->l2_bkt);
-	v.l3 = READ_ONCE(cc->l3_bkt);
-	return v;
-}
-static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
-{
-	if (!use)
-		return false;
-	if (cx == (u32)FLOW_CCX_UNKNOWN || hint == (u32)FLOW_CCX_UNKNOWN)
-		return false;
-	return cx == hint;
-}
+
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	s32 hint = prev_cpu;
-	s32 tgt;
-	int hint_llc = -1;
-	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
-	bool have_hint_topo = false;
-	s32 best = -1;
-	int best_score = 99;
-	bool best_same = false;
-	u8 best_bkt = 0;
-	bool have_best_bkt = false;
-	bool use_ccx;
-	bool smt_on;
-	u32 c;
-	struct topo_iter hint_iter;
-	topo_ptr hint_node = 0;
-	topo_ptr walk = 0;
-	(void)wake_flags;
-	if (!p)
-		return hint;
-	scx_arena_subprog_init();
-	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
-	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
-	tgt = flow_constrained_target(hint, p);
-	if (tgt >= 0)
-		return tgt;
-	if (hint >= 0 && flow_cpu_ok((u32)hint) && topo_all &&
-	    topo_contains(topo_all, (u32)hint)) {
-		hint_llc = flow_hint_llc(hint);
-		hint_ccx = flow_cpu_ccx((u32)hint);
-		TOPO_FOR_EACH_NODE(&hint_iter, walk) {
-			if (topo_contains(walk, (u32)hint)) {
-				hint_node = walk;
-				break;
-			}
-		}
-		if (hint_llc >= 0 || hint_node)
-			have_hint_topo = true;
-	}
-	bpf_for(c, 0, FLOW_MAX_CPUS) {
-		u32 l;
-		u32 cx;
-		u8 cb = 0;
-		int score;
-		int pre;
-		int vllc;
-		bool same_node = false;
-		struct flow_cpu_view vw;
-		if (!flow_cpu_live(c))
-			continue;
-		if (!flow_cpu_allowed((s32)c, p))
-			continue;
-		vllc = topo_cpu_to_llc_id(c);
-		if (vllc < 0 || !flow_llc_ok((u32)vllc))
-			continue;
-		l = (u32)vllc;
-		if (hint_node && topo_contains(hint_node, c))
-			same_node = true;
-		pre = 3;
-		if (have_hint_topo) {
-			if (hint_llc >= 0 && l == (u32)hint_llc)
-				pre = 0;
-			else if (same_node)
-				pre = 1;
-			else
-				pre = 2;
-		} else if (flow_is_primary(0)) {
-			/* Intentional: no hint topo falls back to the node tier.
-			 * The zero arg is the single node default with no widening.
-			 * No core walk runs here by design; each CPU stands single. */
-			pre = 2;
-		}
-		if (pre > best_score)
-			continue;
-		vw = flow_cpu_view(c);
-		cx = vw.ccx;
-		score = pre;
-		if (have_hint_topo && !smt_on && hint_llc >= 0 &&
-		    l == (u32)hint_llc && flow_ccx_match(use_ccx, cx, hint_ccx))
-			score = -1;
-		/* Tier bucket split: group tier reads l2 and LLC tier reads l3.
-		 * Seeds stay equal today so the split is harmless, and a future
-		 * level divergence stays correct. Buckets fetch only for
-		 * competitive tiers with no extra lookup elsewhere. */
-		if (score == -1)
-			cb = vw.l2;
-		else if (score == 0)
-			cb = vw.l3;
-		if (score < best_score) {
-			best_score = score;
-			best = (s32)c;
-			best_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
-			best_bkt = cb;
-			have_best_bkt = cb ? true : false;
-		} else if (score == best_score) {
-			/* Tie favor stays even with threads on; only the fast pick is gated.
-			 * Inside the cache tiers the tie then prefers larger buckets first
-			 * within tier with known priority matching the drain, else fixed
-			 * order keeps unknown sizes. A known bucket replaces an unknown
-			 * best and larger replaces smaller with equal keeping fixed order.
-			 * The full scan stays bounded with no early break
-			 * so the largest known bucket wins. */
-			bool cur_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
-			if (cur_same && !best_same) {
-				best = (s32)c;
-				best_same = true;
-				best_bkt = cb;
-				have_best_bkt = cb ? true : false;
-			} else if (cur_same == best_same && score <= 0 && have_hint_topo &&
-				   cb && (!have_best_bkt || flow_cache_larger(cb, best_bkt))) {
-				best = (s32)c;
-				best_bkt = cb;
-				have_best_bkt = true;
-			}
-		}
-	}
-	/* The mask can change while scanning, check the pick again. */
-	if (best >= 0 && flow_cpu_allowed(best, p))
-		return best;
-	return flow_first_allowed(p);
+	struct flow_task_ctx *t = flow_task_ctx(p);
+	s32 cpu;
+
+	if (!t)
+		return prev_cpu;
+
+	flow_tag_wakeup(t, wake_flags);
+	cpu = flow_pick_idle_cpu(p, t, prev_cpu, wake_flags);
+	if (cpu < 0)
+		return prev_cpu;
+
+	/* The task starts a new activation, so it has not run yet. */
+	t->acc_runtime_ns = 0;
+	scx_bpf_task_set_dsq_vtime(p, flow_score_task(p, t));
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, flow_calc_slice(t, cpu), 0);
+	flow_stat_inc(FLOW_STAT_DIRECT);
+	return cpu;
 }
-#endif
+
+#endif /* __FLOW_SELECT_BPF_H */
