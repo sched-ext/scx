@@ -758,8 +758,9 @@ fn smallest_full_capacity_span(domains: &[Cpumask], capacities: &BTreeMap<usize,
  ******************************************************/
 /// TopoCtx is a helper struct used to build a topology.
 struct TopoCtx {
-    /// Mapping of NUMA node core ids
-    node_core_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
+    /// Mapping of (NUMA node, lowest CPU in core_cpus_list) to internal core IDs.
+    /// The CPU ID is used if core_cpus_list is unavailable.
+    node_core_kernel_ids: BTreeMap<(usize, usize), usize>,
     /// Mapping of NUMA node LLC ids
     node_llc_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of L2 ids
@@ -867,6 +868,17 @@ fn create_insert_cpu(
     let package_id = read_from_file(&top_path.join("physical_package_id"))?;
     let cluster_id = read_from_file(&top_path.join("cluster_id"))?;
 
+    // Using cluster_id would resolve ARM64 core_id collisions across clusters,
+    // but on x86 it reflects L2 cache sharing rather than the kernel's SMT
+    // group (and can split SMT siblings under certain hypervisors). Key by the
+    // lowest CPU in the kernel's SMT sibling mask (core_cpus_list) instead,
+    // falling back to the CPU ID if the mask is missing.
+    let core_key = read_from_file::<String>(&top_path.join("core_cpus_list"))
+        .ok()
+        .and_then(|cpulist| read_cpulist(&cpulist).ok())
+        .and_then(|cpus| cpus.into_iter().min())
+        .unwrap_or(id);
+
     // Evaluate L2, L3 and LLC cache IDs.
     //
     // Use ID 0 if we fail to detect the cache hierarchy. This seems to happen on certain SKUs, so
@@ -937,7 +949,7 @@ fn create_insert_cpu(
     let num_cores = topo_ctx.node_core_kernel_ids.len();
     let core_id = topo_ctx
         .node_core_kernel_ids
-        .entry((node.id, package_id, core_kernel_id))
+        .entry((node.id, core_key))
         .or_insert(num_cores);
 
     let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
