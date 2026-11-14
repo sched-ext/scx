@@ -6041,7 +6041,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flow"
-version = "5.2.24"
+version = "5.2.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -6050,13 +6050,11 @@ dependencies = [
  "ctrlc",
  "libbpf-rs 0.27.2",
  "log",
- "scx_arena",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
  "serde",
- "serde_json",
  "simplelog",
 ]
 
