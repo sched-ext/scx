@@ -697,6 +697,7 @@ struct task_ctx {
 	u32			layer_id;
 	pid_t			last_waker;
 	bool			refresh_layer;
+	bool			select_cpu_skipped;
 	struct cached_cpus	layered_cpus;
 	/*
 	 * XXX: Old kernels can't track a bpf_cpumask on nested structs
@@ -1701,10 +1702,15 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	/*
 	 * We usually update the layer in layered_runnable() to avoid confusion.
 	 * As layered_select_cpu() takes place before runnable, new tasks would
-	 * still have MAX_LAYERS layer. Just return @prev_cpu.
+	 * still have MAX_LAYERS layer. Just return @prev_cpu and let
+	 * layered_enqueue() know so that it handles @p as if select_cpu was
+	 * skipped.
 	 */
-	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
+	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id))) {
+		taskc->select_cpu_skipped = true;
 		return prev_cpu;
+	}
+	taskc->select_cpu_skipped = false;
 
 	if (layer->task_place == PLACEMENT_STICK)
 		cpu = prev_cpu;
@@ -1908,7 +1914,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	bool wakeup = enq_flags & SCX_ENQ_WAKEUP;
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 	u32 llc_id, layer_id;
-	bool yielding, try_preempt_first;
+	bool cpu_selected, yielding, try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
 
@@ -1917,8 +1923,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
+	/* layered_select_cpu() may have returned without doing anything */
+	cpu_selected = __COMPAT_is_enq_cpu_selected(enq_flags) && !taskc->select_cpu_skipped;
+	taskc->select_cpu_skipped = false;
+
 	/* Only invoke if we never went through select_cpu path. */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+	if (!cpu_selected)
 		maybe_refresh_task_layer_from_hint(p, taskc);
 
 	layer_id = taskc->layer_id;
@@ -1956,7 +1966,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
 	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags) || try_preempt_first) {
+	if (!cpu_selected || try_preempt_first) {
 		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
 		if (cpu < 0)
 			goto skip_ddsp;
