@@ -566,23 +566,31 @@ pub fn home_sampled(nvcsw: u64) -> bool {
     nvcsw & HOME_TICK_MASK == 0
 }
 
+// The share tests divide the window rather than multiply the runtime: a
+// checked or saturating multiply is LLVM's umul.with.overflow, which the
+// BPF backend lowers to a call to __multi3, an extern the kernel lacks.
+// ran * d >= window is ran >= ceil(window / d), exactly, without overflow.
+
 /// Did a task that ran `ran` over `window` keep a fifth of a CPU busy?
 #[inline(always)]
 pub fn home_busy(ran: u64, window: u64) -> bool {
-    ran.saturating_mul(HOME_ON_DIV) >= window
+    ran >= window.div_ceil(HOME_ON_DIV)
 }
 
 /// Did it fall under a tenth, which gives its home up?
 #[inline(always)]
 pub fn home_quiet(ran: u64, window: u64) -> bool {
-    ran.saturating_mul(HOME_OFF_DIV) < window
+    ran < window.div_ceil(HOME_OFF_DIV)
 }
 
 /// Is a census of `busy` samples, over HOME_CENSUS_WINDOWS windows, more
 /// than `cores` homes can serve? Then nobody is special and homes are off.
 #[inline(always)]
 pub fn homes_crowded(busy: u64, cores: u64) -> bool {
-    busy > HOME_CENSUS_WINDOWS.saturating_mul(cores)
+    // busy > windows * cores, divided as above: with busy = windows * q + r,
+    // more than q cores, or q and a remainder.
+    let q = busy / HOME_CENSUS_WINDOWS;
+    q > cores || (q == cores && !busy.is_multiple_of(HOME_CENSUS_WINDOWS))
 }
 
 /// The word that records a core's home: the owner's pid and the CID it

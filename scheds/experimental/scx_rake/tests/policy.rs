@@ -596,3 +596,52 @@ fn home_rank_orders_capacity_first() {
     assert!(policy::home_rank(0, u32::MAX) < policy::home_rank(1, 0));
     assert!(policy::home_rank(1, 0) < policy::home_rank(1, 1));
 }
+
+#[test]
+fn home_share_tests_match_the_exact_products() {
+    // The division forms against the products in 128 bits, at the edges
+    // and over a spread of windows, overflowing runtimes included.
+    let mut values = vec![
+        0u64,
+        1,
+        2,
+        4,
+        5,
+        9,
+        10,
+        11,
+        u64::MAX / 10,
+        u64::MAX / 5,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..200 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        values.push(x >> (x % 64));
+    }
+    for &window in &values {
+        for &ran in &values {
+            let busy = u128::from(ran) * 5 >= u128::from(window);
+            let quiet = u128::from(ran) * 10 < u128::from(window);
+            assert_eq!(
+                policy::home_busy(ran, window),
+                busy,
+                "ran {ran} window {window}"
+            );
+            assert_eq!(
+                policy::home_quiet(ran, window),
+                quiet,
+                "ran {ran} window {window}"
+            );
+            let crowded = u128::from(ran) > 4 * u128::from(window);
+            assert_eq!(
+                policy::homes_crowded(ran, window),
+                crowded,
+                "busy {ran} cores {window}"
+            );
+        }
+    }
+}
