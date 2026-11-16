@@ -17,6 +17,7 @@
 
 enum mlfq_tunables {
 	MLFQ_NSEC_PER_SEC		= 1000000000,
+	MLFQ_NSEC_PER_MSEC		= 1000000,
 	MLFQ_SLICE_MIN_NS		= 500000,	/* 0.5 ms */
 	MLFQ_SLICE_MAX_NS		= 5000000,	/* 5 ms */
 	MLFQ_SLICE_BOOST_MAX_NS		= 20000000,	/* 20 ms */
@@ -29,6 +30,17 @@ enum mlfq_tunables {
 	 */
 	MLFQ_LEVEL_QUANTUM_NS		= MLFQ_SLICE_BOOST_MAX_NS,
 	MLFQ_NR_LEVELS			= 8,
+
+	/*
+	 * A waking task takes the CPU of a task on MLFQ_PREEMPT_LEVEL or
+	 * below right away, once that task has run for MLFQ_PREEMPT_MIN_RUN_NS,
+	 * and only while fewer than MLFQ_PREEMPT_MAX_AHEAD queued tasks are
+	 * due before it. Each limit keeps a busy queue from turning every
+	 * wakeup into a preemption.
+	 */
+	MLFQ_PREEMPT_LEVEL		= 3,
+	MLFQ_PREEMPT_MIN_RUN_NS		= 100000,	/* 0.1 ms */
+	MLFQ_PREEMPT_MAX_AHEAD		= 2,
 
 	/* How far the virtual time of a task may trail or lead the clock. */
 	MLFQ_VTIME_LAG_NS		= MLFQ_SLICE_MAX_NS,
@@ -84,6 +96,7 @@ struct mlfq_task_ctx {
 
 struct mlfq_cpu_state {
 	u64	est_stopping_clk;	/* expected stop of curr, 0 if not a victim */
+	u64	run_start_clk;		/* when curr started or was kept, 0 if idle or claimed */
 	u64	idle_start_clk;		/* when the CPU ran out of work, 0 if busy */
 	u64	cpuperf_commit_clk;	/* when the perf target was last sent */
 	u64	sum_lat_cri;		/* lat_cri of tasks started this period */
@@ -92,6 +105,7 @@ struct mlfq_cpu_state {
 	u32	lat_cri;		/* lat_cri of curr */
 	u32	nr_pinned;		/* pinned tasks waiting for this CPU */
 	u32	cpuperf_cur;		/* last perf target sent */
+	u32	run_acc_ms;		/* burst of curr at run_start_clk, in ms */
 } __attribute__((aligned(64)));
 
 /*

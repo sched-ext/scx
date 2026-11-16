@@ -38,6 +38,7 @@ fn add_cpu_stats(row: &mut Metrics, cnt: &[u64; NR_STATS]) {
         fallback: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_FALLBACK),
         kick_idle: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_KICK_IDLE),
         kick_preempt: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_KICK_PREEMPT),
+        kick_lower: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_KICK_LOWER),
         keep: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_KEEP),
         preempted: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_PREEMPTED),
         promoted: get(bpf_intf::mlfq_stat_idx_MLFQ_STAT_PROMOTED),

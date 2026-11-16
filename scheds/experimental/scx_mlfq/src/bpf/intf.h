@@ -28,6 +28,7 @@ enum mlfq_stat_idx {
 	MLFQ_STAT_FALLBACK,	/* inserted into the fallback DSQ */
 	MLFQ_STAT_KICK_IDLE,	/* idle CPU woken up after an enqueue */
 	MLFQ_STAT_KICK_PREEMPT,	/* running task asked to give up its CPU */
+	MLFQ_STAT_KICK_LOWER,	/* task below the top level preempted right away */
 	MLFQ_STAT_KEEP,		/* previous task kept running with a new slice */
 	MLFQ_STAT_PREEMPTED,	/* task stopped while still runnable */
 	MLFQ_STAT_PROMOTED,	/* woke up below the top level and went back to it */

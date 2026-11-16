@@ -168,6 +168,109 @@ static void mlfq_try_preempt(struct task_struct *p, struct mlfq_task_ctx *t, s32
 		mlfq_stat_inc(MLFQ_STAT_KICK_PREEMPT);
 }
 
+/*
+ * Claim @cpu when its task has sunk to MLFQ_PREEMPT_LEVEL by @now and has
+ * had MLFQ_PREEMPT_MIN_RUN_NS since it started or was kept. Tasks that
+ * only lost the top level because a busy queue kept preempting them are
+ * left alone, and the minimum run keeps a stream of wakeups from
+ * bouncing a task that only just got a CPU. Clearing the run stamp makes
+ * concurrent enqueues pick another CPU, and the stamp comes back once the
+ * CPU starts or keeps a task. Returns the cleared stamp, or zero when the
+ * CPU was not claimed.
+ */
+static u64 mlfq_claim_lower(s32 cpu, u64 now)
+{
+	struct mlfq_cpu_state *cs;
+	u64 start, ran;
+
+	if (!mlfq_cpu_valid(cpu))
+		return 0;
+	cs = &mlfq_cpu_states[cpu];
+	start = READ_ONCE(cs->run_start_clk);
+	if (!start || !time_after(now, start))
+		return 0;
+	ran = now - start;
+	if (ran < MLFQ_PREEMPT_MIN_RUN_NS ||
+	    (u64)READ_ONCE(cs->run_acc_ms) * MLFQ_NSEC_PER_MSEC + ran <
+	    mlfq_level_start(MLFQ_PREEMPT_LEVEL))
+		return 0;
+	return __sync_bool_compare_and_swap(&cs->run_start_clk, start, 0) ? start : 0;
+}
+
+/*
+ * Tasks queued in @dsq_id that are due before @deadline, counted up to
+ * MLFQ_PREEMPT_MAX_AHEAD.
+ */
+static u32 mlfq_nr_ahead(u64 dsq_id, u64 deadline)
+{
+	struct task_struct *q;
+	u32 nr = 0;
+
+	bpf_for_each(scx_dsq, q, dsq_id, 0) {
+		if (nr >= MLFQ_PREEMPT_MAX_AHEAD || !time_before(q->scx.dsq_vtime, deadline))
+			break;
+		nr++;
+	}
+	return nr;
+}
+
+/*
+ * A task that wakes up on the top level outranks the tasks that sank
+ * deep, so when it finds no idle CPU it takes the CPU of such a task in
+ * its LLC right away instead of waiting for that CPU's next tick. Tasks on
+ * nearby levels still yield to each other at the tick. Kicked CPUs serve
+ * the DSQ in deadline order, so this only pays off while few queued tasks
+ * are due before @deadline, as when a task wakes up several workers at
+ * once. Walking the DSQ takes its lock, so it only happens once a victim
+ * was found. The insert of @p only lands once ops.enqueue() returns, so
+ * @p itself is not in the DSQ yet. @cpu is tried first, then a few random
+ * CPUs. A pinned task can only use @cpu.
+ */
+static bool mlfq_preempt_lower(struct task_struct *p, const struct mlfq_task_ctx *t, s32 cpu,
+			       u64 dsq_id, u64 deadline, u32 llc, bool pinned, u64 enq_flags)
+{
+	struct bpf_cpumask *llc_mask;
+	s32 victim = -1;
+	u64 now, stamp;
+	u32 i;
+
+	if (!(enq_flags & SCX_ENQ_WAKEUP) || !mlfq_top_level(t->acc_runtime_ns))
+		return false;
+
+	now = scx_bpf_now();
+	stamp = mlfq_claim_lower(cpu, now);
+	if (stamp) {
+		victim = cpu;
+	} else if (!pinned) {
+		llc_mask = MEMBER_VPTR(mlfq_llc_cpumask, [llc]);
+		if (!llc_mask)
+			return false;
+		bpf_for(i, 0, MLFQ_VICTIM_PROBES) {
+			s32 probe = bpf_cpumask_any_and_distribute(cast_mask(llc_mask),
+								   p->cpus_ptr);
+
+			if (probe == cpu)
+				continue;
+			stamp = mlfq_claim_lower(probe, now);
+			if (stamp) {
+				victim = probe;
+				break;
+			}
+		}
+	}
+	if (!mlfq_cpu_valid(victim))
+		return false;
+	/* Hand the claim back unless the CPU moved on to another task meanwhile. */
+	if (mlfq_nr_ahead(dsq_id, deadline) >= MLFQ_PREEMPT_MAX_AHEAD) {
+		__sync_bool_compare_and_swap(&mlfq_cpu_states[victim].run_start_clk, 0, stamp);
+		return false;
+	}
+
+	scx_bpf_kick_cpu(victim, SCX_KICK_PREEMPT);
+	mlfq_stat_inc(MLFQ_STAT_KICK_LOWER);
+	return true;
+}
+
 void BPF_STRUCT_OPS(mlfq_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct mlfq_task_ctx *t, *wt;
@@ -238,7 +341,8 @@ void BPF_STRUCT_OPS(mlfq_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (enq_flags & SCX_ENQ_LAST)
 		return;
-	if (!mlfq_kick_idle(p, t, cpu, pinned, enq_flags))
+	if (!mlfq_kick_idle(p, t, cpu, pinned, enq_flags) &&
+	    !mlfq_preempt_lower(p, t, cpu, dsq_id, deadline, llc, pinned, enq_flags))
 		mlfq_try_preempt(p, t, cpu, llc);
 }
 

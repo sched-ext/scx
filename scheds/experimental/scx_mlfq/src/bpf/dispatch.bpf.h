@@ -61,6 +61,17 @@ static bool mlfq_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
 }
 
 /*
+ * Record that @cs started or kept a task whose burst is @acc at @now, for
+ * mlfq_claim_lower(). The burst is kept in milliseconds so that the state
+ * of a CPU fits in one cache line.
+ */
+static __always_inline void mlfq_mark_run_start(struct mlfq_cpu_state *cs, u64 acc, u64 now)
+{
+	WRITE_ONCE(cs->run_acc_ms, mlfq_min(acc / MLFQ_NSEC_PER_MSEC, (u32)-1));
+	WRITE_ONCE(cs->run_start_clk, now);
+}
+
+/*
  * Let @prev, which is still runnable, keep @cpu with a fresh slice. Its run
  * continues without passing through ops.stopping(), so its deadline is
  * refreshed from the virtual time it reached so far. Unless @always is
@@ -94,6 +105,7 @@ static bool mlfq_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool alwa
 	slice = mlfq_calc_slice(t, cpu);
 	scx_bpf_task_set_slice(prev, slice);
 	WRITE_ONCE(mlfq_cpu_states[cpu].est_stopping_clk, mlfq_est_stop(t, acc, slice, now));
+	mlfq_mark_run_start(&mlfq_cpu_states[cpu], acc, now);
 	return true;
 }
 
@@ -133,6 +145,7 @@ void BPF_STRUCT_OPS(mlfq_dispatch, s32 cpu, struct task_struct *prev)
 	cs = &mlfq_cpu_states[cpu];
 	WRITE_ONCE(cs->lat_cri, 0);
 	WRITE_ONCE(cs->est_stopping_clk, 0);
+	WRITE_ONCE(cs->run_start_clk, 0);
 	if (!READ_ONCE(cs->idle_start_clk))
 		WRITE_ONCE(cs->idle_start_clk, scx_bpf_now());
 }
@@ -156,6 +169,7 @@ void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
 	cs = &mlfq_cpu_states[cpu];
 	WRITE_ONCE(cs->lat_cri, t->lat_cri);
 	WRITE_ONCE(cs->est_stopping_clk, mlfq_est_stop(t, t->acc_runtime_ns, p->scx.slice, now));
+	mlfq_mark_run_start(cs, t->acc_runtime_ns, now);
 	WRITE_ONCE(cs->idle_start_clk, 0);
 	if (t->lat_cri > READ_ONCE(cs->max_lat_cri))
 		WRITE_ONCE(cs->max_lat_cri, t->lat_cri);

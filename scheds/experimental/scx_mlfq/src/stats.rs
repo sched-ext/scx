@@ -35,6 +35,8 @@ pub struct Metrics {
     pub kick_idle: u64,
     #[stat(desc = "Running tasks asked to give up their CPU")]
     pub kick_preempt: u64,
+    #[stat(desc = "Tasks below the top level preempted right away")]
+    pub kick_lower: u64,
     #[stat(desc = "Tasks kept running with a new slice")]
     pub keep: u64,
     #[stat(desc = "Tasks stopped while still runnable")]
@@ -49,7 +51,7 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "queued={} dispatched={} direct={} steal={} fallback={} kick_idle={} kick_preempt={} keep={} preempted={} promoted={} demoted={}",
+            "queued={} dispatched={} direct={} steal={} fallback={} kick_idle={} kick_preempt={} kick_lower={} keep={} preempted={} promoted={} demoted={}",
             self.queued,
             self.dispatched,
             self.direct,
@@ -57,6 +59,7 @@ impl Metrics {
             self.fallback,
             self.kick_idle,
             self.kick_preempt,
+            self.kick_lower,
             self.keep,
             self.preempted,
             self.promoted,
@@ -86,6 +89,7 @@ impl Metrics {
         self.fallback = self.fallback.wrapping_add(rhs.fallback);
         self.kick_idle = self.kick_idle.wrapping_add(rhs.kick_idle);
         self.kick_preempt = self.kick_preempt.wrapping_add(rhs.kick_preempt);
+        self.kick_lower = self.kick_lower.wrapping_add(rhs.kick_lower);
         self.keep = self.keep.wrapping_add(rhs.keep);
         self.preempted = self.preempted.wrapping_add(rhs.preempted);
         self.promoted = self.promoted.wrapping_add(rhs.promoted);
@@ -103,6 +107,7 @@ impl Metrics {
             fallback: self.fallback.wrapping_sub(rhs.fallback),
             kick_idle: self.kick_idle.wrapping_sub(rhs.kick_idle),
             kick_preempt: self.kick_preempt.wrapping_sub(rhs.kick_preempt),
+            kick_lower: self.kick_lower.wrapping_sub(rhs.kick_lower),
             keep: self.keep.wrapping_sub(rhs.keep),
             preempted: self.preempted.wrapping_sub(rhs.preempted),
             promoted: self.promoted.wrapping_sub(rhs.promoted),
@@ -175,6 +180,7 @@ mod tests {
             fallback: 5,
             kick_idle: 6,
             kick_preempt: 7,
+            kick_lower: 12,
             keep: 8,
             preempted: 9,
             promoted: 10,
@@ -187,5 +193,6 @@ mod tests {
         assert_eq!(sum.preempted, 18);
         assert_eq!(sum.promoted, 20);
         assert_eq!(sum.demoted, 22);
+        assert_eq!(sum.kick_lower, 24);
     }
 }
