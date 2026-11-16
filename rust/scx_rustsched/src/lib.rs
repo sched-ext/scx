@@ -110,7 +110,9 @@ pub mod prelude {
     pub use crate::dump::DumpCtx;
     pub use crate::idle::{self, Kind, Scope};
     pub use crate::params;
-    pub use crate::sched::{Cid, DeqFlags, EnqFlags, Error, KickFlags, OptCid, WakeFlags};
+    pub use crate::sched::{
+        Cid, CurrTask, DeqFlags, EnqFlags, Error, KickFlags, OptCid, WakeFlags,
+    };
     pub use crate::task::{InitTaskArgs, Task};
     pub use crate::time;
     pub use crate::uei::ExitInfo;

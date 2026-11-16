@@ -319,8 +319,46 @@ fn search(cid: Cid) -> bool {
     steal(cid) || (multi_pool() && rescue(cid))
 }
 
+/// Does work wait for `cid`: a task on its local DSQ or its own queue,
+/// work in its LLC's pool, or another LLC's offer? scx_cake asks its
+/// runqueue's count, which the own queue's tasks are on and the pool's
+/// may not be; the runtime's queues are counted directly.
+#[inline(always)]
+fn work_waits(cid: Cid) -> bool {
+    if dsq::nr_queued(Dsq::LocalOn(cid)) != 0 || cid.has_queued() {
+        return true;
+    }
+    if dsq::nr_queued(pool_edq(pool_of(cid))) != 0 {
+        return true;
+    }
+    multi_pool()
+        && match cid.slot::<CidCtx>() {
+            Some(here) => here.offer().get() != 0,
+            None => false,
+        }
+}
+
+/// ops.yield(): a sched_yield() gives the slice up only when work waits
+/// for this CID. Without the op the kernel zeroes the slice on every
+/// yield, and a task that yields in a spin loop on an otherwise idle CPU
+/// goes through a dispatch each time for nothing. A directed yield,
+/// yield_to(), is refused, as scx_cake refuses it.
+#[inline(always)]
+pub fn yield_task(from: &Task, to: Option<&Task>) -> bool {
+    if to.is_some() {
+        return false;
+    }
+    if work_waits(from.cid()) {
+        from.set_slice(0);
+    }
+    false
+}
+
 /// ops.dispatch(): the search, and with nothing anywhere the task that ran
-/// keeps the CID with a fresh slice rather than leave it idle.
+/// keeps the CID with a fresh slice rather than leave it idle. Only on its
+/// own CID: core scheduling picks for an SMT sibling from this CPU, and
+/// can drop the runqueue lock in the middle of the search, so a prev seen
+/// from another CID may no longer run there.
 #[inline(always)]
 pub fn dispatch(cid: Cid, prev: Option<&Task>) {
     if search(cid) {
@@ -328,6 +366,7 @@ pub fn dispatch(cid: Cid, prev: Option<&Task>) {
     }
     if let Some(prev) = prev
         && prev.queued()
+        && cid == Cid::current()
         && dsq::nr_queued(Dsq::LocalOn(cid)) == 0
     {
         prev.set_slice(task_slice(prev));

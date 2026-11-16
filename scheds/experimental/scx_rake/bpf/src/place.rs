@@ -30,7 +30,7 @@ use scx_rustsched::prelude::*;
 
 use crate::policy::{self, NEIGHBOUR_PROBE_DEPTH, PREEMPT_PROTECT_SHIFT, PROBE_PROTECT_SHIFT};
 use crate::{
-    CidCtx, FRONTIER, admit, admit_direct, immed, is_stage, is_starved, is_subhandoff, price,
+    CidCtx, FRONTIER, admit, admit_direct, home, immed, is_stage, is_starved, is_subhandoff, price,
     reenq, same_task, seat, serve, set_vtime, task_slice, vtime_of,
 };
 
@@ -103,14 +103,29 @@ fn place(task: &Task, cid: Cid, flags: EnqFlags) -> Cid {
 /// The count is the LLC's, kept by ops.update_idle(): a loop that counts
 /// idle CIDs here is a counter the verifier tracks exactly, a new state
 /// at every CID, and took ops.select_cid() past its limit.
+///
+/// It counts CIDs that are idle, as scx_cake's census on wide hosts does,
+/// not CIDs that are free to claim, as its idle word on narrow ones does:
+/// a CID another wakeup just claimed still counts until it runs. A burst
+/// of claimed wakeups can then read an LLC as serial for the instant
+/// before those CIDs leave idle, and a handoff it allows still queues
+/// behind a task that is about to block.
+///
+/// A count past the LLC's size is broken, not an idle LLC: it is counted
+/// for the dump and allows no handoff.
 #[inline(always)]
 fn llc_serial(cid: Cid) -> bool {
     let (size, _) = cid.llc_span();
     let Some(first) = crate::llc_base(cid).slot::<CidCtx>() else {
         return false;
     };
-    let idle = first.nr_idle().get().min(u64::from(size)) as u32;
-    policy::system_serial(idle, size)
+    match policy::census_serial(first.nr_idle().get(), size) {
+        Some(serial) => serial,
+        None => {
+            crate::CENSUS_BROKEN.add(1);
+            false
+        }
+    }
 }
 
 /// Is the task running on `cid` within one handoff of the end of its mean
@@ -174,9 +189,9 @@ fn retakes(task: &Task, prev: Cid) -> bool {
     };
     if !curr.queued()
         || curr.slot_optional::<crate::TaskCtx>().is_none()
-        || same_task(curr, task)
-        || curr.nr_cpus_allowed() <= 1
-        || is_stage(curr)
+        || same_task(&curr, task)
+        || curr.pinned()
+        || is_stage(&curr)
     {
         return false;
     }
@@ -198,7 +213,7 @@ fn undecided(task: &Task, prev: Cid) -> Cid {
     let Some(curr) = prev.curr() else {
         return prev;
     };
-    if same_task(curr, task) || curr.idle_task() || is_starved(curr, false) {
+    if same_task(&curr, task) || curr.idle_task() || is_starved(&curr, false) {
         return prev;
     }
     let Some(cid) = claim(task, prev).get() else {
@@ -213,6 +228,13 @@ fn undecided(task: &Task, prev: Cid) -> Cid {
 pub fn select_cid(task: &Task, prev: Cid, flags: WakeFlags) -> Cid {
     if let Some(waker) = serial_handoff(task, flags).get() {
         return place(task, waker, EnqFlags::NONE);
+    }
+    // A fixed home: the owner returns on every wakeup, see home.rs.
+    if let Some(home) = home::wake_home(task).get() {
+        if home.claim() {
+            return place(task, home, immed());
+        }
+        return place(task, home, home::evict(task, home));
     }
     let stage = is_stage(task);
     if stage && retakes(task, prev) {
@@ -278,7 +300,7 @@ fn probe_neighbours(task: &Task, cid: Cid, slice: u64, own: u64, now: u64) -> Op
         tried += 1;
         if task.allowed_on(peer)
             && let Some(curr) = peer.curr()
-            && preempts(own, curr, peer, protect, now)
+            && preempts(own, &curr, peer, protect, now)
         {
             return OptCid::some(peer);
         }
@@ -300,7 +322,7 @@ fn probe_neighbours(task: &Task, cid: Cid, slice: u64, own: u64, now: u64) -> Op
         tried += 1;
         if task.allowed_on(peer)
             && let Some(curr) = peer.curr()
-            && preempts(own, curr, peer, protect, now)
+            && preempts(own, &curr, peer, protect, now)
         {
             return OptCid::some(peer);
         }
@@ -350,15 +372,15 @@ fn enqueue_wake(task: &Task, cid: Cid) -> bool {
     let curr = cid.curr();
     // Waking the task this CID is still switching out, the pipe and futex
     // shape: home is right even behind a queue.
-    if let Some(curr) = curr
-        && same_task(curr, task)
+    if let Some(running) = &curr
+        && same_task(running, task)
     {
         let slice = admit_direct(task);
         dsq::insert_vtime(task, Edq::Cid(cid), slice, vtime_of(task), EnqFlags::WAKEUP);
         return true;
     }
     let (slice, key) = admit(task);
-    wake_place(task, cid, slice, key, curr);
+    wake_place(task, cid, slice, key, curr.as_deref());
     true
 }
 
@@ -370,7 +392,7 @@ fn pinned_preempts(cid: Cid, depth: u64, slice: u64) -> bool {
     let Some(curr) = cid.curr() else {
         return false;
     };
-    let price = price(curr, cid, time::now());
+    let price = price(&curr, cid, time::now());
     policy::pinned_preempts(FRONTIER.get(), depth, slice, price.live)
 }
 
@@ -381,7 +403,7 @@ fn pinned_preempts(cid: Cid, depth: u64, slice: u64) -> bool {
 #[inline(always)]
 fn enqueue_kthread(task: &Task, cid: Cid, flags: EnqFlags) {
     // Only the key below: a kernel thread's grant is the fixed slice.
-    if task.nr_cpus_allowed() > 1 {
+    if !task.pinned() {
         if let Some(target) = claim(task, cid).get() {
             admit_direct(task);
             return admit_on(task, target, policy::SLICE_NS, flags | immed());
@@ -417,7 +439,7 @@ fn enqueue_evicted(task: &Task, cid: Cid, key: u64, flags: EnqFlags) {
 /// LLC can serve is offered to another LLC.
 #[inline(always)]
 fn kick_idle(task: &Task, cid: Cid, pooled: bool) {
-    if task.nr_cpus_allowed() > 1
+    if !task.pinned()
         && let Some(idle) = claim(task, cid).get()
     {
         return idle.kick(KickFlags::IDLE);
@@ -432,7 +454,7 @@ fn kick_idle(task: &Task, cid: Cid, pooled: bool) {
 pub fn enqueue(task: &Task, flags: EnqFlags) {
     let cid = task.cid();
     let wakeup = flags.contains(EnqFlags::WAKEUP);
-    let unpinned = task.nr_cpus_allowed() > 1;
+    let unpinned = !task.pinned();
     if wakeup && task.kthread() {
         return enqueue_kthread(task, cid, flags);
     }
@@ -444,20 +466,26 @@ pub fn enqueue(task: &Task, flags: EnqFlags) {
     let frontier = FRONTIER.get();
     let floor = frontier.wrapping_sub(policy::SLICE_NS);
     let own = vtime_of(task);
-    let key = policy::continuation_key(frontier, own);
+    // A requeue keeps its key, floored as deep as a starved wakeup's: the
+    // kernel took its CID, and it should not wait behind every newcomer.
+    let key = policy::continuation_key(frontier, own, reenq(flags));
     // Anti-collision: a wakeup whose CID runs an equally served task would
     // wait out that task's whole slice while other CIDs may be idle.
     if wakeup
         && unpinned
         && let Some(curr) = cid.curr()
-        && !same_task(curr, task)
+        && !same_task(&curr, task)
         && !curr.idle_task()
-        && !is_starved(curr, false)
+        && !is_starved(&curr, false)
     {
         // An occupant past its grant that the tick has not stopped yet
-        // yields now. A stage on its own seat keeps the CID, and a forced
-        // requeue keeps its way to the pool.
-        if !reenq(flags) && !seat::owns(cid, curr.pid() as u32) && grant_spent(curr, cid) {
+        // yields now. A stage on its own seat and a thread at its own home
+        // keep the CID, and a forced requeue keeps its way to the pool.
+        if !reenq(flags)
+            && !seat::owns(cid, curr.pid() as u32)
+            && !home::at_home(&curr, cid)
+            && grant_spent(&curr, cid)
+        {
             let slice = admit_direct(task);
             return dsq::insert(task, Dsq::LocalOn(cid), slice, flags | EnqFlags::PREEMPT);
         }
@@ -478,9 +506,25 @@ pub fn enqueue(task: &Task, flags: EnqFlags) {
     // A task its CID is still switching out is served by that CID's next
     // pick, and a kicked idle CID would lose the race or take it cold.
     let alone = !wakeup && task.running() && !cid.has_queued();
-    // The own queue is the scheduler's, where a PREEMPT flag means
-    // nothing: the verdict goes as a kick after the insert.
-    let preempt = wakeup && !unpinned && pinned_preempts(cid, own.wrapping_sub(floor), slice);
+    // A pinned wakeup can run nowhere else, and no other CID steals it.
+    // With nothing on its own queue to pass, it goes to its CID's local
+    // DSQ at once: claimed if the CID is idle, or preempting an occupant
+    // it out-deserves. The kernel's activation wakes an idle CID, so no
+    // kick and no dispatch pass stand between it and the CPU.
+    let mut preempt = false;
+    if wakeup && !unpinned {
+        let empty = !cid.has_queued();
+        let claimed = empty && cid.claim();
+        preempt = !claimed && pinned_preempts(cid, own.wrapping_sub(floor), slice);
+        if claimed || (empty && preempt) {
+            set_vtime(task, key);
+            let how = if claimed { immed() } else { EnqFlags::PREEMPT };
+            return dsq::insert(task, Dsq::LocalOn(cid), slice, flags | how);
+        }
+    }
+    // Behind its own queue: the own queue is the scheduler's, where a
+    // PREEMPT flag means nothing, so the verdict goes as a kick after the
+    // insert.
     set_vtime(task, key);
     dsq::insert_vtime(task, Edq::Cid(cid), slice, key, flags);
     if preempt {

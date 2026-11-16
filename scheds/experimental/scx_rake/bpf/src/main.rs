@@ -41,9 +41,11 @@ use scx::prelude::*;
 use scx_rustsched as scx;
 use scx_rustsched::{config, helpers};
 
+mod home;
 mod place;
 mod policy;
 mod seat;
+mod seat_word;
 mod serve;
 
 // The tunables: one for each option of the loader, ../src/main.rs.
@@ -67,6 +69,12 @@ scx::arena_struct! {
         seat_cid: u32,
         seat_pid: u32,
         seat_seq: u64,
+        /// The CID the task homes to, plus one, 0 for none: its home only
+        /// while the core's word names it, see home.rs.
+        home: u32,
+        /// The share window: when it began, and the task's runtime then.
+        window_start: u64,
+        window_runtime: u64,
     }
 }
 
@@ -102,12 +110,27 @@ scx::arena_struct! {
         /// In the first CID of an LLC: how many of the LLC's CIDs are
         /// idle, see update_idle().
         nr_idle: u64,
+        /// The frontier as ops.running() left it: the base of the charge's
+        /// ceiling in ops.stopping().
+        frontier: u64,
+        /// In the first CID of a core: the core's home, its owner's pid and
+        /// the CID plus one, 0 for none, and when the owner last refreshed
+        /// it, see home.rs.
+        home: u64,
+        home_seen: u64,
+        /// The best rank and CID a home search on this CID has found so
+        /// far, see home::best_free().
+        best_rank: u64,
+        best_cid: u64,
     }
 }
 
-/// The global virtual-time frontier, advanced by ops.running() in grains:
-/// what a waking task's key is clamped against.
+/// The global virtual-time frontier, advanced by ops.running() in grains
+/// within a wall-rate band: what a waking task's key is clamped against.
 pub static FRONTIER: Var<u64> = Var::new(0);
+/// When the frontier was last stored, on the clock of the CID that stored
+/// it: the base of the rate band.
+pub static FRONTIER_STAMP: Var<u64> = Var::new(0);
 
 /// The number of pools.
 pub static NR_POOLS: Var<u32> = Var::new(1);
@@ -274,8 +297,7 @@ pub fn price(curr: &Task, cid: Cid, now: u64) -> Price {
 /// live virtual time of what runs on the other CIDs, so that one task back
 /// from a long lead does not drag everybody's wake floor with it.
 #[scx::global]
-fn frontier_candidate(vtime: u64, here: Cid, now: u64) -> u64 {
-    let frontier = FRONTIER.get();
+fn frontier_candidate(vtime: u64, frontier: u64, here: Cid, now: u64) -> u64 {
     let mut vtime = vtime;
     if !policy::frontier_outlier(frontier, vtime) {
         return vtime;
@@ -287,7 +309,7 @@ fn frontier_candidate(vtime: u64, here: Cid, now: u64) -> u64 {
         let Some(curr) = cid.curr() else {
             continue;
         };
-        let price = price(curr, cid, now);
+        let price = price(&curr, cid, now);
         if price.live != 0 && policy::time_before(price.live, vtime) {
             vtime = price.live;
             if !policy::frontier_outlier(frontier, vtime) {
@@ -296,6 +318,57 @@ fn frontier_candidate(vtime: u64, here: Cid, now: u64) -> u64 {
         }
     }
     vtime
+}
+
+/// Store `next` as the frontier if it is still `frontier`, stamped `now`;
+/// the frontier after. Every key is bounded by the frontier, and of two
+/// racing stores the lower one loses.
+#[inline(always)]
+fn frontier_store(frontier: u64, next: u64, now: u64) -> u64 {
+    let seen = FRONTIER.compare_exchange(frontier, next);
+    if seen != frontier {
+        return seen;
+    }
+    FRONTIER_STAMP.set(now);
+    next
+}
+
+/// Step the frontier toward `vtime` by between dt >> RATE_FLOOR_SHIFT and
+/// dt, dt the wall time since its last store: it rises with a run ahead of
+/// it, and without one it still rises at the rate floor, so that a key far
+/// ahead of it is reached within a share of the watchdog.
+#[scx::global]
+fn frontier_step(vtime: u64, frontier: u64, here: Cid, now: u64) -> u64 {
+    let dt = policy::time_delta(now, FRONTIER_STAMP.get());
+    let up = if policy::frontier_pulls(frontier, vtime) {
+        frontier_candidate(vtime, frontier, here, now).wrapping_sub(frontier) as i64
+    } else {
+        0
+    };
+    match policy::frontier_step(up, dt) {
+        Some(step) => frontier_store(frontier, frontier.wrapping_add(step), now),
+        None => frontier,
+    }
+}
+
+/// The frontier after ops.running() of a task at `vtime`: most runs are
+/// within a grain of it and owe the rate floor less than a grain, and
+/// read nothing else.
+#[inline(always)]
+fn frontier_advance(vtime: u64, here: Cid, now: u64) -> u64 {
+    let frontier = FRONTIER.get();
+    let dt = policy::time_delta(now, FRONTIER_STAMP.get());
+    if policy::frontier_still(frontier, vtime, dt) {
+        return frontier;
+    }
+    frontier_step(vtime, frontier, here, now)
+}
+
+/// The lead over the frontier a task of reciprocal weight `recip` may
+/// hold, from the tick the loader measured.
+#[inline(always)]
+fn vtime_cap(recip: u64) -> u64 {
+    policy::vtime_cap(policy::vcap_unit(config::get(config::TICK_NS)), recip)
 }
 
 /// The LLCs init() has met so far. A global rather than a local: the
@@ -314,6 +387,9 @@ fn llc_first(cid: Cid) -> bool {
 /// idle count.
 #[inline(always)]
 fn init() -> Result<(), Error> {
+    // The rate band starts at attach.
+    FRONTIER_STAMP.set(time::now());
+    home::init();
     LLCS_SEEN.set(0);
     for cid in Cid::all() {
         if llc_first(cid) {
@@ -374,14 +450,19 @@ fn update_idle(cid: Cid, idle: bool) {
     let Some(here) = cid.slot::<CidCtx>() else {
         return;
     };
-    if (here.idle().get() != 0) == idle {
+    let delta = policy::census_delta(here.idle().get() != 0, idle);
+    if delta == 0 {
         return;
     }
     here.idle().set(u64::from(idle));
     if let Some(first) = llc_base(cid).slot::<CidCtx>() {
-        first.nr_idle().add(if idle { 1 } else { u64::MAX });
+        first.nr_idle().add(delta);
     }
 }
+
+/// Serial tests that found an LLC's idle count past its size, for the
+/// dump: the count is broken, see place.rs.
+pub static CENSUS_BROKEN: Var<u64> = Var::new(0);
 
 /// ops.running(): stamp the run, clear the seat and advance the frontier.
 #[inline(always)]
@@ -405,14 +486,11 @@ fn running(task: &Task) {
     if seat::held(cid) {
         seat::run(cid);
     }
-    // The conditional store: this is the hottest shared word, and a store
-    // of every run would make every CID's next read a miss.
-    let vtime = ctx.vtime().get();
-    if policy::frontier_moves(FRONTIER.get(), vtime) {
-        let vtime = frontier_candidate(vtime, cid, now);
-        if policy::frontier_moves(FRONTIER.get(), vtime) {
-            FRONTIER.set(vtime);
-        }
+    // Late: nothing charges the task's virtual time while it runs. The
+    // frontier is the hottest shared word: most runs only read it.
+    let frontier = frontier_advance(ctx.vtime().get(), cid, now);
+    if let Some(here) = cid.slot::<CidCtx>() {
+        here.frontier().set(frontier);
     }
 }
 
@@ -443,17 +521,28 @@ fn stopping(task: &Task, runnable: bool) {
     // that captures may be outlined, see serve.rs.
     here.hint()
         .set(policy::hint_after(here.hint().get(), runnable, used));
+    if !runnable && policy::home_sampled(task.nvcsw()) {
+        home::sample(task, cid);
+    }
     if !runnable && is_stage(task) {
         seat::take(ctx, task.pid() as u32, cid);
     }
+    // The charge, bounded to the lead the task's weight may hold over the
+    // frontier its run started at.
     let recip = policy::reciprocal(task.weight());
-    ctx.vtime()
-        .set(policy::scale_vtime_add(ctx.vtime().get(), used, recip));
+    ctx.vtime().set(policy::charge(
+        ctx.vtime().get(),
+        used,
+        recip,
+        here.frontier().get(),
+        vtime_cap(recip),
+    ));
 }
 
 #[scx::scheduler(
     name = "rake",
-    flags = ALLOW_QUEUED_WAKEUP,
+    flags = ALLOW_QUEUED_WAKEUP | ENQ_EXITING,
+    timeout_ms = 5000,
     task_slot = TaskCtx,
     cid_slot = CidCtx
 )]
@@ -486,6 +575,10 @@ impl Rake {
         update_idle(cid, idle)
     }
 
+    fn yield_task(from: &Task, to: Option<&Task>) -> bool {
+        serve::yield_task(from, to)
+    }
+
     /// A fresh task starts at the frontier, neither starved nor ahead,
     /// charged for nothing it ran before.
     fn enable(task: &Task) {
@@ -495,34 +588,41 @@ impl Rake {
         }
     }
 
-    /// A holder that leaves the class while blocked gives its seat back.
+    /// A holder that leaves the class while blocked gives its seat back,
+    /// and an owner its home.
     fn disable(task: &Task) {
         if let Some(ctx) = task.slot::<TaskCtx>() {
             seat::retire(ctx, task.pid() as u32, OptCid::NONE);
         }
+        home::leave(task);
     }
 
-    /// So does a holder that exits.
+    /// So does one that exits.
     fn exit_task(task: &Task) {
         if let Some(ctx) = task.slot::<TaskCtx>() {
             seat::retire(ctx, task.pid() as u32, OptCid::NONE);
         }
+        home::leave(task);
     }
 
     fn dump(_dump: &DumpCtx) {
         scx::dump!(
-            "rake frontier=%llu pools=%llu",
+            "rake frontier=%llu pools=%llu seat_lost=%llu census_broken=%llu homes_crowded=%llu",
             FRONTIER.get(),
-            u64::from(NR_POOLS.get())
+            u64::from(NR_POOLS.get()),
+            seat::lost(),
+            CENSUS_BROKEN.get(),
+            u64::from(home::crowded())
         );
     }
 
     fn dump_task(_dump: &DumpCtx, task: &Task) {
         if let Some(ctx) = task.slot::<TaskCtx>() {
             scx::dump!(
-                "rake vtime=%llu seat=%llu",
+                "rake vtime=%llu seat=%llu home=%llu",
                 ctx.vtime().get(),
-                u64::from(ctx.seat_cid().get())
+                u64::from(ctx.seat_cid().get()),
+                u64::from(ctx.home().get())
             );
         }
     }

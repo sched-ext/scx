@@ -127,7 +127,39 @@ pub fn starved(runtime: u64, nvcsw: u64, run_delay: u64, pcount: u64, turn_margi
         return false;
     }
     let run = if turn_margin { run << 1 } else { run };
-    wait.wrapping_mul(switches(nvcsw)) > run.wrapping_mul(pcount | 1)
+    cross_gt(wait, switches(nvcsw), run, pcount | 1)
+}
+
+/// The high word of the 128-bit product of `x` and `y`, from 32-bit limbs.
+/// The cross terms go through black_box(): LLVM folds the limbs back into
+/// a 128-bit multiply, which BPF lowers to __multi3, a call the linker
+/// has no definition of.
+#[inline(always)]
+pub fn mul_hi(x: u64, y: u64) -> u64 {
+    let (xl, xh) = (x & 0xffff_ffff, x >> 32);
+    let (yl, yh) = (y & 0xffff_ffff, y >> 32);
+    let lh = core::hint::black_box(xl * yh);
+    let hl = core::hint::black_box(xh * yl);
+    let mid = ((xl * yl) >> 32) + (lh & 0xffff_ffff) + (hl & 0xffff_ffff);
+    xh * yh + (lh >> 32) + (hl >> 32) + (mid >> 32)
+}
+
+/// Is `a * n` greater than `b * m`? One multiply while every operand fits
+/// 32 bits, so the products fit 64; past that, the products of a long-lived
+/// busy thread pass 2^64, and the 128-bit products are compared exactly.
+/// A thread on half a CPU that switches 4000 times a second gets there in
+/// about nine days.
+#[inline(always)]
+pub fn cross_gt(a: u64, n: u64, b: u64, m: u64) -> bool {
+    if (a | b | n | m) >> 32 == 0 {
+        return a * n > b * m;
+    }
+    let (high_a, high_b) = (mul_hi(a, n), mul_hi(b, m));
+    if high_a != high_b {
+        high_a > high_b
+    } else {
+        a.wrapping_mul(n) > b.wrapping_mul(m)
+    }
 }
 
 /// The adaptive slice and the quotient behind it:
@@ -176,15 +208,15 @@ pub fn clamp_floor(floor: u64, vtime: u64) -> u64 {
 }
 
 /// The key of a continuation: its own virtual time, at most one slice
-/// behind the frontier.
+/// behind the frontier, deeper for a requeue, see requeue_floor().
 #[inline(always)]
-pub fn continuation_key(frontier: u64, vtime: u64) -> u64 {
-    clamp_floor(frontier.wrapping_sub(SLICE_NS), vtime)
+pub fn continuation_key(frontier: u64, vtime: u64, reenq: bool) -> u64 {
+    clamp_floor(requeue_floor(frontier, reenq), vtime)
 }
 
 /// Three quarters of the unused slice.
 #[inline(always)]
-pub fn sleeper_dose(unused: u64) -> u64 {
+pub const fn sleeper_dose(unused: u64) -> u64 {
     (unused >> 1) + (unused >> 2)
 }
 
@@ -316,10 +348,134 @@ pub fn system_serial(idle: u32, online: u32) -> bool {
     idle.wrapping_mul(4) >= online.wrapping_mul(3)
 }
 
-/// Does `vtime` move the frontier, by at least a grain?
+// The bound on a task's lead over the frontier, and the rate the frontier
+// rises at, after scx_cake's G98. Without them a task far ahead of the
+// frontier, a SCHED_IDLE or nice-19 one under a pinned load, waited for
+// the frontier to reach its key, and the watchdog ejected the scheduler
+// first: every key a wait crosses is now bounded, and the frontier crosses
+// them all in a fixed share of the watchdog.
+
+/// The watchdog's timeout, in the #[scheduler] attribute too.
+pub const WATCHDOG_TIMEOUT_MS: u64 = 5 * 1000;
+/// The longest tick the lead bound accepts, HZ 50.
+pub const TICK_MAX_NS: u64 = 20 * NSEC_PER_MSEC;
+/// The frontier rises at least 2^-RATE_FLOOR_SHIFT nanoseconds a
+/// nanosecond, the largest shift the asserts below allow.
+pub const RATE_FLOOR_SHIFT: u32 = 4;
+/// The longest grant the adaptive slice gives.
+pub const GRANT_CAP_NS: u64 = SLICE_NS >> PERIOD_SLICE_CAP_SHIFT;
+/// The weight of nice 19, the lightest of the nice table.
+pub const NICE_19_WEIGHT: u64 = 15;
+/// One nice-19 grant: the most lead over the frontier any weight holds.
+pub const VTIME_CAP_MAX_NS: u64 =
+    (GRANT_CAP_NS * ((NICE_0_WEIGHT << RECIP_SHIFT) / NICE_19_WEIGHT)) >> RECIP_SHIFT;
+
+/// Half the watchdog bounds the key window; the rest is drain, the tick,
+/// clock skew and higher classes.
+pub const KEY_BUDGET_NS: u64 = WATCHDOG_TIMEOUT_MS * NSEC_PER_MSEC / 2;
+/// The keys a wait crosses: the lead bound, the sleeper floor, the pool's
+/// hysteresis against the own queue, and a grain.
+pub const FLOOR_WINDOW_NS: u64 =
+    VTIME_CAP_MAX_NS + 2 * SLICE_NS + sleeper_dose(SLICE_NS) + FRONTIER_GRAIN_NS;
+
+const _: () = assert!(
+    (SLICE_NS + TICK_MAX_NS) * MAX_RECIP_WEIGHT < u64::MAX >> 1,
+    "the cap product fits u64"
+);
+const _: () = assert!(
+    FLOOR_WINDOW_NS << RATE_FLOOR_SHIFT <= KEY_BUDGET_NS,
+    "the floor crosses the key window within its watchdog share"
+);
+const _: () = assert!(
+    FLOOR_WINDOW_NS << (RATE_FLOOR_SHIFT + 1) > KEY_BUDGET_NS,
+    "RATE_FLOOR_SHIFT is the largest shift that fits"
+);
+
+/// The longest run a task gets before the tick sees its slice end: the
+/// fixed slice plus a tick, `tick` 0 or past TICK_MAX_NS counting as
+/// TICK_MAX_NS.
 #[inline(always)]
-pub fn frontier_moves(frontier: u64, vtime: u64) -> bool {
-    time_before(frontier.wrapping_add(FRONTIER_GRAIN_NS), vtime)
+pub const fn vcap_unit(tick: u64) -> u64 {
+    if tick > 0 && tick <= TICK_MAX_NS {
+        SLICE_NS + tick
+    } else {
+        SLICE_NS + TICK_MAX_NS
+    }
+}
+
+/// The lead over the frontier a task of reciprocal weight `recip` may hold:
+/// its longest run's charge, within a grain and VTIME_CAP_MAX_NS. A longer
+/// run clips: a lower key, never a longer wait.
+#[inline(always)]
+pub fn vtime_cap(unit: u64, recip: u64) -> u64 {
+    let cap = unit.wrapping_mul(recip) >> RECIP_SHIFT;
+    cap.clamp(FRONTIER_GRAIN_NS, VTIME_CAP_MAX_NS)
+}
+
+/// `vtime`, or `ceiling` if it is past it: wrap-safe.
+#[inline(always)]
+pub fn vtime_ceil(vtime: u64, ceiling: u64) -> u64 {
+    if time_before(ceiling, vtime) {
+        ceiling
+    } else {
+        vtime
+    }
+}
+
+/// The charge of `used` on `vtime`, bounded to `cap` past `frontier`, the
+/// frontier as ops.running() left it.
+#[inline(always)]
+pub fn charge(vtime: u64, used: u64, recip: u64, frontier: u64, cap: u64) -> u64 {
+    vtime_ceil(
+        scale_vtime_add(vtime, used, recip),
+        frontier.wrapping_add(cap),
+    )
+}
+
+/// Is the frontier left where it is without a look: `vtime` within a
+/// grain of it, and less than the rate floor's grain of wall time `dt`
+/// since its last store? Most runs are.
+#[inline(always)]
+pub fn frontier_still(frontier: u64, vtime: u64, dt: u64) -> bool {
+    time_before(vtime, frontier.wrapping_add(FRONTIER_GRAIN_NS))
+        && dt < FRONTIER_GRAIN_NS << RATE_FLOOR_SHIFT
+}
+
+/// Does `vtime` pull the frontier up: at least a grain ahead of it?
+#[inline(always)]
+pub fn frontier_pulls(frontier: u64, vtime: u64) -> bool {
+    !time_before(vtime, frontier.wrapping_add(FRONTIER_GRAIN_NS))
+}
+
+/// The frontier's step after wall time `dt` since its last store, with
+/// `up` the lead of the run that pulls it, 0 for none and negative for a
+/// candidate behind it: between dt >> RATE_FLOOR_SHIFT and dt, None under
+/// a grain. `dt` comes from time_delta(), below 2^63.
+#[inline(always)]
+pub fn frontier_step(up: i64, dt: u64) -> Option<u64> {
+    if dt < FRONTIER_GRAIN_NS {
+        return None;
+    }
+    let dt = dt.min(i64::MAX as u64) as i64;
+    let step = up.min(dt).max(dt >> RATE_FLOOR_SHIFT);
+    if step < FRONTIER_GRAIN_NS as i64 {
+        None
+    } else {
+        Some(step as u64)
+    }
+}
+
+/// The floor of a continuation's key: one slice behind the frontier, and
+/// for a task the kernel handed back, SCX_ENQ_REENQ, as deep as a starved
+/// wakeup's goes.
+#[inline(always)]
+pub fn requeue_floor(frontier: u64, reenq: bool) -> u64 {
+    let floor = frontier.wrapping_sub(SLICE_NS);
+    if reenq {
+        floor.wrapping_sub(sleeper_dose(SLICE_NS))
+    } else {
+        floor
+    }
 }
 
 /// Is `vtime` an outlier, more than a slice ahead of the frontier, that
@@ -360,4 +516,86 @@ pub fn pool_refresh_due(served: u64, now: u64) -> bool {
 #[inline(always)]
 pub fn grant_left(ran: u64, grant: u64) -> u64 {
     grant.saturating_sub(ran)
+}
+
+/// What an LLC's idle count changes by when ops.update_idle() moves a
+/// CID's flag from `was` to `idle`: 1, minus 1 as its two's complement for
+/// an atomic add, or 0 for a report that changes nothing.
+#[inline(always)]
+pub fn census_delta(was: bool, idle: bool) -> u64 {
+    if was == idle {
+        0
+    } else if idle {
+        1
+    } else {
+        u64::MAX
+    }
+}
+
+/// The serial test on an LLC's idle count: None when the count is not one
+/// an LLC of `size` CIDs can have, a broken count to report rather than
+/// read as an idle LLC.
+#[inline(always)]
+pub fn census_serial(count: u64, size: u32) -> Option<bool> {
+    if count > u64::from(size) {
+        return None;
+    }
+    Some(system_serial(count as u32, size))
+}
+
+// Fixed homes, after scx_cake 1.4.0: a thread busy for a fifth of a CPU
+// over a window owns one core as its home, one home per core, and returns
+// to it on every wakeup. Homes are off while busy threads outnumber the
+// cores.
+
+/// The share is sampled at one block in HOME_TICK_MASK + 1.
+pub const HOME_TICK_MASK: u64 = 63;
+/// The shortest window a share is measured over.
+pub const HOME_WINDOW_NS: u64 = 64 * NSEC_PER_MSEC;
+/// Share windows per census of busy threads.
+pub const HOME_CENSUS_WINDOWS: u64 = 4;
+/// A home is taken at a fifth of a CPU, and given up under a tenth.
+pub const HOME_ON_DIV: u64 = 5;
+pub const HOME_OFF_DIV: u64 = 10;
+/// A home its owner has not refreshed for this long may be taken.
+pub const HOME_STALE_NS: u64 = 2000 * NSEC_PER_MSEC;
+
+/// Is this block one the share is sampled at?
+#[inline(always)]
+pub fn home_sampled(nvcsw: u64) -> bool {
+    nvcsw & HOME_TICK_MASK == 0
+}
+
+/// Did a task that ran `ran` over `window` keep a fifth of a CPU busy?
+#[inline(always)]
+pub fn home_busy(ran: u64, window: u64) -> bool {
+    ran.saturating_mul(HOME_ON_DIV) >= window
+}
+
+/// Did it fall under a tenth, which gives its home up?
+#[inline(always)]
+pub fn home_quiet(ran: u64, window: u64) -> bool {
+    ran.saturating_mul(HOME_OFF_DIV) < window
+}
+
+/// Is a census of `busy` samples, over HOME_CENSUS_WINDOWS windows, more
+/// than `cores` homes can serve? Then nobody is special and homes are off.
+#[inline(always)]
+pub fn homes_crowded(busy: u64, cores: u64) -> bool {
+    busy > HOME_CENSUS_WINDOWS.saturating_mul(cores)
+}
+
+/// The word that records a core's home: the owner's pid and the CID it
+/// homes to, plus one; 0 for none.
+#[inline(always)]
+pub fn home_word(pid: u32, cid: u32) -> u64 {
+    u64::from(pid) << 32 | u64::from(cid.wrapping_add(1))
+}
+
+/// The rank of a core for a home, lower first: capacity tier, then the
+/// platform's packing tier, as scx_cake's rank tiers order big cores and
+/// preferred cores.
+#[inline(always)]
+pub fn home_rank(capacity_tier: u32, place_tier: u32) -> u64 {
+    u64::from(capacity_tier) << 32 | u64::from(place_tier)
 }

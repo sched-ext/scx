@@ -11,7 +11,8 @@
 #[derive(clap::Args)]
 struct Opts {
     /// Keep one wake pool for the whole machine instead of one per LLC,
-    /// scx_cake's g89=0. More than 16 LLCs always take one pool.
+    /// which also turns off the routing between LLCs. More than 16 LLCs
+    /// always take one pool.
     #[clap(long)]
     single_pool: bool,
 }

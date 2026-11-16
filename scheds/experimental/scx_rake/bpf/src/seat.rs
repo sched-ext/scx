@@ -10,22 +10,24 @@
 //! bit, and the holder keeps its identity there, so that when it wakes and
 //! finds a stranger on its seat it takes it back at once.
 //!
-//! A seat is one word in the CID's slot:
+//! A seat is one word in the CID's slot, pid, held bit and generation, see
+//! seat_word.rs. scx_cake keeps the three in separate words and serializes
+//! their changes with a BPF spin lock per CPU. Here each change is one
+//! compare and exchange of the whole word from the value it read, so a
+//! change is applied whole or not at all, and a release whose generation
+//! no longer matches does nothing, which is what the lock and the sequence
+//! number did in C.
 //!
-//! ```text
-//!   63         33  32  31          0
-//!  [ generation   |held|    pid     ]
-//! ```
-//!
-//! scx_cake keeps the pid, the generation and the held bit in three words
-//! and serializes their changes with a BPF spin lock per CPU. Here they are
-//! one word, changed by compare and exchange: a hold, the clear by the task
-//! that runs there and a release by the holder from another CPU each move
-//! the word from the value they read, and a release whose generation no
-//! longer matches does nothing, which is what the lock and the sequence
-//! number did in C. No helper runs between the read and the exchange, so
-//! a retry loop of a few tries is enough to win the race against the one
-//! other writer the word can have at a time.
+//! The word has two kinds of writer: the CID's own runqueue, which holds in
+//! ops.stopping() and clears in ops.running(), one at a time under its
+//! lock, and the holder releasing it from wherever it runs. An exchange
+//! fails only when the other kind wrote the word in between, so it loses
+//! only to a runqueue that completes transitions inside its window. The
+//! retries are bounded, as BPF needs: a change that runs out of them is
+//! not made, is counted in lost(), and a release that is not made keeps
+//! the task's record of its seat, so that its next running, disable or
+//! exit tries again. tests/seat.rs explores every interleaving of the two
+//! writers.
 //!
 //! Counterpart in scx_cake: cake_seat_update(), cake_seat_retire() and the
 //! seat tests of cake.bpf.c.
@@ -33,16 +35,17 @@
 use scx_rustsched::loops;
 use scx_rustsched::prelude::*;
 
+use crate::seat_word::{self, CAS_TRIES};
 use crate::{CidCtx, TaskCtx};
 
-const PID_MASK: u64 = 0xffff_ffff;
-const HELD: u64 = 1 << 32;
-const SEQ_SHIFT: u32 = 33;
+/// Changes that ran out of tries, for the dump.
+static LOST: Var<u64> = Var::new(0);
 
-/// Tries of a compare and exchange before a transition gives up. A seat
-/// has at most two writers at a time, the CID's own runqueue and one
-/// holder releasing from elsewhere.
-const CAS_TRIES: u32 = 4;
+/// How many seat changes ran out of tries.
+#[inline(always)]
+pub fn lost() -> u64 {
+    LOST.get()
+}
 
 #[inline(always)]
 fn word(cid: Cid) -> u64 {
@@ -55,20 +58,20 @@ fn word(cid: Cid) -> u64 {
 /// The pid of the task that holds or held `cid`'s seat, 0 for none.
 #[inline(always)]
 pub fn owner(cid: Cid) -> u32 {
-    (word(cid) & PID_MASK) as u32
+    seat_word::owner(word(cid))
 }
 
 /// Is `cid`'s seat held: has nothing run there since its holder blocked?
 #[inline(always)]
 pub fn held(cid: Cid) -> bool {
-    word(cid) & HELD != 0
+    seat_word::held(word(cid))
 }
 
 /// Is `cid` a seat held by a task other than the one with `pid`?
 #[inline(always)]
 pub fn blocks(cid: Cid, pid: u32) -> bool {
     let seat = word(cid);
-    seat & HELD != 0 && (seat & PID_MASK) as u32 != pid
+    seat_word::held(seat) && seat_word::owner(seat) != pid
 }
 
 /// Is the task with `pid` the owner of `cid`'s seat, held or not?
@@ -78,7 +81,7 @@ pub fn owns(cid: Cid, pid: u32) -> bool {
 }
 
 /// Take `cid`'s seat for the task with `pid`, from ops.stopping() on that
-/// CID. Returns the generation, 0 if the exchange kept losing.
+/// CID. Returns the generation, 0 when the change was not made.
 #[inline(always)]
 fn hold(cid: Cid, pid: u32) -> u64 {
     let Some(ctx) = cid.slot::<CidCtx>() else {
@@ -86,13 +89,12 @@ fn hold(cid: Cid, pid: u32) -> u64 {
     };
     for _ in loops::range(0, CAS_TRIES) {
         let old = ctx.seat().get();
-        let seq = ((old >> SEQ_SHIFT) + 1) & (u64::MAX >> SEQ_SHIFT);
-        let seq = if seq == 0 { 1 } else { seq };
-        let new = (seq << SEQ_SHIFT) | HELD | u64::from(pid);
+        let new = seat_word::hold(old, pid);
         if ctx.seat().compare_exchange(old, new) == old {
-            return seq;
+            return seat_word::seq(new);
         }
     }
+    LOST.add(1);
     0
 }
 
@@ -105,59 +107,67 @@ pub fn run(cid: Cid) {
     };
     for _ in loops::range(0, CAS_TRIES) {
         let old = ctx.seat().get();
-        if old & HELD == 0 {
+        let Some(new) = seat_word::run(old) else {
             return;
-        }
-        if ctx.seat().compare_exchange(old, old & !HELD) == old {
+        };
+        if ctx.seat().compare_exchange(old, new) == old {
             return;
         }
     }
+    LOST.add(1);
 }
 
-/// Give `cid`'s seat back, if it is still the acquisition of `pid` with
-/// generation `seq`: a later hold by another task stays.
+/// Give `cid`'s seat back, if it is still the hold of `pid` with
+/// generation `seq`. True when the seat is no longer that hold, by this
+/// release or before it; false when the change ran out of tries.
 #[inline(always)]
-fn release(cid: Cid, pid: u32, seq: u64) {
+fn release(cid: Cid, pid: u32, seq: u64) -> bool {
     let Some(ctx) = cid.slot::<CidCtx>() else {
-        return;
+        return true;
     };
     for _ in loops::range(0, CAS_TRIES) {
         let old = ctx.seat().get();
-        if (old & PID_MASK) as u32 != pid || old >> SEQ_SHIFT != seq {
-            return;
-        }
-        if ctx.seat().compare_exchange(old, seq << SEQ_SHIFT) == old {
-            return;
+        let Some(new) = seat_word::release(old, pid, seq) else {
+            return true;
+        };
+        if ctx.seat().compare_exchange(old, new) == old {
+            return true;
         }
     }
+    LOST.add(1);
+    false
 }
 
 /// Release the seat `ctx` records, unless it is `keep` held under `pid`:
 /// a task that runs elsewhere, exits or leaves the class gives its seat
-/// back, so that a recycled pid does not inherit it.
+/// back, so that a recycled pid does not inherit it. The record goes only
+/// with the seat: a release that was not made is tried again next time.
+/// False when the seat is still recorded.
 #[inline(always)]
-pub fn retire(ctx: TaskCtx, pid: u32, keep: OptCid) {
+pub fn retire(ctx: TaskCtx, pid: u32, keep: OptCid) -> bool {
     let seat = ctx.seat_cid().get();
     if seat == 0 {
-        return;
+        return true;
     }
-    let keep = keep.raw() + 1;
-    if seat as i32 == keep && ctx.seat_pid().get() == pid {
-        return;
+    if seat as i32 == keep.raw() + 1 && ctx.seat_pid().get() == pid {
+        return true;
     }
-    release(
-        Cid(seat as i32 - 1),
-        ctx.seat_pid().get(),
-        ctx.seat_seq().get(),
-    );
+    let cid = Cid(seat as i32 - 1);
+    if !release(cid, ctx.seat_pid().get(), ctx.seat_seq().get()) {
+        return false;
+    }
     ctx.seat_cid().set(0);
+    true
 }
 
 /// A stage that blocked on `cid` takes its seat there, giving back the one
-/// it held elsewhere.
+/// it held elsewhere. While that one cannot be given back, it takes no new
+/// one: a task records one seat.
 #[inline(always)]
 pub fn take(ctx: TaskCtx, pid: u32, cid: Cid) {
-    retire(ctx, pid, OptCid::some(cid));
+    if !retire(ctx, pid, OptCid::some(cid)) {
+        return;
+    }
     let seq = hold(cid, pid);
     if seq == 0 {
         return;

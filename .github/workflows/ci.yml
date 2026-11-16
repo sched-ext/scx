@@ -215,6 +215,10 @@ jobs:
           tool: cargo-nextest
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --exclude scx_rake --exclude scx_reevdf --exclude scx_rburst --exclude scx_rlocal --exclude scx_rvtime --locked --no-fail-fast --status-level fail --success-output never
+      - name: scx_rake host tests
+        # Its BPF object needs a Rust BPF toolchain, which CI has not, and
+        # the build leaves it empty; the policy and seat tests do not use it.
+        run: cargo nextest run --cargo-profile ci -p scx_rake --locked --no-fail-fast --status-level fail --success-output never
       - name: Check scx_arena package contents
         run: |
           # Package the workspace deps too. On a release PR, their bumped
