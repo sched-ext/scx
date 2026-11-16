@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Flow scheduler front end.
+//! scx_flow: a latency criticality scheduler for gaming and desktop use.
+//!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
-pub use bpf_intf::*;
+pub mod cache;
 pub mod cli;
-pub mod lstopo;
 pub mod metrics;
 pub mod run;
-#[path = "stats.rs"]
-mod stats;
+pub mod stats;
 pub mod topology;
+
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
+use clap::Parser;
 use clap_complete::generate;
 use log::info;
+
 fn main() -> Result<()> {
     let opts = cli::Opts::parse();
+
     if let Some(shell) = opts.completions {
         generate(
             shell,
@@ -35,6 +38,7 @@ fn main() -> Result<()> {
         stats::server_data().describe_meta(&mut std::io::stdout(), Some(&["Metrics"]))?;
         return Ok(());
     }
+
     cli::init_logging(opts.verbose)?;
     info!("{} {}", cli::SCHEDULER_NAME, cli::full_version());
     run::drive(&opts)

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Command line options for the flow scheduler.
+//! Command line options of scx_flow.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
-
-//! Poll interval handling and scheduler flags.
 
 use std::time::Duration;
 
@@ -12,15 +10,13 @@ use clap::Parser;
 use clap_complete::Shell;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 
-/* Binary name used in logs and stats. */
 pub const SCHEDULER_NAME: &str = "scx_flow";
 
 pub fn full_version() -> String {
     scx_utils::build_id::full_version(env!("CARGO_PKG_VERSION"))
 }
 
-/// Init stderr logging with local time offset.
-/// Verbose selects debug output. Other levels stay fixed.
+/// Log to stderr with local timestamps, at debug level when @verbose.
 pub fn init_logging(verbose: bool) -> Result<()> {
     let loglevel = if verbose {
         simplelog::LevelFilter::Debug
@@ -43,12 +39,11 @@ pub fn init_logging(verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// Validated poll interval from float seconds.
-/// Rejects NaN, infinite, non-positive, and values over one hour.
-/// A bad value returns an error before any timer starts.
+/// Statistics interval in seconds, which must be above zero and at most
+/// one hour.
 pub fn poll_interval_secs(v: f64) -> Result<Duration> {
     if !v.is_finite() || v <= 0.0 || v > 3600.0 {
-        anyhow::bail!("interval bad {v}");
+        anyhow::bail!("invalid statistics interval {v}");
     }
     Ok(Duration::from_secs_f64(v))
 }
@@ -56,28 +51,50 @@ pub fn poll_interval_secs(v: f64) -> Result<Duration> {
 #[derive(Debug, Parser)]
 #[command(name = SCHEDULER_NAME, version, disable_version_flag = true)]
 pub struct Opts {
-    /* Poll interval for the stats printer. */
+    /// Print statistics every this many seconds while scheduling.
     #[clap(long)]
     pub stats: Option<f64>,
-    /* Run the stats printer only. */
+
+    /// Print statistics of an already running instance every this many
+    /// seconds, without starting the scheduler.
     #[clap(long)]
     pub monitor: Option<f64>,
-    /* Verbose output with libbpf detail. */
+
+    /// Enable debug output, including libbpf messages.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
-    /* Exit dump buffer length in bytes. Zero keeps the default size. */
-    /* Values pass to the kernel as given. The operator owns this path. */
+
+    /// Size of the debug dump buffer printed on exit, in bytes. Zero keeps
+    /// the kernel default.
     #[clap(long, default_value = "0")]
     pub exit_dump_len: u32,
-    /* Print version and exit. */
+
+    /// Print the version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     pub version: bool,
-    /* Show stat descriptions. */
+
+    /// Describe the statistics and exit.
     #[clap(long)]
     pub help_stats: bool,
-    /* Generate shell completions and exit. */
+
+    /// Generate shell completions and exit.
     #[clap(long, value_name = "SHELL", hide = true)]
     pub completions: Option<Shell>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_bounds() {
+        assert!(poll_interval_secs(0.5).is_ok());
+        assert!(poll_interval_secs(3600.0).is_ok());
+        for bad in [0.0, -1.0, 3600.5, f64::NAN, f64::INFINITY] {
+            assert!(poll_interval_secs(bad).is_err());
+        }
+    }
 }

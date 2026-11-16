@@ -1,51 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler entry.
+ * scx_flow: a latency criticality scheduler for gaming and desktop use.
  *
- * Thin glue that pulls in area headers in order and declares the ops
- * table. Each CPU owns one tree in deadline order and there is one
- * fallback queue in FIFO order. Trees hold with depth bound at
- * RB_MAX_DEPTH. Trees hold without bound on live task count. Ties leave
- * in insertion order with ties right in RB_DUPLICATE-compatible order.
- * Deadline order sets the tree with idle wakes for shared tasks plus a
- * guarded preempt on a much earlier deadline. Trees use the plain BST
- * form. Placement follows the upstream topology library. Tables are
- * written once. A CPU that arrives late needs a restart to be seen.
- * Settings live in the shared header.
+ * Tasks are scored by how much they behave like part of an interactive
+ * pipeline and wait in per-LLC queues ordered by a virtual deadline derived
+ * from that score. Pinned tasks wait in per-CPU queues. Wakeups that find
+ * an idle CPU are dispatched to it directly.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
-#include <scx/user_exit_info.bpf.h>
-#include <bpf_arena_common.bpf.h>
-#include <lib/topology.h>
+#include <bpf_experimental.h>
 #include "intf.h"
+
 char _license[] SEC("license") = "GPL";
+
 UEI_DEFINE(uei);
+
 #include "maps.bpf.h"
-#include "stats.bpf.h"
 #include "fair.bpf.h"
+#include "stats.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"
+
 SCX_OPS_DEFINE(flow_ops,
 	       .select_cpu		= (void *)flow_select_cpu,
 	       .enqueue			= (void *)flow_enqueue,
-	       .dequeue			= (void *)flow_dequeue,
 	       .dispatch		= (void *)flow_dispatch,
+	       .runnable		= (void *)flow_runnable,
 	       .running			= (void *)flow_running,
-	       .stopping		= (void *)flow_stopping,
 	       .tick			= (void *)flow_tick,
-	       .set_cpumask		= (void *)flow_set_cpumask,
-	       .enable			= (void *)flow_enable,
+	       .stopping		= (void *)flow_stopping,
+	       .quiescent		= (void *)flow_quiescent,
 	       .init_task		= (void *)flow_init_task,
-	       .exit_task		= (void *)flow_exit_task,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |
 					  SCX_OPS_ENQ_EXITING |
-					  SCX_OPS_ENQ_MIGRATION_DISABLED |
-					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
-	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
+					  SCX_OPS_ENQ_MIGRATION_DISABLED,
+	       .timeout_ms		= FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");
