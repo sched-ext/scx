@@ -5,7 +5,7 @@
 //! resolved from the kernel's BTF: its policy and weight, whether it is
 //! still runnable, and where it may run.
 
-use core::ptr::read_volatile;
+use core::{cell::UnsafeCell, ptr::read_volatile};
 
 use crate::{
     config, helpers,
@@ -154,8 +154,13 @@ pub fn allowed_on(task: &Task, cid: crate::sched::Cid) -> bool {
 
 /// A task, as a callback of `#[scheduler]` takes it: a reference to the
 /// kernel's task_struct that is valid for the callback it was passed to.
+///
+/// The kernel and the kfuncs change the task while a callback holds it.
+/// The `UnsafeCell` tells the compiler so: without it `&Task` would be a
+/// read-only, non-aliased reference, and it could drop writes made through
+/// it or reuse reads made before a kfunc changed the task.
 #[repr(transparent)]
-pub struct Task(task_struct);
+pub struct Task(UnsafeCell<task_struct>);
 
 impl Task {
     /// # Safety
@@ -168,7 +173,7 @@ impl Task {
     /// The task as the kfuncs take it.
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut task_struct {
-        (self as *const Task).cast_mut().cast()
+        self.0.get()
     }
 
     /// The task's weight, from its nice level: 1024 at nice 0.

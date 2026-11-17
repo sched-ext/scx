@@ -11,25 +11,19 @@ description = "Utilities for sched_ext schedulers"
 [dependencies]
 anyhow = "1"
 bitvec = { version = "1", features = ["serde"] }
-bindgen = ">=0.69"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 glob = "0.3"
 hex = "0.4"
 lazy_static = "1"
-libbpf-cargo = "=0.27.2"
 libbpf-rs = "=0.27.2"
 log = "0.4"
 nvml-wrapper = { version = "0.12", optional = true }
 nvml-wrapper-sys = { version = "0.9", optional = true }
 paste = "1"
 regex = "1"
-ruzstd = "0.8"
 scx_stats = { path = "../scx_stats", version = "1.1.4" }
 serde = { version = "1", features = ["derive"] }
 sscanf = "0.5"
-tar = "0.4"
-walkdir = "2"
-version-compare = "0.2"
 zbus = { version = "5", optional = true }
 num = "0.4"
 tempfile = "3"

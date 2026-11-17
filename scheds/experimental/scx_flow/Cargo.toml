@@ -1,6 +1,6 @@
 [package]
 name = "scx_flow"
-version = "4.8.16"
+version = "5.2.28"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2024"
 rust-version = "1.91"
@@ -19,9 +19,7 @@ scx_stats = { path = "../../../rust/scx_stats", version = "1.1.4" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.4" }
 scx_utils = { path = "../../../rust/scx_utils", version = "1.1.4" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 simplelog = "0.12"
-tiny_http = "0.12"
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.4" }

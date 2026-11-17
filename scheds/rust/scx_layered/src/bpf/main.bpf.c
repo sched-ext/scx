@@ -416,6 +416,23 @@ static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
 	}
 }
 
+/*
+ * The number of tasks that layered_enqueue() sent to the DSQ of @layer_id on
+ * @llc_id and that haven't started running since. scx_bpf_dsq_nr_queued()
+ * can't stand in for this. scx_bpf_dsq_insert[_vtime]() from ops.enqueue()
+ * only records the target DSQ and the kernel queues the task after the
+ * callback returns, so a task being enqueued is not on the DSQ yet.
+ */
+static u32 layer_llc_nr_queued(u32 layer_id, u32 llc_id)
+{
+	struct llc_ctx *llcc;
+
+	if (layer_id >= MAX_LAYERS || !(llcc = lookup_llc_ctx(llc_id)))
+		return 0;
+
+	return READ_ONCE(llcc->nr_queued[layer_id]);
+}
+
 static void layer_llc_drain_enable(struct layer *layer, u32 llc_id)
 {
 	u32 nid = llc_node_id(llc_id);
@@ -599,12 +616,12 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	 * full MB in the above layer->cpus_seq update. This is interlocked with
 	 * layered_enqueue() to guarantee that a task is never left in an empty
 	 * LLC without draining enabled. Either they see 0 nr_llcs_cpus and
-	 * enable drain or we see the task it enqueued and enable drain.
+	 * enable drain or we see the task it counted and enable drain.
 	 */
 	bpf_for(llc_id, 0, nr_llcs) {
 		if (layer->nr_llc_cpus[llc_id])
 			layer_llc_drain_disable(layer, llc_id);
-		else if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer->id, llc_id)))
+		else if (layer_llc_nr_queued(layer_id, llc_id))
 			layer_llc_drain_enable(layer, llc_id);
 	}
 
@@ -680,6 +697,7 @@ struct task_ctx {
 	u32			layer_id;
 	pid_t			last_waker;
 	bool			refresh_layer;
+	bool			select_cpu_skipped;
 	struct cached_cpus	layered_cpus;
 	/*
 	 * XXX: Old kernels can't track a bpf_cpumask on nested structs
@@ -1684,10 +1702,15 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	/*
 	 * We usually update the layer in layered_runnable() to avoid confusion.
 	 * As layered_select_cpu() takes place before runnable, new tasks would
-	 * still have MAX_LAYERS layer. Just return @prev_cpu.
+	 * still have MAX_LAYERS layer. Just return @prev_cpu and let
+	 * layered_enqueue() know so that it handles @p as if select_cpu was
+	 * skipped.
 	 */
-	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
+	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id))) {
+		taskc->select_cpu_skipped = true;
 		return prev_cpu;
+	}
+	taskc->select_cpu_skipped = false;
 
 	if (layer->task_place == PLACEMENT_STICK)
 		cpu = prev_cpu;
@@ -1860,6 +1883,7 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 		return;
 
 	__sync_fetch_and_sub(&llcc->queued_runtime[layer_id], taskc->runtime_avg);
+	__sync_fetch_and_sub(&llcc->nr_queued[layer_id], 1);
 	taskc->qrt_layer_id = MAX_LAYERS;
 	taskc->qrt_llc_id = MAX_LLCS;
 }
@@ -1890,7 +1914,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	bool wakeup = enq_flags & SCX_ENQ_WAKEUP;
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 	u32 llc_id, layer_id;
-	bool yielding, try_preempt_first;
+	bool cpu_selected, yielding, try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
 
@@ -1899,8 +1923,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
+	/* layered_select_cpu() may have returned without doing anything */
+	cpu_selected = __COMPAT_is_enq_cpu_selected(enq_flags) && !taskc->select_cpu_skipped;
+	taskc->select_cpu_skipped = false;
+
 	/* Only invoke if we never went through select_cpu path. */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+	if (!cpu_selected)
 		maybe_refresh_task_layer_from_hint(p, taskc);
 
 	layer_id = taskc->layer_id;
@@ -1938,7 +1966,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
 	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags) || try_preempt_first) {
+	if (!cpu_selected || try_preempt_first) {
 		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
 		if (cpu < 0)
 			goto skip_ddsp;
@@ -2173,6 +2201,7 @@ preempt_xnuma_done: ;
 
 	taskc->qrt_layer_id = layer_id;
 	taskc->qrt_llc_id = llc_id;
+	__sync_fetch_and_add(&llcc->nr_queued[layer_id], 1);
 	queued_runtime = __sync_fetch_and_add(&llcc->queued_runtime[layer_id],
 					      taskc->runtime_avg);
 	queued_runtime += taskc->runtime_avg;
@@ -2193,9 +2222,9 @@ preempt_xnuma_done: ;
 	lstat_inc(LSTAT_ENQ_DSQ, layer, cpuc);
 
 	/*
-	 * Interlocked with refresh_cpumasks(). scx_bpf_dsq_insert[_vtime]()
-	 * always goes through spin lock/unlock and has enough barriers to
-	 * guarantee that either they see the task we enqueeud or we see zero
+	 * Interlocked with refresh_cpumasks(). @p is not on the DSQ until this
+	 * callback returns, but the atomic llcc->nr_queued increment above
+	 * guarantees that either they see the task we counted or we see zero
 	 * nr_llc_cpus.
 	 *
 	 * Also interlocked with opportunistic disabling in
@@ -2529,12 +2558,13 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 		 * consuming as we can race against enabling and end up turning
 		 * off draining and leave the new task in the unserviced DSQ.
 		 *
-		 * Instead, turn it off if it's likely that the DSQ is going to
-		 * be empty after consuming and re-enable afterwards if
-		 * necessary to guarantee that draining never stays disabled
-		 * with tasks in the DSQ.
+		 * Instead, turn it off when no task is in or on its way to the
+		 * DSQ and re-enable afterwards if necessary to guarantee that
+		 * draining never stays disabled with such a task around. A
+		 * consumed task stays counted until it starts running, so this
+		 * happens on an attempt after the one that empties the DSQ.
 		 */
-		if (scx_bpf_dsq_nr_queued(dsq_id) <= 1) {
+		if (!layer_llc_nr_queued(layer->id, llc_id)) {
 			layer_llc_drain_disable(layer, llc_id);
 			disabled = true;
 		}
@@ -2548,7 +2578,7 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 		 * CPUs and re-enable unnecessarily. Doesn't matter. Will be
 		 * re-tried on the next draining attempt.
 		 */
-		if (disabled && scx_bpf_dsq_nr_queued(dsq_id))
+		if (disabled && layer_llc_nr_queued(layer->id, llc_id))
 			layer_llc_drain_enable(layer, llc_id);
 
 		if (consumed) {

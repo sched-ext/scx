@@ -23,7 +23,13 @@ pub const OUTPUT_VERSION: u32 = 2;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
     pub active: bool,
+    /// Enabled persistently: systemd starts the unit at boot.
     pub enabled: bool,
+    /// Enabled with `systemctl enable --runtime`: started like an
+    /// enabled unit until the next boot, when the enablement is gone.
+    /// Written only when true; older output without it reads as false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled_runtime: bool,
 }
 
 /// What the unit runs now, from its main process.
@@ -127,6 +133,7 @@ pub fn detect(
         unit: Unit {
             active: info.active,
             enabled: info.enabled,
+            enabled_runtime: info.enabled_runtime,
         },
         running,
         next,

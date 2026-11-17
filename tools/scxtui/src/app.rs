@@ -812,6 +812,7 @@ mod tests {
                 unit: Unit {
                     active: true,
                     enabled: true,
+                    enabled_runtime: false,
                 },
                 running: Some(Running {
                     sched: "scx_cosmos".into(),

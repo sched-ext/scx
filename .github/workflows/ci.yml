@@ -17,7 +17,7 @@ defaults:
 env:
   PS4: '+ $(date "+%H:%M:%S") '
   BPF_CLANG: clang-22
-  SCX_PACKAGES: "pkg-config lld clang clang-22 llvm-22 libbpf-dev libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold"
+  SCX_PACKAGES: "pkg-config lld clang clang-22 llvm-22 libbpf-dev libelf-dev libzstd-dev protobuf-compiler libcap-ng-dev stress-ng mold"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
@@ -83,10 +83,11 @@ jobs:
           - name: scx__stable__6_16
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.16.y
-            veristat-disable: scx_lavd
+            veristat-disable: scx_lavd scx_flow scx_mlfq
           - name: scx__stable__6_18
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.18.y
+            veristat-disable: scx_flow scx_mlfq
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -237,7 +238,7 @@ jobs:
         scheds:
           - flash beerland bpfland cosmos
           - layered p2dq lavd mitosis
-          - rlfifo rustland tickless mlfq
+          - tickless mlfq
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

@@ -15,7 +15,7 @@ $ sudo do-release-upgrade
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev libbpf-dev pahole
+$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libbpf-dev pahole
 ```
 
 #### Build the scx schedulers from source
@@ -125,7 +125,7 @@ No additional steps needed here other than what is mentioned in the main README.
 ```nix
 {
   services.scx-loader.enable = true;
-  # see other options: https://github.com/bahrom04-lab/scx/blob/main/scheds/README.md
+  # see other options: https://github.com/sched-ext/scx/blob/main/scheds/README.md
   services.scx-loader.config.default_sched = "scx_bpfland";
   boot.kernelPackages = pkgs.linuxPackages_latest;
 }

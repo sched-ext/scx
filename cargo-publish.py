@@ -6,8 +6,7 @@ import re
 import subprocess
 import sys
 
-publish_args={'scx_rlfifo': ['--no-verify'],
-              'scx_rustland': ['--no-verify']}
+publish_args = {}
 
 verbose = False
 

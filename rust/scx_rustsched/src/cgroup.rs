@@ -31,7 +31,7 @@
 //! ancestor or one found by its id, is a `CgroupGuard`: a reference that
 //! is given back when the guard goes out of scope.
 
-use core::{ffi::c_void, ops::Deref, ptr::read_volatile};
+use core::{cell::UnsafeCell, ffi::c_void, ops::Deref, ptr::read_volatile};
 
 use crate::{
     config, helpers,
@@ -39,9 +39,10 @@ use crate::{
     ops::{cgroup, scx_cgroup_init_args},
 };
 
-/// A cgroup, valid for the callback it was passed to.
+/// A cgroup, valid for the callback it was passed to. The kernel changes
+/// it while the callback holds it, hence the `UnsafeCell`, as for `Task`.
 #[repr(transparent)]
-pub struct Cgroup(cgroup);
+pub struct Cgroup(UnsafeCell<cgroup>);
 
 impl Cgroup {
     /// # Safety
@@ -54,7 +55,7 @@ impl Cgroup {
     /// The cgroup as the kfuncs take it.
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut cgroup {
-        (self as *const Cgroup).cast_mut().cast()
+        self.0.get()
     }
 
     /// How deep the cgroup is in the hierarchy: 0 for the root.

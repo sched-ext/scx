@@ -317,7 +317,20 @@ Clients that are not root run the privileged commands as
 - `list` and `list recommended` show the recommended entries with the
   current state; `list all` shows every installed scheduler the catalog
   does not hide, the recommended ones marked. `list` in every form
-  takes `--json` and `--catalog PATH`; `get` takes only `--json`.
+  takes `--json` and `--catalog PATH`; `get` takes only `--json`. The
+  text output of `get` says, on its `configured:` line, what the next
+  start would run, whether that is what runs now, and whether there
+  will be a next start at boot (`starts at boot` from `unit.enabled`,
+  `enabled until reboot only` from `unit.enabled_runtime`, else `not
+  at boot`): the first question after a switch, answered next to the
+  configuration it applies to. That is systemd's declaration that
+  the unit is enabled, not a promise that the scheduler will run after
+  the reboot: a kernel without `sched_ext` skips the unit by its
+  condition, a scheduler binary gone or changed by an upgrade fails
+  it, and only `failure` and `kernel` after the fact say which.
+  Clients show the same, since a scheduler that runs now but will not
+  come back (a `systemctl disable` by hand) is the one state a user
+  would not guess.
   `--catalog` lists with the named file instead of the installed
   catalog (a checkout's `services/catalog.json`, say, to see what it
   would show before it is installed): the same scan and the same state,
@@ -451,8 +464,16 @@ not know.
 ```
 
 - `scheduler` is as defined above.
-- `unit` is the unit's state: active (its process may be alive) and
-  enabled (it starts at boot).
+- `unit` is the unit's state: `active` (its process may be alive),
+  `enabled` (`UnitFileState=enabled`: systemd starts it at boot) and
+  `enabled_runtime` (`enabled-runtime`, from `systemctl enable
+  --runtime`: started like an enabled unit until the next boot, when
+  the enablement is gone), the last written only when true and read as
+  false when absent. `masked`, `static`, `linked` and the rest are
+  neither. Output from before the field existed reported a runtime
+  enablement as `enabled`, so a client reading such output cannot tell
+  the two apart; that is a limit of the older producer, not of the
+  format.
 - `running` is the unit's main process, by basename, or null when the
   unit is inactive or the process cannot be read.
 - `next` is what the next start would run after the environment is

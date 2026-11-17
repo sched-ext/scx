@@ -97,7 +97,13 @@ pub enum Tier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
     pub active: bool,
+    /// Starts at boot (persistently enabled).
     pub enabled: bool,
+    /// `systemctl enable --runtime`: until the next boot only. Absent
+    /// in older output reads as false, and is written only when true,
+    /// as scxcli writes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled_runtime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

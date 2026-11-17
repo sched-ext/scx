@@ -57,9 +57,7 @@
     "scx_nitosis",
     "scx_rburst",
     "scx_reevdf",
-    "scx_rlfifo",
     "scx_rlocal",
-    "scx_rustland",
     "scx_rvtime",
     "scx_tickless"
   ]

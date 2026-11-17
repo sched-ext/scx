@@ -6,7 +6,6 @@ description = "The sched_ext runtime for Rust BPF schedulers: arena, task slots,
 license = "GPL-2.0-only"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 repository = "https://github.com/sched-ext/scx"
-homepage = "https://github.com/sched-ext/scx"
 publish = false
 
 # Built for the BPF target by a scheduler's build script, with build-std,

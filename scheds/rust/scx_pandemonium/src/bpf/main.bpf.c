@@ -945,7 +945,7 @@ static __always_inline u64 keep_own_bound_ns(void)
 // STATIC SCAN CEILING FOR THE SPILL HELPER ONLY. THE RUNTIME BUDGET ABOVE IS
 // SMALL (6 AT 12C, 16 AT 32C), SO THE COMPILE-TIME BOUND IS PURE VERIFIER DEPTH.
 // 32 COVERS EVERY REALISTIC TOPOLOGY -- NO SPILL WANTS THE 33RD-NEAREST SEAT --
-// AND KEEPS THE INLINED select_cpu UNDER THE INSTRUCTION BUDGET. THE STEAL-SIDE
+// AND LIMITS THE SIZE OF THE UNROLLED SPILL SCAN. THE STEAL-SIDE
 // LOOPS KEEP THE FULL 128.
 #define PCPU_SPILL_SCAN_MAX 32
 // RETURNS THE NEAREST PEER IN src_cpu's CACHE DOMAIN THAT WOULD ADMIT A TASK BY
@@ -965,7 +965,8 @@ static __always_inline u64 keep_own_bound_ns(void)
 // LINEAR R_eff TERM CANNOT SEPARATE THE TWO NON-SMT RUNGS (STANDING,
 // do-not-re-attempt). THE BOUND IS THE PARTITION domain_inter_dsq DRAINS BY, SO
 // A SPILL NEVER CROSSES AN L3. A FOREIGN PEER IS SKIPPED WITHOUT COSTING BUDGET.
-static __always_inline s32 find_spill_seat(s32 src_cpu,
+/* Share one copy of the unrolled scan between placement paths. */
+static __noinline s32 find_spill_seat(s32 src_cpu,
 					     const struct cpumask *allowed,
 					     u64 now)
 {
@@ -977,6 +978,7 @@ static __always_inline s32 find_spill_seat(s32 src_cpu,
 	u32 src_dom = cpu_domain_of(src_cpu);
 	u32 checked = 0;
 
+#pragma unroll
 	for (int i = 0; i < PCPU_SPILL_SCAN_MAX; i++) {
 		u32 key = base + (u32)i;
 		u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);

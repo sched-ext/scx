@@ -42,9 +42,11 @@ configuration. There is no daemon and no D-Bus; the backend is
   administrator's. The view opens with a warning that a scheduler
   unsuited to the workload can perform worse than the kernel's default.
 - **Status panel:** the state (the kernel's scheduler, or which one
-  runs), what runs now (the unit's process), what is configured and
+  runs), what runs now (the unit's process), what is configured,
   whether it is what runs (the file, or an `SCX_SCHEDULER_OVERRIDE` /
-  `SCX_FLAGS_OVERRIDE` in effect), why the last start failed, and the
+  `SCX_FLAGS_OVERRIDE` in effect) and whether it starts at boot (the
+  unit's enabled state, which Enter sets and `default` clears), why
+  the last start failed, and the
   kernel's `sched_ext` state with a warning whenever it disagrees with
   the unit: a scheduler attached outside the service, a unit that is
   active while nothing is attached, an ops name that does not match.
