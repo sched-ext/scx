@@ -7,10 +7,12 @@
  * path through ops.enqueue() inserts the task exactly once.
  *
  * After the insert, mlfq looks for an idle CPU to wake up. If there is
- * none and the task is urgent enough, it asks the running task with the
- * lowest latency criticality in the LLC to give up its CPU. The request
- * shortens the slice of that task instead of sending an IPI, so the CPU
- * switches at its next scheduling point.
+ * none, a task that just woke up on the top level takes the CPU of a task
+ * of another process that sank deep, right away. Otherwise, if the task
+ * is urgent enough, it asks the running task with the lowest latency
+ * criticality in the LLC to give up its CPU. That request shortens the
+ * slice of the task instead of sending an IPI, so the CPU switches at its
+ * next scheduling point.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -169,19 +171,25 @@ static void mlfq_try_preempt(struct task_struct *p, struct mlfq_task_ctx *t, s32
 }
 
 /*
- * Claim @cpu when its task has sunk to MLFQ_PREEMPT_LEVEL by @now and has
- * had MLFQ_PREEMPT_MIN_RUN_NS since it started or was kept. Tasks that
- * only lost the top level because a busy queue kept preempting them are
- * left alone, and the minimum run keeps a stream of wakeups from
- * bouncing a task that only just got a CPU. Clearing the run stamp makes
- * concurrent enqueues pick another CPU, and the stamp comes back once the
- * CPU starts or keeps a task. Returns the cleared stamp, or zero when the
- * CPU was not claimed.
+ * Claim @cpu when its task has sunk to MLFQ_PREEMPT_LEVEL by @now, has
+ * had MLFQ_PREEMPT_MIN_RUN_NS since it started or was kept and is not in
+ * the thread group @tgid. Tasks that only lost the top level because a
+ * busy queue kept preempting them are left alone, and the minimum run
+ * keeps a stream of wakeups from bouncing a task that only just got a CPU.
+ * The threads of one process share locks and work, as when the workers of
+ * a game spin on a job queue, and taking the CPU of one of them at once
+ * tends to delay the very work its siblings wait for, so they are
+ * preempted at the tick instead. Clearing the run stamp makes concurrent
+ * enqueues pick another CPU, and the stamp comes back once the CPU starts
+ * or keeps a task. Returns the cleared stamp, or zero when the CPU was not
+ * claimed.
  */
-static u64 mlfq_claim_lower(s32 cpu, u64 now)
+static u64 mlfq_claim_lower(s32 cpu, u64 now, s32 tgid)
 {
 	struct mlfq_cpu_state *cs;
+	struct task_struct *curr;
 	u64 start, ran;
+	bool other;
 
 	if (!mlfq_cpu_valid(cpu))
 		return 0;
@@ -193,6 +201,12 @@ static u64 mlfq_claim_lower(s32 cpu, u64 now)
 	if (ran < MLFQ_PREEMPT_MIN_RUN_NS ||
 	    (u64)READ_ONCE(cs->run_acc_ms) * MLFQ_NSEC_PER_MSEC + ran <
 	    mlfq_level_start(MLFQ_PREEMPT_LEVEL))
+		return 0;
+	bpf_rcu_read_lock();
+	curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	other = curr && curr->tgid != tgid;
+	bpf_rcu_read_unlock();
+	if (!other)
 		return 0;
 	return __sync_bool_compare_and_swap(&cs->run_start_clk, start, 0) ? start : 0;
 }
@@ -216,15 +230,16 @@ static u32 mlfq_nr_ahead(u64 dsq_id, u64 deadline)
 
 /*
  * A task that wakes up on the top level outranks the tasks that sank
- * deep, so when it finds no idle CPU it takes the CPU of such a task in
- * its LLC right away instead of waiting for that CPU's next tick. Tasks on
- * nearby levels still yield to each other at the tick. Kicked CPUs serve
- * the DSQ in deadline order, so this only pays off while few queued tasks
- * are due before @deadline, as when a task wakes up several workers at
- * once. Walking the DSQ takes its lock, so it only happens once a victim
- * was found. The insert of @p only lands once ops.enqueue() returns, so
- * @p itself is not in the DSQ yet. @cpu is tried first, then a few random
- * CPUs. A pinned task can only use @cpu.
+ * deep, so when it finds no idle CPU it takes the CPU of such a task of
+ * another process in its LLC right away instead of waiting for that CPU's
+ * next tick. Tasks on nearby levels and deep tasks of the same process
+ * still yield at the tick. Kicked CPUs serve the DSQ in deadline order, so
+ * this only pays off while few queued tasks are due before @deadline, as
+ * when a task wakes up several workers at once. Walking the DSQ takes its
+ * lock, so it only happens once a victim was found. The insert of @p only
+ * lands once ops.enqueue() returns, so @p itself is not in the DSQ yet.
+ * @cpu is tried first, then a few random CPUs. A pinned task can only use
+ * @cpu.
  */
 static bool mlfq_preempt_lower(struct task_struct *p, const struct mlfq_task_ctx *t, s32 cpu,
 			       u64 dsq_id, u64 deadline, u32 llc, bool pinned, u64 enq_flags)
@@ -238,7 +253,7 @@ static bool mlfq_preempt_lower(struct task_struct *p, const struct mlfq_task_ctx
 		return false;
 
 	now = scx_bpf_now();
-	stamp = mlfq_claim_lower(cpu, now);
+	stamp = mlfq_claim_lower(cpu, now, p->tgid);
 	if (stamp) {
 		victim = cpu;
 	} else if (!pinned) {
@@ -251,7 +266,7 @@ static bool mlfq_preempt_lower(struct task_struct *p, const struct mlfq_task_ctx
 
 			if (probe == cpu)
 				continue;
-			stamp = mlfq_claim_lower(probe, now);
+			stamp = mlfq_claim_lower(probe, now, p->tgid);
 			if (stamp) {
 				victim = probe;
 				break;

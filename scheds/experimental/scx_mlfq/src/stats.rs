@@ -35,7 +35,7 @@ pub struct Metrics {
     pub kick_idle: u64,
     #[stat(desc = "Running tasks asked to give up their CPU")]
     pub kick_preempt: u64,
-    #[stat(desc = "Tasks below the top level preempted right away")]
+    #[stat(desc = "Deep tasks of other processes preempted right away")]
     pub kick_lower: u64,
     #[stat(desc = "Tasks kept running with a new slice")]
     pub keep: u64,

@@ -32,11 +32,11 @@ enum mlfq_tunables {
 	MLFQ_NR_LEVELS			= 8,
 
 	/*
-	 * A waking task takes the CPU of a task on MLFQ_PREEMPT_LEVEL or
-	 * below right away, once that task has run for MLFQ_PREEMPT_MIN_RUN_NS,
-	 * and only while fewer than MLFQ_PREEMPT_MAX_AHEAD queued tasks are
-	 * due before it. Each limit keeps a busy queue from turning every
-	 * wakeup into a preemption.
+	 * A waking task takes the CPU of a task of another process on
+	 * MLFQ_PREEMPT_LEVEL or below right away, once that task has run for
+	 * MLFQ_PREEMPT_MIN_RUN_NS, and only while fewer than
+	 * MLFQ_PREEMPT_MAX_AHEAD queued tasks are due before it. Each limit
+	 * keeps a busy queue from turning every wakeup into a preemption.
 	 */
 	MLFQ_PREEMPT_LEVEL		= 3,
 	MLFQ_PREEMPT_MIN_RUN_NS		= 100000,	/* 0.1 ms */

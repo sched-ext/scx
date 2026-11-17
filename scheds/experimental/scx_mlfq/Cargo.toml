@@ -1,6 +1,6 @@
 [package]
 name = "scx_mlfq"
-version = "2.0.1"
+version = "2.0.2"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2024"
 rust-version = "1.91"
