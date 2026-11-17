@@ -4,8 +4,10 @@
  *
  * A CPU first serves the tasks pinned to it, then its own LLC, then the
  * other LLCs of its node, then remote LLCs and finally the fallback DSQ.
- * When nothing is queued anywhere and the previous task still wants to
- * run, it keeps the CPU with a fresh slice.
+ * A task of its own LLC that is due well before the pinned tasks goes
+ * first, so pinned tasks cannot starve the LLC. When nothing is queued
+ * anywhere and the previous task still wants to run, it keeps the CPU
+ * with a fresh slice.
  *
  * Runtime is charged when a task stops running, from the time it spent on
  * the CPU. At every tick, a task that already had a minimum slice gives
@@ -71,6 +73,26 @@ static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
 }
 
 /*
+ * Move a task pinned to @cpu or a task of @llc to the local DSQ of @cpu.
+ * Pinned tasks cannot run anywhere else, so they go first unless the head
+ * of @llc is due more than a maximum slice before them. Without that
+ * limit, CPUs that always have a pinned task waiting would starve the rest
+ * of the LLC, as when stress-ng pins two tasks to every CPU.
+ */
+static bool flow_consume_local(s32 cpu, u32 llc)
+{
+	u64 cpu_dsq = FLOW_CPU_DSQ_BASE + cpu, llc_dsq = FLOW_LLC_DSQ_BASE + llc;
+	struct task_struct *pinned = __COMPAT_scx_bpf_dsq_peek(cpu_dsq);
+
+	if (pinned &&
+	    flow_queued_ahead(llc_dsq, pinned->scx.dsq_vtime - FLOW_SLICE_MAX_NS, cpu) &&
+	    scx_bpf_dsq_move_to_local(llc_dsq, 0))
+		return true;
+	return scx_bpf_dsq_move_to_local(cpu_dsq, 0) ||
+	       scx_bpf_dsq_move_to_local(llc_dsq, 0);
+}
+
+/*
  * Let @prev, which is still runnable, keep @cpu with a fresh slice. Its run
  * continues without passing through ops.stopping(), so its deadline is
  * refreshed from the virtual time it reached so far. Unless @always is
@@ -120,8 +142,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		flow_stat_inc(FLOW_STAT_KEEP);
 		return;
 	}
-	if (scx_bpf_dsq_move_to_local(FLOW_CPU_DSQ_BASE + cpu, 0) ||
-	    scx_bpf_dsq_move_to_local(FLOW_LLC_DSQ_BASE + llc, 0)) {
+	if (flow_consume_local(cpu, llc)) {
 		flow_stat_inc(FLOW_STAT_DISPATCHED);
 		return;
 	}
