@@ -111,6 +111,23 @@ def diff(a, b, wall_s):
     rows.sort(key=lambda r: -r["run_ms"])
     return rows
 
+# perf arms its per-CPU buffers one at a time; its own start stalls read as the run's worst delay.
+PERF_WARMUP_S = 0.25
+
+
+def trace_start(rec):
+    """Timestamp of the first event in a perf.data file, or None."""
+    p = subprocess.Popen(["perf", "script", "-i", rec, "-F", "time"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    line = p.stdout.readline() if p.stdout else ""
+    p.kill()
+    p.wait()
+    try:
+        return float(line.strip().rstrip(":"))
+    except ValueError:
+        return None
+
+
 def perf_wakeup_graph(duration, game_pids_set):
     """Best-effort waker->wakee dependency graph + handoff latency via perf sched.
     Returns [] if perf/permissions unavailable. Captures 'who wakes who' and how
@@ -121,7 +138,9 @@ def perf_wakeup_graph(duration, game_pids_set):
                            capture_output=True, text=True, timeout=duration + 30)
         if r.returncode != 0:
             return {"available": False, "reason": r.stderr.strip()[:200] or "perf sched record failed"}
-        sc = subprocess.run(["perf", "sched", "latency", "-i", rec, "-s", "max"],
+        t0 = trace_start(rec)
+        span = [] if t0 is None else ["--time", f"{t0 + PERF_WARMUP_S:.6f},"]
+        sc = subprocess.run(["perf", "sched", "latency", "-i", rec, "-s", "max"] + span,
                            capture_output=True, text=True, timeout=60)
         # parse per-task avg/max scheduling delay table
         edges = []

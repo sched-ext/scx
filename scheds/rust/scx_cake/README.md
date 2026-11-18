@@ -74,7 +74,6 @@ build machine, and falls back when a feature is missing.
 |---|---|---|
 | Cached rq clock in `ops.running` | stock 6.14 or newer | `scx_bpf_now()` |
 | Native CTZ/POPCNT | patch 1, and x86 BMI1 and POPCNT | portable bit math |
-| Lean idle claim, `lazy` by default | patch 2 | regular idle claim, no warning |
 | Direct DSQ index | patch 3, kernel side only | hash lookup |
 | `--kernel-signals` (input and fence wakes, IRQ time) | patch 4 | reports it unavailable and runs normally |
 
@@ -145,10 +144,10 @@ Each step is a sched_ext callback in
 | `cake_yield` | a task calls `sched_yield` | keeps or zeroes the slice |
 | `cake_running`, `cake_stopping` | a task starts or stops running | stamps the run, charges its virtual runtime |
 | `cake_cpu_release` | a higher scheduling class takes the CPU | re-enqueues the CPU's waiting local tasks so idle CPUs can serve them |
-| `cake_update_idle` | a CPU goes idle or wakes | serves pool work that arrived as it went idle; tracks idle CPUs past ID 63 |
+| `cake_update_idle` | a CPU goes idle or wakes | serves pool work that arrived as it went idle; keeps cake's idle word, or tracks idle CPUs past ID 63 on wide hosts |
 
 The full rules, with every route and threshold, are in
-[DESIGN.md](./DESIGN.md#-where-work-goes).
+[DESIGN.md](./DESIGN.md#where-work-goes).
 
 ## Limits
 
@@ -158,7 +157,7 @@ The full rules, with every route and threshold, are in
 | Wake pools | 16 LLCs | one shared pool |
 | Cache-aware steal order | CPU IDs 0 to 127 | plain ring walk |
 | CPU ID span | 1024, possible CPUs included | refuses to start |
-| Starvation fallback | fixed 24 ms | dispatch serves the waiting pool first ([DESIGN.md](./DESIGN.md#-starvation-fallback-24-ms)) |
+| Starvation fallback | fixed 24 ms | dispatch serves the waiting pool first ([DESIGN.md](./DESIGN.md#starvation-fallback-24-ms)) |
 
 ## Research
 
@@ -170,7 +169,7 @@ code but keep their record.
 |---|---|
 | [STATE.md](./STATE.md) | current state, the [pattern ledger](./STATE.md#pattern-ledger) of every pattern tried with its kernel need, numbers and verdict, and owed work |
 | [docs/PERFORMANCE.md](./docs/PERFORMANCE.md) | how results are measured: metric levels, slot order, noise, build identity |
-| [docs/research/](https://github.com/RitzDaCat/scx/blob/RitzDaCat/scx_cake-nightly/scheds/rust/scx_cake/docs/research/README.md) | dated investigations, each with its method and tables |
+| [docs/research/](./docs/research/README.md) | dated investigations, each with its method and tables |
 | [DESIGN.md](./DESIGN.md) | the policy as built and its known limits |
 | [docs/README.md](./docs/README.md) | documentation map |
 
@@ -221,11 +220,8 @@ Testing:
 |---|---|---|
 | `--toggle NAME=0\|1` | | set a toggle; repeatable, the last one wins |
 | `--handoff-ns NS` | `1464` | change the handoff floor: the slice floor, serial handoff, sub-handoff and deep-idle cutoffs |
-| `--lean-idle off\|on\|lazy` | `lazy` | lean idle claim (patch 2); warns only when asked for explicitly and missing |
 | `--native-bitops` | auto | require native CTZ/POPCNT; fail without them |
 | `--portable-bitops` | off | force portable CTZ/POPCNT |
-| `--native-ring` | off | native-CTZ queue scan; only for hosts with one LLC and at most 64 CPU IDs |
-| `--native-hist` | off | native CLZ for the probe histograms, used only with `probe=1` |
 | `--kernel-signals off\|observe\|on` | `off` | patch 4: `observe` counts the signals, `on` also uses them for placement |
 | `--signal-report NEW.csv` | off | save the signal counters at exit; needs `observe` or `on` |
 
@@ -249,8 +245,11 @@ the launch arguments, and the scheduler and kernel logs.
 
 | File | Purpose |
 |---|---|
-| [src/main.rs](./src/main.rs) | loader: flags, topology, attach, IRQ-sink monitor |
+| [src/main.rs](./src/main.rs) | loader: flags, host shape to rodata, attach, IRQ-sink monitor |
+| [src/exit_report.rs](./src/exit_report.rs) | reports after detach: probe census, pool counters, kernel events, signal CSV |
 | [src/core_performance.rs](./src/core_performance.rs) | platform core ranking, read once at start |
+| [src/build_identity.rs](./src/build_identity.rs) | SHA-256 of the running binary, for the start banner and `--version` |
+| [src/inspect_bpf.rs](./src/inspect_bpf.rs) | `--inspect-bpf`: per-program BPF and JIT dump after the verifier load |
 | [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | scheduling policy |
 | [src/bpf/wake-signals.bpf.h](./src/bpf/wake-signals.bpf.h) | `--kernel-signals` reads |
 | [src/bpf/intf.h](./src/bpf/intf.h) | shared constants and limits |

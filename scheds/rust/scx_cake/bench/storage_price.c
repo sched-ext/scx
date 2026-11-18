@@ -9,10 +9,9 @@
  *   taskset -c 2 nice -n 19 .scx_cake_bench/storage_price
  *
  * THE QUESTION
- *   cake_burst_ns() is sum_exec_runtime / (nvcsw | 1). cake computes it TWICE
- *   per wake from identical inputs: cake_task_slice (cake.bpf.c:914) and
- *   cake_cadence_depth (:977). Three ways to remove the second divide:
- *     1. keep recomputing            (today)
+ *   cake_burst_ns() is sum_exec_runtime / (nvcsw | 1). Three ways to read a
+ *   value like it a second time:
+ *     1. recompute it                (HOT below)
  *     2. BPF task storage            (cosmos / pandemonium's answer)
  *     3. per-CPU tagged slot cache   (cake's own §G46 answer)
  *   Whichever costs less than one divide wins; anything costing more is a

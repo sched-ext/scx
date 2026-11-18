@@ -22,11 +22,11 @@ flowchart LR
 | 📜 Rules | repository-root `CLAUDE.md` (local) |
 | 📏 Measurement method | [PERFORMANCE](PERFORMANCE.md) |
 | 💲 Instruction and kernel-call costs | [cost audit](AUDIT_OPERATION_COST_2026-09-15.md) |
-| 🧩 Kernel patch research | [research index](https://github.com/RitzDaCat/scx/blob/RitzDaCat/scx_cake-nightly/scheds/rust/scx_cake/docs/research/README.md) |
+| 🧩 Kernel patch research | [research index](research/README.md) |
 | 🎮 Sep 28 nightly game evidence | [KovaaK's A/B](KOVAAKS_KICK_ABBA_2026-09-28.md) |
 | 🛠️ Tools | [bench](../bench/README.md) · [TOOLING](TOOLING.md) |
 | 🗂️ Folders and local-only files | [STRUCTURE](STRUCTURE.md) |
-| 📊 Meeting page | [meeting/index.html](https://github.com/RitzDaCat/scx/blob/RitzDaCat/scx_cake-nightly/scheds/rust/scx_cake/docs/meeting/index.html) |
+| 📊 Meeting page | [meeting/index.html](meeting/index.html) |
 | 🗄️ History, rejected ideas | [archive](archive/README.md) · `archive/STATE_ARCHIVE.md` |
 
 <details>

@@ -885,7 +885,9 @@ paths that skip ops.enqueue (`!scx_rq_online`, bypassing, `PF_EXITING`,
 `SCX_ENQ_LAST`), and none can hold a tagged task: exiting and last need a
 run first (running strips), offline and bypass come with a hotplug or a
 PM notifier, and a hotplug exits cake (no `cpu_online`/`cpu_offline`
-ops; the loader re-execs). `SCX_SLICE_DFL` and `SLICE_NS` keep the tag
+ops; the loader re-execs). Correction from STATE.md §G102: scheduler exit
+also enters bypass, which wipes the tag of a task still in the pool, so
+positive pending at exit is normal. `SCX_SLICE_DFL` and `SLICE_NS` keep the tag
 bits clear. Reviewer notes kept, not fixed: the continuation-arm pinned
 KICK_PREEMPT zeroes whoever is curr when the irq_work lands (one extra
 dispatch if the target already picked the wakee; the old ENQ_PREEMPT on a
