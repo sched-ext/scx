@@ -13,3 +13,7 @@ scx_mlfq is a knob-free multilevel feedback queue scheduler on sched_ext. Tasks 
 ## Limitations
 
 - Hotplug needs restart.
+
+## Credits
+
+scx_mlfq is made possible by the support we received from the sched_ext community. Credit goes to the developers and contributors whose work inspired it and who helped with its development.

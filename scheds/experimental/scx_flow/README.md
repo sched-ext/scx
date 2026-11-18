@@ -13,3 +13,7 @@ scx_flow is a knob-free latency score scheduler on sched_ext. Each LLC owns one 
 ## Limitations
 
 - Hotplug needs restart.
+
+## Credits
+
+scx_flow is made possible by the support we received from the sched_ext community. Credit goes to the developers and contributors whose work inspired it and who helped with its development.
