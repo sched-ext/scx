@@ -6263,6 +6263,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_panda"
+version = "0.2.12"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs 0.27.2",
+ "libc",
+ "scx_cargo",
+ "scx_utils",
+]
+
+[[package]]
 name = "scx_pandemonium"
 version = "5.23.1"
 dependencies = [
