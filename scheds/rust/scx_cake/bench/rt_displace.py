@@ -18,6 +18,8 @@ wake side (T5: warm home vs claimed idle) and the >150 us stays.
 import argparse, re, statistics as st, subprocess, sys
 from collections import defaultdict
 
+from wakeclock import WakeClock
+
 HEAD = re.compile(r"^\s*(\S.*?)\s+(\d+)(?:/(\d+))?\s+\[(\d+)\]\s+(\d+)\.(\d+):\s+(\S+):\s+(.*)$")
 SW = re.compile(r"prev_comm=(.*?) prev_pid=(\d+) prev_prio=(-?\d+) prev_state=(\S+) ==> next_comm=(.*?) next_pid=(\d+) next_prio=(-?\d+)")
 WK = re.compile(r"comm=(.*?) pid=(\d+) prio=(-?\d+) target_cpu=(\d+)")
@@ -75,7 +77,7 @@ def parse(src, watched, main):
     burst = {}                     # watched pid -> [cpu, t_in, d_or_None]
     ctrl = defaultdict(list)       # (pid, bucket) -> plain bursts
     last_out_cpu = {}
-    wakes, pending = [], {}        # T5
+    wakes, clock = [], WakeClock()  # T5; info: [home, class, residual]
     events = []
     for line in src:
         m = HEAD.match(line)
@@ -91,11 +93,11 @@ def parse(src, watched, main):
             continue
         if ev == "sched:sched_waking":
             g = WK.match(rest)
-            if g and main and int(g.group(2)) == main and main not in pending:
+            if g and main and int(g.group(2)) == main and clock.pending(main) is None:
                 home = last_out_cpu.get(main)
                 occ = cur.get(home) if home is not None else None
                 cls = "idle" if (occ is None or occ[0] == 0) else ("rt" if occ[1] < 100 else ("own" if occ[0] in watched else "other"))
-                pending[main] = [t, home, cls, None]
+                clock.wake(main, t, [home, cls, None])
             continue
         if ev != "sched:sched_switch":
             continue
@@ -107,9 +109,10 @@ def parse(src, watched, main):
         rt_next = nprio < 100 and nxt != 0
 
         # T5 residual occupancy: the first switch on the home after the waking
-        pw = pending.get(main) if main else None
-        if pw and pw[3] is None and cpu == pw[1] and t >= pw[0]:
-            pw[3] = t - pw[0]
+        pw = clock.pending(main) if main else None
+        if pw and pw[1][2] is None and cpu == pw[1][0] and t >= pw[0]:
+            pw[1][2] = t - pw[0]
+        w5 = clock.switch(prev, nxt)
 
         if pprio < 100 and prev != 0 and prev in rt_in:
             rt_bursts[prev].append(t - rt_in.pop(prev))
@@ -164,8 +167,8 @@ def parse(src, watched, main):
                 burst[nxt] = [cpu, t, d]
             else:
                 burst[nxt] = [cpu, t, None]
-                if main and nxt == main and main in pending:
-                    tw, home, cls, resid = pending.pop(main)
+                if main and nxt == main and w5 is not None:
+                    tw, (home, cls, resid) = w5
                     wakes.append((cls, cpu != home, t - tw, resid if resid is not None else 0))
         cur[cpu] = (nxt, nprio, next_comm)
     return events, ctrl, wakes, rt_bursts

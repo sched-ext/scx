@@ -5,6 +5,7 @@ the gap, locality is still the lever. If it does not, the stayed path itself is
 slower and placement is eliminated.
 """
 import re, subprocess, sys, statistics as st, random
+from wakeclock import WakeClock
 HEAD = re.compile(r"^\s*(\S.*?)\s+(\d+)(?:/(\d+))?\s+\[(\d+)\]\s+([\d.]+):\s+(\S+):\s+(.*)$")
 SW = re.compile(r"prev_comm=(.*?) prev_pid=(\d+) prev_prio=\d+ prev_state=(\S+) ==> next_comm=(.*?) next_pid=(\d+)")
 WK = re.compile(r"comm=(.*?) pid=(\d+)")
@@ -12,7 +13,7 @@ WK = re.compile(r"comm=(.*?) pid=(\d+)")
 def split(trace, role):
     p = subprocess.Popen(["perf","script","-i",trace], stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True, bufsize=1<<20)
-    pend, lastcpu, same, migr = {}, {}, [], []
+    clock, lastcpu, same, migr = WakeClock(), {}, [], []
     for line in p.stdout:
         m = HEAD.match(line)
         if not m: continue
@@ -21,13 +22,15 @@ def split(trace, role):
         except ValueError: continue
         if ev.endswith(("sched_waking","sched_wakeup","sched_wakeup_new")):
             w=WK.search(rest)
-            if w and w.group(1)==role: pend.setdefault(w.group(2), t)
+            if w and w.group(1)==role: clock.wake(w.group(2), t)
         elif ev.endswith("sched_switch"):
             s=SW.search(rest)
-            if not s or s.group(4)!=role: continue
-            tid=s.group(5); w=pend.pop(tid,None); prev=lastcpu.get(tid); lastcpu[tid]=cpu
+            if not s: continue
+            w=clock.switch(s.group(2), s.group(5))
+            if s.group(4)!=role: continue
+            tid=s.group(5); prev=lastcpu.get(tid); lastcpu[tid]=cpu
             if w is None or prev is None: continue
-            lat=(t-w)*1e6
+            lat=(t-w[0])*1e6
             if 0<=lat<=1e6: (migr if prev!=cpu else same).append(lat)
     p.wait(); return same, migr
 

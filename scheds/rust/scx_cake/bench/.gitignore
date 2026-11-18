@@ -1,5 +1,0 @@
-# Compiled benchmark binary — rebuild with `make`
-pipeline_sim
-
-# Assembly dumps
-*.s

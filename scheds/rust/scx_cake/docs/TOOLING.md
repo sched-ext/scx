@@ -22,8 +22,8 @@ idleatwake, framecap, frameautopsy, placeaudit), `mini_20260904` (mini, cycload)
 | `bench/capture_preflight.py` | receipt, scxctl, attach state, noise level and sources, rotation time | `python3 bench/capture_preflight.py --game kovaaks --arms 3` | validity |
 | `scx_cake --inspect-bpf DIR` | verifier load and per-program BPF/JIT sizes, no attach | after setcap on a receipt copy | validity |
 | `cakebench wake-latency capture/parse` | per-role wake-to-run p50/p95/p99/max, migrations, same-CPU wakes, preempted-while-runnable, top wakers | `bash cakebench wake-latency capture --match 'GameThread\|dxvk' --duration 22 --label x` · `parse --trace file.perf.data` | diagnostic |
-| `--toggle probe=1` census | which select arm placed each wake; placed / waited >300 µs / >1 ms per queue kind; home declines (`hd_*`) | read the `arms` and census lines at detach | diagnostic |
-| `cake-bpfstats` | `bpf_stats_enabled` + `bpftool prog show`: run count and ns/run per callback | `sudo -n /usr/local/libexec/cake-bpfstats enable\|show\|disable`; `bench/cake-bpfstats` is a read-only local copy | diagnostic |
+| `--toggle probe=1` census | which select arm placed each wake; placed / waited >300 µs / >1 ms per queue kind; home declines (`hd_*`) | read the `census` lines at detach | diagnostic |
+| `cake-bpfstats` | `bpf_stats_enabled` + `bpftool prog show`: run count and ns/run per callback | `sudo -n /usr/local/libexec/cake-bpfstats enable\|show\|disable`; the local `bench/cake-bpfstats` is a separate read-only tool (`status`, `show`, `ftrace-dump`) that cannot enable stats | diagnostic |
 | `runs/perfmap_20260927/perfmap.sh` + `perfmap.py` | `cycles:k` by cake function → kfunc → leaf | `perfmap.sh <receipt> <hogs> <secs> <out> [spec]`, `perf script -F period,ip > script.txt`, `perfmap.py <out>` | diagnostic |
 | `bench/wake_maxdecomp.py` | every runnable-to-run delay over a threshold for chosen roles, classed QUEUE / HOLD / IDLE with holder and burst | `python3 bench/wake_maxdecomp.py <perf.data> "RenderThread 1,GameThread" 200` (default 1000 µs) | diagnostic |
 | `bench/wake_migsplit.py` · `wake_occupant.py` · `migrate_cause.py` · `percpu_wake.py` | wake latency migrated vs not · who held the target · migration causes · per-CPU wakes | `python3 bench/wake_migsplit.py <perf.data>`; others in their docstrings | diagnostic |
@@ -34,7 +34,7 @@ idleatwake, framecap, frameautopsy, placeaudit), `mini_20260904` (mini, cycload)
 | `bench/cakeload.c` | named CPU load (comm `cakeload`) for a saturated wake test | build first: `cc -O2 -o <scx>/target/cakeload bench/cakeload.c`, run `cakeload <threads> <pidfile>` | diagnostic |
 
 `percpu_wake.py`, `wake_maxdecomp.py`, `gameprobe.py`, `scx_cake_smt_residency.py` and
-`cake-bpfstats` are local-only ([STRUCTURE](STRUCTURE.md)).
+`bench/cake-bpfstats` are local-only ([STRUCTURE](STRUCTURE.md)).
 
 ## 🐧 Linux tools and what cake uses them for
 

@@ -45,9 +45,11 @@ The dated missing-evidence statements in §§7–9 describe their original snaps
 | 1 | BPF stack reload | 4 cycles ≈ 0.8 ns exposed, ~0.3 ns overlapped | exposed when the next branch consumes it |
 | 2 | own-line load/store (this CPU's `run[]` slot, own `irq_live` slot) | ~1 ns | — |
 | 2 | read-mostly shared line (`cpu_irq_hot_words`, rodata masks, `qmask` when unchanged) | ~1–4 ns (L1/L2 hit) | becomes tier 5 right after another CPU wrote it |
+| 2 | cached cid round trip (two BSS loads), replacing the inlined CPU id read | +4.73 ns per read on `stopping` (§G103, rejected) | — |
 | 3 | BPF-to-BPF call (`__noinline`) | ~2–4 ns + spills of r1–r5 live values | live values across the call |
 | 3 | lock-prefixed atomic, line owned | ~20 cycles ≈ 4 ns | tier 6 if another CPU holds the line |
 | 4 | kfunc / helper call, no lock: `scx_bpf_now`, `bpf_get_smp_processor_id`, `scx_bpf_get_idle_cpumask`+put, `scx_bpf_cpu_curr`, `scx_bpf_dsq_nr_queued(LOCAL_ON)` | ~10–20 ns (trampoline + body) | `cpu_curr` adds a remote rq line read (tier 5) |
+| 4 | `scx_bpf_this_cid` or `scx_bpf_task_cid` plus a BSS back-translation, replacing the inlined CPU id read | +8.76 ns per read on `stopping` (§G103, rejected) | 7.2 has no RCU guard in `this_cid`, so its price differs |
 | 4 | `bpf_ktime_get_ns` | ~20–25 ns (clocksource) | — |
 | 4 | `bpf_task_storage_get` (exists) | ~20–40 ns | + allocation on first sighting (`F_CREATE`) |
 | 5 | cross-core read of a line another CPU writes (`irq_live[c]`, remote `run[c].stamp`, `rq->curr`) | 60–100 ns miss, only if the owner wrote since the last read | frequency of the owner's writes |
@@ -98,6 +100,16 @@ Blender the joint build ran fps +2.0 % and frame p50 2,347,619 → 2,288,088 ns 
 worst frame fell in 8 of 9 pairs (p 0.039): the gain comes through other tasks, not the game's. Under
 Proton every finite `Sleep` is a `sched_yield` (Wine source), so a Proton game is where
 `cake_yield` is priced in frames.
+Idle claim and cids (2026-11-06, §G103, appsim on 7.3.1 at select 150 k/s, frames flat): a private
+BSS idle word with an inline read and `fetch_and` claim, replacing the kernel's claim kfunc and the
+mask read, reads select 86.53 → 76.90 ns and enqueue 169.20 → 153.81 ns. Numbering that word by cid
+reads select +0.40 ns over CPU ids. Clock limit: bpf_stats reads a plain `rdtsc`
+(`native_sched_clock`), which does not wait for a locked operation near the exit of a short program.
+The word's `update_idle` reads +0.46 ns/run though it adds a `lock or` on half the runs, about
++2 ns/run at 20.3 cycles. That reading is an inference until `bpftool prog profile` prices it.
+Landed form (2026-11-07, STATE.md): `@word` is really idle and a claim goes to a second word on its
+line, a read and `fetch_or`. Idle entry adds a read of the claims and, after a claim, a `fetch_and`.
+Against nightly in appsim: select −9.31, enqueue −10.72, dispatch +2.12, update_idle +1.01 ns.
 
 ## 2. Site map — where each operation class lives
 
@@ -170,6 +182,7 @@ disassembly; kfunc/atomic costs from §1. Δ columns are checkpoint `08763176e` 
 | §G45 one idle census word | — | mask walk | claim | positive |
 | §G49 sibling via `get_idle_smtmask` | 1 kfunc [4] | `cpu_curr` deref chain [4+5] | home claim | positive |
 | §G86 claim walk rewrite | per-try `cpu_clean` [5] | double idle scan, `pick_idle_escape` | claim | positive |
+| §G103 private idle word, claimed word (landed 2026-11-07) | read + `fetch_or` claim [2+3/6], `lock or` + two reads in `update_idle`, `lock and` after a claim [3/6], dispatch re-arm and slice-end clear [2] | claim kfunc [4+6], mask stash read [2], kernel mask upkeep | wake path | select −9.31, enqueue −10.72, dispatch +2.12, stopping +1.92 ns, BPF −0.52 ms/s; KovaaK's avg fps +1.29 %; `update_idle` atomic price open |
 | 2026-09-15 peek gating (`ba1a8912e`) | +5 stack ops on both-empty [1]; +2 on own/pool-only | 1 `dsq_peek` [6] on own-only and pool-only | dispatch | ~−5 ns/dispatch at an 80/20 mix; both-empty path pays ~3 ns for nothing (see §5) |
 | 2026-09-15 rq clock (`9722bfcdd`) | `time_delta` clamp [1] | clocksource read → rq clock at 7 sites [4→4, ~20 ns each] | running, occupant, handoff, pool stamps | positive |
 | 2026-09-15 seat gate (`a2a8532a4`) | 1 shared read + branch [2] | `task_storage_get` [4] per switch while no seat is held | running | positive |
@@ -308,7 +321,7 @@ this documentation update.
 
 ## 8. Recovered LZCNT rationale and broader fast-path review (2026-09-29)
 
-Follow-up: [JIT investigation and fresh compiler reproductions](https://github.com/RitzDaCat/scx/blob/RitzDaCat/scx_cake-nightly/scheds/rust/scx_cake/docs/research/jit-20260929/README.md).
+Follow-up: [JIT investigation and fresh compiler reproductions](research/jit-20260929/README.md).
 The reference JIT does not recognize these bit-count sequences; fresh Clang
 22.1.8 BPF/native comparisons and matching installed/live kernel build-ID/BTF
 evidence are retained there. Current Cake native JIT output remains unavailable.

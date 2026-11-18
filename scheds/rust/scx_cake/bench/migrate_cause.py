@@ -26,6 +26,8 @@ import subprocess
 import sys
 from collections import defaultdict
 
+from wakeclock import WakeClock
+
 HEAD = re.compile(r"^\s+(.+?)\s+(\d+)\s+\[(\d+)\]\s+(\d+\.\d+):\s+sched:(\S+):\s+(.*)$")
 WAKE = re.compile(r"comm=(.+?)\s+pid=(\d+)\s+prio=\d+\s+target_cpu=(\d+)")
 SWITCH = re.compile(
@@ -46,7 +48,7 @@ def main():
                          stderr=subprocess.DEVNULL, text=True, bufsize=1 << 22)
 
     busy_pid = {}                       # cpu -> pid currently on it (0 = idle)
-    pending = {}                        # pid -> (t, role, target, target_was_busy)
+    clock = WakeClock()                 # info: (role, target, target_was_busy)
     cell = defaultdict(lambda: defaultdict(list))
 
     for line in p.stdout or ():
@@ -58,8 +60,7 @@ def main():
             w = WAKE.match(rest)
             if w and w.group(1).strip() in want:
                 tgt = int(w.group(3))
-                pending[int(w.group(2))] = (t, w.group(1).strip(), tgt,
-                                            bool(busy_pid.get(tgt)))
+                clock.wake(int(w.group(2)), t, (w.group(1).strip(), tgt, bool(busy_pid.get(tgt))))
             continue
         if ev != "sched_switch":
             continue
@@ -67,8 +68,9 @@ def main():
         if not s:
             continue
         next_pid = int(s.group(5))
-        if next_pid in pending:
-            wt, role, tgt, tbusy = pending.pop(next_pid)
+        w = clock.switch(int(s.group(2)), next_pid)
+        if w is not None:
+            wt, (role, tgt, tbusy) = w
             d = t - wt
             if d >= 0:
                 key = ("busy" if tbusy else "idle") + "+" + ("moved" if cpu != tgt else "stayed")
