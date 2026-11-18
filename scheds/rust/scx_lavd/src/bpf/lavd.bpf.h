@@ -160,13 +160,15 @@ enum consts_flags {
 	LAVD_FLAG_SLICE_BOOST		= (0x1 << 8), /* task's time slice is boosted. */
 	LAVD_FLAG_IDLE_CPU_PICKED	= (0x1 << 9), /* an idle CPU is picked at ops.select_cpu() */
 	LAVD_FLAG_KSOFTIRQD		= (0x1 << 10), /* ksoftirqd/%u thread */
-	LAVD_FLAG_WOKEN_BY_RT_DL	= (0x1 << 11), /* woken by a RT/DL task */
-	LAVD_FLAG_WOKEN_BY_HARDIRQ	= (0x1 << 12), /* woken by a hardware interrupt */
-	LAVD_FLAG_WOKEN_BY_SOFTIRQ	= (0x1 << 13), /* woken by a softirq */
 	LAVD_FLAG_MIGRATION_AGGRESSIVE  = (0x1 << 14), /* immediate task migration is necessary. */
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
 	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
 	LAVD_FLAG_WARM_CPU		= (0x1 << 17), /* wait on the previous CPU: enqueue on its per-CPU DSQ */
+};
+
+enum lavd_wakeup_irq {
+	LAVD_WAKEUP_HARDIRQ = 1,
+	LAVD_WAKEUP_SOFTIRQ,
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
@@ -222,14 +224,14 @@ struct task_ctx {
 	 */
 	u16	lat_cri;		/* final context-aware latency criticality */
 	u16	normalized_lat_cri;	/* lat_cri normalized to [0, 1024] scale */
-	u16	lat_cri_waker;		/* waker's latency criticality */
-	u16	lat_cri_wakee;		/* wakee's latency criticality */
+	u32	lat_cri_waker;		/* waker's latency criticality */
+	u32	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
 	volatile u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
 	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
-	u32	__pad0;
-	u64	last_running_clk;	/* last time when scheduled in */
+	u32	wakeup_irq;		/* pending IRQ boost, enum lavd_wakeup_irq */
+	u32	woken_by_rt_dl;		/* pending RT/DL boost */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
@@ -240,6 +242,7 @@ struct task_ctx {
 	u64	avg_runtime_invr;
 
 	/* --- cacheline 3 boundary (192 bytes): lower-frequency / monitoring --- */
+	u64	last_running_clk;	/* last time when scheduled in */
 	/*
 	 * Average wall-clock runtime per schedule.
 	 * Used for reporting.

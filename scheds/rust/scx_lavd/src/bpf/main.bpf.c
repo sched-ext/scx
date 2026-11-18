@@ -840,6 +840,28 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	return ret;
 }
 
+/*
+ * Update the wake frequency of @waker_taskc using wall clock time.
+ * wake_freq measures how often this task wakes up other tasks -- an
+ * event-driven, external-world phenomenon. The interval between wakeup
+ * events is inherently a wall-clock quantity, unaffected by CPU capacity
+ * or frequency changes.
+ */
+static __always_inline void account_waker_wake_freq(task_ctx *waker_taskc)
+{
+	u64 now = scx_bpf_now();
+	u64 interval;
+
+	interval = time_delta(now,
+			      READ_ONCE(waker_taskc->last_runnable_clk));
+	if (interval >= LAVD_LC_WAKE_INTERVAL_MIN) {
+		u64 wake_freq = READ_ONCE(waker_taskc->wake_freq);
+
+		WRITE_ONCE(waker_taskc->wake_freq, calc_avg_freq(wake_freq, interval));
+		WRITE_ONCE(waker_taskc->last_runnable_clk, now);
+	}
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -851,7 +873,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		.cpuc_cur = cpuc_cur,
 		.wake_flags = wake_flags,
 	};
-	struct task_struct *waker;
 	bool found_idle = false;
 	s32 cpu_id;
 
@@ -866,27 +887,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		set_task_flag(ictx.taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	else
 		reset_task_flag(ictx.taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
-
-	/*
-	 * Check whether the task is woken by an interrupt handler (either the
-	 * top or bottom half) to boost its latency-criticality later.
-	 *
-	 * WARNING: bpf_in_nmi/task/hardirq/serving_softirq() is supported only
-	 * in x86 and arm64. On the unsupported architectures (e.g., s390x),
-	 * it will always return 0. So, never use !bpf_in_xxx() and keep the
-	 * logic below optional. See more details in below link:
-	 *  - https://lore.kernel.org/bpf/20260124132706.183681-2-changwoo@igalia.com/T/#u
-	 */
-	if (unlikely((bpf_in_hardirq() || bpf_in_nmi()) &&
-		     !bpf_in_serving_softirq())) {
-		set_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ);
-		reset_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ);
-	} else if (unlikely(bpf_in_serving_softirq() ||
-			    ((waker = bpf_get_current_task_btf()) &&
-			     is_ksoftirqd(waker)))) {
-		set_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ);
-		reset_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ);
-	}
 
 	/*
 	 * Find an idle cpu and reserve it since the task @p will run
@@ -1615,119 +1615,125 @@ reassert_idle:
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
-	struct task_struct *waker;
-	task_ctx *p_taskc, *waker_taskc;
-	u64 now, interval;
-	int i;
+	task_ctx *taskc = get_task_ctx(p);
 
-	/*
-	 * Clear the accumulated runtime.
-	 */
-	p_taskc = get_task_ctx(p);
-	if (!p_taskc) {
+	if (!taskc) {
 		scx_bpf_error("Failed to lookup task_ctx for task %d", p->pid);
 		return;
 	}
-	WRITE_ONCE(p_taskc->acc_runtime_wall, 0);
-	WRITE_ONCE(p_taskc->acc_runtime_invr, 0);
+	WRITE_ONCE(taskc->acc_runtime_wall, 0);
+	WRITE_ONCE(taskc->acc_runtime_invr, 0);
+}
 
-	/*
-	 * When a task @p is wakened up, the wake frequency of its waker task
-	 * is updated. The @current task is a waker and @p is a waiter, which
-	 * is being wakened up now. This is true only when
-	 * SCX_OPS_ALLOW_QUEUED_WAKEUP is not set. The wake-up operations are
-	 * batch processed with SCX_OPS_ALLOW_QUEUED_WAKEUP, so @current task
-	 * is no longer a waker task.
-	 */
-	if (!(enq_flags & SCX_ENQ_WAKEUP))
-		return;
+/* Older kernels keep the unshifted state values in a separate enum. */
+enum scx_task_state___old {
+	SCX_TASK_ENABLED___old = 3,
+};
 
-	/*
-	 * Filter out unrelated tasks. We keep track of tasks under the same
-	 * parent process to confine the waker-wakee relationship within
-	 * closely related tasks.
-	 *
-	 * WARNING: bpf_in_nmi/task/hardirq/serving_softirq() is supported only
-	 * in x86 and arm64. On the unsupported architectures (e.g., s390x),
-	 * it will always return 0. So, never use !bpf_in_xxx() and keep the
-	 * logic below optional. See more details in below link:
-	 *  - https://lore.kernel.org/bpf/20260124132706.183681-2-changwoo@igalia.com/T/#u
-	 */
-	if (enq_flags & (SCX_ENQ_PREEMPT | SCX_ENQ_REENQ | SCX_ENQ_LAST))
-		return;
+enum scx_ent_flags___waking {
+	SCX_TASK_STATE_SHIFT___waking = 8,
+	SCX_TASK_STATE_MASK___waking = 0x700,
+	SCX_TASK_ENABLED___waking = 0x400,
+};
 
-	if (bpf_in_hardirq() || bpf_in_serving_softirq() || bpf_in_nmi())
-		return;
+static __always_inline bool is_scx_enabled_task(struct task_struct *p)
+{
+	u32 state, enabled;
+
+	state = READ_ONCE(p->scx.flags) &
+		bpf_core_enum_value(enum scx_ent_flags___waking,
+				    SCX_TASK_STATE_MASK___waking);
+	if (bpf_core_enum_value_exists(enum scx_ent_flags___waking,
+				       SCX_TASK_ENABLED___waking)) {
+		enabled = bpf_core_enum_value(enum scx_ent_flags___waking,
+					      SCX_TASK_ENABLED___waking);
+	} else {
+		enabled = bpf_core_enum_value(enum scx_task_state___old,
+					      SCX_TASK_ENABLED___old) <<
+			  bpf_core_enum_value(enum scx_ent_flags___waking,
+					      SCX_TASK_STATE_SHIFT___waking);
+	}
+	return state == enabled;
+}
+
+SEC("tp_btf/sched_waking")
+int BPF_PROG(lavd_sched_waking, struct task_struct *p)
+{
+	struct task_struct *waker;
+	task_ctx *taskc, *waker_taskc;
+	u32 waker_lat_cri, wakee_lat_cri;
+	u32 irq = 0;
+	bool softirq, rt_dl;
+	int i;
+
+	if (!p || !is_scx_enabled_task(p))
+		return 0;
 
 	waker = bpf_get_current_task_btf();
-	if (is_ksoftirqd(waker))
-		return;
-
-	if ((p->real_parent != waker->real_parent))
-		return;
-
-	if (is_kernel_task(p) != is_kernel_task(waker))
-		return;
+	if (p == waker)
+		return 0;
 
 	/*
-	 * If the waker is an RT or DL task, set the flag to increase the
-	 * wakee’s latency-criticality. We don’t track the latency-criticality
-	 * of RT/DL tasks, so we can not inherit their latency criticality.
-	 * Instead, we increase wakee’s latency-criticality by a fixed amount.
+	 * The IRQ context helpers may always return zero on architectures
+	 * without support. Only positive results identify interrupt context.
 	 */
-	if (rt_or_dl_task(waker))
-		set_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
-	else
-		reset_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+	softirq = bpf_in_serving_softirq();
+	if (!softirq && (bpf_in_hardirq() || bpf_in_nmi()))
+		irq = LAVD_WAKEUP_HARDIRQ;
+	else if (softirq || is_ksoftirqd(waker))
+		irq = LAVD_WAKEUP_SOFTIRQ;
+
+	/* Only propagate between related tasks of the same kind. */
+	if (!irq &&
+	    (READ_ONCE(p->real_parent) != READ_ONCE(waker->real_parent) ||
+	     is_kernel_task(p) != is_kernel_task(waker)))
+		return 0;
+
+	/*
+	 * This also runs when the wakee has not left its rq yet. Account
+	 * those wakeups too. The wakee can still be running on another CPU,
+	 * so deadline calculation consumes pending boosts atomically.
+	 */
+	bpf_rcu_read_lock();
+	taskc = find_task_ctx(p);
+	if (!taskc)
+		goto out;
+
+	if (irq) {
+		WRITE_ONCE(taskc->wakeup_irq, irq);
+		goto out;
+	}
+
+	/* RT/DL wakers contribute a fixed boost without needing a context. */
+	rt_dl = rt_or_dl_task(waker);
+	WRITE_ONCE(taskc->woken_by_rt_dl, rt_dl);
+	if (rt_dl)
+		goto out;
 
 	waker_taskc = find_task_ctx(waker);
-	if (!waker_taskc) {
-		/*
-		 * In this case, the waker could be an idle task
-		 * (swapper/_[_]), so we just ignore.
-		 */
-		return;
-	}
+	if (!waker_taskc)
+		goto out;
+
+	account_waker_wake_freq(waker_taskc);
 
 	/*
-	 * Update wake frequency using wall clock time. wake_freq measures how
-	 * often this task wakes up other tasks -- an event-driven, external-world
-	 * phenomenon. The interval between wakeup events is inherently a
-	 * wall-clock quantity, unaffected by CPU capacity or frequency changes.
+	 * Pass the waker's criticality forward and the wakee's back to the
+	 * waker. Deadline calculation caps and decays the inherited boost.
 	 */
-	now = scx_bpf_now();
-	interval = time_delta(now, READ_ONCE(waker_taskc->last_runnable_clk));
-	if (interval >= LAVD_LC_WAKE_INTERVAL_MIN) {
-		WRITE_ONCE(waker_taskc->wake_freq,
-			   calc_avg_freq(waker_taskc->wake_freq, interval));
-		WRITE_ONCE(waker_taskc->last_runnable_clk, now);
-	}
+	waker_lat_cri = READ_ONCE(waker_taskc->lat_cri);
+	wakee_lat_cri = READ_ONCE(taskc->lat_cri);
+	WRITE_ONCE(taskc->lat_cri_waker, waker_lat_cri);
+	if (READ_ONCE(waker_taskc->lat_cri_wakee) < wakee_lat_cri)
+		WRITE_ONCE(waker_taskc->lat_cri_wakee, wakee_lat_cri);
 
-	/*
-	 * Forward propagate waker’s latency criticality to wakee and
-	 * backward propagate wakee’s latency criticality to waker.
-	 *
-	 * Forward propagation is to keep the waker’s momentum forward to the
-	 * wakee, and backward propagation is to boost the low-priority waker
-	 * (i.e., priority inversion) for the next time. Propagation decays
-	 * geometrically and is capped to a limit to prevent unlimited cyclic
-	 * inflation of latency-criticality.
-	 *
-	 * Note that task @p’s latency criticality (p_taskc->lat_cri) is
-	 * not up-to-date, but such a small imprecision is okay.
-	 */
-	p_taskc->lat_cri_waker = waker_taskc->lat_cri;
-	if (waker_taskc->lat_cri_wakee < p_taskc->lat_cri)
-		waker_taskc->lat_cri_wakee = p_taskc->lat_cri;
-
-	/*
-	 * Collect additional information when the scheduler is monitored.
-	 */
-	if (is_monitored) {
-		p_taskc->waker_pid = waker->pid;
+	if (READ_ONCE(is_monitored)) {
+		WRITE_ONCE(taskc->waker_pid, waker->pid);
 		for (i = 0; i < TASK_COMM_LEN && can_loop; i++)
-			p_taskc->waker_comm[i] = waker->comm[i];
+			WRITE_ONCE(taskc->waker_comm[i], READ_ONCE(waker->comm[i]));
 	}
+out:
+	bpf_rcu_read_unlock();
+	return 0;
 }
 
 /*

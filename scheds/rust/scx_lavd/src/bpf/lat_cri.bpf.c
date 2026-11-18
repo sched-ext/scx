@@ -18,9 +18,18 @@
 #include <lib/cgroup.h>
 
 
+/* Atomically take a boost that sched_waking may update on another CPU. */
+static __always_inline u32 consume_wakeup_value(u32 __arena *value)
+{
+	if (!READ_ONCE(*value))
+		return 0;
+	return __sync_lock_test_and_set(value, 0);
+}
+
 static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 {
 	u64 weight_boost = 1;
+	u32 wakeup_irq;
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
@@ -49,21 +58,17 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 	 * Note that the irq-boosted criticality will flow through the forward
 	 * & backward propagation mechanism, which will be described below.
 	 */
-	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ)) {
-		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ);
+	wakeup_irq = consume_wakeup_value(&taskc->wakeup_irq);
+	if (wakeup_irq == LAVD_WAKEUP_HARDIRQ)
 		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGHEST;
-	} else if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ)) {
-		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ);
+	else if (wakeup_irq == LAVD_WAKEUP_SOFTIRQ)
 		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
-	}
 
 	/*
 	 * Prioritize a task woken by an RT/DL task.
 	 */
-	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL)) {
-		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+	if (consume_wakeup_value(&taskc->woken_by_rt_dl))
 		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
-	}
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve
@@ -121,7 +126,7 @@ static u64 calc_wait_factor(task_ctx *taskc)
 
 static u64 calc_wake_factor(task_ctx *taskc)
 {
-	u64 freq = min(taskc->wake_freq, LAVD_LC_FREQ_MAX);
+	u64 freq = min(READ_ONCE(taskc->wake_freq), LAVD_LC_FREQ_MAX);
 	return freq + 1;
 }
 
@@ -217,7 +222,8 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 	 * inflation of latency-criticality.
 	 *
 	 */
-	lat_cri_giver = taskc->lat_cri_waker + taskc->lat_cri_wakee;
+	lat_cri_giver = consume_wakeup_value(&taskc->lat_cri_waker) +
+			consume_wakeup_value(&taskc->lat_cri_wakee);
 	if (lat_cri_giver > (2 * lat_cri)) {
 		/*
 		 * The amount of latency criticality inherited needs to be
@@ -229,9 +235,7 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 		u64 receiver_max = lat_cri >> LAVD_LC_INH_RECEIVER_SHIFT;
 		lat_cri += min(giver_inh, receiver_max);
 	}
-	taskc->lat_cri = lat_cri;
-	taskc->lat_cri_waker = 0;
-	taskc->lat_cri_wakee = 0;
+	WRITE_ONCE(taskc->lat_cri, lat_cri);
 
 	/*
 	 * Normalize lat_cri to [0, 1024] scale for CPU selection
