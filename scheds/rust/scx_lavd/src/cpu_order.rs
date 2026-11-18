@@ -825,14 +825,17 @@ impl<'a> EnergyModelOptimizer<'a> {
                 }
             };
 
+            // Remove the old base before inserting its extension since both
+            // can have the same performance value and removing after
+            // inserting would drop the extension.
+            if let Some(del_pdsi) = del_pdsi {
+                self.perf_pdsi.borrow_mut().remove(&del_pdsi.performance);
+            }
+
             if let Some(best_pdsi) = best_pdsi {
                 self.perf_pdsi
                     .borrow_mut()
                     .insert(best_pdsi.performance, best_pdsi);
-            }
-
-            if let Some(del_pdsi) = del_pdsi {
-                self.perf_pdsi.borrow_mut().remove(&del_pdsi.performance);
             }
         }
 
@@ -1532,5 +1535,22 @@ mod tests {
 
         assert_eq!(emo.nr_cpus_combinations.len(), 8);
         assert_eq!(emo.gen_pds_combinations(100.0).len(), 8);
+    }
+
+    /// The top performance level of the CPU order table covers every CPU.
+    /// With a single performance state, the last two levels can pick the
+    /// same CPUs, and extending the previous level to the top one must not
+    /// drop it.
+    #[test]
+    fn test_top_level_has_all_cpus() {
+        for nr_cpus in 1..=8 {
+            let em = energy_model(&[nr_cpus]);
+            let cpus_pf = cpu_pref_order(&(0..nr_cpus).collect::<Vec<_>>());
+            let table = EnergyModelOptimizer::get_perf_cpu_order_table(&em, &cpus_pf);
+            let (_, top) = table.last_key_value().unwrap();
+            let mut cpus = top.cpus_perf.borrow().clone();
+            cpus.sort();
+            assert_eq!(cpus, (0..nr_cpus).collect::<Vec<_>>(), "{nr_cpus} CPUs");
+        }
     }
 }

@@ -783,7 +783,7 @@ impl TopoCtx {
     }
 }
 
-fn cpus_online() -> Result<Cpumask> {
+pub(crate) fn cpus_online() -> Result<Cpumask> {
     let path = format!("{}/sys/devices/system/cpu/online", *ROOT_PREFIX);
     let online = std::fs::read_to_string(path)?;
     Cpumask::from_cpulist(&online)
