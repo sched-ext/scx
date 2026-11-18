@@ -1543,7 +1543,7 @@ mod tests {
     /// drop it.
     #[test]
     fn test_top_level_has_all_cpus() {
-        for nr_cpus in 1..=8 {
+        for nr_cpus in 1..=(*NR_CPU_IDS).min(8) {
             let em = energy_model(&[nr_cpus]);
             let cpus_pf = cpu_pref_order(&(0..nr_cpus).collect::<Vec<_>>());
             let table = EnergyModelOptimizer::get_perf_cpu_order_table(&em, &cpus_pf);
