@@ -1,21 +1,24 @@
 // PANDEMONIUM SHARED INTERFACE
-// CONSTANTS AND STRUCTURES SHARED BETWEEN BPF (C23) AND RUST
+// CONSTANTS AND STRUCTURES SHARED BETWEEN BPF AND RUST
 
 #ifndef __INTF_H
 #define __INTF_H
 
-// BINDGEN/SCX COMPATIBILITY: provide kernel types unconditionally.
-// vmlinux.h also typedefs these in BPF context; C11+ permits
-// duplicate compatible typedefs, so no conflict.
-typedef unsigned long long u64;
+// THE BPF SIDE GETS THESE FROM vmlinux.h. A BINDINGS PASS PARSES THIS HEADER
+// ALONE, SO IT DEFINES THEM ITSELF WHEN vmlinux.h HAS NOT.
+#ifndef __VMLINUX_H__
 typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef unsigned long long u64;
+typedef signed char s8;
+typedef short s16;
+typedef int s32;
+typedef long long s64;
+#endif
 
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
-#define MAX_NODES 32
-// OVERFLOW-DOMAIN CEILING. DSQs ARE PRE-ALLOCATED AT INIT;
-// nr_overflow_domains GATES WHICH ARE LIVE.
-#define MAX_OVERFLOW_DOMAINS 32
 // PER-CPU affinity_rank SLOT COUNT: MAX_CPUS >> 3 = 128 AT MAX_CPUS=1024.
 // SLOTS PAST nr_cpu_ids - 1 HOLD (u32)-1; LOOPS EARLY-EXIT ON THE SENTINEL.
 // MAP SIZE = MAX_CPUS * 128 * 4 = 512KB.
@@ -24,19 +27,40 @@ typedef unsigned char u8;
 // KERNEL PROCESS FLAGS (NOT IN vmlinux.h -- THESE ARE #define MACROS)
 #define PF_KTHREAD 0x00200000
 
+// THE PLACEMENT BASE COST's RAIL, ONE DEFINITION FOR BOTH SIDES: BPF HOLDS tau's
+// COST AND THE LAYER's phi_base_ns TO IT, AND THE LAYER HOLDS WHAT IT WRITES TO
+// IT. bpf_intf.rs MIRRORS IT AND ITS TEST READS THESE LINES.
+#define PHI_BASE_MIN_NS  5000ULL
+#define PHI_BASE_MAX_NS  100000ULL
+
+// THE FLOOR UNDER EVERY SLICE BPF GRANTS, AND HOW MANY LIVE CoDel TARGETS A
+// STANDING TASK MAY HOLD A CPU FOR WHILE standing_targets IS UNWRITTEN: THE
+// BOUND A WAITER PAYS WHEN IT LANDS ON A BUSY CPU. THE LAYER WRITES ITS KNOBS
+// ON THE SAME RAILS (tuning.rs TuningKnobs::applied); tuning.rs MIRRORS THEM
+// AND bpf_intf.rs's TEST READS THESE LINES.
+#define SLICE_MIN_NS            100000ULL
+#define SLICE_STANDING_TARGETS  4ULL
+
 // TUNING KNOBS -- RUST ADAPTIVE LOOP WRITES THESE, BPF READS THEM
 // SINGLE-ELEMENT BPF_MAP_TYPE_ARRAY, UPDATED EVERY 50-1000MS
 struct tuning_knobs {
 	u64 slice_ns;           // BASE TIME SLICE (DEFAULT 1MS)
-	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
-	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
 	u64 codel_thresh_ns;    // tick() PER-CPU SOJOURN SCAN THRESHOLD (SET BY RUST)
-	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (DEFAULT 1MS)
 	u64 topology_tau_ns;    // FIEDLER TIME CONSTANT, CAPACITY-AWARE IN N.
 	                        // 0 = UNWRITTEN, BPF FALLBACKS STAY IN EFFECT
 	u64 codel_eq_ns;        // CODEL EQUILIBRIUM, A POSITION IN THE TARGET BAND
 	                        // FROM THE SPECTRAL-GAP DEFICIT. 0 = UNWRITTEN
+	u64 phi_base_ns;        // THE PLACEMENT BASE COST THE LAYER MEASURED: THE
+	                        // MEDIAN OVER TASKS OF A TASK's MEDIAN STINT AFTER A
+	                        // CROSS-L3 WAKE LESS AFTER A SAME-L3 ONE (research
+	                        // t14), ON [PHI_BASE_MIN_NS, PHI_BASE_MAX_NS] ON BOTH
+	                        // SIDES. 0 = UNWRITTEN: tau's COST STANDS, AND A 0
+	                        // WRITTEN AFTER A VALUE RESTORES IT
+	u64 standing_targets;   // CoDel TARGETS A STANDING TASK MAY HOLD THE CPU
+	                        // FOR. 0 = UNWRITTEN, SLICE_STANDING_TARGETS STANDS
+	u64 waker_leave_ns;     // A WAKER THAT STOPS THIS SOON AFTER ITS WAKES SEATS
+	                        // A PARTNER AS A SYNC WAKER DOES. 0 = OFF
 	// THE PHI DISTANCE PENALTY IS NOT A KNOB: RUST PRE-FOLDS IT INTO THE
 	// reff_value MAP IN NS AT TOPOLOGY DETECT AND BPF READS THAT MAP.
 };
@@ -46,7 +70,7 @@ struct tuning_knobs {
 struct pandemonium_stats {
 	u64 nr_dispatches;      // TOTAL TASKS DISPATCHED (ALL PATHS)
 	u64 nr_idle_hits;       // SELECT_CPU FAST PATH -> SCX_DSQ_LOCAL
-	u64 nr_shared;          // ENQUEUE -> PER-NODE SHARED DSQ
+	u64 nr_shared;          // ENQUEUE SEATS, EVERY TIER
 	u64 nr_preempt;         // TICK PREEMPTIONS (BATCH TASK YIELDED)
 	u64 wake_lat_sum;       // SUM WAKEUP->RUN LATENCY (NS)
 	u64 wake_lat_samples;   // COUNT OF WAKEUP LATENCY SAMPLES
@@ -65,13 +89,12 @@ struct pandemonium_stats {
 	u64 nr_l2_hit_interactive;
 	u64 nr_l2_miss_interactive;
 	u64 nr_reenqueue;       // TASKS RESCUED BY scx_bpf_reenqueue_local()
-	u64 batch_sojourn_ns;   // CURRENT OVERFLOW WAIT AGE (NS), WRITTEN BY tick()
-	u64 longrun_mode_active;// 1 IF SUSTAINED OVERFLOW PRESSURE, WRITTEN BY tick()
-	u64 nr_overflow_rescue; // DISPATCHES BY try_service_aged_overflow AT
-	                        // codel_target_ns (STEP 2)
-	// CROSS-DOMAIN LANDINGS BY PLACEMENT PATH, INDEXED BY XDOM_* BELOW.
-	// THE ADAPTIVE LAYER SUMS XDOM_SEL_* + XDOM_ENQ_T1 AS THE MWU SCATTER
-	// LOSS; XDOM_STEAL AND XDOM_STEP5 ARE EXCLUDED FROM IT.
+	u64 nr_rescue;          // DISPATCHES THAT SERVED A LANE PAST codel_target_ns,
+	                        // THE OSCILLATOR'S FORCING TERM
+	// CROSS-DOMAIN LANDINGS BY PLACEMENT PATH, INDEXED BY XDOM_* BELOW. THE
+	// [KNOBS] LINE's scatter_pct SUMS THE PLACEMENT PATHS XDOM_SEL_* AND
+	// XDOM_ENQ_T1; THE STEAL, XDOM_STEAL, IS EXCLUDED FROM IT. SLOTS 5 AND 7 ARE
+	// RETIRED AND STAY ZERO.
 	u64 nr_cross_domain[8];
 	u64 nr_osc_park;        // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK)
 	u64 nr_spill_kick_preempt; // select_cpu SEATS REDIRECTED OFF AN IDLE PICK
@@ -80,26 +103,84 @@ struct pandemonium_stats {
 	                        // CROSS- AND SAME-DOMAIN
 	u64 nr_kick_declined;   // requeue_kick_flag RETURNING KICK_NONE,
 	                        // SELF-TARGETED ONLY. NO KFUNC WAS CALLED
-	u64 nr_stay_cost_held;  // anchor_stay_beats_move REFUSING THE
-	                        // anchor -> target MOVE
-	u64 nr_stay_move_taken; // THE SAME EDGE ADMITTED. HELD + TAKEN IS EVERY
-	                        // anchor -> target DECISION THE WAKE PATH MADE
-	// PER-CPU RUNNABLE DEPTH, ACCUMULATED AT TICK RATE. USERSPACE DIFFERENCES
-	// BOTH FIELDS FOR AN INTERVAL MEAN, AS wake_lat_sum/wake_lat_samples DO.
-	// MONOTONIC; NEVER RESET IN BPF.
-	u64 rq_depth_sum;
-	u64 rq_depth_samples;
+	u64 nr_steal_lost;      // STEP 1 MOVES LOST TO ANOTHER THIEF OR THE PEER'S
+	                        // OWN STEP 0; THE WALK WENT ON TO THE NEXT PEER
+	u64 nr_steal_base_held; // PEER HEADS A STEAL WALK LEFT THAT tau's BASE COST
+	                        // WOULD HAVE TAKEN: THE LIVE BASE COST's REFUSALS.
+	                        // ZERO WHILE THE APPLIED COST IS tau's (THE BPF ARM)
+	u64 nr_sleepless_cut;  // TIER 2 WAKES THAT MAY NOT CUT, SEATED BY THE CUT
+	                        // ON A CPU WHOSE RESIDENT DOES NOT SLEEP
+	u64 nr_sleepless_miss;  // THE SAME WAKES THAT FOUND NO SUCH RESIDENT WITHIN
+	                        // THE WALK AND WAITED IN ORDER
+};
+
+// PER-CPU QUEUE RING. EACH TICK ADDS THIS CPU'S SEAT DEPTH, ITS LANE'S DEPTH
+// AND ITS LOCAL DSQ'S DEPTH INTO THE SLOT FOR THE CURRENT BUCKET
+// (epoch = ktime / depth_bucket_ns), AND EVERY running() ADDS THE RUN, WHETHER
+// IT ENDED A WAKE, AND THE QUEUE WAIT IT ENDED, SO EVERY CPU SAMPLES ONE TIME
+// GRID AND THE 1HZ LOOP READS EVERY SAMPLE INSTEAD OF ONE MEAN PER SECOND. A
+// SLOT WHOSE epoch IS NOT THE ONE ASKED FOR HOLDS AN EARLIER LAP OR A CPU THAT
+// NEITHER TICKED NOR RAN ANYTHING, AND READS ABSENT. domain IS THE CPU'S
+// TOPOLOGY DOMAIN, SO USERSPACE FOLDS A DOMAIN'S CPUS FROM WHAT BPF ACTUALLY
+// SAMPLED. POWER OF TWO.
+#define DEPTH_RING_SLOTS 512
+
+struct depth_slot {
+	u64 epoch;
+	u32 ticks;
+	u32 own;                // SUM OF THIS CPU'S SEAT DEPTH OVER ticks
+	u32 lane;               // SUM OF ITS LANE'S DEPTH OVER ticks
+	u32 loc;                // SUM OF ITS LOCAL DSQ'S DEPTH OVER ticks
+	u32 runs;               // TASKS THAT STARTED RUNNING HERE IN THE BUCKET
+	u32 wakes;              // OF THOSE, THE RUNS THAT ENDED A WAKE: ARRIVALS
+	u32 wait_us;            // SUM OF THE QUEUE WAITS THOSE RUNS ENDED, IN US:
+	                        // THE QUEUE CLOCK, INSERT (OR WAKE) TO RUNNING
+	u32 idle;               // OF THE WAKES, THOSE select_cpu SEATED ON AN IDLE
+	                        // CPU: nr_idle_hits, PER BUCKET
+	u32 min_wait_us;        // THE SHORTEST QUEUE WAIT THOSE RUNS ENDED, IN US:
+	                        // CoDel's STANDING-QUEUE TEST. MEANINGFUL WHEN runs > 0
+	u32 _pad;
+};
+
+struct depth_ring {
+	u32 domain;
+	u32 _pad;
+	struct depth_slot slot[DEPTH_RING_SLOTS];
+};
+
+// PER-CPU FLOW ROW. running() COUNTS, ON THE CPU THE TASK NOW RUNS ON, WHERE
+// EACH ARRIVAL CAME FROM: wake[s] FOR A WAKE WHOSE WAKER RAN ON CPU s, mig[s]
+// FOR A RUN WHOSE PREVIOUS RUN WAS ON CPU s, ANOTHER CPU. CUMULATIVE AND
+// WRAPPING; THE LOOP TAKES PER-TICK DELTAS. CPU d's ROW IS THE FLOW GRAPH'S
+// EDGES INTO d.
+struct flow_row {
+	u32 wake[MAX_CPUS];
+	u32 mig[MAX_CPUS];
+};
+
+// PER-CPU REFILL LEDGER. stopping() APPENDS ONE RECORD PER RUN THAT ENDED A
+// CLASSED WAKE (running(): FROM ANOTHER CPU, NOT FROM THE IDLE TASK, NOT A
+// KTHREAD's): (pid << 1 | crossed) << 32 | service_ns, crossed WHEN THE WAKER's
+// CPU SITS IN ANOTHER DOMAIN (L3), THE SERVICE SATURATED AT u32. head COUNTS
+// EVERY APPEND AND WRAPS; THE NEWEST RECORD IS rec[(head - 1) % REFILL_RING_SLOTS].
+// POWER OF TWO.
+#define REFILL_RING_SLOTS 1024
+
+struct refill_ring {
+	u32 head;
+	u32 _pad;
+	u64 rec[REFILL_RING_SLOTS];
 };
 
 // XDOM PATH INDICES FOR pandemonium_stats.nr_cross_domain[] (DIAGNOSTIC).
-// THE INDICES ARE POSITIONAL IN ARCHIVED PROM LABELS: NEVER RENUMBER.
+// THE INDICES ARE POSITIONAL IN ARCHIVED PROM LABELS: NEVER RENUMBER. 5 (THE
+// TIER 2 SPILL, NEVER COUNTED) AND 7 (THE OVERFLOW'S CROSS-DOMAIN TAKE) ARE
+// RETIRED, AND THEIR SLOTS STAY ZERO.
 #define XDOM_SEL_TIGHT   0   // select_cpu sync pipe-partner co-location
 #define XDOM_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
 #define XDOM_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
 #define XDOM_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
 #define XDOM_ENQ_T1      4   // enqueue TIER 1 idle (pick_idle_cpu_node)
-#define XDOM_ENQ_T2      5   // enqueue TIER 2 warm-anchor spill
 #define XDOM_STEAL       6   // dispatch STEP 1 R_eff steal (this_cpu vs peer)
-#define XDOM_STEP5       7   // dispatch STEP 5 cross-domain work-conservation
 
 #endif // __INTF_H

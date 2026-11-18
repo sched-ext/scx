@@ -9,7 +9,7 @@ use libbpf_rs::MapCore;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 
 use crate::bpf_skel::*;
-use crate::tuning::{OscillatorState, TuningKnobs};
+use crate::tuning::{OscillatorState, Regime, TuningKnobs, scaled_regime_knobs};
 use scx_pandemonium::event::EventLog;
 
 // SCX EXIT CODES (FROM KERNEL)
@@ -44,11 +44,12 @@ pub struct PandemoniumStats {
     pub nr_l2_hit_interactive: u64,
     pub nr_l2_miss_interactive: u64,
     pub nr_reenqueue: u64,
-    pub batch_sojourn_ns: u64,
-    pub longrun_mode_active: u64,
-    pub nr_overflow_rescue: u64,
+    // LANES SERVED PAST codel_target_ns (intf.h nr_rescue), THE OSCILLATOR'S
+    // FORCING TERM.
+    pub nr_rescue: u64,
     // CROSS-DOMAIN SCATTER ATTRIBUTION (PER XDOM_* PATH) -- MATCHES nr_cross_domain[8] IN
-    // intf.h. PLACEMENT-SIDE PATHS FEED THE MWU SCATTER LOSS PATHWAY.
+    // intf.h. THE PLACEMENT-SIDE PATHS (0..6) SUM TO THE [KNOBS] LINE's scatter_pct;
+    // SLOTS 5 AND 7 ARE RETIRED AND READ ZERO.
     pub nr_cross_domain: [u64; 8],
     // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK WRITER; intf.h nr_osc_park)
     pub nr_osc_park: u64,
@@ -60,11 +61,6 @@ pub struct PandemoniumStats {
     // domain half, which on a two-domain box is the minority. Every steal is a
     // migration by definition, so this is the dispatch side's share of the count.
     pub nr_steal: u64,
-    // THE anchor -> target EDGE, BOTH OUTCOMES (intf.h nr_stay_cost_held /
-    // nr_stay_move_taken). The cost is the only priced term on the wake path's
-    // own move and nothing incremented when it fired, so "holds everything home"
-    // and "never runs" were indistinguishable from outside. Read as a ratio: the
-    // pair is every decision, the first is the refusals.
     // REFUSED REQUEUE KICKS, SELF-TARGETED (intf.h nr_kick_declined). The bottom
     // rung of the kick ladder: the price refused the act, not just its strength,
     // and only where this CPU is the one that will dispatch. Read beside
@@ -72,26 +68,91 @@ pub struct PandemoniumStats {
     // one, or the kick rate reports IPIs that were never issued. Its magnitude is
     // what says whether the self-only subset is worth keeping.
     pub nr_kick_declined: u64,
-    pub nr_stay_cost_held: u64,
-    pub nr_stay_move_taken: u64,
-    // PER-CPU RUNNABLE DEPTH (intf.h rq_depth_sum / rq_depth_samples).
-    // Monotonic accumulators sampled at tick rate; difference BOTH across an
-    // interval and divide for the mean depth on that CPU, exactly as
-    // wake_lat_sum/wake_lat_samples are already consumed. Read per-CPU via
-    // read_stats_percpu() -- folding these to a total discards the spatial
-    // dimension that is the entire reason they exist.
-    pub rq_depth_sum: u64,
-    pub rq_depth_samples: u64,
+    // STEAL MOVES LOST TO ANOTHER THIEF OR THE PEER'S OWN STEP 0 (intf.h
+    // nr_steal_lost); THE WALK WENT ON TO THE NEXT PEER.
+    pub nr_steal_lost: u64,
+    // HEADS A STEAL WALK LEFT THAT tau's BASE COST WOULD HAVE TAKEN (intf.h
+    // nr_steal_base_held): THE LIVE BASE COST's REFUSALS. ZERO ON THE BPF ARM.
+    pub nr_steal_base_held: u64,
+    // TIER 2 WAKES THAT MAY NOT CUT, SEATED BY THE CUT ON A CPU WHOSE RESIDENT
+    // DOES NOT SLEEP, AND THE ONES THAT FOUND NONE (intf.h nr_sleepless_cut,
+    // nr_sleepless_miss).
+    pub nr_sleepless_cut: u64,
+    pub nr_sleepless_miss: u64,
+}
+
+// PER-CPU QUEUE RING (intf.h struct depth_ring). One slot per bucket of the
+// BPF-side time grid; a slot is current for an epoch only when its epoch
+// matches. A slot with no ticks carries no depth sample, and one with no runs
+// carries no queue-clock sample: absent, not an empty queue.
+pub const DEPTH_RING_SLOTS: usize = 512;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DepthSlot {
+    pub epoch: u64,
+    pub ticks: u32,
+    pub own: u32,
+    pub lane: u32,
+    pub loc: u32,
+    pub runs: u32,
+    pub wakes: u32,
+    pub wait_us: u32,
+    pub idle: u32,
+    pub min_wait_us: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DepthRing {
+    pub domain: u32,
+    pub _pad: u32,
+    pub slot: [DepthSlot; DEPTH_RING_SLOTS],
+}
+
+// PER-CPU FLOW ROW (intf.h struct flow_row): CPU d's cumulative counts of the
+// wakes and migrations it received from each source CPU.
+pub const FLOW_ROW_CPUS: usize = 1024;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FlowRow {
+    pub wake: [u32; FLOW_ROW_CPUS],
+    pub mig: [u32; FLOW_ROW_CPUS],
+}
+
+// PER-CPU REFILL LEDGER (intf.h struct refill_ring): stopping()'s record of each
+// run that ended a classed wake, (pid << 1 | crossed) << 32 | service_ns. head
+// counts every append and wraps.
+pub const REFILL_RING_SLOTS: usize = 1024;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RefillRing {
+    pub head: u32,
+    pub _pad: u32,
+    pub rec: [u64; REFILL_RING_SLOTS],
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-// 184 (base, after the structurally empty latcrit l2 pair) + 8*8 (nr_cross_domain)
+// 168 (base, after the structurally empty latcrit l2 pair) + 8*8 (nr_cross_domain)
 // + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) + 8 (nr_steal)
-// + 8 (nr_kick_declined) + 8 (nr_stay_cost_held) + 8 (nr_stay_move_taken)
-// + 8 (rq_depth_sum) + 8 (rq_depth_samples) = 312.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 312);
+// + 8 (nr_kick_declined) + 8 (nr_steal_lost) + 8 (nr_steal_base_held)
+// + 16 (nr_sleepless_cut, nr_sleepless_miss) = 296.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 296);
+// 8 (head + pad) + 1024 * 8 = 8200.
+const _: () = assert!(std::mem::size_of::<RefillRing>() == 8200);
+// 8 (domain + pad) + 512 * 48 (epoch, ticks, own, lane, loc, runs, wakes,
+// wait_us, idle, min_wait_us, pad) = 24584.
+const _: () = assert!(std::mem::size_of::<DepthRing>() == 24584);
+// 2 * MAX_CPUS (1024) * 4 = 8192.
+const _: () = assert!(std::mem::size_of::<FlowRow>() == 8192);
 // 88 - 16 (lat_cri_thresh_high/_low, removed with the classifier that read them)
-// - 8 (spill_temp_q16, computed every tick and consumed by nothing).
+// - 8 (spill_temp_q16, computed every tick and consumed by nothing)
+// - 8 (affinity_mode) - 8 (preempt_thresh_ns), both read nowhere in BPF
+// - 8 (burst_slice_ns, read only under longrun, which went with the overflow)
+// + 8 (phi_base_ns) + 8 (standing_targets) + 8 (waker_leave_ns) = 64.
 const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 64);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
@@ -119,7 +180,7 @@ impl<'a> Scheduler<'a> {
         let builder = MainSkelBuilder::default();
         let mut open_skel = builder.open(open_object)?;
 
-        // INJECT VERSION SUFFIX INTO OPS NAME FOR scx_loader GUI
+        // INJECT VERSION SUFFIX INTO OPS NAME
         {
             let ops = open_skel.struct_ops.pandemonium_ops_mut();
             let name_field = &mut ops.name;
@@ -156,9 +217,10 @@ impl<'a> Scheduler<'a> {
         rodata.__SCX_DSQ_FLAG_LOCAL_ON = SCX_DSQ_FLAG_LOCAL_ON;
         rodata.__SCX_DSQ_INVALID = SCX_DSQ_FLAG_BUILTIN;
         rodata.__SCX_DSQ_GLOBAL = SCX_DSQ_FLAG_BUILTIN | 1;
-        rodata.__SCX_DSQ_LOCAL = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON;
-        rodata.__SCX_DSQ_LOCAL_ON = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON | 1;
+        rodata.__SCX_DSQ_LOCAL = SCX_DSQ_FLAG_BUILTIN | 2;
+        rodata.__SCX_DSQ_LOCAL_ON = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON;
         rodata.__SCX_DSQ_LOCAL_CPU_MASK = 0xFFFFFFFF;
+        rodata.__SCX_TASK_QUEUED = 1;
 
         // POPULATE SCX_KICK_* ENUM VALUES
         rodata.__SCX_KICK_IDLE = 1;
@@ -226,10 +288,77 @@ impl<'a> Scheduler<'a> {
         out
     }
 
+    // PER-CPU DEPTH RINGS, ONE PER POSSIBLE CPU, INDEXED BY CPU. One map read a
+    // second carries every tick's sample since the last one.
+    pub fn read_depth_rings(&self) -> Vec<DepthRing> {
+        let key = 0u32.to_ne_bytes();
+        let percpu_vals = match self
+            .skel
+            .maps
+            .depth_ring
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(v)) => v,
+            _ => return Vec::new(),
+        };
+        percpu_vals
+            .iter()
+            .filter(|v| v.len() >= std::mem::size_of::<DepthRing>())
+            .map(|v| unsafe { std::ptr::read_unaligned(v.as_ptr() as *const DepthRing) })
+            .collect()
+    }
+
+    pub fn read_flow_rows(&self) -> Vec<FlowRow> {
+        let key = 0u32.to_ne_bytes();
+        let percpu_vals = match self
+            .skel
+            .maps
+            .flow_rows
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(v)) => v,
+            _ => return Vec::new(),
+        };
+        percpu_vals
+            .iter()
+            .filter(|v| v.len() >= std::mem::size_of::<FlowRow>())
+            .map(|v| unsafe { std::ptr::read_unaligned(v.as_ptr() as *const FlowRow) })
+            .collect()
+    }
+
+    // PER-CPU REFILL RINGS, ONE PER POSSIBLE CPU. One map read a second carries
+    // each CPU's newest REFILL_RING_SLOTS records.
+    pub fn read_refill_rings(&self) -> Vec<RefillRing> {
+        let key = 0u32.to_ne_bytes();
+        let percpu_vals = match self
+            .skel
+            .maps
+            .refill_ring
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(v)) => v,
+            _ => return Vec::new(),
+        };
+        percpu_vals
+            .iter()
+            .filter(|v| v.len() >= std::mem::size_of::<RefillRing>())
+            .map(|v| unsafe { std::ptr::read_unaligned(v.as_ptr() as *const RefillRing) })
+            .collect()
+    }
+
+    // THE BASE COST BPF APPLIES (main.bpf.c phi_base_cost_ns): tau's, OR THE
+    // LAYER's KNOB ON ITS RAIL. EMITTED BESIDE THE WRITTEN VALUE. 0 WITHOUT A
+    // MAPPED .data.
+    pub fn read_phi_base_applied(&self) -> u64 {
+        self.skel
+            .maps
+            .data_data
+            .as_ref()
+            .map_or(0, |d| d.phi_base_cost_ns)
+    }
+
     // THE REDUCE. Separated from the read so the fold is testable without a
     // live BPF map, and so every not-a-sum field is stated in one place:
-    // batch_sojourn_ns and longrun_mode_active take a MAX across CPUs (a
-    // system's worst sojourn is not the sum of its CPUs' sojourns), and
     // nr_cross_domain is an 8-element per-path array summed elementwise.
     // Returning the raw vec without honoring these would silently change
     // behavior for every existing consumer.
@@ -257,13 +386,7 @@ impl<'a> Scheduler<'a> {
                 total.nr_l2_hit_interactive += stats.nr_l2_hit_interactive;
                 total.nr_l2_miss_interactive += stats.nr_l2_miss_interactive;
                 total.nr_reenqueue += stats.nr_reenqueue;
-                if stats.batch_sojourn_ns > total.batch_sojourn_ns {
-                    total.batch_sojourn_ns = stats.batch_sojourn_ns;
-                }
-                if stats.longrun_mode_active > total.longrun_mode_active {
-                    total.longrun_mode_active = stats.longrun_mode_active;
-                }
-                total.nr_overflow_rescue += stats.nr_overflow_rescue;
+                total.nr_rescue += stats.nr_rescue;
                 for i in 0..8 {
                     total.nr_cross_domain[i] += stats.nr_cross_domain[i];
                 }
@@ -271,14 +394,10 @@ impl<'a> Scheduler<'a> {
                 total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
                 total.nr_steal += stats.nr_steal;
                 total.nr_kick_declined += stats.nr_kick_declined;
-                total.nr_stay_cost_held += stats.nr_stay_cost_held;
-                total.nr_stay_move_taken += stats.nr_stay_move_taken;
-                // Folded so the aggregate stays complete, but the SUMMED value
-                // is close to meaningless -- it is the total depth seen across
-                // every CPU. The per-CPU pair is the point; read it from
-                // read_stats_percpu() and never from here.
-                total.rq_depth_sum += stats.rq_depth_sum;
-                total.rq_depth_samples += stats.rq_depth_samples;
+                total.nr_steal_lost += stats.nr_steal_lost;
+                total.nr_steal_base_held += stats.nr_steal_base_held;
+                total.nr_sleepless_cut += stats.nr_sleepless_cut;
+                total.nr_sleepless_miss += stats.nr_sleepless_miss;
             }
         }
 
@@ -295,11 +414,9 @@ impl<'a> Scheduler<'a> {
     // FIELDS THAT MUST BE IDENTICAL ON EVERY CPU.
     //
     // tuning_knobs_map is per-CPU, which makes divergence expressible -- and
-    // for these three it would be a defect rather than a feature. tau and
+    // for these two it would be a defect rather than a feature. tau and
     // codel_eq are topology-owned and drive tau-scaling, which every CPU
-    // re-derives from the same constant; affinity_mode decides how a TASK is
-    // placed, so a task would change placement depending on which CPU last
-    // looked at it.
+    // re-derives from the same constant.
     //
     // Broadcast rather than trusted: the writer overwrites these in every slot
     // from slot 0, so a caller cannot diverge them by omission.
@@ -311,7 +428,7 @@ impl<'a> Scheduler<'a> {
         for k in rest.iter_mut() {
             k.topology_tau_ns = first.topology_tau_ns;
             k.codel_eq_ns = first.codel_eq_ns;
-            k.affinity_mode = first.affinity_mode;
+            k.phi_base_ns = first.phi_base_ns;
         }
     }
 
@@ -323,14 +440,19 @@ impl<'a> Scheduler<'a> {
         self.write_tuning_knobs_percpu(&vec![*knobs; n])
     }
 
-    // WRITE PER-CPU KNOBS. The per-CPU fields (slice, preempt window, batch and
-    // burst ceilings, the CoDel rescue threshold) may differ per slot; the six
-    // global fields are broadcast from slot 0 regardless of what the caller put
-    // in the others.
+    // WRITE PER-CPU KNOBS. The per-CPU fields (slice, batch ceiling, the CoDel
+    // rescue threshold) may differ per slot; the two global fields are
+    // broadcast from slot 0 regardless of what the caller put in the others.
     pub fn write_tuning_knobs_percpu(&self, per_cpu: &[TuningKnobs]) -> Result<()> {
         let n = libbpf_rs::num_possible_cpus()?;
         let mut vals: Vec<TuningKnobs> = (0..n)
-            .map(|i| per_cpu.get(i).copied().unwrap_or_else(|| per_cpu[0]))
+            .map(|i| {
+                per_cpu
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| per_cpu[0])
+                    .applied()
+            })
             .collect();
         Self::broadcast_global_fields(&mut vals);
         let key = 0u32.to_ne_bytes();
@@ -348,13 +470,19 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // WRITE TOPOLOGY-OWNED FIELDS (tau_ns + codel_eq_ns), PRESERVING OTHERS.
-    // CALLED AT TOPOLOGY DETECT AND ON HOTPLUG. READ-MODIFY-WRITE BECAUSE THE
-    // tuning_knobs_map IS A SINGLE-ENTRY STRUCT AND PARTIAL UPDATES AREN'T A
-    // libbpf CONCEPT -- BUT WE NEED A NARROW SETTER SO TOPOLOGY CHANGES DON'T
-    // STOMP ON WHATEVER THE ADAPTIVE LOOP'S LATEST KNOB VALUES ARE.
-    pub fn write_topology_fields(&self, tau_ns: u64, codel_eq_ns: u64) -> Result<()> {
-        let mut knobs = self.read_tuning_knobs();
+    // WRITE THE TOPOLOGY-OWNED KNOBS: tau_ns, codel_eq_ns AND THE BASE SET,
+    // WHICH IS A FUNCTION OF tau ALONE (scaled_regime_knobs AT THE STARTUP
+    // REGIME). THE BASE IS TOPOLOGY, SO --no-adaptive RUNS IT TOO AND THE TWO
+    // ARMS DIFFER BY THE LOOP ALONE. CALLED AT TOPOLOGY DETECT AND ON HOTPLUG: A
+    // HOTPLUG RESETS THE ADAPTIVE LOOP'S KNOBS TO THE NEW BASE, AND ITS NEXT
+    // RETUNE RE-DERIVES FROM THERE. A ZERO tau (NO SPECTRUM) WRITES THE TWO
+    // TOPOLOGY FIELDS ALONE AND LEAVES THE REST AS THEY ARE.
+    pub fn write_topology_fields(&self, tau_ns: u64, codel_eq_ns: u64, nr_cpus: u64) -> Result<()> {
+        let mut knobs = if tau_ns > 0 {
+            scaled_regime_knobs(Regime::Mixed, nr_cpus, tau_ns)
+        } else {
+            self.read_tuning_knobs()
+        };
         knobs.topology_tau_ns = tau_ns;
         knobs.codel_eq_ns = codel_eq_ns;
         self.write_tuning_knobs(&knobs)
@@ -362,14 +490,10 @@ impl<'a> Scheduler<'a> {
 
     // READ BPF OSCILLATOR STATE FROM BSS/DATA SECTIONS.
     //
-    // Unused since MWU was removed, and kept deliberately. MWU read this to
-    // avoid double-correcting: two controllers both adapting on
-    // global_rescue_count would fight. That hazard is GONE -- the BPF
-    // oscillator is now the only thing adapting on rescue count, and the graph
-    // derives from depth, shape and persistence instead. The accessor stays
-    // because the live-R_eff work reads the same maps.
-    // MWU GATES ITS RESCUE-DRIVEN PATHWAYS ON THIS SO IT DOESN'T
-    // DOUBLE-CORRECT WHEN THE BPF DAMPED OSCILLATOR HAS ALREADY MOVED.
+    // The BPF oscillator is the only thing adapting on rescue count. The
+    // adaptive loop reads where it sits so a knob write defers while the
+    // oscillator is already responding (OscillatorState::responding): two
+    // controllers on the same error would fight.
     pub fn read_oscillator_state(&self) -> OscillatorState {
         let bss = match self.skel.maps.bss_data.as_ref() {
             Some(b) => b,
@@ -485,7 +609,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // POPULATE EMERGENT OVERFLOW-DOMAIN MAP (T3b.2). cpu_domain[cpu] = the
+    // POPULATE EMERGENT DOMAIN MAP (T3b.2). cpu_domain[cpu] = the
     // emergent domain id from the T2 tree (the discrete domain map replacement).
     pub fn write_cpu_domain(&self, cpu: u32, domain: u32) -> Result<()> {
         let key = cpu.to_ne_bytes();
@@ -497,12 +621,11 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // SET nr_overflow_domains (post-load mutable global). Walked from topology at startup.
-    // Gates how many of the MAX_OVERFLOW_DOMAINS per-domain overflow DSQs are addressed
-    // by dispatch drain loops.
-    pub fn write_nr_overflow_domains(&mut self, nr_overflow_domains: u32) {
+    // SET nr_domains (post-load mutable global). Walked from topology at startup.
+    // More than one arms the tight seat.
+    pub fn write_nr_domains(&mut self, nr_domains: u32) {
         if let Some(data) = self.skel.maps.data_data.as_mut() {
-            data.nr_overflow_domains = nr_overflow_domains;
+            data.nr_domains = nr_domains;
         }
     }
 
@@ -514,17 +637,6 @@ impl<'a> Scheduler<'a> {
         if let Some(data) = self.skel.maps.data_data.as_mut() {
             data.affinity_domain_peers = peers;
         }
-    }
-
-    // POPULATE L2 SIBLINGS MAP ENTRY
-    pub fn write_l2_sibling(&self, group_id: u32, slot: u32, cpu: u32) -> Result<()> {
-        let key = (group_id * 8 + slot).to_ne_bytes();
-        let val = cpu.to_ne_bytes();
-        self.skel
-            .maps
-            .l2_siblings
-            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
-        Ok(())
     }
 
     // POPULATE RESISTANCE AFFINITY RANK MAP
