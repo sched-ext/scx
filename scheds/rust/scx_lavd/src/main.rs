@@ -250,6 +250,11 @@ struct Opts {
     #[clap(long = "no-wake-sync", action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Allow the kernel to activate woken tasks asynchronously when supported.
+    /// This is an experimental feature.
+    #[clap(long = "queued-wakeup", action = clap::ArgAction::SetTrue)]
+    queued_wakeup: bool,
+
     /// Disable dynamic slice boost for long-running tasks.
     #[clap(long = "no-slice-boost", action = clap::ArgAction::SetTrue)]
     no_slice_boost: bool,
@@ -847,6 +852,16 @@ impl<'a> Scheduler<'a> {
 
         if opts.partial {
             skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
+
+        if opts.queued_wakeup {
+            let flag = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+            if flag != 0 {
+                skel.struct_ops.lavd_ops_mut().flags |= flag;
+                info!("Queued wakeups allowed");
+            } else {
+                warn!("Kernel lacks SCX_OPS_ALLOW_QUEUED_WAKEUP, using synchronous wakeups");
+            }
         }
 
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
