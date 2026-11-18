@@ -28,6 +28,7 @@ members = [
     "scheds/rust/scx_pandemonium",
     "scheds/rust/scx_rusty",
     "scheds/experimental/scx_flow",
+    "scheds/experimental/scx_lertick",
     "scheds/experimental/scx_nitosis",
     "scheds/experimental/scx_mavd",
     "scheds/experimental/scx_mlfq",

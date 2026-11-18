@@ -22,6 +22,7 @@ comments in their `main.rs` or `*.bpf.c` files.
 # Schedulers
 
 - [scx_flow](scx_flow/README.md)
+- [scx_lertick](scx_lertick/README.md): weighted vtime scheduler with per-LLC queues that learns each task's time slice in BPF
 - [scx_mlfq](scx_mlfq/README.md)
 - [scx_reevdf](scx_reevdf/README.md): EEVDF cid-form scheduler written in Rust BPF, a port of scx_eevdf
 - [scx_rburst](scx_rburst/README.md): EEVDF-style scheduler with virtual-time borrowing, whose requests follow the CPU burst, written in Rust BPF
