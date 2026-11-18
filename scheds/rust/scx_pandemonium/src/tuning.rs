@@ -12,12 +12,12 @@ pub const HEAVY_ENTER_PCT: u64 = 10; // mean_idle <= THIS BAND -> CANDIDATE HEAV
 pub const LIGHT_ENTER_PCT: u64 = 50; // mean_idle >= THIS BAND -> CANDIDATE LIGHT
 
 // REGIME PROFILES
-// PREEMPT_THRESH CONTROLS WHEN TICK PREEMPTS BATCH TASKS (IF INTERACTIVE WAITING).
 // BATCH_SLICE_NS CONTROLS MAX UNINTERRUPTED BATCH RUN WHEN NO INTERACTIVE WAITING.
 // CPU_BOUND_THRESH_NS CONTROLS DEMOTION THRESHOLD PER REGIME (FEATURE 5).
 
 const MIXED_SLICE_NS: u64 = 1_000_000; // 1MS: TIGHT INTERACTIVE CONTROL
-const MIXED_PREEMPT_NS: u64 = 1_000_000; // 1MS: MATCH FOR CLEAN ENFORCEMENT
+const LIGHT_SLICE_NS: u64 = 2_000_000; // 2MS: LITTLE CONTENTION, FEWER SWITCHES
+const HEAVY_SLICE_NS: u64 = 4_000_000; // 4MS: SATURATED, WIDER FOR THROUGHPUT
 const MIXED_BATCH_NS: u64 = 20_000_000; // 20MS: MATCHES LIGHT/HEAVY/BPF DEFAULT
 
 // P99 CEILINGS
@@ -33,21 +33,12 @@ const HEAVY_P99_CEIL_NS: u64 = 10_000_000; // 10MS: HEAVY LOAD, REALISTIC
 // TUNING KNOBS
 // MATCHES struct tuning_knobs IN BPF (intf.h)
 
-// AFFINITY MODE: L2 PLACEMENT STRENGTH
-pub const AFFINITY_OFF: u64 = 0;
-pub const AFFINITY_WEAK: u64 = 1;
-// AFFINITY_STRONG (2) IS IN THE BPF ABI BUT NOTHING SHIPS IT; THE BASE PROFILE
-// HOLDS WEAK.
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TuningKnobs {
     pub slice_ns: u64,
-    pub preempt_thresh_ns: u64,
     pub batch_slice_ns: u64,
-    pub affinity_mode: u64,
     pub codel_thresh_ns: u64,
-    pub burst_slice_ns: u64,
     // FIEDLER-DERIVED TOPOLOGY TIME CONSTANT, CAPACITY-AWARE IN N.
     // ZERO MEANS RUST HAS NOT YET WRITTEN tau; BPF USES THE PRE-FIRST-TICK
     // FALLBACK CONSTANTS UNTIL A NONZERO VALUE LANDS. WRITTEN BY RUST AT
@@ -57,20 +48,60 @@ pub struct TuningKnobs {
     // SPECTRAL-GAP DEFICIT. CO-LOCATED WITH topology_tau_ns; SAME ZERO/WRITE/
     // CLAMP SEMANTICS.
     pub codel_eq_ns: u64,
+    // THE PLACEMENT BASE COST THE LAYER MEASURED: THE PAIRED REFILL (adaptive.rs
+    // RefillPairs), ON bpf_intf.rs's [PHI_BASE_MIN_NS, PHI_BASE_MAX_NS] AS BOTH
+    // SIDES CLAMP IT. ZERO MEANS UNWRITTEN: BPF APPLIES ITS tau-DERIVED COST, SO
+    // THE BPF ARM NEVER MOVES IT, AND A ZERO WRITTEN AFTER A VALUE RESTORES IT.
+    pub phi_base_ns: u64,
+    // CoDel TARGETS A STANDING TASK MAY HOLD THE CPU FOR: task_slice's BOUND,
+    // THE ONE THAT BINDS (batch_slice_ns SITS ABOVE IT AT EVERY WIDTH).
+    pub standing_targets: u64,
+    // A WAKER THAT BLOCKS WITHIN THIS OF ITS WAKES SEATS A PARTNER AS A SYNC
+    // WAKER DOES (main.bpf.c waker_leaving). 0 = OFF, WHICH THE BPF ARM RUNS.
+    pub waker_leave_ns: u64,
 }
+
+// intf.h's SLICE_STANDING_TARGETS, THE BASE BOTH ARMS RUN, AND SLICE_MIN_NS,
+// THE FLOOR UNDER EVERY SLICE BPF GRANTS; bpf_intf.rs's TEST READS BOTH
+// AGAINST THE HEADER.
+pub const STANDING_TARGETS: u64 = 4;
+pub const SLICE_MIN_NS: u64 = 100_000;
+
+// THE DEPARTURE BOUND THE ADAPTIVE LAYER WRITES. On the captures the waker of a
+// cross-L3 seat left its CPU within 25us on 99.6% of ipc's and 56-71% of
+// frame's (research t30b), and within it a seat on the waker's own CPU waits
+// for nothing.
+pub const WAKER_LEAVE_NS: u64 = 25_000;
 
 impl Default for TuningKnobs {
     fn default() -> Self {
         Self {
             slice_ns: 1_000_000,
-            preempt_thresh_ns: 1_000_000,
             batch_slice_ns: 20_000_000,
-            affinity_mode: AFFINITY_OFF,
             codel_thresh_ns: 5_000_000,
-            burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            phi_base_ns: 0,
+            standing_targets: STANDING_TARGETS,
+            waker_leave_ns: 0,
         }
+    }
+}
+
+impl TuningKnobs {
+    // WHAT BPF APPLIES FOR A WRITTEN SET, ON intf.h's RAILS: EVERY SLICE IT
+    // GRANTS FLOORS AT SLICE_MIN_NS, AND AN UNWRITTEN HOLD STANDS AT
+    // SLICE_STANDING_TARGETS. THE REST IT APPLIES AS WRITTEN, AND phi_base_ns
+    // RESOLVES IN BPF's tick() (Scheduler::read_phi_base_applied). THE LAYER
+    // WRITES THIS, SO THE MAP HOLDS THE VALUE APPLIED.
+    pub fn applied(&self) -> Self {
+        let mut k = *self;
+        k.slice_ns = k.slice_ns.max(SLICE_MIN_NS);
+        k.batch_slice_ns = k.batch_slice_ns.max(SLICE_MIN_NS);
+        if k.standing_targets == 0 {
+            k.standing_targets = STANDING_TARGETS;
+        }
+        k
     }
 }
 
@@ -107,13 +138,11 @@ impl Regime {
 // THE BASE KNOB PROFILE.
 //
 // This was three profiles selected by a Regime enum. An audit of what actually
-// varied across Light/Mixed/Heavy found only slice, preempt and batch, all now
-// derived from measured queue depth, critical slowing and traffic shape.
-// codel_thresh_ns and burst_slice_ns were IDENTICAL in all three, so they were
-// never regime-dependent -- they were defaults wearing a selector.
-// affinity_mode carries its base value THROUGH: a coupling derivation was tried
-// and withdrawn after it regressed IPC 16x, and derive_percpu_knobs must not
-// reintroduce one.
+// varied across Light/Mixed/Heavy found only slice, preempt and batch. Slice and
+// batch are now derived from measured queue depth and traffic shape; preempt
+// had no BPF reader and is gone.
+// codel_thresh_ns was IDENTICAL in all three, so it was never
+// regime-dependent -- a default wearing a selector.
 //
 // What remains is a starting point the derivations move from. It is not a
 // policy choice; it is the value a knob holds on a machine we have not measured
@@ -121,13 +150,13 @@ impl Regime {
 pub fn base_knobs() -> TuningKnobs {
     TuningKnobs {
         slice_ns: MIXED_SLICE_NS,
-        preempt_thresh_ns: MIXED_PREEMPT_NS,
         batch_slice_ns: MIXED_BATCH_NS,
-        affinity_mode: AFFINITY_WEAK,
         codel_thresh_ns: 5_000_000,
-        burst_slice_ns: 1_000_000,
         topology_tau_ns: 0,
         codel_eq_ns: 0,
+        phi_base_ns: 0,
+        standing_targets: STANDING_TARGETS,
+        waker_leave_ns: 0,
     }
 }
 
@@ -135,12 +164,10 @@ pub fn base_knobs() -> TuningKnobs {
 // CAPS DIMENSIONED AS Q16 FIXED-POINT MULTIPLIERS OF tau_ns. k_i CALIBRATED
 // AGAINST THE 12C REFERENCE TOPOLOGY, WHERE tau IS 13.3MS:
 //   SLICE_CAP:   0.15  -> 2.0MS
-//   PREEMPT_CAP: 0.075 -> 1.0MS
 //   BATCH_CAP:   1.5   -> 20MS (Mixed ONLY)
 //   SOJOURN:     0.15  -> 2.0MS, WHICH IS ITS CLAMP FLOOR
 // PER-CAP CLAMPS ARE SAFETY RAILS.
 const K_SLICE_CAP_Q16: u64 = 9830; // 0.15
-const K_PREEMPT_CAP_Q16: u64 = 4915; // 0.075
 const K_BATCH_CAP_Q16: u64 = 98304; // 1.5
 const K_SOJOURN_Q16: u64 = 9830; // 0.15
 
@@ -151,13 +178,18 @@ fn scale_tau_u64(tau_ns: u64, k_q16: u64) -> u64 {
 
 pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64, tau_ns: u64) -> TuningKnobs {
     let mut knobs = base_knobs();
+    // THE REGIME'S PROFILE: THE SLICE A NON-STANDING TASK GETS, BEFORE THE tau
+    // CAP AND THE LOW-CORE CAP BELOW.
+    knobs.slice_ns = match r {
+        Regime::Light => LIGHT_SLICE_NS,
+        Regime::Mixed => MIXED_SLICE_NS,
+        Regime::Heavy => HEAVY_SLICE_NS,
+    };
 
     let slice_cap_tau = scale_tau_u64(tau_ns, K_SLICE_CAP_Q16).clamp(500_000, 8_000_000);
-    let preempt_cap_tau = scale_tau_u64(tau_ns, K_PREEMPT_CAP_Q16).clamp(250_000, 4_000_000);
     let sojourn_tau = scale_tau_u64(tau_ns, K_SOJOURN_Q16).clamp(2_000_000, 6_000_000);
 
     knobs.slice_ns = knobs.slice_ns.min(slice_cap_tau);
-    knobs.preempt_thresh_ns = knobs.preempt_thresh_ns.min(preempt_cap_tau);
 
     // LOW-CORE SLICE CAP. tau IS LARGEST AT LOW CORE COUNT (lambda_2 SHRINKS
     // AS CORES DROP), SO THE tau SLICE CAP ABOVE IS LOOSEST EXACTLY WHERE A
@@ -316,18 +348,52 @@ impl OscillatorState {
     pub fn effective_release_ns(&self) -> u64 {
         self.codel_target_ns.saturating_add(self.home_dist_extra_ns)
     }
+
+    // THE BPF IS RESPONDING WHILE ITS EFFECTIVE RELEASE POINT SITS BELOW ITS
+    // AT-REST ONE. The oscillator rests at codel_eq clamped into its own window
+    // (codel_seed_ns, the value the envelope parks it at exactly); rescues pull
+    // the target below that and the spring restores it. Both sides carry the
+    // same nearest-peer hold, so the comparison is release point to release
+    // point. No equilibrium written yet, or a degenerate window: not responding.
+    pub fn responding(&self, codel_eq_ns: u64) -> bool {
+        if codel_eq_ns == 0 || self.codel_target_floor_ns >= self.codel_target_max_ns {
+            return false;
+        }
+        let rest = self.applied_eq(codel_eq_ns);
+        self.effective_release_ns() < rest.saturating_add(self.home_dist_extra_ns)
+    }
+
+    // THE EQUILIBRIUM BPF APPLIES FOR A WRITTEN codel_eq_ns: apply_tau_scaling's
+    // TWO COMPARES INTO THE OSCILLATOR'S WINDOW, IN ITS ORDER. ON A PART WHERE
+    // tau NEARS 1ms THE WINDOW's 200us FLOOR SITS ABOVE THE WRITTEN VALUE. 0 IS
+    // UNWRITTEN, AND WITH NO WINDOW READ BACK THE WRITTEN VALUE STANDS.
+    pub fn applied_eq(&self, codel_eq_ns: u64) -> u64 {
+        if codel_eq_ns == 0 || self.codel_target_max_ns == 0 {
+            return codel_eq_ns;
+        }
+        let mut eq = codel_eq_ns;
+        if eq < self.codel_target_floor_ns {
+            eq = self.codel_target_floor_ns;
+        }
+        if eq > self.codel_target_max_ns {
+            eq = self.codel_target_max_ns;
+        }
+        eq
+    }
 }
 
 // QUIESCENCE GATE
 // Latches a "frozen" flag telling the monitor loop the machine is steady. The
 // loop still ticks at 1 Hz; the chaos sensors are the exit condition.
 //
-// The third term used to be MWU weight-vector convergence. With no learner
-// there is nothing to converge, so the gate is the chaos band alone -- which
-// makes the saturation hole (a flat idle_pct window reads lambda ~2 and DET
-// 1.0, both in band) the only thing standing between a pegged box and a frozen
-// loop. Replacing this with an occupancy predicate over per-CPU queue depth is
-// the open item; the graph now supplies the depth series it needs.
+// FREEZE ON OCCUPANCY, NOT PATTERN. A pegged box pins idle_pct flat, and a
+// flat window reads lambda ~2 and DET 1.0, both in band, so the chaos band
+// alone froze a saturated loop on 54-74% of its ticks. Occupancy is the
+// predicate: any depth sample this tick, own queue or domain queue, above zero
+// means work is waiting and the box is not steady. Zero is the boundary, not a
+// tuned threshold. The pattern lenses then corroborate, each only where it has
+// a reading: a lens below its validity floor drops out of the verdict rather
+// than vetoing it.
 pub const QUIESCE_ENTER_TICKS: u32 = 4;
 
 pub struct QuiescenceState {
@@ -350,12 +416,13 @@ impl QuiescenceState {
     }
 
     // ADVANCE THE GATE ONE TICK. RETURNS THE LATCHED `frozen` FLAG.
-    // rqa_det IS None WHEN THE WINDOW IS NOT YET FULL -- THAT NEVER
-    // COUNTS AS IN-BAND (NEVER FREEZE ON INSUFFICIENT DATA).
-    pub fn update(&mut self, hvg_lambda: f64, rqa_det: Option<f64>, mwu_converged: bool) -> bool {
-        let in_band = hvg_lambda <= crate::chaos::HVG_LAMBDA_PERIODIC_MAX
-            && rqa_det.is_some_and(|d| d >= crate::chaos::RQA_DET_STEADY_MIN)
-            && mwu_converged;
+    // `occupied` IS WHETHER ANY DEPTH SAMPLE DRAINED THIS TICK WAS ABOVE ZERO.
+    // rqa_det IS None UNTIL RQA_MIN_SAMPLES BUCKETS HAVE FILLED ITS WINDOW, AND
+    // WHILE None IT HAS NO VOTE.
+    pub fn update(&mut self, hvg_lambda: f64, rqa_det: Option<f64>, occupied: bool) -> bool {
+        let in_band = !occupied
+            && hvg_lambda <= crate::chaos::HVG_LAMBDA_PERIODIC_MAX
+            && rqa_det.is_none_or(|d| d >= crate::chaos::RQA_DET_STEADY_MIN);
 
         if in_band {
             self.in_band_streak = self.in_band_streak.saturating_add(1);
@@ -393,15 +460,15 @@ pub fn next_retune_interval(cur: u32, sub_threshold: bool, disturbed: bool) -> u
 }
 
 // COMMIT-ON-CHANGE: TRUE IFF THE TWO KNOB SETS DIFFER ON ANY
-// MWU-OWNED FIELD. topology_tau_ns / codel_eq_ns ARE EXCLUDED -- THEY
+// FIELD THE ADAPTIVE LOOP DERIVES. topology_tau_ns / codel_eq_ns ARE EXCLUDED -- THEY
 // ARE OWNED BY THE TOPOLOGY LAYER AND WRITTEN INDEPENDENTLY VIA
 // write_topology_fields(); INCLUDING THEM WOULD SPURIOUSLY TRIP THE
 // DIFF EVERY TICK THE LOOP OVERLAYS THEM.
 pub fn knobs_differ(a: &TuningKnobs, b: &TuningKnobs) -> bool {
     a.slice_ns != b.slice_ns
-        || a.preempt_thresh_ns != b.preempt_thresh_ns
         || a.batch_slice_ns != b.batch_slice_ns
-        || a.affinity_mode != b.affinity_mode
         || a.codel_thresh_ns != b.codel_thresh_ns
-        || a.burst_slice_ns != b.burst_slice_ns
+        || a.phi_base_ns != b.phi_base_ns
+        || a.standing_targets != b.standing_targets
+        || a.waker_leave_ns != b.waker_leave_ns
 }
