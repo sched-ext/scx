@@ -6,8 +6,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, ensure};
 
 /// Identify the running executable, including local changes and its embedded BPF.
-/// Open before spawning: /proc/self/exe in the child would identify sha256sum.
-/// The open inode also remains correct if a rebuild replaces the binary on disk.
+/// Open before spawning: in the child /proc/self/exe is sha256sum; the inode survives a rebuild.
 pub fn binary_sha256() -> Result<String> {
     let executable = File::open("/proc/self/exe").context("opening running executable")?;
     let output = Command::new("sha256sum")
