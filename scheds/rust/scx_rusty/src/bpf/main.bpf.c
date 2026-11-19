@@ -1837,6 +1837,12 @@ __weak s32 create_dom(u32 dom_id)
 	}
 
 	domc->id = dom_id;
+	/*
+	 * A freed task_ctx slot is zeroed, so start the generation at 1 for
+	 * the load balancer not to take a freed slot for a task recorded in
+	 * the current generation.
+	 */
+	domc->active_tasks.genn = 1;
 
 	ret = create_save_cpumask(&lb_domain->cpumask);
 	if (ret)
