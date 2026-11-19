@@ -322,6 +322,16 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
 }
 
 /*
+ * Don't wait for previous turbulent CPU if this task is preemption vulnerable.
+ */
+static bool warm_cpu_turbulent_for(struct pick_ctx *ctx)
+{
+	struct cpu_ctx *prevc = get_cpu_ctx_id(ctx->prev_cpu);
+
+	return prevc && is_turbulent_cpu(prevc) && is_preemption_vulnerable(ctx);
+}
+
+/*
  * For preemption-vulnerable tasks, repartition active/overflow masks based
  * on the pre-computed steady_cpumask. Steady (non-turbulent) CPUs become
  * the active set, and turbulent CPUs become the overflow set.
@@ -1049,7 +1059,8 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 */
 	if (warm_cpu_ns && ctx->prev_cpu >= 0 &&
 	    bpf_cpumask_test_cpu(ctx->prev_cpu, cast_mask(ctx->active)) &&
-	    bpf_cpumask_test_cpu(ctx->prev_cpu, ctx->p->cpus_ptr)) {
+	    bpf_cpumask_test_cpu(ctx->prev_cpu, ctx->p->cpus_ptr) &&
+	    !warm_cpu_turbulent_for(ctx)) {
 		if (claim_idle_cpu(ctx->prev_cpu)) {
 			cpu = ctx->prev_cpu;
 			goto idle_out;
