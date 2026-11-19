@@ -1710,8 +1710,8 @@ void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
 	scx_bpf_task_set_dsq_vtime(p, vtime_now);
 }
 
-s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
 {
 	struct task_ctx *tctx;
 	int ret;
@@ -1721,12 +1721,20 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 
-	if ((ret = scx_pmu_task_init(p)))
-		return ret;
+	if (perf_config || perf_sticky) {
+		ret = scx_pmu_task_init(p);
+		if (ret)
+			return ret;
+	}
 
-	ret = init_cpumask(&tctx->cpumask);
-	if (ret)
-		return ret;
+	if (gpu_enabled && numa_enabled) {
+		ret = init_cpumask(&tctx->cpumask);
+		if (ret) {
+			if (perf_config || perf_sticky)
+				scx_pmu_task_fini(p);
+			return ret;
+		}
+	}
 
 	return 0;
 }
@@ -1734,7 +1742,8 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
 		   struct scx_exit_task_args *args)
 {
-	scx_pmu_task_fini(p);
+	if (perf_config || perf_sticky)
+		scx_pmu_task_fini(p);
 }
 
 /*
