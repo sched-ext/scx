@@ -156,10 +156,12 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
     }
 
     let ptr = unsafe {
-        &mut *std::ptr::with_exposed_provenance_mut::<[u64; 10]>(args.bitmap.try_into().unwrap())
+        &mut *std::ptr::with_exposed_provenance_mut::<types::scx_bitmap>(
+            args.bitmap.try_into().unwrap(),
+        )
     };
 
-    let (valid_mask, _) = ptr.split_at_mut(mask.len());
+    let (valid_mask, _) = ptr.bits.split_at_mut(mask.len());
     valid_mask.clone_from_slice(mask);
 
     let mut args = types::arena_topology_node_init_args {
