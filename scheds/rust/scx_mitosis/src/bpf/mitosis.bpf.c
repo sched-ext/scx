@@ -1583,8 +1583,12 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	if (cgrp_is_dying(cgrp))
 		return 0;
 
-	/* Initialize ancestors first (replicates SCX cgroup_init order) */
-	bpf_for(level, 1, target_level)
+	/*
+	 * Initialize ancestors first (replicates SCX cgroup_init order). The
+	 * walk starts at the root: tp_cgroup_mkdir is attached before
+	 * mitosis_init() runs, so the root's cgrp_ctx may not exist yet.
+	 */
+	bpf_for(level, 0, target_level)
 	{
 		struct cgroup *ancestor __free(cgroup) = lookup_cgrp_ancestor(cgrp, level);
 		if (!ancestor)
