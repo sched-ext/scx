@@ -1028,22 +1028,24 @@ struct rq___local {
 	 */
 	u64		clock_task;
 	/*
-	 * Invariant version of clock_task scaled by CPU capacity and
-	 * frequency. For example, clock_pelt advances 2x slower on a CPU
-	 * with half the capacity.
+	 * Invariant version of clock_task: while a task runs, it advances
+	 * scaled by CPU capacity and frequency. For example, clock_pelt
+	 * advances 2x slower on a CPU with half the capacity.
 	 *
-	 * At idle exit, rq->clock_pelt jumps forward to resync with
-	 * clock_task. The kernel's rq_clock_pelt() corrects for this jump
-	 * by subtracting lost_idle_time, yielding a clock that appears
-	 * continuous across idle transitions. scx_clock_pelt() mirrors
-	 * rq_clock_pelt() by performing the same subtraction.
+	 * While the CPU is idle, the kernel resyncs clock_pelt with
+	 * clock_task, giving back at once the time it fell behind. Over an
+	 * interval that contains idle, it therefore advances by clock_task,
+	 * not by invariant active time. Only a difference taken while a task
+	 * runs throughout measures invariant time.
 	 */
 	u64		clock_pelt;
 	/*
-	 * Accumulates the magnitude of each clock_pelt jump at idle exit.
-	 * Subtracting this from clock_pelt gives rq_clock_pelt(): a
-	 * continuous, capacity-invariant clock suitable for both task
-	 * execution time stamping and cross-idle measurements.
+	 * The part of the clock_pelt resync that the kernel books as lost
+	 * rather than idle. It grows only when the CFS, RT and DL
+	 * utilization sums are at their maximum, as on an always-running
+	 * CPU, and sched_ext tasks do not contribute to the CFS sum.
+	 * Otherwise rq_clock_pelt() = clock_pelt - lost_idle_time jumps
+	 * with clock_pelt at the resync.
 	 */
 	unsigned long	lost_idle_time;
 	/*
@@ -1136,25 +1138,15 @@ static inline u64 scx_clock_pelt(u32 cpu)
 	struct rq___local *rq = get_current_rq(cpu);
 
 	/*
-	 * Equivalent to the kernel's rq_clock_pelt(): subtracts
-	 * lost_idle_time from clock_pelt to absorb the jump that occurs
-	 * when clock_pelt resyncs with clock_task at idle exit. The intent
-	 * is a continuous, capacity- and frequency-invariant clock that is
-	 * frozen during idle, IRQ, and hypervisor steal.
+	 * Equivalent to the kernel's rq_clock_pelt(): clock_pelt minus
+	 * lost_idle_time. It is invariant only over an interval in which a
+	 * task runs throughout. Across idle it catches up with clock_task
+	 * (see struct rq___local), so it is not a continuous invariant
+	 * clock.
 	 *
-	 * However, like scx_clock_task(), this clock has a stale-read issue
-	 * for remote idle CPUs with NO_HZ_IDLE (the default). clock_pelt
-	 * itself advances at wall-clock rate (hardware-clock based), but
-	 * lost_idle_time is only updated via update_rq_clock_pelt(), which
-	 * requires update_rq_clock() to be called. With NO_HZ_IDLE, the
-	 * periodic tick is stopped on idle CPUs, so lost_idle_time is not
-	 * refreshed during idle. Reading this clock for a remote idle CPU
-	 * from a BPF timer callback therefore returns a value that drifts
-	 * at wall-clock rate -- the same stale behaviour as scx_clock_task().
-	 *
-	 * Without NO_HZ_IDLE, periodic ticks keep lost_idle_time nearly in
-	 * sync (stale by at most one tick period, ~1 ms), so the result is
-	 * accurate.
+	 * Like scx_clock_task(), it is only updated on scheduling events.
+	 * With NO_HZ_IDLE (the default), reading it for a remote idle CPU
+	 * returns the value from the CPU's last rq clock update.
 	 */
 	return rq ? (rq->clock_pelt - rq->lost_idle_time) : 0;
 }
