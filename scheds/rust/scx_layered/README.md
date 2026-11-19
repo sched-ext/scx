@@ -98,5 +98,157 @@ interrupt overhead the scale factor is 1.0 and compensated utilization
 equals raw utilization, so the flag has no effect on layers that only
 run on clean CPUs.
 
+### Memory-bandwidth limits
+
+A Confined or Grouped layer can limit its share of each NUMA node's memory
+bandwidth:
+
+```json
+"membw_limit": {
+  "utilization_range": [0.30, 0.40],
+  "action": "Shrink"
+}
+```
+
+The low and high values are fractions of the node's bandwidth capacity, and
+the limit applies to the layer's attributed bandwidth, not to the node's total
+traffic. When a layer reaches the high watermark on a node, that `(layer, node)`
+pair becomes pressured. It remains pressured until its attributed utilization
+reaches the low watermark.
+
+Pressure is evaluated on the node owning the memory, but CPU caps apply to the
+nodes whose CPUs generate the traffic, which differ for remote accesses. A
+layer's CPUs on a node are capped when that node generates at least 10% of the
+layer's attributed bandwidth into a pressured node, and Shrink sizes the cap by
+the most overloaded node it feeds.
+
+- `Hold` caps the layer at the CPUs it holds on the node when pressure starts.
+- `Shrink` cuts the cap proportionally to the overshoot, by at least one
+  allocation unit, at most once per second so the bandwidth signal can settle
+  between cuts.
+
+The cap outlives the pressure: while utilization is between the watermarks the
+cap holds, and below the low watermark it relaxes by one allocation unit per
+second until it covers the whole node and is dropped. This keeps a noisy signal
+from releasing the cap all at once and regrowing the layer immediately. The
+layer-wide `cpus_range` minimum is always honored.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Uncapped
+    Uncapped --> Capped: attributed bandwidth >= high * capacity
+    Capped --> Capped: pressured: Hold keeps cap, Shrink cuts cap (1/s)
+    Capped --> Capped: between watermarks: cap holds
+    Capped --> Capped: below low: cap += 1 alloc unit (1/s)
+    Capped --> Uncapped: cap reaches node size
+```
+
+A cap only limits bandwidth if the layer cannot run elsewhere. Confined layers
+already stay on their CPUs. Grouped layers normally overflow onto CPUs they do
+not own, so while any node is capped they are confined the same way, and the
+overflow resumes once all caps are dropped.
+
+CPU count controls bandwidth only below the point where the layer saturates the
+node's memory. A streaming workload can saturate a node with a small fraction
+of its cores, and adding CPUs beyond that point does not add bandwidth. `Hold`
+therefore only limits a layer which is still below that point when pressure
+starts, and `Shrink` may need to cut deeply, which also limits the layer's
+non-memory work. Choose `cpus_range` minimums accordingly.
+
+#### Proportional bandwidth attribution
+
+The hardware PMU event used by `membw_gb` is sampled while each task runs, so
+its deltas can be associated with a layer and the NUMA node of the executing
+CPU. A node-level counter provides the shared bandwidth total for each NUMA
+node, and `scx_layered` apportions each node's total among all layers, similar
+to proportional set size:
+
+```text
+layer_bandwidth[layer, node] = node_bandwidth[node]
+                              * layer_pmu_delta[layer, node]
+                              / sum_layer_pmu_deltas[node]
+```
+
+The node total comes from `--node-membw-source`:
+
+- `memctl`: memory-controller CAS counters (AMD UMC), one per DRAM channel,
+  grouped by the node owning the channel. These count actual DRAM reads and
+  writes, including prefetches, writebacks, DMA, and remote-socket accesses to
+  the node's memory, which matches what node capacity describes. Packages that
+  span multiple NUMA nodes (NPS2/NPS4) are not supported.
+  On single-NUMA-node NVIDIA Grace systems, this source uses SCF CMEM reads
+  (`cmem_rd_data`, 32 bytes per count) and writes (`cmem_wr_total_bytes`).
+  These count traffic served by CPU memory, including prefetches and
+  writebacks. GPU and PCIe traffic monitored by separate PMUs is excluded.
+- `resctrl`: root-group MBM, with L3 monitoring domains grouped by NUMA node.
+  MBM counts traffic leaving each L3 regardless of where it is served, so a
+  node's total includes its CPUs' remote accesses and, on AMD, cache-to-cache
+  transfers. It can exceed the node's local DRAM capacity.
+- `auto` (default): `memctl` when available, otherwise `resctrl`.
+
+Rates are computed over the interval between two node samples, which the
+scheduler takes immediately before reading the per-layer PMU proxies.
+
+Every layer participates in the denominator, including layers without a
+`membw_limit`, so shared traffic is counted once. The policy is applied only to
+layers which configure a limit. If a node has bandwidth activity but no usable
+PMU proxy delta, that sample is left unattributed and does not trigger a layer
+policy.
+
+PMU proxy deltas are recorded on the executing CPU's node. On AMD Zen 3 and
+later, local and remote DRAM demand fills are counted separately. On Zen 4, L2
+prefetches which miss the L3 are counted too; they carry most streaming
+traffic, and their remote share is estimated from the layer's demand
+local/remote ratio. With `memctl` node totals, which belong to the node owning
+the memory, local fills stay on the CPU's node and remote fills are moved to the
+remote nodes in proportion to their measured traffic (exact with two nodes).
+With `resctrl` totals, which are counted on the requesting CPU's node, the
+whole proxy stays there. Other CPUs count a single event and attribute all
+fills to the CPU's node.
+
+On ARM, the kernel-advertised `l3d_cache_refill` event supplies the core proxy.
+On Grace it includes streaming read traffic brought in by hardware prefetches.
+Systems with multiple ARM core PMU types are not supported. Grace SCF totals
+are currently supported only with one NUMA node, since this core proxy cannot
+distinguish local and remote fills.
+
+This attribution is an estimate. Writebacks and non-temporal stores are not
+measured directly by the core proxies. Demand-fill-only proxies also omit
+hardware prefetches. Layers dominated by such traffic are under-attributed, and
+the difference is charged to other layers on the same node. DMA is not
+attributed to any layer. A future resctrl-per-layer mode can provide stronger
+attribution where enough RMIDs are available.
+
+#### Capacity and CPU sizing
+
+No CPU-model-specific bandwidth values are assumed. When at least one layer
+configures `membw_limit`, each node's capacity is selected in this order:
+
+1. `--node-membw-capacity-gb N`, applied uniformly to all nodes.
+2. The larger of the HMAT read and write bandwidth from sysfs. Reads and writes
+   share the same channels, so they are not added.
+
+If neither source is available for every node, `membw_limit` is ignored with a
+warning instead of guessing a capacity. Without any `membw_limit` or
+`membw_gb` field, memory-bandwidth tracking is disabled and no PMU counter or
+resctrl sampling is enabled.
+
+CPU utilization still computes each layer's initial target. The unified
+allocator then places that demand across nodes, after which `membw_limit` caps
+the selected layer's target on capped nodes. Uncapped nodes retain their
+normal allocations, and competing layers may use the released CPUs. The
+existing global `membw_gb` limit composes with this policy; the lower target
+wins.
+
+Memory-bandwidth tracking uses up to three pinned core PMU counters and a node
+source: memory-controller PMUs or resctrl mounted at `/sys/fs/resctrl`. Pinning
+prevents silent perf multiplexing of the core proxy. Memory-controller counters
+are shared with other system-wide perf users, so their deltas are scaled by
+enabled/running time and a warning is logged when they are multiplexed.
+Scheduler startup logs a warning and ignores memory-bandwidth limits if the
+core event cannot run on every online CPU or no node source is available. See
+`examples/membw_limit.json` (pass it as `f:examples/membw_limit.json`).
+
 `scx_layered` can provide performance wins, for certain workloads when
 sufficient tuning on the layer config.

@@ -1,0 +1,30 @@
+[
+	{
+		"name": "bandwidth-limited",
+		"matches": [
+			[{ "PcommPrefix": "my-service" }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range": [2, 32],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "Topo",
+				"membw_limit": {
+					"utilization_range": [0.30, 0.40],
+					"action": "Shrink"
+				}
+			}
+		}
+	},
+	{
+		"name": "everything-else",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]
