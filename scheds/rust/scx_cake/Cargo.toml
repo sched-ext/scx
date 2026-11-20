@@ -1,6 +1,6 @@
 [package]
 name = "scx_cake"
-version = "1.4.1"
+version = "1.4.2"
 authors = ["RitzDaCat"]
 edition = "2024"
 rust-version = "1.91"

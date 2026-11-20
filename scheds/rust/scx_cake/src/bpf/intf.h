@@ -60,6 +60,8 @@ enum consts {
 	STATE_SLOT_WORDS	= STATE_SLOT_BYTES / sizeof(u64),
 
 	WATCHDOG_TIMEOUT_MS	= 5 * 1000,
+	CAKE_DSQ_SCAN_DEPTH	= 64,	/* deep queues use bounded candidate selection */
+	CAKE_DSQ_SCAN_MAX	= 8,
 	TICK_MAX_NS		= 20 * NSEC_PER_MSEC,	/* longest tick the loader takes (HZ 50) */
 
 	MAX_CPUS	= 1024,	/* verifier bound; a power of 2 so indexes mask; not a DSQ count */

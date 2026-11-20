@@ -36,6 +36,7 @@ bench/*
 !bench/review_regressions.py
 !bench/topology_regressions.py
 !bench/pool_mark_ordering.py
+!bench/pool_regressions.py
 !bench/rt_displace.py
 !bench/frame_attrib.py
 !bench/wake_occupant.py

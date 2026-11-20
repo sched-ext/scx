@@ -14,6 +14,7 @@ pipeline. Ignored local tools a clone lacks are listed in [STRUCTURE](../docs/ST
 | `review_regressions.py`, `review_regressions.c` | extract scheduler functions into deterministic helper models; the C no longer compiles against current source |
 | `topology_regressions.py`, `topology_regressions.c` | offline topology and policy cases using that extractor; stops on functions that no longer exist |
 | `pool_mark_ordering.py` | queue-mark interleaving model; not a kernel concurrency proof |
+| `pool_regressions.py` | compile and run the current pool callbacks against deferred inserts and canceled tasks |
 | `arith_price.c`, `storage_price.c`, `qmark_price.c`, `floor_ladder.c`, `handoff_shape.c`, `decomp.c`, `wakecost.c`, `cakeload.c` | standalone cost and load probes; read each source for its assumptions and build line |
 
 Models may describe an older source shape: check the extraction against the current

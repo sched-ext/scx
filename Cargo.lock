@@ -5876,7 +5876,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cake"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "anyhow",
  "clap",

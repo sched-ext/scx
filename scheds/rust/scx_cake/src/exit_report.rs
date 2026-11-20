@@ -361,7 +361,6 @@ pub fn pools(skel: &BpfSkel<'_>, verbose: bool) {
             .iter()
             .map(|v| *v as i64)
             .collect();
-        // Bypass wipes pooled tasks' tags before ops.disable, so a positive count is normal.
         for (pool, left) in pending.iter().enumerate().filter(|(_, v)| **v < 0) {
             warn!("   pool    {pool}: pending {left} at exit; more tokens returned than taken");
         }

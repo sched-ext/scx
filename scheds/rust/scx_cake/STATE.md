@@ -31,6 +31,640 @@ flowchart LR
 
 ---
 
+## 2026-11-20 · Task storage is created in `ops.init_task` (1.4.2, on the nightly)
+
+A user reported four hard lockups on a Ryzen 9 9950X3D under Cake 1.3.0
+and 1.4.1, on CachyOS 7.3.1, 7.3.3 and 7.4.0-rc3. Each capture showed one
+CPU spinning on its own rq lock inside `ops.stopping`:
+
+```
+__schedule
+ dequeue_task_scx
+  cake_stopping -> cake_home_sample
+   bpf_task_storage_get(F_CREATE)
+    bpf_selem_alloc -> kmalloc_nolock
+     obj_cgroup_uncharge_pages -> refill_stock
+      queue_work_on -> try_to_wake_up
+       native_queued_spin_lock_slowpath
+```
+
+The create charges the map's memcg. That charge can queue work, and the
+wakeup takes the rq lock that `__schedule()` already holds. Every other
+CPU then hangs on the stuck CPU's TLB-flush IPI. The pool count added
+for 1.4.2 created the same record from `ops.enqueue`, also under the rq
+lock.
+
+Cake now creates the record in `ops.init_task`, which the kernel calls
+with no rq lock at fork and for every existing task at attach. Every
+other callback only looks the record up. A task whose create failed
+still runs: it has no home or seat, and its pooled wakes go to the
+global queue. This needs a stock kernel only. The lockup did not
+reproduce on the 9800X3D, so the fix is checked against the reported
+path and has no before and after. The desktop freeze of 2026-11-19 left
+no record; whether it was this lockup is unknown.
+
+On 1.4.1 a thread create and join took 4,309 and 4,322 ns before the
+fix and 4,547 and 4,536 ns after (median of 2,000 pairs, two runs each
+in ABBA order, 7.3.5). A thread that blocked fewer than 64 times used to
+skip the allocation. The cost on the 1.4.2 source is unmeasured.
+
+ShadowGate at 720p Low, uncapped, four quiet launches per build, each
+run against the 1.4.2 work without the fix (`3df00acc05a7`):
+
+| Build | FPS, reference / build | Frame p99, ms | Frame p99.9, ms | Input p99, ms |
+|---|---:|---:|---:|---:|
+| 1.4.2 work with the fix (`d0a13ad04920`, the nightly) | 603.25 / 604.35 | 1.865 / 1.862 | 2.088 / 2.124 | 1.732 / 1.713 |
+| 1.4.1 with the fix (`a176722ae3f3`) | 601.96 / 593.81 | 1.866 / 1.879 | 2.076 / 2.158 | 1.734 / 1.749 |
+| 1.4.2 work with the fix and the seat keep (`0f3398f44e76`) | 593.10 / 599.96 | 1.870 / 1.867 | 2.106 / 2.077 | 1.737 / 1.743 |
+
+The same reference averaged 603.25, 601.96 and 593.10 FPS in the three
+runs, so one run does not resolve the fix's +1.10 FPS. The paired
+changes for the fix were +2.66, -1.79, +5.21 and -1.69 FPS. No build
+reached a 605 FPS average.
+
+### Seat keep in `ops.stopping`
+
+A stage thread that blocks on the CPU whose seat record still names it
+already holds that acquisition. The experiment marked the seat held
+again without the storage lookup, the seat lock, the sequence bump and
+three record writes. `ops.stopping` went from 308 to 327 instructions in
+the object. In two profile slots per build it retired 842.77 and 835.28
+instructions per call and used 490.03 and 487.19 cycles; the per-slot
+cycles overlap. A first form also tested the record in `ops.running` and
+added 11.7 instructions per run there, from spills in the inlined seat
+update. The game run is the third row above. The experiment stays out of
+the nightly: the game does not resolve it and the cycle saving did not
+separate. Patches, builds and results are in
+`scx_cake_bench/runs/shadowgate_init_task_storage_142/`.
+
+### Call depth under `ops.enqueue` on older verifiers
+
+The verifier allows eight nested call frames (`MAX_CALL_FRAMES`) and
+counts every call in the object, the probe arms included. `linux-6.18.y`
+restarts the count at a global function; `linux-6.13.y` and
+`linux-6.16.y` do not. 1.4.1 was eight deep under `ops.enqueue`.
+`cake_pool_insert` made it nine, and upstream's veristat on 6.13 and 6.16
+refused `cake_enqueue` with "the call stack of 8 frames is too deep".
+
+| Build | Deepest chain under `ops.enqueue` | Frames |
+|---|---|---:|
+| 1.4.1 | `cake_enqueue` > `cake_enqueue_wake` > `cake_wake_place` > `cake_dsq_insert_vtime` > `cake_dsq_insert_vtime_probe` > `cake_probe_place` > `cake_stat_inc2_cold` > `cake_stat_inc_cold` | 8 |
+| 1.4.2 before | the same with `cake_pool_insert` after `cake_wake_place` | 9 |
+| 1.4.2 now | ends at `cake_stat_inc2_cold`, which counts without a call | 8 |
+
+`cake_stat_inc2_cold` went from 5 to 20 instructions. The other 65
+functions and all 22 programs are unchanged in the object, so the
+ShadowGate rows above still describe the code that runs with the probe
+off. The chain is at the limit again: one more `__noinline` frame on the
+wake path needs a frame taken out elsewhere.
+
+## 2026-11-20 · Fixed homes and alternative placements in ShadowGate
+
+On the single-CCD Ryzen 7 9800X3D and stock CachyOS 7.3.5, each policy
+ran five quiet matches and two matches alongside four CPU workers. All
+35 scored launches passed the external-noise check. None averaged 610
+presented FPS. The reference was the current 1.4.2 build `3df00acc05a7`.
+
+| Policy | Quiet FPS | Four-worker FPS |
+|---|---:|---:|
+| Fixed home (reference) | 602.68 | 541.94 |
+| Prefer a wholly idle core for work near an active home | 599.99 | 545.64 |
+| Priority kick on eligible pinned wakes | 596.12 | 538.79 |
+| Reserve top-ranked homes for higher-share claimants | 598.76 | 542.51 |
+| Fold paired SMT idle bits | 601.95 | 540.97 |
+
+FPS is total present intervals divided by their total elapsed time.
+Fixed homes led the quiet runs on FPS, p99 frame time and p99 simulated
+input latency. With four workers, isolated homes improved FPS and p99
+frame time in both blocks. Median worker throughput was 7,980 bogo-ops/s
+with isolation and 8,025 with fixed homes. The worker delta changed sign
+between the two blocks.
+
+The extra priority-kick counter stayed at zero in all seven scored
+play windows for that build. In two pinned synthetic trials it issued
+124 and 128 requests per 384 wakes. Mean wake delay fell in both
+trials, with mixed p99 results. The boost fixture consistently gave
+the top eligible core to the 57%-duty worker after the 29%-duty
+worker had claimed a home. A separate instrumented game recorded
+1,307 successful isolated-home redirects in 19.3 seconds. In 342 of
+those, the protected owner was RenderThread. These counters record
+the admission decision. Measuring simultaneous sibling execution
+requires a schedule trace.
+
+The SMT fold matched the reference for all 65,536 idle masks on this
+topology. Four paired relay runs measured a median change of -32 ps
+per `select_cpu` call, ranging from -1,585 to +289 ps. In the separate
+handoff arithmetic test, reusing a threshold saved 144 ps per decision
+in the wide-count case and cost 29 ps on the mixed input. No candidate
+became a release default. The patches, matched-block comparisons,
+frame and injected-input tails, and worker throughput are under
+`scx_cake_bench/runs/cake_engine_floor_142/home_frontier/`.
+
+In a separate native-scheduler run, pinned threads exchanged one cache
+line across all 120 unordered logical CPU pairs. The median effective
+half round trip was 27,441 ps for SMT siblings and 43,449 ps for
+distinct cores sharing L3. Distinct-core pair medians ranged from
+29,150 to 52,476 ps. In 48 alternating comparisons, CPU 0 with CPU 2
+was a median 694 ps slower than CPU 0 with CPU 1. The interval for
+the median was 481 to 1,886 ps. The difference varied with the cache
+line's offset in the page. Dividing each elapsed batch by 40,000 gives
+0.025 ps arithmetic granularity. Individual transfer times remain
+unresolved at that scale. Load/store, coherence and spin-loop time all
+contribute.
+
+For this chip the 28 distinct physical-core pairs and eight SMT costs
+fit in 36 bytes at 250 ps per entry. The replay decoded all 120
+logical pairs from a table that fits in one aligned cache line. Across
+held-out launches its mean absolute error was 890 ps. Among distinct-core
+destination comparisons with a predicted gap of at least 2,000 ps, it
+ordered 98.2% correctly (67.7% coverage).
+
+In a subsequent ShadowGate A/B, candidate `5371b796ba00` used the
+table on synchronous wakes after the fixed and previous home paths.
+It could choose a wholly idle core up to five CPPC points below the
+ordinary choice for a predicted gain of at least 2,000 ps. Fixed homes
+averaged 604.90 FPS and the candidate averaged 597.83. The candidate
+lost all four quiet matched pairs and neither build reached 610.
+Median launch p99 frame time rose from 1.826 to 1.874 ms and p99
+simulated-input latency rose from 1.703 to 1.747 ms. Frame p99.9 fell
+from 2.082 to 2.044 ms. Only 13 of 2,172 successful alternate claims
+during play targeted the game process. Every alternate cost one CPPC
+grade. The score includes the extra selection and counting work.
+Keep the release policy. Replay, patch and raw frames are under
+`home_frontier/core_pair/`.
+
+An offline model used these handoff times to weight how far the
+GameThread, RenderThread and RHIThread ran from their own homes. Adding
+the Alcubierre moving-center term increased next-interval runnable-wait
+error slightly in both held-out launches. The center moved in only
+four of the 96 held-out observations. The transfer map and predictor
+replays are in `home_frontier/fabric_latency/` and `home_frontier/alcubierre/`.
+
+## 2026-11-20 · ShadowGate render placement at equal core rank
+
+Five quiet, unpinned launches of the combined 1.4.2 release `3df00acc05a7`
+averaged 599.22 presented FPS. None averaged 610. The five tracked game
+threads each held a distinct fixed home in all 21 snapshots per match.
+The sampler checked each recorded owner against both the per-CPU home
+and the PID-indexed table. A persistent hash collision on one of these
+threads does not explain the five-launch spread.
+In the 592.08 FPS launch RenderThread held CPU 4 while the NVIDIA IRQ
+ran on its SMT sibling, CPU 12. In the 603.37 FPS launch the render home
+was CPU 2. On aligned measurement windows the slower launch used 27.85
+more microseconds of render CPU time per present. Render runnable wait
+increased by 1.08 microseconds per present. Render CPU service was higher
+in all 16 matched seconds. The main and RHI threads used less CPU per
+present in that comparison. These observations do not isolate the IRQ's
+effect. The underlying intervals, owner records and capture are in
+`scx_cake_bench/runs/cake_engine_floor_142/ordinary_variation/`.
+
+An isolated stock-kernel variant `cfb169a718c8` used Cake's existing
+physical-core IRQ mask to break a tie only when acquiring a new home.
+It required equal top rank, known ranks, uniform capacity and one cache
+domain for the tied choices. It introduced no polling. An eight-launch
+comparison scored 601.07 FPS on the reference and 599.21 on the variant.
+Each arm reached 610 in zero of four launches. The two blocks changed
+by +0.75 and -4.48 FPS. Three pairs passed the strict quietness gate,
+averaging 601.59 and 599.38 FPS. Median launch p99.9 rose from 2.131 to
+2.292 ms. A tracked game thread still owned the GPU interrupt's sibling
+in every scored launch. The renderer held it in two reference launches
+and one candidate launch. Keep ordinary acquisition. The isolated patch,
+comparison and build receipts are in `cake_engine_floor_142/home_rank_irq/`.
+
+A separate diagnostic counted 67 fixed-home acquisition attempts in one
+game launch and 22 successful claims. Only two attempts had an eligible
+rank tie. Both came before Cake's IRQ mask was populated. The variant
+changed zero placements in that launch. The timing is specific to a fresh
+scheduler attachment. The scored launches ran without this instrumentation.
+
+When Cake stayed attached through a warmup match, it already recognized
+CPU 12 as an IRQ sink as the next game started. In this separate launch
+the rule changed three of 66 acquisition attempts. All three successfully
+assigned GameThread to CPU 5 in place of equally ranked CPU 4. RenderThread
+had no changed choice. The game committed 22 homes in total. This verifies
+that the rule can take effect on an already-running scheduler.
+
+Two opposing pairs then scored the ordinary and experimental releases
+after an excluded warmup game on each still-attached scheduler. All four
+scored launches began with the IRQ core identified and passed the quiet
+gates. Ordinary Cake averaged 599.95 FPS and the candidate 596.84. Both
+were 0/2 at 610. The paired changes were +2.52 and -8.74 FPS. In the
+592.16 FPS candidate launch, the renderer had no validated fixed home in
+any of the 21 samples. Its last scheduled CPU spanned ten logical CPUs.
+The samples do not show which acquisition or release condition was
+responsible. The results are in `home_rank_irq/warm_shadowgate/`.
+
+The same directory's `historical_audit.json` recomputes complete-present
+FPS from older raw records. Three separate builds on kernel 7.3.4 had
+qualifying launches at 610.262, 612.595 and 610.409 FPS on the same
+ShadowGate executable. Each build crossed the target once, out of three,
+eight and two launches respectively. Brief in-match readings have a
+different denominator from these full-window launch averages.
+
+## 2026-11-20 · Direct admission latency in local 1.4.2
+
+The [system review and editable models](docs/research/cake-system-review/README.md)
+trace an observed ShadowGate wake, show the 9800X3D cache-line layout and
+record two subsequent correctness fixes. In a 7.3.5 guest the loader
+detected a hotplug during topology discovery and retried with both CPUs.
+In a host affinity test a busy worker released an ineligible fixed home at
+its next qualifying sample, 64.2 ms after its allowed CPUs changed.
+The fixes use the existing attachment and blocking callbacks.
+
+A separate quiet ShadowGate screen compared the same reference build
+with a rank shortcut that skips the tier scan when only one CPU remains.
+Those cases accounted for 14.91% of tier-word reads in a gameplay census.
+Across four scored launches per arm, the normal build averaged 603.11 FPS
+and the shortcut 601.48. Neither reached 610. The two blocks disagreed
+and median launch p99 moved from 1.848 to 1.867 ms. Keep ordinary ranking.
+
+Reusing an untagged slice in `cake_running` removed three instructions
+from its common path. Eight handoff pairs gave a median saving of 1.24 ns
+per callback. In a separate four-pair quiet game screen the reference
+averaged 602.60 FPS and reuse 595.38. All launches were below 610.
+The two blocks changed by -17.23 and +2.81 FPS. Keep this as an experiment.
+
+The slice grant clears its low five bits. Its compute threshold is even,
+so adding one to a doubled quotient cannot change the selected cap.
+Applying the cap and handoff floor also preserves the final masked grant.
+Drop that correction and keep the quotient used for sleeper admission.
+Both outputs matched a wide-integer oracle on 272,879 cases. This change
+uses the existing stock-kernel path and adds no runtime instrumentation.
+
+On the 9800X3D with stock CachyOS 7.3.5, eight counterbalanced pairs
+timed direct admission for two mutex-handoff workers. The interval covers
+grant and virtual-time computation through publication of the virtual time.
+P10 moved from 10 to 9 ns in every pair. Median launch share at or below
+10 ns rose from 17.0% to 27.1%. The empty clock pair measured 9 ns at p10.
+P50 and p99 stayed at 19 and 29 ns by median launch. The instrument
+resolves a distribution shift at its lower limit.
+
+With both probes off, eight separate pairs showed a median paired change
+of -4.5 ns at handoff p10 (four faster, three slower, one tie) and +15 ns
+at p99. The handoff did not clear the predeclared improvement threshold.
+The tested release is `5f2d179c352d` and the pre-change release was
+`cb8630cfb042`. Freeze frequency remains unmeasured.
+
+In uncapped ShadowGate at 720p Low with eight bots, all four quiet
+pairs passed the noise checks. Aggregate presented FPS rose from
+598.49 to 599.34. The two blocks changed by +2.26 and -0.58 FPS.
+Median launch p99 frame time was 1.863 and 1.862 ms respectively.
+Neither build reached 610 average FPS in any measured launch. The build
+receipts, per-launch results and game settings are in
+`scx_cake_bench/runs/cake_engine_floor_142/` and its `shadowgate/` folder.
+
+### Precompute the stopping cap at startup
+
+Each priority's virtual-time cap depends only on its reciprocal and a
+tick-derived value set at attach. An experimental build computed all 64
+entries once and read the cap by index when a task stopped. All entries
+matched the original calculation on the host, including idle and padding.
+This uses the same stock-kernel facilities as the local 1.4.2 build.
+
+In a fresh four-pair comparison with that build, ShadowGate averaged
+603.13 FPS with the original calculation and 603.79 with the table.
+All pairs were quiet. Paired differences ranged from -4.30 to +4.78 FPS,
+and the table reached 610 in zero of four launches. Median launch frame
+p99 fell from 1.851 to 1.844 ms and p99.9 rose from 2.056 to 2.148 ms.
+In eight separate handoff pairs the median paired change in stopping
+cost was -0.093 ns/call. Five pairs favored the table and the effect
+reversed by test order. Keep the existing calculation in the nightly.
+Receipts are in `scx_cake_bench/runs/cake_engine_floor_142/stop_cap/`.
+
+## 2026-11-19 · 1.4.2 nightly candidate for reported system freezes
+
+The local user reports a full system freeze during ordinary desktop use,
+including browsing. Audio stopped and SSH from another machine stopped
+responding at the same time.
+The last scheduler event in the previous boot was Cake 1.4.1 enabling on
+CachyOS 7.3.4. The journal ended abruptly at 14:56:10 CST on November 19.
+It recorded no sched_ext abort, GPU fault or clean shutdown at that boundary.
+The next boot's pstore service found no crash record to archive.
+CPU load and wake-to-run latency at the freeze are unknown. The October 20
+report of a game stalling after about ten minutes remains open separately.
+
+The 1.4.2 candidate bounds searches of queues at least 64 tasks deep. It can
+return control to native scheduling when the same head remains overdue and
+the CPU cannot serve the first eight tasks. The handoff worked in guest
+tests on stock CachyOS 7.3.4 and 7.3.5. Shallow queues do not trigger this
+guard. Recovery still requires kernel progress. [Recovery details](./DESIGN.md#lifecycle)
+
+The idle-wakeup defect reproduced on stock CachyOS 7.3.5 in a four-CPU
+QEMU guest. Periodic worker bursts and four freezer tests let sched_ext
+enter power-management bypass with tasks in Cake's wake pool. Before the
+fix, both pool counters ended at eight with no work left. Cake issued 72
+idle self-kicks in the following eight quiet seconds. A kernel probe saw
+799 idle self-kicks at a physical pool depth of zero over the full run.
+The guest stayed responsive. The desktop incident boot recorded no suspend
+or resume, so its cause remains open.
+
+The local fix keeps the pool number in the task's existing BPF storage
+and retires it on a temporary dequeue, before a kernel slice refill can
+hide it. An empty queue can still have a real insert in flight. Cake keeps
+the wakeup for that case. The change requires no kernel patch or timer.
+With the fix, six freezer cycles began at measured pool depths of 1, 1,
+3, 5, 7 and 22 with the default bypass slice. Both counters returned to
+zero after every thaw. The kernel probe and Cake both counted zero idle
+self-kicks, including the eight quiet seconds, and Cake served 548 pool
+tasks. A separate run with a 1001 us bypass slice also drained the pool.
+
+The stock 7.3.5 host verifier accepted the release. The loaded programs
+for CPU selection, dispatch, idle updates and stopping retained the same
+instructions. An ordinary sleep now enters one four-instruction callback.
+Pooled tasks do additional storage work.
+
+Eight ten-second slots in a four-vCPU software-emulated guest compared
+the changes in ABBA and BAAB order with the probe off. In the 120 Hz
+appsim workload, the median of the per-slot p99 frame intervals was
+8.572 ms before and 8.729 ms after. One candidate slot produced 1055
+frames instead of 1200. All four slots in the reverse block reached 1200
+with no interval above 16.7 ms.
+
+ShadowGate ProfileMatch on the 9800X3D and RTX 4090 compared the exact
+pre-fix and fixed 1.4.2 builds at 1280x720 Low. Ordinary play used four
+launches per build in ABBA then BAAB order. Eight background CPU workers
+ran in a separate ABBA block with two launches per build. Values are
+medians across launches and input ends at game simulation.
+
+| Workload | Average FPS, before / fixed | Frame p99, ms | Frame p99.9, ms | Input p99, ms |
+|---|---:|---:|---:|---:|
+| Ordinary | 596.97 / 599.17 | 1.895 / 1.875 | 2.567 / 2.120 | 1.737 / 1.735 |
+| Eight CPU workers | 464.45 / 462.23 | 2.473 / 2.450 | 2.741 / 2.742 | 2.266 / 2.273 |
+
+One 18.58 ms frame occurred before the fix. The longest fixed-build frame
+across both conditions was 5.91 ms. The short runs cannot establish the
+frequency of rare stalls. All 12 measured matches completed and restored
+native scheduling. Each reported the same five draw-time pipeline-state
+misses in the game's I/O guard. No competing GPU work was detected in a
+measured match. Full hashes, per-match results and frame intervals are in
+`scx_cake_bench/runs/shadowgate_idle_142/`.
+
+The archived 1.4.1 nightly (`4a8850699ff9`) and fixed 1.4.2
+(`cb8630cfb042`) also ran head-to-head on the same boot and game build.
+The first eight ordinary matches included external CPU or GPU contention.
+The table uses the four-match ordinary repeat and a separate four-match
+block with eight CPU workers. Each block ran in ABBA order, with two
+matches per build. The same five draw-time pipeline misses occurred in
+all sixteen matches.
+
+| Workload | Average FPS, 1.4.1 / 1.4.2 | Frame p99, ms | Frame p99.9, ms | Input p99, ms |
+|---|---:|---:|---:|---:|
+| Ordinary repeat | 598.19 / 596.97 | 1.862 / 1.883 | 2.108 / 2.179 | 1.733 / 1.746 |
+| Eight CPU workers | 461.38 / 465.24 | 2.515 / 2.472 | 3.562 / 3.181 | 2.318 / 2.246 |
+
+On fixed 1.4.2 threads named `ShadowGate` accumulated 2.84 ms of
+runnable wait per second in the ordinary repeat and 57.30 ms per second
+with the workers. The harness sums by thread name. Six TIDs shared that
+name in a later match, including the process leader. The `RenderThread 0`
+group accumulated 1.98 and 3.70 ms per second respectively.
+Four separate matches with kernel BPF accounting enabled measured 64.67
+and 66.45 ms of Cake callback time per wall second for 1.4.1 and 1.4.2.
+One slot had external GPU activity and one had elevated external CPU
+activity. On 1.4.2 dispatch used 19.26 ms/s, CPU selection 19.09 ms/s,
+and the new quiescent callback 2.07 ms/s at 9.6 ns per call. Per-match
+frames, noise flags, thread waits and callback profiles are in
+`scx_cake_bench/runs/shadowgate_141_vs_142/`.
+
+An additional instrumented match kept every work-stealing attempt and
+counted its outcome against the preceding queue-depth read. Of 932,416
+attempts, 855,240 saw zero depth. Of those, 2,546 still moved a task.
+The depth sample and move can straddle an enqueue. In the second-choice
+pool path, 23,579 of 23,721 depth reads went unused because the claim
+failed (1,208 per second). Moving that read after a successful claim
+would retain the physical depth check before a move. The diagnostic
+patch and counter deltas accompany the callback profiles.
+
+The delayed-lookup experiment (`4ae3b81da9c5`) eliminated the failed
+claim's lookup in the callback fixture. In four ordinary matches per
+build, average FPS was 598.68 / 598.08 (fixed 1.4.2 / experiment), but
+frame p99.9 was 2.078 / 2.213 ms. One baseline slot had external GPU
+activity. Both ordinary blocks had the same tail direction. With eight
+CPU workers, two slots per build gave 454.92 / 463.16 FPS and p99.9
+3.067 / 2.702 ms. Four separate callback profiles put dispatch at
+19.08 / 19.09 ms per wall second. Four six-second spin slots per build
+gave 3,464 completed busy bursts per second and sleeper p99 excess over
+the requested millisecond of 54.51 / 54.52 us. One reverse spin slot
+had high external load. Keep the original fixed 1.4.2 default. The
+experiment and measurements are in `scx_cake_bench/runs/shadowgate_pool_depth_142/`.
+
+Across the two baseline game profiles, Cake used 66.21 ms of CPU time
+per wall second across the host. CPU selection used 19.10 ms/s,
+dispatch 19.08, running 7.99, enqueue 6.97, stopping 4.85, idle
+updates 4.10 and quiescent 2.07. The remaining callbacks used about
+2.05 ms/s. These rates span all threads and CPUs.
+
+A follow-up on the original fixed 1.4.2 isolated the process leader by
+TID. Under eight workers, 98,211 completed runnable waits over 19.52 s
+had p99 16.91 us, maximum 490.07 us and 18 waits of at least 250 us.
+The corresponding ordinary match had p99 2.96 us and maximum 70.33 us.
+The event intervals summed to 12.30 / 4.24 ms per second (loaded /
+ordinary), while the leader's schedstat counter measured 7.17 / 0.46.
+Each trace had one unmatched event and no reported loss. These are
+separate observations from the earlier by-name 57.30 ms/s aggregate.
+
+Unreal Insights identified the engine game thread by OS TID in both
+profiled matches. With eight workers, the middle fifth of frames took
+2.488 ms at median and the slowest one percent took 3.662 ms at median.
+Game-thread work rose from 1.323 to 1.954 ms and game-thread event waits
+from 1.159 to 1.633 ms. GPU time was 0.868 / 0.865 ms. Rendering
+synchronization averaged 1.174 ms on the game thread. World tick rose
+from 0.768 to 1.150 ms in the slow-frame comparison, including more
+time waiting on tasks. The worker at the end of that dependency was
+unidentified. Stage medians can overlap and need not sum. The counters
+cover 7,781 frames under load and 9,915 alone in the instrumented
+`ShadowProfile` region. The `wall_cpu8` and `wall_idle` summaries
+accompany the uninstrumented results above.
+
+A second experiment (`3a84d0851f8a`) skipped physical LLC comparisons
+when the loader found exactly one physical LLC. On the 9800X3D the
+verifier removed 24 dispatch instructions and 128 JIT bytes. The first
+four callback profiles measured 83.99 / 82.22 ns per dispatch (fixed /
+experiment). In reverse order the medians were 83.63 / 83.64 ns.
+Across all eight profiles, total callback time was 65.89 / 66.97 ms
+per wall second. All profile slots had low external CPU and GPU activity.
+
+| Workload | Average FPS, fixed / experiment | Frame p99, ms | Input-to-simulation p99, ms |
+|---|---:|---:|---:|
+| Ordinary, four matches per build | 597.37 / 598.89 | 1.986 / 1.909 | 1.759 / 1.806 |
+| Eight CPU workers, two matches per build | 463.20 / 467.10 | 2.500 / 2.458 | 2.255 / 2.272 |
+
+Background worker throughput was 19,316 / 19,226 stress-ng operations
+per wall second across the full loaded slots. External CPU or GPU
+activity affected several game slots. The unpinned spin test held at
+47 ns p99 deadline overshoot. On CPU 5 the median slot p99 was 47.5 ns
+on the baseline and 19.8 us on the experiment. Two candidate slots
+accounted for the increase, and seven of eight spin slots had external
+load warnings. The dispatch saving did not repeat and a game-input
+benefit was unproven. Keep fixed 1.4.2 for testing. The source patch
+and per-slot evidence are in `scx_cake_bench/runs/shadowgate_single_domain_142/`.
+
+A separate stock 7.3.5 guest exposed two L3s on two emulated sockets.
+The experimental flag loaded as zero. Both pools were occupied on five
+of six freezer entries and both drained after every thaw. Cake served
+869 and 806 tasks in the respective pools and issued zero idle-callback
+self-kicks. The guest measured queue progress on the generic path.
+Physical dual-CCD game performance and the desktop freeze remain open.
+
+Two instrumented ShadowGate matches on fixed 1.4.2 put Unreal tasks,
+Linux runnable intervals and Vulkan submissions on the same monotonic
+clock. The game kept low-latency mode enabled. Each complete frame had
+two frame-fence signals, one from the render thread and one from the
+RHI thread. The measurements cover the game's graphics and compute
+queues. Another GPU client reached 7% activity in the ordinary match.
+
+| Per complete frame | Game alone | Eight background CPU workers |
+|---|---:|---:|
+| Frames observed | 9,264 | 7,530 |
+| Time both queues had no recorded work outstanding | 47.0% | 52.9% |
+| Mean overlap with game thread asleep at its render fence and a foreground worker runnable | 7.9 us | 23.3 us |
+| Frames with at least 136 us of that overlap | 8 | 12 |
+
+The eventual render signaler's own runnable time during the matched
+sleep and queue gap averaged 2.07 / 4.56 us per frame. The RHI
+signaler averaged 0.80 / 1.16 us. Worker readiness alone cannot
+identify the task holding up a frame. The render signaler was already
+on CPU for 206.49 / 243.18 us per frame in these windows. Allocating
+and collecting transient render-graph resources accounted for
+30.56 / 37.49 us of that execution in exclusive CPU scopes. No
+individual timer dominated. At the earlier uninstrumented
+597.4 FPS, reaching 650 FPS requires about 136 us less per frame.
+This overlap gives little support for a blanket worker priority
+change. Per-frame overlaps and capture details are in
+`scx_cake_bench/runs/shadowgate_pipeline_142/`.
+
+A 24-minute light-load desktop test ran native, fixed Cake, fixed Cake
+and native on the same boot. Each six-minute block included two quiet
+minutes without audio, four minutes of silent USB audio and six browser
+input bursts. Cake stayed attached across the middle two blocks. Each
+arm delivered all 7,200 deadlines on a 100 ms timer and completed eight
+minutes of audio with zero reported stream or sink underruns. The
+longest gaps between timer reads were 100.020 ms native and 100.022 ms
+on Cake. A separate offscreen browser processed all six matched inputs
+per arm. Only one of 24 visible-window frame requests completed with
+the displays asleep. Neither arm reproduced the system-wide freeze.
+Visible desktop responsiveness and remote SSH were untested. The
+per-block results are in `scx_cake_bench/runs/shadowgate_desktop_stability_142/`.
+
+Fixed 1.4.2 and native scheduling then ran the same ShadowGate
+ProfileMatch on this boot. Each workload ran in ABBA and BAAB order
+after an excluded native warmup. All sixteen scored matches had low
+outside CPU activity and clear GPU samples. Each match completed the
+scenario and reported the same five draw-time PSO misses. Values are
+medians of four launches per arm at 1280x720 Low, uncapped.
+
+| Workload | FPS, native / Cake | 1% low FPS | Frame p99, ms | Frame p99.9, ms | Input-to-simulation p99, ms |
+|---|---:|---:|---:|---:|---:|
+| Game alone | 547.38 / 597.15 | 448.41 / 502.08 | 2.082 / 1.869 | 2.496 / 2.162 | 1.948 / 1.736 |
+| Eight CPU workers | 395.68 / 467.74 | 265.01 / 379.98 | 3.397 / 2.423 | 4.153 / 2.867 | 2.915 / 2.233 |
+
+The loaded FPS gain came with a throughput cost. Eight stress-ng
+workers completed 20,673 operations per wall second on native and
+18,988 on Cake across the full slots. Both four-match blocks showed
+the same tradeoff. The per-launch receipts and 143,586 frame intervals
+are in `scx_cake_bench/runs/shadowgate_native_vs_fixed142/`.
+
+The game-alone repeat left all desktop apps open and both displays
+asleep. All eight native/Cake pairs passed the quietness checks. Median
+FPS rose from 548.36 to 601.65, 1% low FPS from 448.53 to 508.02,
+and p99 input-to-simulation fell from 1.935 to 1.725 ms. Frame p99
+fell from 2.078 to 1.855 ms and p99.9 from 2.456 to 2.111 ms. Every
+metric favored Cake in all eight pairs. Mean outside CPU per launch
+ranged from 0.30 to 0.56% of host capacity on native and 1.53 to
+2.18% on Cake. No competing process reported a numeric GPU SM sample.
+Across sixteen matched 16-second gameplay windows, Steam WebHelper
+used a median 0.25% of one logical CPU and Discord used 0.75%.
+The data and all 164,959 scored frame intervals are in the run's
+`quiet_repeat/` directory.
+
+A separate quiet screen changed fixed-home acquisition and renewal
+to prefer a free physical core away from the GPU interrupt. On this
+boot IRQ 97 ran on CPU 12, whose SMT sibling was CPU 4. Two of four
+scored control matches had a tracked game role homed on CPU 4, each
+for all 21 samples. No tracked candidate role owned it. Median FPS
+was 598.08 fixed and 601.71 on the candidate. Candidate launches
+ranged from 600.21 to 605.47 FPS. Frame p99.9 rose from 2.097 to
+2.172 ms and 1% lows fell from 503.82 to 500.57 FPS. This screen
+did not establish a Pareto gain. Keep the fixed build. Receipts are
+in `scx_cake_bench/runs/shadowgate_candidates_142/home_irq/screen/`.
+
+A three-second fixed-build trace found times when a game thread shared
+a core while another allowed, IRQ-clean core in the LLC was fully idle.
+Those times covered 5.3% of the game thread's scheduled time, 8.7% of
+the render thread's and 5.1% of the RHI thread's. A subsequent candidate
+kept the fixed home but allowed one alternate whole-core claim if the
+owner woke to its idle home beside a busy sibling. Its probe counted
+53,749 successful exceptions across the host in 19.45 seconds of play.
+In four quiet launches per build, median FPS went from 599.05 to
+595.02 and p99 input-to-simulation from 1.727 to 1.739 ms. All four
+candidate runs fell short of 610 FPS. The excluded fixed warmup ran at
+611.00 FPS; a scored fixed run reached only 555.08 FPS under the same
+settings and quietness checks. That run had longer ordinary frames
+and no frame longer than 8.33 ms. Keep the existing owner wake path.
+The trace is in `shadowgate_native_vs_fixed142/quiet_smt/` and the
+comparison in `shadowgate_candidates_142/home_spare/` under bench runs.
+
+A third screen left the owner's wake path intact. A waking task that
+needed a new CPU could borrow a clean, wholly idle, unowned core before
+taking another task's fixed home. A separate probe confirmed 197,988
+successful changes to the baseline's choice over 19.45 seconds across
+all scheduler clients. The four quiet candidate runs averaged 596.55 to
+607.95 FPS, with a median of 601.83 versus 601.07 on fixed. The
+forward block gained 10.41 FPS and the reverse block lost 2.59. Median
+p99.9 was 2.079 versus 2.092 ms. The gain did not repeat across test
+orders. None of the three candidates qualified for a loaded test or
+a change to the default. Results and probe counts are in
+`shadowgate_candidates_142/borrow_core/` under bench runs.
+
+Four separate fixed-build matches counted retired instructions and
+cycles on five game threads. They ran at 575.42 to 589.22 FPS with
+instrumentation. In the slowest and fastest matches, the game thread
+retired 4.013 and 4.016 million user instructions per frame. Its cycles
+per instruction were 0.849 and 0.821, and it used 665.75 and 643.37 us
+of CPU time per frame. These two runs had the same measured GPU clock.
+The slower run had higher game-thread cycles per instruction in all 17
+matched full seconds. The 555 FPS run had no hardware counters, so its
+cause remains open. Phase data are in `shadowgate_native_vs_fixed142/quiet_pmu/`.
+
+Across the four loaded slots per scheduler, Cake workers received 2.73%
+less CPU time per wall second and completed 5.40% fewer operations per
+CPU second. In one separate traced pair all eight workers ran at nice
+-8 in both arms and recorded zero voluntary context switches. Native
+recorded 12,179 involuntary worker switches and 105 migrations. Cake
+recorded 95,669 and 62,963 over about 19.3 seconds of play. During a
+five-second switch trace, the eight workers spent 0.008% of their CPU
+time sharing a physical core with another worker on native and 34.64%
+on Cake. This identifies worker placement as a target for a controlled
+test. Check which queue serves a displaced, still-runnable worker and
+whether its slice had expired. The trace cannot apportion the throughput
+cost between migrations and SMT contention. The diagnostic is in the
+run's `worker_profile/`.
+
+Four stock-binary diagnostic matches repeated the eight-worker test
+with the workers at nice -8 and nice 0. In 19.3 seconds Cake recorded
+60,821 and 62,143 worker migrations respectively, versus 323 and 346
+on native. Both five-second Cake traces had zero worker wakeups.
+Every observed cross-CPU resume followed a runnable switch-out.
+
+Two separate instrumented Cake matches tracked the kernel dispatch
+queue and slice at each worker's next run. At nice 0, 56.4% of 73,809
+cross-CPU resumes used only a local queue, 36.6% passed through the
+previous CPU's Cake queue and 7.1% came through the LLC pool. The last
+positive-to-zero slice write was a local-enqueue preemption for 67.4%
+of moves and a runtime charge for 17.5%. At nice -8 those figures were
+57.9% and 30.1%. The queue observations do not identify the specific
+Cake placement branch for the local-only moves or establish that a
+move was avoidable. The instrumentation targets this kernel build and
+its runs supply attribution only. See `worker_routes/queue_results.json`
+and the stock controls in `worker_routes/results.json` in the same run.
+
+An eight-frame render-graph capture found cache hits for all 424 tracked
+transient resources with recorded allocation ranges. The deferred renderer
+repeated the dummy fog setup for the same view. Reusing it could avoid
+four buffer handles and two queued uploads per affected view. Its frame
+time cost remains unmeasured. All eight BloomX and BloomY textures per
+frame had consumers. The resource counts and engine source references
+are in `scx_cake_bench/runs/shadowgate_rdg_142/`.
+
 ## 2026-11-17 · Half-length grant for compute tasks (1.4.1, on the nightly)
 
 | | Finding / evidence boundary |
@@ -411,11 +1045,17 @@ Metric levels follow `CLAUDE.md` (1 = game frames … 4 = static counts).
 
 | | Pattern | Kernel | Best evidence | Next |
 |---|---|---|---|---|
+| Kept locally | Drop the low-bit correction in the slice grant | Stock, existing Cake requirements | Direct admission p10 10 to 9 ns in 8/8 pairs, empty-clock p10 9 ns in both arms | ShadowGate +0.84 aggregate FPS across four pairs. The two blocks disagreed. [Measurements](#2026-11-20--direct-admission-latency-in-local-142) |
+| Screened | Precompute the stopping cap by priority | Stock, existing Cake requirements | ShadowGate +0.66 aggregate FPS, median launch p99.9 +0.092 ms | Keep the existing formula. [Measurements](#precompute-the-stopping-cap-at-startup) |
+| Default | Create task storage in `ops.init_task`, lookup only elsewhere | Stock, existing Cake requirements | Removes the create under the rq lock from a reported hard lockup. ShadowGate 603.25 to 604.35 FPS, unresolved. Thread create and join +214 and +238 ns on 1.4.1 | Reporter's test on the 9950X3D. Create cost on 1.4.2. [Measurements](#2026-11-20--task-storage-is-created-in-opsinit_task-142-on-the-nightly) |
+| Screened | Seat keep: a stage thread blocking on the seat it still owns skips the lookup and the seat lock | Stock, existing Cake requirements | `ops.stopping` 842.77 to 835.28 instructions per call, 490.03 to 487.19 cycles with overlapping slots. ShadowGate 593.10 to 599.96 FPS in one run | Out of the nightly. [Measurements](#seat-keep-in-opsstopping) |
 | Replaced | **Lean idle claim `lazy`** (K1–K4, `SCX_OPS_LEAN_IDLE` + `_LAZY_SMT`), replaced by §G103 | 🧩 patch 2, which cake no longer uses | KovaaK's (CPU-limited: uncapped ~770 FPS, GPU ~39 %) quiet: avg FPS **+1.4 %**, p99 **−5.1 %**, 1 % low **+7.5 %**, stddev −18 % (16/16) · 16 hogs: 0.1 % low +6.6 %, max −16 %, nothing worse · `on` ≈ `off` · [why](#why-lazy-wins) | §G103 against `lazy` on the 🧩 kernel (Owed #3) |
 | ✅ | E1: `ops.running` reads cached `rq->scx.clock` | 🐧 ≥ 6.14 · else `scx_bpf_now()` | appsim 24 slots: running −3.10 ns [−4.32, −1.91], BPF −1.9 %, frames neutral | ⏳ game A/B |
 | ✅ | Native CTZ/POPCNT (auto) | 🧩 patch 1 · else portable builtins | running −2.31 ns, select −4.11 / −0.2 ns · KovaaK's: no frame difference after 2 rounds ([evidence](#evidence)) | — |
 | ✅ | D+F: wide-host idle popcount; `update_idle` pool interlock on every host | 🐧 (> 64 CPUs) | forced-wide, 2 rounds: `update_idle` −1.09 / −0.64 ns, running −2.69 / −1.05 ns, 0 stalls | ⏳ real > 64-CPU host |
 | ✅ | Exit pool check, census identities, detach-first reports | 🐧 | identities exact in 4 probe slots; pending 0 at every exit of those slots; positive pending after a loaded exit is normal (§G102) | diagnostics only |
+| Inconclusive | Superoptimized `cake_vtime_ceil` | stock 7.3.0-2 tested | exact proof; one fewer loaded conditional branch; matched appsim `stopping` 17.075 to 16.941 ns (-0.135 ns, -0.79%), 95% interval [-0.586, +0.317]; total BPF +0.46%; [report](docs/research/superoptimization/README.md) | tools retained; production source unchanged; no game result |
+| Needs clean rerun | Superoptimized slice grant; admission/IRQ screens | stock 7.3.0-2 loaded | exact slice proof; 16 fewer BPF operations and two fewer branches in each of three callers; loaded select JIT 6,576 to 6,514 bytes; eight-slot timing screen excluded (outside-app CPU 21-25% in two A slots). Admission floor removes a branch; IRQ alternative adds operations. [Report](docs/research/superoptimization/README.md) | exact recipes/tools retained; quiet slice A/B and game result owed; production unchanged |
 | 🧪 | Wake classes by waker context (IRQ / kthread / game / other) | 🐧 | KovaaK's 90 s: `dxvk-queue` IRQ-woken 731k× (GPU completion), mean 0.6 µs, worst 1.08 ms; game↔game worst 4.8 ms | policy under test |
 | 🧪 | IRQ-woken wakes run next (idle CPU, else head of prev + PREEMPT) | 🐧 | KovaaK's under 16 hogs paused at slot 5/8; data unread | ⏳ rerun quiet |
 | ⏳ | DSQ direct index (kernel) | 🧩 patch 3 · else hash | untested on hardware | reboot A/B |
@@ -689,7 +1329,8 @@ Appsim helldivers2-mission-fitted, 20 s, `cakebench cost`, busy 30–31 %, runs 
 | 10 | ⏳ | Spread pick in frames | only if the retake drop is worth it |
 | 11 | ⏳ | IRQ-woken wake priority, quiet host | tools `scx_cake_bench/runs/kovaaks_irqwake_20261005/tools/` (`run.sh`, `irq_wake.py`, `diag_wake.py`; set PID/WIN in `kv_ab.py`, `CAKE_DIAG_TGID`); arms `kv-x` / `kv-y`; `run1/` slots 1–5 likely skewed |
 | 12 | ⏳ | CPU-bound tail: trace, then 7 guarded ideas | Deadlock CPU-limited: nightly worst 5.14 ms vs LAVD 2.84 · plan + interference check in [cpu-bound-tail-20261014](docs/research/cpu-bound-tail-20261014/README.md) |
-| 13 | ⏳ | 7.2.10 kernel review | host on 7.2.10 since 10-15 · the experimental-patches port notes only that `bpf_jit_comp.c` and `ext.c` changed since 7.2.9 · review eBPF, sched_ext and the CachyOS patch set and note what helps or breaks cake here |
+| 13 | ⏳ | Kernel review: 7.2.10 and current 7.3 | current host observed on `7.3.0-2-cachyos` 10-22; prior 7.2.10 review also unfinished · review eBPF, sched_ext and the CachyOS patch set and note what helps or breaks cake here |
+| 14 | Open | Superoptimization clean slice confirmation | [Three-target extension](docs/research/superoptimization/README.md) complete: slice proof/compiler/verifier pass; eight-slot performance screen excluded for host noise. Freeze recipe `8a6982aaa`, rerun at matched low outside-app CPU; ceil's -0.135 ns mean remains inconclusive. No game/default-promotion evidence. |
 | 15 | 🧪 | Spin latency under stress: arm C (§G93 release gate) first | reproduced 10-29 (extreme, high_gaming; EEVDF vs HEAD): with RT stressors the `cpu_release` re-enqueue (S8) moves the spinner after each 2–4 µs RT run (same-CPU resume 7–28 % vs 100 %), which is the median loss, and costs 3.5 CPUs of BPF (`cake_dispatch` 880 ns/run); without RT the sleeper ties and CPU-bound spinners trade median for avg/p99 (S1) · step 0 (tester) and 4 milder situations owed · arm C builds §G93 (#8) · §G99 release hold ❌ 10-29: overshoot medians fixed, but the sleeper wakes 3.7 ms late at p50 and the pinned spinner loses ×20; cause open · plan in [spin-storm-20261028](docs/research/spin-storm-20261028/README.md) |
 | 16 | 🧪 | CPU-to-CPU wake gap (c2clat) | §G100 (default `26b8f2604`) built and A/B'd 10-29: pinned p50 now beats EEVDF (cross 644 vs 673 ns, SMT 722 vs 803) and p90 fell ~40 % vs HEAD · §G101 (default `1218ad972`) closed G6, the dispatch pass per background `sched_yield`: under a yield spin same-CPU p50 991 → 697 ns, IWI 5–7 k → 0.3–0.4 k/s · left: pinned p99 and p99.9 trail EEVDF and did not move with §G101 (cross p99 3.2 vs 1.8 µs, SMT p99.9 83 vs 7.8 µs), G1 preempting a busy occupant (+1 µs), G2 a busy SMT sibling (+0.9 µs), G3 unpinned with no idle CPU migrates late (neighbour chosen in enqueue, not `select_cpu`), G4 saturation tail (1.4–1.9 % of wakes over 100 µs vs 0.4–0.5 %), G7 the sched_ext yield path itself (no stats, per yield per thread: EEVDF 55.6 ns, §G101 75.5, §G100 84.7; `cake_yield` is a few ns of it, so 🧩 kernel side), G8 §G101 on a saturated host (a yielder keeps its slice while a busy peer's queue waits, as EEVDF's local yield does; if that costs, give way when the die has no idle CPU and a peer is marked) · owed: appsim for both · game: ShadowGate 10-29, joint build (the game never yields, pins no thread): frames equal on a quiet host; beside a steady Blender fps +2.0 %, 0.1 % low +6.7 %; worst frame lower in 8/9 pairs, p 0.039 · next: a §G100-only arm, a Blender yield census, a Proton game · [wake-map](docs/research/wake-map-20261029/README.md) · games rarely pin: the value is kthreads, pinned workers and audio |
 | 17 | ⏳ | 1 µs rule: per-callback duration tripwire | bpf_stats gives means only · a probe-only (`--toggle probe=1`) log2 histogram of each callback's duration flags runs over 1 µs; IBS expected-sample checks (`scx_cake_bench/bench/locality/ibs_bullseye.py`) split stats artifacts from real cost |
@@ -711,6 +1352,7 @@ Appsim helldivers2-mission-fitted, 20 s, `cakebench cost`, busy 30–31 %, runs 
 | [`claimhome-20261012/`](docs/research/claimhome-20261012/README.md) | ❌ lazy placement without the patch: placement yes, frames no |
 | [`burstkey-20261012/`](docs/research/burstkey-20261012/README.md) | ❌ cosmos-style requeue key: no gain; cake beats cosmos here |
 | [`counting-classifiers-20261005/`](docs/research/counting-classifiers-20261005/README.md) | spread pick ❌, D+F ✅ |
+| [`superoptimization/`](docs/research/superoptimization/README.md) | Three-target extension: slice removes 16 BPF ops / two branches per caller, exact proof + stock load pass; runtime screen noisy. Earlier ceil -0.135 ns mean inconclusive; default unchanged. |
 | [`wake-map-20261029/`](docs/research/wake-map-20261029/README.md) | ✅🧪 §G100 and §G101 default (`26b8f2604`, `1218ad972`) · §G100 pinned fast lane: pinned p50 beats EEVDF, p90 −40 % vs HEAD · §G101 `ops.yield` keep closes G6 (a dispatch pass per background `sched_yield`) · ShadowGate: equal on a quiet host, worst frame lower in 8/9 pairs (p 0.039), fps +2 % beside Blender · gaps G1–G5, G7, G8 |
 | [`spin-storm-20261028/`](docs/research/spin-storm-20261028/README.md) | 🧪 reproduced 10-29: the `cpu_release` re-enqueue (S8) is the RT-load loss and costs 3.5 CPUs of BPF; §G99 release hold ❌ (overshoot fixed, sleeper wake delay ×150); IBS puts half of HEAD's dispatch in `move_to_local` lock spin; §G93 gate or a v3 hold next; S1 chops are a trade; chop rule after; `ops.yield` and `__preempt_count` follow |
 
