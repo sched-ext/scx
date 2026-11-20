@@ -178,13 +178,11 @@ static void collect_sys_stat(void)
 		}
 
 		/*
-		 * When pinned tasks are waiting to run on this CPU
-		 * or a system is overloaded (so the slice cannot be boosted
-		 * or there are pending tasks to run), shrink the time slice
-		 * of slice-boosted tasks.
+		 * When the boost delays a waiting task or a system is
+		 * overloaded (so the slice cannot be boosted), shrink the
+		 * time slice of slice-boosted tasks.
 		 */
-		if (cpuc->nr_pinned_tasks || !can_boost_slice() ||
-		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id)) {
+		if (!can_boost_slice() || boost_delays_waiter(cpuc, c->now)) {
 			shrink_boosted_slice_remote(cpuc, c->now);
 		}
 

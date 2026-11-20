@@ -8,6 +8,7 @@
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "power.bpf.h"
+#include "util.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -252,6 +253,64 @@ bool can_boost_slice(void)
 	 */
 	return (sys_stat.avg_util_wall <= LAVD_SLICE_BOOST_UTIL_WALL) &&
 	       (sys_stat.nr_queued_task <= sys_stat.nr_active);
+}
+
+/*
+ * How long the head task of @dsq_id has waited since its enqueue,
+ * or 0 if the DSQ is empty.
+ */
+static __always_inline u64 peek_wait(u64 dsq_id, u64 now)
+{
+	struct task_struct *p;
+	task_ctx *taskc;
+	u64 wait = 0;
+
+	bpf_rcu_read_lock();
+	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	if (p && likely(taskc = find_task_ctx(p))) {
+		wait = time_delta(now, READ_ONCE(taskc->last_enqueue_clk));
+	}
+	bpf_rcu_read_unlock();
+
+	return wait;
+}
+
+/*
+ * Return true if a slice boost on @cpuc would delay a waiting task.
+ *
+ * A pinned task, or any task in @cpuc's local or per-CPU DSQ, waits for
+ * @cpuc itself, so any boost delays it. A task in the compute domain's
+ * DSQ can run on any CPU in the domain. It counts only when it is the
+ * head (the next to run) and has waited longer than a regular slice,
+ * which means the domain is short of CPUs. Tasks behind the head wait
+ * for their vtime turn, not for a CPU.
+ *
+ * The head may be a task that cannot run on @cpuc. Then @cpuc loses its
+ * boost for nothing and runs a regular slice instead.
+ */
+__hidden
+bool boost_delays_waiter(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 bound = sys_stat.slice_wall;
+
+	if (unlikely(!cpuc)) {
+		return false;
+	}
+
+	if (cpuc->nr_pinned_tasks ||
+	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id) ||
+	    (use_per_cpu_dsq() &&
+	     scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id)))) {
+		return true;
+	}
+
+	if (use_cpdom_dsq() &&
+	    ((peek_wait(cpdom_to_dsq(cpuc->cpdom_id), now) > bound) ||
+	     (peek_wait(cpdom_to_turb_dsq(cpuc->cpdom_id), now) > bound))) {
+		return true;
+	}
+
+	return false;
 }
 
 __hidden
