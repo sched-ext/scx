@@ -480,15 +480,15 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	pos = idx & mask;
 	data = chunk->data[pos];
-	if (likely(!data)) {
+	if (likely(data)) {
 		cast_kern(data);
 
-		data[pos] = (struct sdt_data) {
+		*data = (struct sdt_data) {
 			.tid.genn = data->tid.genn + 1,
 		};
 
 		/* Zero out one word at a time. */
-		for (i = zero; i < alloc->pool.elem_size / 8 && can_loop; i++) {
+		for (i = zero; i < (alloc->pool.elem_size - sizeof(struct sdt_data)) / 8 && can_loop; i++) {
 			data->payload[i] = 0;
 		}
 	}
