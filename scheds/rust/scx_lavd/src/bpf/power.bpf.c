@@ -1160,111 +1160,73 @@ static __always_inline u64 get_cpufreq_rate_limit_ns(struct cpu_ctx *cpuc)
 }
 
 /*
- * The target to send: normally the CPU's target from its utilization history,
- * but the running task's demand if that is higher, since the CPU's utilization
- * takes time to catch up with the task's demand.
- */
-static __always_inline u32 effective_cpuperf_target(struct cpu_ctx *cpuc)
-{
-	return max(READ_ONCE(cpuc->cpuperf_target),
-		   READ_ONCE(cpuc->cpuperf_floor));
-}
-
-/*
- * The kernel gives no sign of whether a target was applied: schedutil drops a
- * request inside its rate limit without a trace, and nothing retries it. So
- * the target is sent at three points, each for @cpuc's own CPU:
+ * Send @cpuc's performance target: the CPU's target from its utilization
+ * history, or the demand of the tasks that must run here if higher. Those are
+ * the running task plus the average demand of the other pinned tasks runnable
+ * here. schedutil silently drops a request inside its rate limit, so @mode
+ * decides when to send:
  *
- * - update_cpuperf_target(), from ops.running(), when the target changed;
- * - refresh_cpuperf_target(), from ops.tick(), periodically whether or not
- *   it changed;
- * - decay_idle_cpuperf_target(), from the sys_stat timer, for an idle CPU.
- */
-static __always_inline void commit_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
-{
-	u32 cpuperf_target = effective_cpuperf_target(cpuc);
-
-	scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
-	WRITE_ONCE(cpuc->cpuperf_cur, cpuperf_target);
-	WRITE_ONCE(cpuc->cpuperf_commit_clk, now);
-}
-
-/*
- * Raise the floor to @demand, the demand of the task about to run, and send
- * the target if it rose above the last one sent. ops.running() is the first
- * point at which a CPU runs a task after its target may have moved: the task
- * brought its own demand, the sys_stat timer computed a new target, or an
- * RT/DL task took the CPU and LAVD_CPUPERF_UNSET voided the last send, since
- * the RT/DL task may have left the frequency anywhere.
- *
- * Only a rise is sent from here. The floor changes at nearly every context
- * switch, so sending every drop would put the kfunc on the context-switch
- * path. A lower target waits for refresh_cpuperf_target(), at most one rate
- * limit away.
+ * - LAVD_CPUPERF_RISE (ops.running(), or ops.enqueue() of a pinned task):
+ *   only a rise. A drop waits for the next refresh, and an RT/DL task leaving
+ *   the CPU forces no send, since its dequeue already updates schedutil.
+ * - LAVD_CPUPERF_REFRESH (ops.tick()): once per rate limit, changed or not,
+ *   to retry dropped sends and track the RT/DL/IRQ load schedutil adds.
+ * - LAVD_CPUPERF_DECAY (sys_stat timer): an idle CPU's drop, since an idle
+ *   CPU runs neither op.
  */
 __hidden
-int update_cpuperf_target(struct cpu_ctx *cpuc, u32 demand, u64 now)
-{
-	u32 step = LAVD_SCALE >> LAVD_CPUPERF_UP_SHIFT;
-	u32 cur;
-
-	if (!get_cpufreq_rate_limit_ns(cpuc)) {
-		return 0;
-	}
-
-	WRITE_ONCE(cpuc->cpuperf_floor,
-		   min(round_up(demand, step), LAVD_SCALE));
-
-	cur = READ_ONCE(cpuc->cpuperf_cur);
-	if (cur == LAVD_CPUPERF_UNSET || effective_cpuperf_target(cpuc) > cur) {
-		commit_cpuperf_target(cpuc, now);
-	}
-	return 0;
-}
-
-/*
- * Send the target once per schedutil rate-limit interval, whether or not it
- * changed. A send that landed inside the rate limit was dropped silently, and
- * the RT/DL/IRQ load schedutil adds to the target keeps moving, so for as long
- * as the CPU is busy the target is resent from ops.tick(), much as the fair
- * class kicks schedutil every tick. Sending more often than the rate limit
- * would only be dropped.
- */
-__hidden
-int refresh_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
+int send_cpuperf_target(struct cpu_ctx *cpuc, u64 now, u32 mode)
 {
 	u64 rate_limit = get_cpufreq_rate_limit_ns(cpuc);
+	u32 step = LAVD_SCALE >> LAVD_CPUPERF_UP_SHIFT;
+	u32 demand, target, cur, nr, sum, own;
+	bool send;
 
 	if (!rate_limit) {
 		return 0;
 	}
 
-	if (time_delta(now, READ_ONCE(cpuc->cpuperf_commit_clk)) >= rate_limit) {
-		commit_cpuperf_target(cpuc, now);
+	/*
+	 * The pinned sum and count are read apart and may briefly disagree,
+	 * which only skews the target until the next send.
+	 */
+	demand = READ_ONCE(cpuc->cpuperf_floor);
+	nr = READ_ONCE(cpuc->nr_pinned_tasks);
+	sum = READ_ONCE(cpuc->cpuperf_pinned);
+	own = READ_ONCE(cpuc->cpuperf_floor_pinned);
+	if (own && nr) {
+		sum -= min(sum, own);
+		nr--;
 	}
-	return 0;
-}
-
-/*
- * Send an idle CPU's target as it decays. An idle CPU runs neither
- * ops.running() nor ops.tick(), so its last target would otherwise stay in the
- * kernel for as long as it idles, and on a cluster sharing one frequency keep
- * the cluster up. Only an idle online CPU is touched, and only when its target
- * fell below what was sent (or nothing valid was). If the CPU wakes in
- * between, its own ops.running() or next tick resends within one interval.
- */
-__hidden
-int decay_idle_cpuperf_target(struct cpu_ctx *cpuc, u64 now)
-{
-	u32 cur = READ_ONCE(cpuc->cpuperf_cur);
-
-	if (!get_cpufreq_rate_limit_ns(cpuc) || !cpuc->is_online ||
-	    !READ_ONCE(cpuc->idle_start_clk)) {
-		return 0;
+	if (nr) {
+		demand += sum / nr;
 	}
 
-	if (cur == LAVD_CPUPERF_UNSET || effective_cpuperf_target(cpuc) < cur) {
-		commit_cpuperf_target(cpuc, now);
+	target = max(READ_ONCE(cpuc->cpuperf_target),
+		     min(round_up(demand, step), LAVD_SCALE));
+	cur = READ_ONCE(cpuc->cpuperf_cur);
+
+	switch (mode) {
+	case LAVD_CPUPERF_RISE:
+		send = (cur == LAVD_CPUPERF_UNSET) || (target > cur);
+		break;
+	case LAVD_CPUPERF_REFRESH:
+		send = time_delta(now, READ_ONCE(cpuc->cpuperf_commit_clk)) >=
+		       rate_limit;
+		break;
+	case LAVD_CPUPERF_DECAY:
+		send = cpuc->is_online && READ_ONCE(cpuc->idle_start_clk) &&
+		       ((cur == LAVD_CPUPERF_UNSET) || (target < cur));
+		break;
+	default:
+		send = false;
+		break;
+	}
+
+	if (send) {
+		scx_bpf_cpuperf_set(cpuc->cpu_id, target);
+		WRITE_ONCE(cpuc->cpuperf_cur, target);
+		WRITE_ONCE(cpuc->cpuperf_commit_clk, now);
 	}
 	return 0;
 }

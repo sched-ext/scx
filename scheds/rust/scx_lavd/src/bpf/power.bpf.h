@@ -26,9 +26,7 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpufreq_rate_limit(struct cpu_ctx *cpuc);
 int update_next_cpufreq_rate_limit(void);
 int warn_cpufreq_rate_limit_err(void);
-int update_cpuperf_target(struct cpu_ctx *cpuc, u32 demand, u64 now);
-int refresh_cpuperf_target(struct cpu_ctx *cpuc, u64 now);
-int decay_idle_cpuperf_target(struct cpu_ctx *cpuc, u64 now);
+int send_cpuperf_target(struct cpu_ctx *cpuc, u64 now, u32 mode);
 
 const volatile u16 *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);
