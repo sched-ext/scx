@@ -25,6 +25,7 @@ extern struct psi_group_cpu psi_group_cpu __ksym __weak;
 extern struct kernel_stat kernel_stat __ksym __weak;
 extern struct kernel_cpustat kernel_cpustat __ksym __weak;
 extern struct cpufreq_policy* cpufreq_cpu_data __ksym __weak;
+extern struct update_util_data* cpufreq_update_util_data __ksym __weak;
 extern struct sched_domain* sd_llc __ksym __weak;
 extern struct sched_domain* sd_asym_packing __ksym __weak;
 extern struct vm_event_state vm_event_states __ksym __weak;
@@ -87,6 +88,7 @@ DEFINE_PER_CPU_VAL_FUNC(cpu_llc_id, int, sd_llc_id)
 DEFINE_PER_CPU_VAL_FUNC(cpu_priority, int, sched_core_priority)
 
 DEFINE_PER_CPU_PTR_PTR_FUNC(cpu_cpufreq_policy, struct cpufreq_policy*, cpufreq_cpu_data)
+DEFINE_PER_CPU_PTR_PTR_FUNC(cpu_cpufreq_update_util, struct update_util_data*, cpufreq_update_util_data)
 DEFINE_PER_CPU_PTR_PTR_FUNC(cpu_llc_dom, struct sched_domain*, sd_llc)
 DEFINE_PER_CPU_PTR_PTR_FUNC(cpu_asym_packing_dom, struct sched_domain*, sd_asym_packing)
 
@@ -101,6 +103,7 @@ DEFINE_THIS_CPU_VAL_FUNC(cpu_llc_size)
 DEFINE_THIS_CPU_VAL_FUNC(cpu_priority)
 
 DEFINE_THIS_CPU_PTR_FUNC(cpu_cpufreq_policy)
+DEFINE_THIS_CPU_PTR_FUNC(cpu_cpufreq_update_util)
 DEFINE_THIS_CPU_PTR_FUNC(cpu_kernel_cpustat)
 DEFINE_THIS_CPU_PTR_FUNC(cpu_kernel_stat)
 DEFINE_THIS_CPU_PTR_FUNC(cpu_psi_group)

@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
@@ -107,12 +108,11 @@ __hidden
 void update_effective_capacity(struct cpu_ctx *cpuc)
 {
 	/* WARNING: This should be called after updating cpuc->cur_util. */
-	extern struct cpufreq_policy *cpufreq_cpu_data __ksym;
 	extern const unsigned long hw_pressure __ksym __weak;
 
 	u16 capacity_policy = 0, capacity_observed;
 	unsigned long *p_pressure, pressure = 0;
-	struct cpufreq_policy **base, *policy;
+	struct cpufreq_policy *policy;
 	u32 mfo;
 	int cpu;
 
@@ -133,9 +133,7 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	 */
 	capacity_policy = cpuc->max_capacity;
 
-	if (unlikely((base = (struct cpufreq_policy **)&cpufreq_cpu_data) &&
-	    (bpf_probe_read_kernel(&policy, sizeof(policy), base + cpu) == 0) &&
-	    policy)) {
+	if (unlikely(policy = cpu_cpufreq_policy(cpu))) {
 		u32 cpu_max = BPF_CORE_READ(policy, cpuinfo.max_freq);
 		u32 scaling_max = BPF_CORE_READ(policy, max);
 
@@ -977,14 +975,6 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc)
 u64 cpufreq_rate_limit_ns[LAVD_CPU_ID_MAX];
 
 /*
- * The CPU's cpufreq policy, and the hook its governor installed for the
- * scheduler to call on a utilization change. Neither is exported, so both are
- * weak.
- */
-extern struct cpufreq_policy *cpufreq_cpu_data __ksym __weak;
-extern struct update_util_data *cpufreq_update_util_data __ksym __weak;
-
-/*
  * Assumptions below that turned out broken, reported once after init by
  * warn_cpufreq_rate_limit_err().
  */
@@ -1024,8 +1014,8 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 	 * name. There is only one, so later checks compare the pointer.
 	 */
 	static struct cpufreq_governor *schedutil_gov;
-	struct cpufreq_policy **policyp, *policy;
-	struct update_util_data **hookp, *hook;
+	struct cpufreq_policy *policy;
+	struct update_util_data *hook;
 	struct cpufreq_governor *governor;
 	struct sugov_policy *sg_pol;
 	struct sugov_cpu *sg_cpu;
@@ -1054,11 +1044,7 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 	 * governor name, the same name sysfs shows. A driver that sets the
 	 * policy itself has no governor.
 	 */
-	policyp = bpf_per_cpu_ptr(&cpufreq_cpu_data, cpu);
-	if (!policyp) {
-		return 0;
-	}
-	policy = *policyp;
+	policy = cpu_cpufreq_policy(cpu);
 	if (!policy) {
 		return 0;
 	}
@@ -1074,11 +1060,7 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 		WRITE_ONCE(schedutil_gov, governor);
 	}
 
-	hookp = bpf_per_cpu_ptr(&cpufreq_update_util_data, cpu);
-	if (!hookp) {
-		return 1;
-	}
-	hook = *hookp;
+	hook = cpu_cpufreq_update_util(cpu);
 	if (!hook) {
 		return 0;
 	}
