@@ -60,12 +60,14 @@ Affinity applies everywhere. A read of the idle word or mask is only a candidate
 
 ```mermaid
 flowchart LR
-    A[serial handoff] -->|no| B[seat retake] -->|no| C[warm home] -->|no| D[idle claim] -->|none| U[undecided] --> E[enqueue]
+    A[serial handoff] -->|no| H[fixed home] -->|no| B[seat retake] -->|no| C[warm home] -->|no| D[idle claim] -->|none| U[undecided] --> E[enqueue]
+    H -->|higher class and no idle claim| E
 ```
 
 | Step | Rule |
 |---|---|
 | Serial handoff | queue behind the waker on its CPU, no preempt, when: that CPU's last 3 runs each woke a task and blocked within the handoff floor; the waker is within one handoff of its mean burst end; that CPU's own and local queues are empty; >= 3/4 of its LLC is idle; it is not IRQ-busy; the wake is not `WAKE_SYNC` or a device wake (patched kernel) |
+| Fixed home | An owner can return to its allowed home. When a higher scheduling class already occupies it, Cake tries another allowed idle CPU, preferring the same LLC. If the claim fails, normal enqueue handles the wake. |
 | Seat retake | a stage task takes its seat back from a queued, unpinned, non-stage task with PREEMPT (enqueue reroutes that task); only once something else ran there, never on an IRQ-busy CPU |
 | Warm home | the previous CPU, if idle. Skipped for: a SYNC wake that is not a stage; a core not fully idle (one-word hosts); another task's held seat; turn-starved and not sub-handoff; IRQ-busy; a contended core (wide hosts) |
 | Idle claim | one-word hosts, inside one LLC: the task's, or the waker's for a non-stage task on a multi-LLC host; a stage off the preferred LLC moves there when a whole core is free. The starting CPU first if it is a whole idle core, no seat and no IRQ sink, then up to `claim_tries` picks by: big cores (hybrid), then whole idle core, then not a seat, then no IRQ sink on the core, not in deep idle, then platform rank, then lowest ID |
@@ -118,6 +120,33 @@ flowchart LR
 | Other pools | multi-LLC: only a head a slice behind the frontier, or a pool unserved for 24 ms |
 | Nothing | both queues empty: re-pick up to 4 times for a pool insert under way; then `prev`, if still runnable, keeps running with a fresh slice |
 
+An idle CPU can see an empty pool while the kernel is still committing an
+enqueue. Cake counts the task before submitting the insert so that CPU can
+wake to serve it. The task owns its count in BPF task storage. A hint in
+its slice lets ordinary wakes and runs skip the lookup. When the kernel
+removes a runnable task during a property change or suspend, the quiescent
+callback returns its count even if the kernel has replaced the slice.
+Ordinary sleeps return immediately. Cake creates the storage in
+`ops.init_task`, at fork and at attach, where no rq lock is held. Every
+other callback only looks it up, because a create under the rq lock can
+deadlock in the memory charge. A task whose create failed goes to the
+kernel's global dispatch queue.
+
+When Cake observes 64 or more tasks in an owner queue or wake pool, it
+examines up to eight tasks and asks the kernel to move one that can run
+on the destination CPU. The limit applies per queue. The first choice
+between the owner queue and its pool reuses the depth already read for
+ordering. A steal or retry takes another depth reading. A queue can grow
+after Cake reads it, including while entering a shallow queue's bulk move.
+The verifier checks the deep search as a separate BPF function. Checking
+it in each caller's context exceeded the verifier's instruction budget
+on test layouts with 1024 possible CPU IDs.
+
+For a game thread that wakes while real-time work holds its fixed home,
+an eligible idle core can start the thread sooner. Moving can also cost
+more than waiting out a short interruption because the new core has cold
+private caches. Preferring a core that shares L3 limits that cost.
+
 Only a successful queue move proves work was taken; counts and marks are hints.
 
 ---
@@ -144,10 +173,13 @@ flowchart TD
 | Steal order | same LLC, then LLCs with the same cache size, then the rest; within each, SMT sibling first, then the following IDs, wrapping. Precomputed below ID 128; wider hosts walk a ring |
 | Idle word | one-word hosts: cake keeps its own word of really idle CPUs, changed only by `ops.update_idle`, the dispatch re-arm and `ops.dispatch`'s clear when a queued prev's slice ends (bypass hides idle exits), and runs without `SCX_OPS_KEEP_BUILTIN_IDLE`, so the kernel stops updating its masks. A claim sets a bit in a second word on the same line, cleared when that CPU next goes idle. Claimable is idle and not claimed; the whole-core read ignores claims, so a claimed core stays whole until that CPU runs. Wide hosts keep the kernel's masks and picker |
 | Claim tries | max(4, online CPUs in the widest LLC / 4) |
-| Preferred LLC | multi-LLC one-word hosts: the most big cores; on a V-cache pair, the cache LLC in AMD `cache` mode, else the other; otherwise the largest cache (`cache` mode) or highest platform preference. The mode is re-read every second |
+| Preferred LLC | On a one-package, multi-LLC host within the idle word, prefer an LLC when all its cores outrank every core outside it. If ranks overlap on a two-LLC X3D system, use the driver's startup mode and measured unified L3 sizes. Cache mode prefers the larger L3 and frequency mode the smaller one. Ambiguous inputs give no die preference. A fixed home uses an eligible unowned core on the preferred LLC when available. |
 | Deep idle | one-word hosts avoid a CPU in an idle state slower to exit than the handoff floor |
-| Core ranking | full capacity data, then preferred-core hints; unknown cores never rank below known ones |
+| Core ranking | At startup, scale architectural CPU capacity by comparable policy and firmware ceilings, then apply enabled preferred-core hints. An explicit preferred-core opt-out suppresses the CPPC fallback. Governor, EPP and frequency floors are reported for inspection. |
 | Optional kernel features | detected at start, with fallbacks ([README table](./README.md#kernel-features)) |
+
+Restart Cake after changing placement settings. `--print-topology` uses the same
+discovery as scheduler startup and prints the selected mask and its source.
 
 ---
 
@@ -188,7 +220,9 @@ slice = max(1464, min(want, cap))
 A task that wants a whole 3 ms slice never blocks inside it: it is a compute task, and
 its grant is capped at half of what the others get.
 
-Age under 3 ms counts as 3 ms; the low 5 bits are cleared (they tag pooled tasks).
+Age under 3 ms counts as 3 ms. The returned grant clears its low five bits
+for the pool tag. Since the compute threshold is even, the implementation
+can omit the low-bit correction to `want` and produce the same grant.
 Kernel threads placed directly get a flat 3 ms. A slice is a budget the kernel tick
 enforces, not a preemption promise: cake has no `ops.tick`.
 
@@ -205,9 +239,17 @@ flowchart LR
     A[toggles set] --> B[BPF loads] --> C[loader drops capabilities] --> D[running]
     D -->|kernel restart request| E[re-exec with same args] --> B
     D -->|Ctrl+C| F[release scheduler]
+    D -->|deep queue with overdue work| F
 ```
 
-Cake asks the kernel for a 5 s runnable-stall watchdog.
+If the eight tasks examined in a deep queue cannot run on the destination
+CPU, other CPUs can still serve them. When the head has already waited
+2.5 s, Cake checks that the same head still leads a deep queue before
+requesting a voluntary exit. The loader reports the queue, CPU and PID.
+The kernel returns queued work to native scheduling. The age check uses
+the tick period measured at startup. If that measurement is unavailable,
+Cake still limits the search to eight candidates. The kernel's 5 s
+runnable-task watchdog also applies.
 
 ## Starvation fallback (24 ms)
 
@@ -222,6 +264,6 @@ Cake asks the kernel for a 5 s runnable-stall watchdog.
 
 | Limit |
 |---|
-| The wait-vs-burst products can overflow for very long-lived, very busy tasks |
+| The wait and service totals are quantized before comparing their ratios. Large products take an exact 128-bit comparison in BPF. |
 | A late queue mark or remote offer can delay cross-LLC service |
 | Passing the verifier and the tests does not prove performance |

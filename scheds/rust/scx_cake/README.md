@@ -45,16 +45,21 @@ Two flags inspect the host and the binary without attaching:
 
 ```sh
 scx_cake --version           # version and binary SHA-256
-scx_cake --print-topology    # CPU layout and core preferences
+scx_cake --print-topology    # CPU policy limits, core ranks and preferred cache domain
 ```
+
+Cake reads CPU placement settings at startup. Apply BIOS, X3D mode and
+CPU frequency policy changes before starting Cake. Restart it to pick up
+later changes. `--print-topology` shows what a fresh start would use.
 
 Unknown options, such as the old `--profile gaming` or `-p powersave`
 from `scx_loader`, are skipped with a warning. Cake still starts.
 
 > [!WARNING]
-> The kernel removes cake if a runnable task waits 5 s, and the CPUs go
-> back to the default scheduler. That watchdog is a safety net, not a
-> latency promise.
+> Cake can request a return to native scheduling during dispatch if a deep
+> queue has an old head and the dispatching CPU cannot serve its first
+> eight tasks. The kernel also has a 5 s runnable-task watchdog. Both
+> recovery paths require the kernel to make progress.
 
 ## Requirements
 
@@ -143,7 +148,8 @@ Each step is a sched_ext callback in
 | `cake_dispatch` | a CPU's local DSQ is empty | moves work as in step 4 |
 | `cake_yield` | a task calls `sched_yield` | keeps or zeroes the slice |
 | `cake_running`, `cake_stopping` | a task starts or stops running | stamps the run, charges its virtual runtime |
-| `cake_cpu_release` | a higher scheduling class takes the CPU | re-enqueues the CPU's waiting local tasks so idle CPUs can serve them |
+| `cake_init_task` | a task is forked, or cake attaches | creates the task's storage record while no rq lock is held |
+| `cake_cpu_release` | a higher scheduling class takes the CPU | re-enqueues waiting local tasks and kicks an idle CPU to serve the owner queue when possible |
 | `cake_update_idle` | a CPU goes idle or wakes | serves pool work that arrived as it went idle; keeps cake's idle word, or tracks idle CPUs past ID 63 on wide hosts |
 
 The full rules, with every route and threshold, are in
@@ -219,7 +225,7 @@ Testing:
 | Flag | Default | Does |
 |---|---|---|
 | `--toggle NAME=0\|1` | | set a toggle; repeatable, the last one wins |
-| `--handoff-ns NS` | `1464` | change the handoff floor: the slice floor, serial handoff, sub-handoff and deep-idle cutoffs |
+| `--handoff-ns NS` | `1464` | test a handoff floor from 32 to 750000 ns. This also sets the serial handoff, sub-handoff and deep-idle cutoffs. |
 | `--native-bitops` | auto | require native CTZ/POPCNT; fail without them |
 | `--portable-bitops` | off | force portable CTZ/POPCNT |
 | `--kernel-signals off\|observe\|on` | `off` | patch 4: `observe` counts the signals, `on` also uses them for placement |

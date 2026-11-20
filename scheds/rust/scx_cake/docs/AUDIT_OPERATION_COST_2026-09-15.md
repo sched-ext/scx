@@ -611,3 +611,23 @@ loads and 9 activation/restoration checks. A separate intentionally weakened
 VM kernel confirms that the existing negative tests detect the missing precision
 dependency; those negative programs were never executed. No hardware latency
 delta, FPS gain, or default promotion is claimed.
+
+## 13. Slice grant in direct admission (2026-11-20)
+
+Removing the grant's low-bit correction reduced `cake_admit_direct` from
+121 to 108 BPF instruction slots in the production object. On stock
+CachyOS 7.3.5, the timed portion of direct admission reached 10 ns or
+less on 17.0% of wakes before the change and 27.1% after it (median of
+eight launches per arm). Instrumented p10 moved from 10 to 9 ns in all
+eight pairs, at the 9 ns empty-clock p10. In a separate accounting block
+the paired median change in mean `select_cpu` cost was -2.18 ns, with
+three of four pairs faster. The wider user-space handoff showed mixed
+results. [Methods and release hashes](../STATE.md#2026-11-20--direct-admission-latency-in-local-142)
+
+The separate stopping-cap table removed one multiply, one shift and two
+conditional jumps from `cake_stopping` and added three stack accesses.
+The stock 7.3.5 JIT body shrank from 2,970 to 2,953 bytes. In eight quiet
+handoff pairs, the paired median was -0.093 ns per call. The order groups
+disagreed. ShadowGate averaged 603.13 FPS on the original build and
+603.79 with the table. The experiment stayed out of the local nightly.
+[Game and callback comparison](../STATE.md#precompute-the-stopping-cap-at-startup)
