@@ -80,6 +80,22 @@ pub fn extract(out_dir: impl AsRef<Path>) -> io::Result<BpfAssets> {
 
     let libarena = libarena_rs::build::extract(out_dir)?;
     patch_libarena_rbtree(&libarena.source("rbtree.bpf.c"))?;
+    inline_libarena_buddy_header(&libarena.source("buddy.bpf.c"))?;
 
     Ok(BpfAssets { root, libarena })
+}
+
+fn inline_libarena_buddy_header(source: &Path) -> io::Result<()> {
+    const OUT_OF_LINE: &str = "static struct buddy_header __arena *idx_to_header(";
+    const INLINED: &str = "static __always_inline struct buddy_header __arena *idx_to_header(";
+
+    // Leave room for callers of the buddy allocator in the BPF call stack.
+    let contents = fs::read_to_string(source)?;
+    if contents.matches(OUT_OF_LINE).count() != 1 {
+        return Err(io::Error::other(format!(
+            "{} does not contain the expected idx_to_header declaration",
+            source.display()
+        )));
+    }
+    fs::write(source, contents.replacen(OUT_OF_LINE, INLINED, 1))
 }

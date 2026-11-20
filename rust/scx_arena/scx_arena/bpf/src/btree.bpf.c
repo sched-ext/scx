@@ -44,7 +44,7 @@ __weak int arrcpy(u64 __arg_arena __arena *dst, u64 __arg_arena __arena *src, si
 	return 0;
 }
 
-static bt_node *btnode_alloc(btree_t *btree, bt_node __arg_arena *parent, u64 flags)
+static __always_inline bt_node *btnode_alloc(btree_t *btree, bt_node __arg_arena *parent, u64 flags)
 {
 	bt_node *btn;
 
@@ -332,7 +332,7 @@ u64 btnode_split_internal(bt_node __arg_arena *btn_new, bt_node __arg_arena *btn
 	return key;
 }
 
-__weak
+static __always_inline
 int bt_split(btree_t __arg_arena *btree, bt_node __arg_arena *btn_old)
 {
 	bt_node *btn_new, *btn_root, *btn_parent;
