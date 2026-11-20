@@ -97,9 +97,11 @@ struct Opts {
     #[clap(long = "toggle", value_name = "NAME=0|1")]
     toggle: Vec<String>,
 
-    /// Test only: override the handoff floor (ns, default 1464). It moves
+    /// Test only: override the handoff floor (32 to 750000 ns, default 1464). It moves
     /// the slice floor, serial handoff, sub-handoff and deep-idle cutoffs.
-    #[clap(long = "handoff-ns", value_name = "NS")]
+    #[clap(long = "handoff-ns", value_name = "NS", value_parser = clap::value_parser!(u64).range(
+        u64::from(bpf_intf::consts_CAKE_POOL_TAG_MASK + 1)..=u64::from(bpf_intf::consts_CAKE_GRANT_CAP_NS / 2)
+    ))]
     handoff_ns: Option<u64>,
 }
 
@@ -361,7 +363,7 @@ fn log_startup_detail(
     topo: &Topology,
     rank_tiers: u32,
     core_performance: &core_performance::CorePerformanceLayout,
-    pref_die: Option<&PreferredDie>,
+    pref_die: &PreferredDie,
     x3d_mode: Option<&str>,
     probe_on: bool,
 ) {
@@ -383,15 +385,8 @@ fn log_startup_detail(
     if opts.verbose {
         info!("Core order   {}", core_performance.summary());
     }
-    if let Some(die) = pref_die {
-        info!("Cache bias   Preferred cache domain selected");
-        let w = preferred_word(die, x3d_mode);
-        if opts.verbose {
-            info!(
-                "Cache mask   {w:#x} (x3d mode {})",
-                x3d_mode.unwrap_or("n/a")
-            );
-        }
+    if opts.verbose || pref_die.word != 0 {
+        info!("Cache bias   {}", pref_die.summary(x3d_mode));
     }
     if opts.verbose {
         for core in core_performance.details() {
@@ -533,9 +528,6 @@ struct Scheduler<'a> {
     verbose: bool,
     /// Live IRQ-sink tracking state.
     sinks: SinkMonitor,
-    /// Multi-LLC hosts: the die each V-cache mode prefers, and the mode last seen.
-    pref_die: Option<PreferredDie>,
-    x3d_mode: Option<String>,
     signal_report: Option<std::fs::File>,
     signals_enabled: bool,
 }
@@ -547,11 +539,12 @@ impl<'a> Scheduler<'a> {
 
         let signal_report = open_signal_report(opts)?;
         let signals = detect_signals(opts);
+        // Record the kernel's hotplug sequence before sampling the online topology.
+        let mut skel = open_skel(opts.verbose, open_object)?;
         let topo = Topology::new().context("failed to read topology")?;
         let bitops = NativeBitops::detect().select(opts)?;
         log_host(opts, &topo, bitops);
 
-        let mut skel = open_skel(opts.verbose, open_object)?;
         let rodata = skel
             .maps
             .rodata_data
@@ -579,7 +572,7 @@ impl<'a> Scheduler<'a> {
             _ => {}
         }
         let core_performance = core_performance::CorePerformanceLayout::discover(&topo);
-        let host = HostShape::read(&topo, core_performance.rank_words(), idle_states);
+        let host = HostShape::read(&topo, &core_performance, idle_states);
         let ranks = skel
             .maps
             .data_cake_ranks_data
@@ -599,14 +592,20 @@ impl<'a> Scheduler<'a> {
         let probe_on = probe_toggle(&opts.toggle);
         rodata.cake_tog_probe = u8::from(probe_on);
 
-        let pref_die = preferred_die(&topo, &core_performance);
         let x3d_mode = amd_x3d_mode();
+        let pref_die = preferred_die(
+            &topo,
+            &core_performance,
+            &host.rank_words,
+            x3d_mode.as_deref(),
+        );
+        rodata.cake_llc_pref_word = pref_die.word;
         log_startup_detail(
             opts,
             &topo,
             rodata.cake_rank_tiers,
             &core_performance,
-            pref_die.as_ref(),
+            &pref_die,
             x3d_mode.as_deref(),
             probe_on,
         );
@@ -637,9 +636,6 @@ impl<'a> Scheduler<'a> {
         }
 
         let irq_links = attach_hooks(&skel, idle_exit_max_ns);
-        if let (Some(die), Some(bss)) = (&pref_die, skel.maps.bss_data.as_mut()) {
-            bss.cake_llc_pref_word = preferred_word(die, x3d_mode.as_deref());
-        }
 
         // Begin scheduling only after handler accounting is installed.
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
@@ -660,8 +656,6 @@ impl<'a> Scheduler<'a> {
             probe_on,
             verbose: opts.verbose,
             sinks: SinkMonitor::new(*NR_CPU_IDS),
-            pref_die,
-            x3d_mode,
             signal_report,
             signals_enabled: signals.enabled,
         }))
@@ -684,7 +678,6 @@ impl<'a> Scheduler<'a> {
             if let Some(set) = self.sinks.tick(*NR_CPU_IDS) {
                 self.publish_sinks(&set);
             }
-            self.refresh_preferred_die();
         }
 
         // Detach first: ops.exit copies the event and pool counters, and no record is mid-write.
@@ -729,20 +722,6 @@ impl<'a> Scheduler<'a> {
                 stuck.len(),
                 stuck.join(" ")
             );
-        }
-    }
-
-    /// A game-mode daemon flips the V-cache mode after attach.
-    fn refresh_preferred_die(&mut self) {
-        if let Some(die) = &self.pref_die {
-            let mode = amd_x3d_mode();
-            if mode != self.x3d_mode {
-                if let Some(bss) = self.skel.maps.bss_data.as_mut() {
-                    bss.cake_llc_pref_word = preferred_word(die, mode.as_deref());
-                }
-                info!("   die     x3d mode {}", mode.as_deref().unwrap_or("n/a"));
-                self.x3d_mode = mode;
-            }
         }
     }
 
@@ -1124,72 +1103,116 @@ fn amd_x3d_mode() -> Option<String> {
     None
 }
 
-/// Per-LLC idle-word masks and the LLC each mode prefers: the die with the most
-/// high-capacity cores, else the largest cache under mode "cache", else the
-/// highest summed platform preference. Multi-LLC hosts within one word only.
 struct PreferredDie {
-    cache: u64,
-    frequency: u64,
+    word: u64,
+    reason: &'static str,
+}
+
+impl PreferredDie {
+    fn summary(&self, mode: Option<&str>) -> String {
+        format!(
+            "preferred LLC mask {:#x} ({}), X3D driver mode {}",
+            self.word,
+            self.reason,
+            mode.unwrap_or("unavailable")
+        )
+    }
+}
+
+/// Read the physical L3 size. The topology's per-CPU cache share also varies
+/// with the number of online cores and cannot identify a stacked-cache die.
+fn l3_size(cpu: usize) -> Option<usize> {
+    let caches = std::fs::read_dir(format!("/sys/devices/system/cpu/cpu{cpu}/cache")).ok()?;
+    caches.flatten().find_map(|entry| {
+        let path = entry.path();
+        let level = std::fs::read_to_string(path.join("level")).ok()?;
+        let kind = std::fs::read_to_string(path.join("type")).ok()?;
+        if level.trim() == "3" && kind.trim() == "Unified" {
+            scx_utils::misc::read_file_byte(&path.join("size"))
+                .ok()
+                .filter(|&size| size > 0)
+        } else {
+            None
+        }
+    })
 }
 
 fn preferred_die(
     topo: &Topology,
     perf: &core_performance::CorePerformanceLayout,
-) -> Option<PreferredDie> {
-    if topo.all_llcs.len() < 2 || *NR_CPU_IDS > 64 {
-        return None;
+    tiers: &[u64],
+    mode: Option<&str>,
+) -> PreferredDie {
+    if topo.all_llcs.len() < 2 {
+        return PreferredDie {
+            word: 0,
+            reason: "only one cache domain",
+        };
     }
-    let mut word: BTreeMap<usize, u64> = BTreeMap::new();
-    let mut big: BTreeMap<usize, u32> = BTreeMap::new();
-    let mut cache: BTreeMap<usize, usize> = BTreeMap::new();
-    for cpu in topo.all_cpus.values() {
-        *word.entry(cpu.llc_id).or_insert(0) |= 1u64 << cpu.id;
-        if cpu.core_type != scx_utils::CoreType::Little {
-            *big.entry(cpu.llc_id).or_insert(0) += 1;
-        }
-        let e = cache.entry(cpu.llc_id).or_insert(0);
-        *e = (*e).max(cpu.cache_size);
+    if *NR_CPU_IDS > 64 || topo.all_llcs.len() > bpf_intf::consts_MAX_LLCS as usize {
+        return PreferredDie {
+            word: 0,
+            reason: "topology exceeds the preferred-LLC mask or pool limit",
+        };
     }
-    let mut pref: BTreeMap<usize, u64> = BTreeMap::new();
-    for core in &perf.cores {
-        *pref.entry(core.identity.llc).or_insert(0) += u64::from(core.preference.unwrap_or(0));
+    let package = perf.cores.first().map(|core| core.identity.package);
+    if perf
+        .cores
+        .iter()
+        .any(|core| Some(core.identity.package) != package)
+    {
+        return PreferredDie {
+            word: 0,
+            reason: "multiple CPU packages",
+        };
     }
-    let best = |key: &dyn Fn(&usize) -> u64| -> u64 {
-        word.keys()
-            .max_by_key(|l| (key(l), std::cmp::Reverse(**l)))
-            .map_or(0, |l| word[l])
-    };
-    let by_big = best(&|l| u64::from(big.get(l).copied().unwrap_or(0)));
-    let big_differs = big.values().max() != big.values().min();
-    let by_cache = best(&|l| cache.get(l).copied().unwrap_or(0) as u64);
-    let by_pref = best(&|l| pref.get(l).copied().unwrap_or(0));
-    let all: u64 = word.values().fold(0, |a, w| a | w);
-    let cache_differs = cache.values().max() != cache.values().min();
-    Some(if big_differs {
-        PreferredDie {
-            cache: by_big,
-            frequency: by_big,
-        }
-    } else if cache_differs && word.len() == 2 {
-        // A V-cache pair: the platform re-ranks cores with the mode, so the
-        // frequency die is the other die, not the ranking read at start.
-        PreferredDie {
-            cache: by_cache,
-            frequency: all & !by_cache,
-        }
-    } else {
-        PreferredDie {
-            cache: by_cache,
-            frequency: by_pref,
-        }
-    })
+    let mode = mode.filter(|_| !perf.preferences_disabled());
+    let read_l3 = mode.is_some() && topo.all_llcs.len() == 2;
+    let domains: Vec<_> = topo
+        .all_llcs
+        .values()
+        .map(|llc| {
+            let word = llc.span.as_raw_slice()[0];
+            let l3 = if read_l3 {
+                llc.span.iter().next().and_then(l3_size)
+            } else {
+                None
+            };
+            (word, l3)
+        })
+        .collect();
+    select_die(&domains, tiers, mode)
 }
 
-fn preferred_word(die: &PreferredDie, mode: Option<&str>) -> u64 {
-    if mode == Some("cache") {
-        die.cache
-    } else {
-        die.frequency
+fn select_die(domains: &[(u64, Option<usize>)], tiers: &[u64], mode: Option<&str>) -> PreferredDie {
+    // Pick by effective performance only when every core of one domain ranks
+    // ahead of every core outside it. A larger core count cannot win a tie.
+    for &(word, _) in domains {
+        let ahead = tiers
+            .iter()
+            .copied()
+            .take_while(|tier| tier & !word == 0)
+            .fold(0, |mask, tier| mask | tier);
+        if word != 0 && ahead == word {
+            return PreferredDie {
+                word,
+                reason: "effective core tiers",
+            };
+        }
+    }
+    if let [(a, Some(a_l3)), (b, Some(b_l3))] = domains
+        && a_l3 != b_l3
+        && matches!(mode, Some("cache" | "frequency"))
+    {
+        let pick_a = (a_l3 > b_l3) == (mode == Some("cache"));
+        return PreferredDie {
+            word: if pick_a { *a } else { *b },
+            reason: "X3D mode and L3 size",
+        };
+    }
+    PreferredDie {
+        word: 0,
+        reason: "no distinct domain preference",
     }
 }
 
@@ -1426,6 +1449,9 @@ fn main() -> Result<()> {
         let topo = Topology::new().context("failed to read topology")?;
         let layout = core_performance::CorePerformanceLayout::discover(&topo);
         println!("{}", layout.summary());
+        let mode = amd_x3d_mode();
+        let die = preferred_die(&topo, &layout, &layout.rank_words(), mode.as_deref());
+        println!("{}", die.summary(mode.as_deref()));
         for core in layout.details() {
             println!("{core}");
         }
@@ -1543,7 +1569,11 @@ struct HostShape {
 }
 
 impl HostShape {
-    fn read(topo: &Topology, rank_words: Vec<u64>, idle_states: Vec<u64>) -> Self {
+    fn read(
+        topo: &Topology,
+        perf: &core_performance::CorePerformanceLayout,
+        idle_states: Vec<u64>,
+    ) -> Self {
         let span = (*NR_CPU_IDS).max(
             std::fs::read_to_string("/sys/devices/system/cpu/possible")
                 .ok()
@@ -1559,7 +1589,7 @@ impl HostShape {
                     core: cpu.core_id,
                     llc: cpu.llc_id,
                     cache_size: cpu.cache_size,
-                    big: cpu.core_type != scx_utils::CoreType::Little,
+                    big: perf.big_cpu(cpu),
                 })
                 .collect(),
             nr_cpu_ids: *NR_CPU_IDS,
@@ -1567,7 +1597,7 @@ impl HostShape {
             online: online_cpu_set(topo),
             idle_states,
             tick_ns: coarse_tick_ns(),
-            rank_words,
+            rank_words: perf.rank_words(),
         }
     }
 
@@ -1839,6 +1869,57 @@ impl LlcLayout {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn handoff_floor_preserves_tagged_and_compute_slice_bounds() {
+        let min = u64::from(super::bpf_intf::consts_CAKE_POOL_TAG_MASK + 1);
+        let max = u64::from(super::bpf_intf::consts_CAKE_GRANT_CAP_NS / 2);
+        for value in [0, min - 1, min, 1464, max, max + 1, u64::MAX] {
+            let value_arg = value.to_string();
+            let parsed = super::parse_opts_lenient(["scx_cake", "--handoff-ns", &value_arg]);
+            if (min..=max).contains(&value) {
+                assert_eq!(parsed.unwrap().0.handoff_ns, Some(value));
+            } else {
+                assert!(parsed.is_err(), "accepted {value} ns");
+            }
+        }
+    }
+
+    #[test]
+    fn effective_core_order_wins_over_a_conflicting_x3d_mode() {
+        let domains = [(0x0f, Some(96)), (0xf0, Some(32))];
+        assert_eq!(
+            super::select_die(&domains, &[0x03, 0x0c, 0xf0], Some("frequency")).word,
+            0x0f
+        );
+        assert_eq!(
+            super::select_die(&domains, &[0xf0, 0x0f], Some("cache")).word,
+            0xf0
+        );
+    }
+
+    #[test]
+    fn x3d_fallback_requires_two_distinct_measured_l3_sizes_and_a_mode() {
+        let domains = [(0x3, Some(96)), (0xfc, Some(32))];
+        let overlapping = [0x05, 0xfa];
+        assert_eq!(
+            super::select_die(&domains, &overlapping, Some("cache")).word,
+            0x03
+        );
+        assert_eq!(
+            super::select_die(&domains, &overlapping, Some("frequency")).word,
+            0xfc
+        );
+        assert_eq!(super::select_die(&domains, &overlapping, None).word, 0);
+        assert_eq!(
+            super::select_die(&[(3, None), (252, Some(32))], &[255], Some("frequency")).word,
+            0
+        );
+        assert_eq!(
+            super::select_die(&[(3, Some(32)), (252, Some(32))], &[255], Some("cache")).word,
+            0
+        );
+    }
+
+    #[test]
     fn bitops_and_inspection_flags_are_recognized() {
         let (defaults, dropped) = super::parse_opts_lenient(["scx_cake"]).unwrap();
         assert!(dropped.is_empty());
@@ -2055,6 +2136,7 @@ mod tests {
         let builder = super::BpfSkelBuilder::default();
         let mut skel = builder.open(&mut object).expect("open embedded BPF object");
         assert!(!skel.struct_ops.cake_ops_mut().update_idle.is_null());
+        assert!(!skel.struct_ops.cake_ops_mut().quiescent.is_null());
         assert!(!skel.struct_ops.cake_ops_mut().cpu_release.is_null());
         assert!(!skel.struct_ops.cake_ops_mut().disable.is_null());
         assert!(skel.progs.cake_cpu_release.autoload());
@@ -2275,6 +2357,9 @@ mod tests {
         ro.cake_native_ctz = native.ctz;
         ro.cake_native_popcnt = native.popcnt;
         host_shape(shape).publish(ro, ranks)?;
+        if ro.cake_one_word != 0 && ro.nr_llcs > 1 {
+            ro.cake_llc_pref_word = ro.cpu_llc_word[shape.cores[0][0]];
+        }
         ro.cake_wake_hop_ns = ro.cake_tick_ns / 8;
         Ok(())
     }
@@ -2317,14 +2402,6 @@ mod tests {
     #[test]
     #[ignore = "requires BPF load capabilities and a sched_ext kernel"]
     fn verifier_load_topologies() -> anyhow::Result<()> {
-        use super::BpfSkelBuilder;
-        use libbpf_rs::AsRawLibbpf;
-        use libbpf_rs::libbpf_sys::bpf_program__set_log_buf;
-        use libbpf_rs::skel::{OpenSkel, Skel};
-        use scx_utils::{scx_ops_load, scx_ops_open};
-        use std::mem::MaybeUninit;
-        use std::os::fd::AsFd;
-
         let mut wide_uneven = uneven_layout();
         wide_uneven.extend((8..72).map(|cpu| vec![cpu]));
         let shapes = [
@@ -2400,8 +2477,29 @@ mod tests {
             load_shape("128 at +64, 8 LLCs", pairs_at(64, 64), 8, 1),
             load_shape("1024 at +512", pairs_at(512, 512), 1, 1),
         ];
+        verify_shapes(&shapes)
+    }
+
+    #[test]
+    #[ignore = "requires BPF load capabilities and a sched_ext kernel"]
+    fn verifier_load_preferred_die() -> anyhow::Result<()> {
+        verify_shapes(&[
+            load_shape("two CCDs, 16 ranked SMT pairs", pairs_at(16, 16), 2, 16),
+            load_shape("two LLCs, irregular SMT", uneven_layout(), 2, 3),
+        ])
+    }
+
+    fn verify_shapes(shapes: &[LoadShape]) -> anyhow::Result<()> {
+        use super::BpfSkelBuilder;
+        use libbpf_rs::AsRawLibbpf;
+        use libbpf_rs::libbpf_sys::bpf_program__set_log_buf;
+        use libbpf_rs::skel::{OpenSkel, Skel};
+        use scx_utils::{scx_ops_load, scx_ops_open};
+        use std::mem::MaybeUninit;
+        use std::os::fd::AsFd;
+
         let mut failures = Vec::new();
-        for shape in &shapes {
+        for shape in shapes {
             let one_word = shape.cores.iter().flatten().max().unwrap() < &64;
             let mut object = MaybeUninit::uninit();
             let builder = BpfSkelBuilder::default();
