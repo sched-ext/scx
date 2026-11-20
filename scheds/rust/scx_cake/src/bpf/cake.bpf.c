@@ -1405,8 +1405,7 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 		kind = CAKE_PLACE_LOCAL;
 	else
 		kind = (enq_flags & CAKE_ENQ_WAKEUP) ? CAKE_PLACE_CPUQ_WAKE : CAKE_PLACE_CPUQ_CONT;
-	t = bpf_task_storage_get(&cake_probe_tags, p, 0,
-				 BPF_LOCAL_STORAGE_GET_F_CREATE);
+	t = bpf_task_storage_get(&cake_probe_tags, p, 0, 0);
 	if (!t)
 		return;
 	t->place_ns = cake_now_rq(CAKE_SITE_KT_PROBE);
@@ -1555,15 +1554,15 @@ struct {
 	__type(value, struct cake_groove);
 } cake_grooves SEC(".maps");
 
+/* Lookup only: a create allocates, and the allocator may wake a kworker under the rq lock. */
 static __always_inline struct cake_groove *cake_groove_of(struct task_struct *p)
 {
 	if (unlikely(cake_tog_probe)) {
 		cake_stat_inc_cold(CAKE_SITE_TASK_STORAGE);
 		return CAKE_TIMED_COLD(CAKE_SITE_T_TASK_STORAGE,
-				       bpf_task_storage_get(&cake_grooves, p, 0,
-							    BPF_LOCAL_STORAGE_GET_F_CREATE));
+				       bpf_task_storage_get(&cake_grooves, p, 0, 0));
 	}
-	return bpf_task_storage_get(&cake_grooves, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	return bpf_task_storage_get(&cake_grooves, p, 0, 0);
 }
 
 static __noinline u64 cake_task_slice(struct task_struct *p __arg_trusted);
@@ -3216,7 +3215,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	/* Share sample once per HOME_TICK_MASK + 1 blocks. */
 	if (cake_one_word && !runnable && cpu < CPU_WORD_BITS && !(p->nvcsw & HOME_TICK_MASK))
 		cake_home_sample(p, cpu);
-	/* Failed allocation: no reservation. Stage tested last: gates cost a load, it an imul. */
+	/* No groove: no reservation. Stage tested last: gates cost a load, it an imul. */
 	if (cake_one_word && !runnable && cpu < CPU_WORD_BITS && cake_stage(p)) {
 		struct cake_groove *gr = cake_groove_of(p);
 
@@ -3276,6 +3275,16 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 		__atomic_fetch_or(&cake_idle_words[c >> 6], bit, __ATOMIC_RELAXED);
 	else
 		__atomic_fetch_and(&cake_idle_words[c >> 6], ~bit, __ATOMIC_RELAXED);
+}
+
+/* ops.init_task: the one place task storage is made; a failed create costs the task its home. */
+s32 BPF_STRUCT_OPS(cake_init_task, struct task_struct *p, struct scx_init_task_args *args)
+{
+	if (cake_one_word)
+		bpf_task_storage_get(&cake_grooves, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (unlikely(cake_tog_probe))
+		bpf_task_storage_get(&cake_probe_tags, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	return 0;
 }
 
 /* ops.enable: a fresh task starts at the vtime frontier, neither starved nor in credit. */
@@ -3408,6 +3417,7 @@ SCX_OPS_DEFINE(cake_ops,
 	       .stopping	= (void *)cake_stopping,
 	       .yield		= (void *)cake_yield,
 	       .update_idle	= (void *)cake_update_idle,
+	       .init_task	= (void *)cake_init_task,
 	       .enable		= (void *)cake_enable,
 	       .exit_task	= (void *)cake_exit_task,
 	       .disable		= (void *)cake_disable,
