@@ -120,13 +120,18 @@ static __always_inline void cake_tried_inc(u32 cpu, u32 idx)
 		cake_tried[cpu & (MAX_CPUS - 1)][idx & (CAKE_TRIED_NR - 1)]++;
 }
 
-/* Cold: a hot probe site is one rodata test and a call the verifier removes with the toggle off. */
-static __noinline void cake_stat_inc_cold(u32 idx)
+static __always_inline void cake_stat_bump(u32 idx)
 {
 	u64 *v = bpf_map_lookup_elem(&cake_stats, &idx);
 
 	if (v)
 		(*v)++;
+}
+
+/* Cold: a hot probe site is one rodata test and a call the verifier removes with the toggle off. */
+static __noinline void cake_stat_inc_cold(u32 idx)
+{
+	cake_stat_bump(idx);
 }
 
 static __noinline void cake_stat_add_cold(u32 idx, u64 add)
@@ -137,11 +142,11 @@ static __noinline void cake_stat_add_cold(u32 idx, u64 add)
 		*v += add;
 }
 
-/* Two counts from one toggle test: a class total and its site. */
+/* Two counts from one toggle test; no call: a ninth frame under ops.enqueue fails older verifiers. */
 static __noinline void cake_stat_inc2_cold(u32 idx, u32 site)
 {
-	cake_stat_inc_cold(idx);
-	cake_stat_inc_cold(site);
+	cake_stat_bump(idx);
+	cake_stat_bump(site);
 }
 
 static __always_inline void cake_stat_inc(u32 idx)
