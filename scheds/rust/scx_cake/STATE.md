@@ -97,6 +97,27 @@ the nightly: the game does not resolve it and the cycle saving did not
 separate. Patches, builds and results are in
 `scx_cake_bench/runs/shadowgate_init_task_storage_142/`.
 
+### Call depth under `ops.enqueue` on older verifiers
+
+The verifier allows eight nested call frames (`MAX_CALL_FRAMES`) and
+counts every call in the object, the probe arms included. `linux-6.18.y`
+restarts the count at a global function; `linux-6.13.y` and
+`linux-6.16.y` do not. 1.4.1 was eight deep under `ops.enqueue`.
+`cake_pool_insert` made it nine, and upstream's veristat on 6.13 and 6.16
+refused `cake_enqueue` with "the call stack of 8 frames is too deep".
+
+| Build | Deepest chain under `ops.enqueue` | Frames |
+|---|---|---:|
+| 1.4.1 | `cake_enqueue` > `cake_enqueue_wake` > `cake_wake_place` > `cake_dsq_insert_vtime` > `cake_dsq_insert_vtime_probe` > `cake_probe_place` > `cake_stat_inc2_cold` > `cake_stat_inc_cold` | 8 |
+| 1.4.2 before | the same with `cake_pool_insert` after `cake_wake_place` | 9 |
+| 1.4.2 now | ends at `cake_stat_inc2_cold`, which counts without a call | 8 |
+
+`cake_stat_inc2_cold` went from 5 to 20 instructions. The other 65
+functions and all 22 programs are unchanged in the object, so the
+ShadowGate rows above still describe the code that runs with the probe
+off. The chain is at the limit again: one more `__noinline` frame on the
+wake path needs a frame taken out elsewhere.
+
 ## 2026-11-20 · Fixed homes and alternative placements in ShadowGate
 
 On the single-CCD Ryzen 7 9800X3D and stock CachyOS 7.3.5, each policy
