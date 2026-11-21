@@ -167,9 +167,6 @@ impl ArenaLib {
     /// before any arena_topology_node_init() calls. The sizes are derived from
     /// the actual host topology to keep per-node allocation as small as
     /// possible.
-    ///
-    /// NOTE: rust/scx_arena/selftests/src/main.rs::setup_topology() contains
-    /// equivalent logic and must be kept in sync with this function.
     fn setup_topology_max_children(obj: &Object, topo: &Topology) -> Result<()> {
         // Compute the maximum number of children at each topology level.
         // TOPO_TOP  (0): children are NUMA nodes

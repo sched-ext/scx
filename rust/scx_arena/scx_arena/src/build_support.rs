@@ -12,29 +12,6 @@ use std::path::{Path, PathBuf};
 
 static BPF_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scx-arena-libarena-bpf.tar"));
 
-fn patch_libarena_rbtree(source: &Path) -> io::Result<()> {
-    const OLD_HELPER: &str = "__weak\nint rb_print_pop_up(";
-    const NEW_HELPER: &str = "static __always_inline\nint rb_print_pop_up(";
-    const OLD_PUSH: &str = "stack[depth++] = state;";
-    const NEW_PUSH: &str = "volatile u8 stack_idx = depth & (RB_MAXLVL_PRINT - 1);\n\
-                            \t\t\tif (stack_idx >= RB_MAXLVL_PRINT)\n\
-                            \t\t\t\treturn 0;\n\
-                            \t\t\tstack[stack_idx] = state;\n\
-                            \t\t\tdepth++;";
-
-    let contents = fs::read_to_string(source)?;
-    if contents.matches(OLD_HELPER).count() != 1 || contents.matches(OLD_PUSH).count() != 2 {
-        return Err(io::Error::other(format!(
-            "{} does not contain the expected rb_print_pop_up implementation",
-            source.display()
-        )));
-    }
-    let patched = contents
-        .replacen(OLD_HELPER, NEW_HELPER, 1)
-        .replace(OLD_PUSH, NEW_PUSH);
-    fs::write(source, patched)
-}
-
 #[derive(Debug)]
 pub struct BpfAssets {
     root: PathBuf,
@@ -79,7 +56,35 @@ pub fn extract(out_dir: impl AsRef<Path>) -> io::Result<BpfAssets> {
     tar::Archive::new(Cursor::new(BPF_ARCHIVE)).unpack(&root)?;
 
     let libarena = libarena_rs::build::extract(out_dir)?;
-    patch_libarena_rbtree(&libarena.source("rbtree.bpf.c"))?;
+    inline_libarena_buddy_header(&libarena.source("buddy.bpf.c"))?;
+    for name in [
+        "common.bpf.c",
+        "buddy.bpf.c",
+        "bitmap.bpf.c",
+        "rbtree.bpf.c",
+    ] {
+        let source = libarena.source(name);
+        let contents = fs::read_to_string(&source)?;
+        fs::write(
+            source,
+            format!("#include <lib/alloc/libarena_compat.h>\n{contents}"),
+        )?;
+    }
 
     Ok(BpfAssets { root, libarena })
+}
+
+fn inline_libarena_buddy_header(source: &Path) -> io::Result<()> {
+    const OUT_OF_LINE: &str = "static struct buddy_header __arena *idx_to_header(";
+    const INLINED: &str = "static __always_inline struct buddy_header __arena *idx_to_header(";
+
+    // Leave room for callers of the buddy allocator in the BPF call stack.
+    let contents = fs::read_to_string(source)?;
+    if contents.matches(OUT_OF_LINE).count() != 1 {
+        return Err(io::Error::other(format!(
+            "{} does not contain the expected idx_to_header declaration",
+            source.display()
+        )));
+    }
+    fs::write(source, contents.replacen(OUT_OF_LINE, INLINED, 1))
 }

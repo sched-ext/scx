@@ -2,7 +2,6 @@
 members = [
     "rust/scx_arena/scx_arena",
     "rust/scx_arena/libarena_selftests",
-    "rust/scx_arena/selftests",
     "rust/scx_rustsched_abi",
     "rust/scx_rustsched_build",
     "rust/scx_rustsched_loader",

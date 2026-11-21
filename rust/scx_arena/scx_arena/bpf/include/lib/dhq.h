@@ -4,6 +4,7 @@
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
 #include <bpf_arena_spin_lock.h>
+#include <lib/spinlock.h>
 #endif /* __BPF__ */
 
 #include <lib/minheap.h>

@@ -4,7 +4,6 @@
  */
 #include <scx/common.bpf.h>
 #include <libarena/common.h>
-#include <libarena/buddy.h>
 #include <lib/sdt_task.h>
 
 #include <lib/arena.h>
@@ -17,55 +16,10 @@
 
 struct task_ctx;
 
-/*
- * A NULL arena pointer aliases the arena's first page at access time and a
- * stray NULL dereference would silently read or corrupt live data. Keep the
- * front of the arena unallocated so such accesses fault and get reported on the
- * program's BPF stderr stream instead. The guard must exceed the largest single
- * arena object so that indexing into one from NULL stays inside it. Negative
- * offsets off NULL wrap to the top of the window, which cannot be guarded the
- * same way as libbpf places the __arena globals there.
- */
-enum {
-	NULL_GUARD_PAGES	= BUDDY_VADDR_OFFSET / PAGE_SIZE,
-};
-
 SEC("syscall")
 int arena_init(struct arena_init_args *args)
 {
 	int ret;
-
-	/*
-	 * On kernels without full-range LDIMM64 offset support, libbpf places
-	 * the __arena globals at the bottom of the arena instead of the top and
-	 * the guard region is occupied from the get-go. The guard cannot work
-	 * there, skip it. qnodes is in the __arena globals, test its placement.
-	 */
-	if (bpf_ksym_exists(bpf_arena_reserve_pages) &&
-	    (u32)(u64)qnodes >= NULL_GUARD_PAGES * PAGE_SIZE) {
-		/*
-		 * A fault on an unallocated arena page allocates it, including
-		 * a read through /proc/PID/mem by another process. Memory
-		 * scanners, such as the one on GitHub's hosted runners, read
-		 * the front of large new mappings and may have left guard pages
-		 * allocated. Nothing lives there yet, so free them before
-		 * reserving.
-		 *
-		 * Unlike bpf_arena_reserve_pages(), bpf_arena_free_pages()
-		 * returns without freeing on a NULL pointer. Only the lower 32
-		 * bits of the address select the pages, so pass page 0's full
-		 * user address instead, taking the upper bits from qnodes.
-		 */
-		bpf_arena_free_pages(&arena, (void __arena *)((u64)qnodes & ~0xffffffffULL),
-				     NULL_GUARD_PAGES);
-		ret = bpf_arena_reserve_pages(&arena, NULL, NULL_GUARD_PAGES);
-		if (ret) {
-			bpf_printk("NULL guard: reserving pages [0, %u) failed with %d, "
-				   "the arena front was allocated before arena_init()",
-				   NULL_GUARD_PAGES, ret);
-			return ret;
-		}
-	}
 
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
 		bpf_printk("uninitialized nr_cpu_ids variable");

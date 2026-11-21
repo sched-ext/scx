@@ -9,7 +9,7 @@ include = ["src/**", "bpf/**", "build.rs"]
 
 [dependencies]
 anyhow = "1"
-libarena-rs = { version = "0.3.3", optional = true, features = ["build-support", "compat"] }
+libarena-rs = { version = "0.3.4", optional = true, features = ["build-support"] }
 libc = "0.2"
 libbpf-rs = "=0.27.2"
 libbpf-sys = "=1.7.1"
@@ -20,5 +20,6 @@ tar = { version = "0.4", optional = true }
 build-support = ["dep:libarena-rs", "dep:tar"]
 
 [build-dependencies]
+libbpf-sys = "=1.7.1"
 scx_cargo = { path = "../../scx_cargo", version = "1.1.4" }
 tar = "0.4"

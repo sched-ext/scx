@@ -3,7 +3,7 @@
 #pragma once
 
 #include <lib/cid_topology.h>
-#include <lib/arena_map.h>
+#include <libarena/common.h>
 
 /*
  * CID idle tracking for sched_ext schedulers
@@ -18,8 +18,7 @@
  * In ops.init(), call scx_cid_idle_init() with the SMT setting and split
  * level. It allocates ranges and segments, then marks every CID idle so CPUs
  * which start idle can be selected. The initial set is optimistic: a claim
- * or ops.update_idle() clears a CID that is already busy. Segment allocations
- * use the CID's NUMA node when the kfunc is available.
+ * or ops.update_idle() clears a CID that is already busy.
  *
  * Schedulers with ranges embedded in another topology table can pass the
  * first ranges entry and the table stride to scx_cid_idle_init(). Set
@@ -273,31 +272,24 @@ scx_cid_idle_split_index(const struct scx_cid_ranges __arena *ranges,
 static __always_inline int
 scx_cid_idle_alloc(struct scx_cid_idle_state *state, u32 nr_cids_max)
 {
-	u64 segment_bytes;
-	u32 segment_pages;
 	struct scx_cid_idle_segment __arena * __arena *segments;
 	struct scx_cid_idle_segment __arena * __arena *summaries;
 	struct scx_cmask __arena * __arena *core_llcs;
 
 	if (!nr_cids_max)
 		return -EINVAL;
-	segment_bytes = (u64)nr_cids_max * sizeof(*segments);
-	segment_pages = (segment_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-	segments = bpf_arena_alloc_pages(&arena, NULL, segment_pages,
-					  NUMA_NO_NODE, 0);
+	segments = arena_calloc(nr_cids_max, sizeof(*segments));
 	if (!segments)
 		return -ENOMEM;
-	summaries = bpf_arena_alloc_pages(&arena, NULL, segment_pages,
-					   NUMA_NO_NODE, 0);
+	summaries = arena_calloc(nr_cids_max, sizeof(*summaries));
 	if (!summaries) {
-		bpf_arena_free_pages(&arena, segments, segment_pages);
+		arena_free(segments);
 		return -ENOMEM;
 	}
-	core_llcs = bpf_arena_alloc_pages(&arena, NULL, segment_pages,
-					    NUMA_NO_NODE, 0);
+	core_llcs = arena_calloc(nr_cids_max, sizeof(*core_llcs));
 	if (!core_llcs) {
-		bpf_arena_free_pages(&arena, summaries, segment_pages);
-		bpf_arena_free_pages(&arena, segments, segment_pages);
+		arena_free(summaries);
+		arena_free(segments);
 		return -ENOMEM;
 	}
 
@@ -368,22 +360,20 @@ scx_cid_idle_alloc_segment(struct scx_cid_idle_build *build, u32 base,
 	return seg;
 }
 
-/* Allocate one NUMA-local pool for a node's summary and all its segments. */
+/* Allocate one pool for a node's summary and all its segments. */
 static __always_inline int
 scx_cid_idle_start_node(struct scx_cid_idle_state *state,
 			struct scx_cid_idle_build *build, u32 node_base,
-			u32 node_nr, u64 bytes, s32 node)
+			    u32 node_nr, u64 bytes)
 {
-	u64 pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-
 	if (!node_nr || node_base >= state->nr_cids ||
 	    node_nr > state->nr_cids - node_base ||
-	    !pages || pages > (u64)~0U / PAGE_SIZE)
+	    !bytes || bytes > (u64)~0U)
 		return -EINVAL;
-	build->node_pool = bpf_arena_alloc_pages(&arena, NULL, pages, node, 0);
+	build->node_pool = arena_calloc(1, bytes);
 	if (!build->node_pool)
 		return -ENOMEM;
-	build->node_pool_size = pages * PAGE_SIZE;
+	build->node_pool_size = bytes;
 	build->node_pool_off = 0;
 	build->node_pool_base = node_base;
 	build->node_summary = scx_cid_idle_alloc_segment(build, node_base,
@@ -413,8 +403,7 @@ scx_cid_idle_init_node(struct scx_cid_idle_state *state,
 	ret = scx_cid_idle_node_pool_bytes(first, last, split, &bytes);
 	if (ret)
 		return ret;
-	return scx_cid_idle_start_node(state, build, cid, first->node_nr,
-					    bytes, __COMPAT_scx_bpf_cid_node(cid));
+	return scx_cid_idle_start_node(state, build, cid, first->node_nr, bytes);
 }
 
 /* Add a segment after scx_cid_idle_start_node() for its node. */
@@ -784,7 +773,6 @@ scx_cid_idle_init(struct scx_cid_idle_state *state, bool smt_enabled,
 	struct scx_cid_range_builder builder = SCX_CID_RANGE_BUILDER_INIT;
 	struct scx_cid_idle_build build = {};
 	u32 nr_cids = scx_bpf_nr_online_cids();
-	u32 range_pages;
 	u32 i;
 	int ret;
 
@@ -803,10 +791,7 @@ scx_cid_idle_init(struct scx_cid_idle_state *state, bool smt_enabled,
 		state->ranges = ranges;
 		state->range_stride = stride;
 	} else {
-		range_pages = ((u64)state->nr_cids_max * sizeof(*state->ranges) +
-			       PAGE_SIZE - 1) / PAGE_SIZE;
-		state->ranges = bpf_arena_alloc_pages(&arena, NULL, range_pages,
-						      NUMA_NO_NODE, 0);
+		state->ranges = arena_calloc(state->nr_cids_max, sizeof(*state->ranges));
 		if (!state->ranges) {
 			scx_bpf_error("cid_idle: failed to allocate ranges");
 			return -ENOMEM;

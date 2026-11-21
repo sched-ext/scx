@@ -302,11 +302,7 @@ __weak int scx_selftest_rbtree_remove_one(struct rbtree __arena *rbtree __arg_ar
 	return 0;
 }
 
-/*
- * This method, but lets us pass verification by encapsulating a bunch
- * of if-else paths within the for loop.
- */
-__weak
+static __always_inline
 u64 remove_key(struct rbtree __arena *rbtree __arg_arena, task_ctx __arg_arena *taskc, u64 key, int *ret)
 {
 	task_ctx *tmp;
