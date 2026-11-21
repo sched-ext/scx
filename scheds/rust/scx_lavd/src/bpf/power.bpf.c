@@ -21,6 +21,7 @@
 bool			have_turbo_core;
 bool			have_little_core;
 const volatile bool	is_smt_active;
+const volatile bool	have_symmetric_cpus; /* same capacity on all CPUs */
 
 /*
  * CPU properties
@@ -120,6 +121,13 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cpu_ids)
 		return;
 	cpu = cpuc->cpu_id;
+
+	/* Symmetric SMT CPUs in performance mode keep their max capacity. */
+	if (have_symmetric_cpus && is_smt_active &&
+	    power_mode == LAVD_PM_PERFORMANCE) {
+		cpuc->effective_capacity = cpuc->max_capacity;
+		return;
+	}
 
 	/*
 	 * Calculate the maximum capacity available at the moment which is
