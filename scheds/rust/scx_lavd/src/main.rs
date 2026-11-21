@@ -784,6 +784,10 @@ impl<'a> Scheduler<'a> {
         rodata.nr_llcs = order.nr_llcs as u64;
         rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         rodata.is_smt_active = order.smt_enabled;
+        rodata.have_symmetric_cpus = order
+            .cpuids
+            .windows(2)
+            .all(|w| w[0].cpu_cap == w[1].cpu_cap);
         rodata.is_autopilot_on = opts.autopilot;
         rodata.verbose = debug_level;
         rodata.slice_max_ns = opts.slice_max_us * 1000;
