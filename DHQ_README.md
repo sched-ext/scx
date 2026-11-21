@@ -732,8 +732,8 @@ In scx_p2dq's LLC migration:
 
 - **Header**: `scheds/include/lib/dhq.h` - Complete API definitions
 - **Implementation**: `lib/dhq.bpf.c` - Full DHQ logic with strand constraints
-- **Unit Tests**: `lib/selftests/st_dhq.bpf.c` - Comprehensive test suite
-- **Build Integration**: Updated `rust/scx_arena/selftests/build.rs` and `lib/selftests/selftest.{h,bpf.c}`
+- **Unit Tests**: `rust/scx_arena/scx_arena/bpf/src/selftests/st_dhq.bpf.c` - Comprehensive test suite
+- **Build Integration**: `rust/scx_arena/libarena_selftests/build.rs`
 
 ## Architecture
 
