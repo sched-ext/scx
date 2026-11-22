@@ -6,6 +6,7 @@ the wait entirely, which is something native has no notion of.
 """
 import re, subprocess, sys, statistics as st
 from collections import Counter, defaultdict
+from wakeclock import WakeClock
 HEAD = re.compile(r"^\s*(\S.*?)\s+(\d+)(?:/(\d+))?\s+\[(\d+)\]\s+([\d.]+):\s+(\S+):\s+(.*)$")
 SW = re.compile(r"prev_comm=(.*?) prev_pid=(\d+) prev_prio=\d+ prev_state=(\S+) ==> next_comm=(.*?) next_pid=(\d+)")
 WK = re.compile(r"comm=(.*?) pid=(\d+)")
@@ -13,7 +14,7 @@ trace, role = sys.argv[1], sys.argv[2]
 p = subprocess.Popen(["perf","script","-i",trace], stdout=subprocess.PIPE,
                      stderr=subprocess.DEVNULL, text=True, bufsize=1<<20)
 cpu_cur = {}            # cpu -> comm running there
-pend = {}               # tid -> (waketime, occupant_of_its_home)
+clock = WakeClock()     # info: occupant of its home
 lastcpu = {}
 slow, fast = Counter(), Counter()
 lat_by = defaultdict(list)
@@ -27,8 +28,9 @@ for line in p.stdout:
         s = SW.search(rest)
         if not s: continue
         cpu_cur[cpu] = s.group(4)
+        w = clock.switch(s.group(2), s.group(5))
         if s.group(4)==role:
-            tid=s.group(5); w=pend.pop(tid,None); prev=lastcpu.get(tid); lastcpu[tid]=cpu
+            tid=s.group(5); prev=lastcpu.get(tid); lastcpu[tid]=cpu
             if w is None or prev is None or prev!=cpu: continue
             lat=(t-w[0])*1e6
             if not (0<=lat<=1e6): continue
@@ -39,7 +41,7 @@ for line in p.stdout:
         w=WK.search(rest)
         if w and w.group(1)==role:
             tid=w.group(2)
-            pend.setdefault(tid,(t, cpu_cur.get(lastcpu.get(tid,""),None)))
+            clock.wake(tid, t, cpu_cur.get(lastcpu.get(tid,""),None))
 p.wait()
 tot_s=sum(slow.values()); tot_f=sum(fast.values())
 print(f"{trace.split('/')[-1]}  same-cpu wakes: {tot_f} fast(<=20us) / {tot_s} SLOW(>20us)")

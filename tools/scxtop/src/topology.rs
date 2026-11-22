@@ -4,6 +4,8 @@
 // GNU General Public License version 2.
 
 use anyhow::{Context, Result};
+use scx_utils::ROOT_PREFIX;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -66,11 +68,6 @@ impl UnionFind {
         }
         self.sets[id].id = self.find(self.sets[id].id);
         self.sets[id].id
-    }
-
-    fn find_count(&mut self, id: usize) -> usize {
-        let root = self.find(id);
-        self.sets[root].cnt
     }
 
     /// Returns true if sets were disjoint
@@ -144,7 +141,10 @@ fn determine_cpu_topology(cpu_cnt: usize) -> Result<Vec<CpuTopo>> {
     // NUMA topology
     let mut node = 0;
     loop {
-        let path = format!("/sys/devices/system/node/node{}/cpulist", node);
+        let path = format!(
+            "{}/sys/devices/system/node/node{}/cpulist",
+            *ROOT_PREFIX, node
+        );
         if !Path::new(&path).exists() {
             break;
         }
@@ -169,8 +169,8 @@ fn determine_cpu_topology(cpu_cnt: usize) -> Result<Vec<CpuTopo>> {
         let mut cache_idx = 0;
         loop {
             let type_path = format!(
-                "/sys/devices/system/cpu/cpu{}/cache/index{}/type",
-                cpu, cache_idx
+                "{}/sys/devices/system/cpu/cpu{}/cache/index{}/type",
+                *ROOT_PREFIX, cpu, cache_idx
             );
 
             if !Path::new(&type_path).exists() {
@@ -187,8 +187,8 @@ fn determine_cpu_topology(cpu_cnt: usize) -> Result<Vec<CpuTopo>> {
 
             // Get cache level
             let level_path = format!(
-                "/sys/devices/system/cpu/cpu{}/cache/index{}/level",
-                cpu, cache_idx
+                "{}/sys/devices/system/cpu/cpu{}/cache/index{}/level",
+                *ROOT_PREFIX, cpu, cache_idx
             );
 
             if let Ok(level_str) = fs::read_to_string(&level_path)
@@ -197,8 +197,8 @@ fn determine_cpu_topology(cpu_cnt: usize) -> Result<Vec<CpuTopo>> {
             {
                 // Get cache ID
                 let id_path = format!(
-                    "/sys/devices/system/cpu/cpu{}/cache/index{}/id",
-                    cpu, cache_idx
+                    "{}/sys/devices/system/cpu/cpu{}/cache/index{}/id",
+                    *ROOT_PREFIX, cpu, cache_idx
                 );
 
                 if let Ok(id_str) = fs::read_to_string(&id_path)
@@ -307,38 +307,31 @@ pub fn setup_cpu_to_ringbuf_mapping(rb_cnt: usize, cpu_cnt: usize) -> Result<Vec
             // Restore original CPU order for balancing
             topo.sort_by_key(|t| t.cpu);
 
-            // Balance step: merge smallest groups randomly until we hit rb_cnt
-            use rand::RngExt;
-            let mut rng = rand::rng();
-
+            // Merge the smallest pair of groups within a topology domain.
+            // An exhausted domain must not stop merges in the other domains.
             while set_cnt > rb_cnt {
-                let cpu = rng.random_range(0..cpu_cnt);
-                let mut best_cpu = None;
-                let mut best_cnt = usize::MAX;
-
-                for i in 0..cpu_cnt {
-                    if uf.find(i) == uf.find(cpu) {
-                        continue;
-                    }
-                    if topo[i].topo[k] != topo[cpu].topo[k] {
-                        continue;
-                    }
-
-                    let cnt = uf.find_count(i);
-                    if cnt < best_cnt {
-                        best_cpu = Some(i);
-                        best_cnt = cnt;
+                let mut domains: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+                for (cpu, cpu_topo) in topo.iter().enumerate() {
+                    if uf.find(cpu) == cpu {
+                        domains.entry(cpu_topo.topo[k]).or_default().push(cpu);
                     }
                 }
 
-                if let Some(best) = best_cpu {
-                    if uf.union(cpu, best) {
-                        set_cnt -= 1;
-                    }
-                } else {
-                    // No valid merge found, break to avoid infinite loop
-                    break;
-                }
+                let pair = domains
+                    .values_mut()
+                    .filter_map(|domain| {
+                        if domain.len() < 2 {
+                            return None;
+                        }
+                        domain.sort_unstable_by_key(|&cpu| (uf.sets[cpu].cnt, cpu));
+                        Some([domain[0], domain[1]])
+                    })
+                    .min_by_key(|&[a, b]| uf.sets[a].cnt + uf.sets[b].cnt);
+                let [a, b] =
+                    pair.context("No CPU groups can be merged within a topology domain")?;
+
+                uf.union(a, b);
+                set_cnt -= 1;
             }
 
             topo_regroup(&mut topo, &mut uf);

@@ -151,8 +151,10 @@ static __always_inline s32 pick_idle_cid_shards(struct scx_cmask *cand, u32 shar
 struct task_ctx {
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	/* running time is charged up to here, see charge_running() */
-	u64 charged_at;
+	/* scx_clock_task() timestamp through which running time has been
+	 * charged to the demand counters; advanced on ticks and slice
+	 * extensions so long runs show up continuously. */
+	u64 running_accounted_at;
 	/* Cell whose vtime domain should be charged for this task */
 	u32 vtime_charge_cell;
 	u64 basis_vtime;
@@ -196,24 +198,6 @@ struct task_ctx {
 };
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
-
-extern const volatile bool use_lockless_peek;
-
-/*
- * Peek at the head of a DSQ. Uses lockless kfunc when available,
- * otherwise falls back to bpf_for_each iterator.
- */
-static inline struct task_struct *dsq_peek(u64 dsq_id)
-{
-	struct task_struct *p;
-
-	if (use_lockless_peek)
-		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
-
-	bpf_for_each(scx_dsq, p, dsq_id, 0)
-		return p;
-	return NULL;
-}
 
 static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
 {

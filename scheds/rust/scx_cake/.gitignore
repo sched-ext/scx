@@ -1,6 +1,7 @@
 .agent/
 docs/*
 !docs/README.md
+!docs/STRUCTURE.md
 !docs/archive/
 !docs/archive/**
 !docs/ANALYSIS_DIABLO_CHOP_2026-08-02.md
@@ -14,27 +15,35 @@ docs/*
 !docs/AUDIT_OPERATION_COST_2026-09-15.md
 !docs/TOOLING.md
 !docs/KERNEL_TOOL_INVENTORY_2026-08-23.md
+!docs/KOVAAKS_KICK_ABBA_2026-09-28.md
+!docs/AUDIT_PREDICT_VERIFY_2026-08-22.md
+!docs/research/
+!docs/research/**
+!docs/meeting/
+!docs/meeting/index.html
+docs/research/**/__pycache__/
+docs/research/**/*.pyc
+docs/research/**/build/
 
 # Benchmark binaries and local captures
 bench/*
-!bench/.gitignore
+!bench/README.md
 !bench/*.sh
 !bench/*.c
-!bench/scx_cake_bench_capture.sh
-!bench/scx_cake_bench_suite.sh
-!bench/scx_cake_policy_bench.sh
-!bench/scx_cake_game_diag_extract.py
+!bench/capture_preflight.py
 !bench/fnspills.py
 !bench/comment_lint.py
 !bench/review_regressions.py
 !bench/topology_regressions.py
 !bench/pool_mark_ordering.py
+!bench/pool_regressions.py
 !bench/rt_displace.py
 !bench/frame_attrib.py
 !bench/wake_occupant.py
 !bench/migrate_cause.py
 !bench/wake_migsplit.py
 !bench/scx_cake_thread_profile.py
+!bench/wakeclock.py
 
 # MangoHud performance logs
 mangohud/

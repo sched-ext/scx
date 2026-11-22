@@ -48,7 +48,7 @@ fn test_render_scheduler_view_sparkline() {
             let area = frame.area();
             let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                scheduler_name: "scx_rustland",
+                scheduler_name: "scx_lavd",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
                 localize: false,
@@ -85,7 +85,7 @@ fn test_render_scheduler_view_barchart() {
             let area = frame.area();
             let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                scheduler_name: "scx_rustland",
+                scheduler_name: "scx_lavd",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
                 localize: false,
@@ -159,7 +159,7 @@ fn test_render_scheduler_view_no_dsqs() {
             let area = frame.area();
             let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                scheduler_name: "scx_rustland",
+                scheduler_name: "scx_lavd",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
                 localize: false,
@@ -196,7 +196,7 @@ fn test_render_scheduler_view_with_localization() {
             let area = frame.area();
             let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                scheduler_name: "scx_rustland",
+                scheduler_name: "scx_lavd",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
                 localize: true, // localize enabled
@@ -231,7 +231,7 @@ fn test_render_dsq_summary_table() {
         .draw(|frame| {
             let area = frame.area();
             let params = DsqSummaryParams {
-                scheduler_name: "scx_rustland",
+                scheduler_name: "scx_lavd",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
                 dsq_filter_text: "",
@@ -261,7 +261,7 @@ fn test_render_dsq_summary_table_empty() {
         .draw(|frame| {
             let area = frame.area();
             let params = DsqSummaryParams {
-                scheduler_name: "scx_rustland",
+                scheduler_name: "scx_lavd",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
                 dsq_filter_text: "",
@@ -298,7 +298,7 @@ fn test_render_dsq_summary_table_different_themes() {
             .draw(|frame| {
                 let area = frame.area();
                 let params = DsqSummaryParams {
-                    scheduler_name: "scx_rustland",
+                    scheduler_name: "scx_lavd",
                     dsq_data: &dsq_data,
                     sample_rate: 1000,
                     dsq_filter_text: "",
@@ -372,7 +372,7 @@ fn test_render_scheduler_view_different_events() {
                 let area = frame.area();
                 let params = SchedulerViewParams {
                     event,
-                    scheduler_name: "scx_rustland",
+                    scheduler_name: "scx_lavd",
                     dsq_data: &dsq_data,
                     sample_rate: 1000,
                     localize: false,

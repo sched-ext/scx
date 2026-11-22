@@ -1,7 +1,7 @@
 {
   "unit": "active",
   "manager": [
-    "SCX_SCHEDULER_OVERRIDE=scx_rustland",
+    "SCX_SCHEDULER_OVERRIDE=scx_lavd",
     "SCX_FLAGS_OVERRIDE=-v"
   ],
   "files": {
@@ -26,7 +26,7 @@
       "args": []
     },
     "next": {
-      "sched": "scx_rustland",
+      "sched": "scx_lavd",
       "args": [
         "-v"
       ],

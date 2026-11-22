@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+set -euo pipefail
+
+cake_script=$(readlink -f -- "${BASH_SOURCE[0]}")
+cake_repo=$(cd -- "$(dirname -- "$cake_script")/../../.." && pwd)
+
+if [[ $# != 1 || $1 != build ]]; then
+    echo 'Usage: cake build' >&2
+    exit 2
+fi
+
+cake_build_tmp="$cake_repo/target/cake_build_tmp"
+mkdir -p -- "$cake_build_tmp"
+export TMPDIR="$cake_build_tmp"
+
+exec cargo build --manifest-path "$cake_repo/Cargo.toml" \
+    --target-dir "$cake_repo/target" --locked --release -p scx_cake

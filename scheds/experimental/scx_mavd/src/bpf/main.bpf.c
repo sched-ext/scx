@@ -273,6 +273,15 @@ const volatile u64	lb_low_util_wall = 0;
 const volatile u64	lb_local_dsq_util_wall = 0;
 
 /*
+ * Least completion-time gain, in ns, that justifies a cross-cpdom migration
+ * on big.LITTLE systems. When non-zero, a task whose sticky cpdom the load
+ * balancer has marked overloaded migrates to a neighbor sharing its L3 only if
+ * its estimated completion time there is shorter by more than this. 0 disables
+ * the feature.
+ */
+const volatile u64	xmig_min_gain_ns = 0;
+
+/*
  * Slice time for all tasks when pinned tasks are running on the CPU.
  * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
  * the dispatch logic compares vtimes across DSQs.
@@ -780,9 +789,12 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 	/*
 	 * An idle CPU with nothing queued cannot be congested --
 	 * queued_on_cpu() covers every DSQ that is_cpu_congested()
-	 * counts -- so no congestion check is needed on this path.
+	 * counts. The claim is a hint that can be stale (bypass mode
+	 * skips ops.update_idle()), so check the CPU is really idle
+	 * before dispatching into a local DSQ only it drains.
 	 */
-	if (is_cpu_idle && !queued_on_cpu(cpuc))
+	if (is_cpu_idle && !queued_on_cpu(cpuc) &&
+	    is_cpu_idle_now(cpuc->cid))
 		return true;
 
 	/*
@@ -826,8 +838,13 @@ static __always_inline void account_queued_load(task_ctx *taskc,
 	 * changes between enqueue and dequeue.
 	 */
 	u32 load = task_load_metric(taskc);
-	__sync_fetch_and_add(&get_cpdom_ctx(cpdom_id)->qload_invr, load);
+	u64 svc = taskc->avg_runtime_invr;
+	struct cpdom_ctx *cpdomc = get_cpdom_ctx(cpdom_id);
+
+	__sync_fetch_and_add(&cpdomc->qload_invr, load);
+	__sync_fetch_and_add(&cpdomc->qload_svc_invr, svc);
 	taskc->queued_load_snapshot = load;
+	taskc->queued_svc_snapshot = svc;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, cpdom_id);
 }
 
@@ -841,20 +858,27 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 
 	cpdomc = get_cpdom_ctx(cpdom_id);
 	__sync_fetch_and_sub(&cpdomc->qload_invr, taskc->queued_load_snapshot);
+	__sync_fetch_and_sub(&cpdomc->qload_svc_invr, taskc->queued_svc_snapshot);
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
 static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
 						     s32 primary_cpu)
 {
+	struct cpu_ctx *cpuc;
 	u32 load;
+	u64 svc;
 
 	if (READ_ONCE(taskc->queued_on_cid) >= 0)
 		return;
 
 	load = task_load_metric(taskc);
-	__sync_fetch_and_add(&get_cpu_ctx_id(primary_cpu)->qload_invr, load);
+	svc = taskc->avg_runtime_invr;
+	cpuc = get_cpu_ctx_id(primary_cpu);
+	__sync_fetch_and_add(&cpuc->qload_invr, load);
+	__sync_fetch_and_add(&cpuc->qload_svc_invr, svc);
 	taskc->queued_load_snapshot_cpu = load;
+	taskc->queued_svc_snapshot_cpu = svc;
 	WRITE_ONCE(taskc->queued_on_cid, (s16)primary_cpu);
 }
 
@@ -868,6 +892,7 @@ static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
 
 	cpuc = get_cpu_ctx_id(primary_cpu);
 	__sync_fetch_and_sub(&cpuc->qload_invr, taskc->queued_load_snapshot_cpu);
+	__sync_fetch_and_sub(&cpuc->qload_svc_invr, taskc->queued_svc_snapshot_cpu);
 	WRITE_ONCE(taskc->queued_on_cid, -1);
 }
 
@@ -1177,9 +1202,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cid == -ENOENT)) {
 		taskc->pinned_cid = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
-
-		debugln("cpu%d [%d] -- %s:%d -- %s:%d", cpuc->kernel_cpu,
-			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__, __LINE__);
 	}
 
 	/*
@@ -1215,9 +1237,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 kick_cpu_out:
 	/*
-	 * Kick @cpu so an idle CPU picks up the task.
+	 * Kick @cpu if it was claimed idle or is marked idle; a hint
+	 * missed in bypass mode is repaired by the sys_stat resync.
 	 */
-	if (is_idle) {
+	if (is_idle || is_cpu_hinted_idle(cpuc)) {
 		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 		return;
 	}
@@ -1247,12 +1270,6 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 		dispatch_to_rescue(p, taskc, 0);
 		return 0;
 	}
-
-	/*
-	 * Note that we don't need to calculate p->scx.dsq_vtime again
-	 * since it was already calculated and assigned to p->scx.dsq_vtime
-	 * before the task was throttled.
-	 */
 
 	/*
 	 * Validate the cached CPU choice before dispatch.
@@ -1316,6 +1333,15 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 
 	/*
 	 * Enqueue the task to a DSQ.
+	 *
+	 * Note that we don't need to calculate p->scx.dsq_vtime again. It is
+	 * safe to trust the value, since lavd set it before the task was put
+	 * aside: ops.enqueue() computes it with calc_when_to_run() before
+	 * checking the throttle, and the REENQ path puts the task aside with
+	 * the vtime of its last enqueue, or the one lavd_enable() set if lavd
+	 * has not enqueued it yet. While the task is put aside, nothing else
+	 * writes it: the kernel lets only the scheduler that owns the task
+	 * change its vtime, and moving the task to another cgroup keeps it.
 	 */
 	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
@@ -1324,11 +1350,9 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 		account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
 
 	/*
-	 * Kick the target CPU if it is idle. Test-and-clear avoids
-	 * waking a CPU that is already busy with another task and
-	 * generating a spurious reschedule IPI.
+	 * Claim @cpu and kick it if it was idle.
 	 */
-	if (claim_idle_cid(cpu) > 0)
+	if (clear_cpu_idle_state(cpuc, cpu))
 		scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
 	return 0;
 }
@@ -1479,7 +1503,7 @@ bool scan_dsq_for_ovflw_ext(u64 dsq_id, s32 cpu,
 		 * no context to tell, try another task.
 		 */
 		taskc = find_task_ctx(p);
-		if (!taskc || !test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		if (!taskc || !is_affinitized(p, taskc) ||
 		    cmask_intersects(active, &taskc->allowed) ||
 		    cmask_intersects(ovrflw, &taskc->allowed)) {
 			bpf_task_release(p);
@@ -1699,7 +1723,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		taskc_prev = get_task_ctx(prev);
 		if (taskc_prev &&
-		    test_task_flag(taskc_prev, LAVD_FLAG_IS_AFFINITIZED) &&
+		    is_affinitized(prev, taskc_prev) &&
 		    cmask_test(cpu, &taskc_prev->allowed) &&
 		    !cmask_intersects(active, &taskc_prev->allowed) &&
 		    !cmask_intersects(ovrflw, &taskc_prev->allowed)) {
@@ -1759,12 +1783,11 @@ consume_out:
 	consume_prev(prev, taskc_prev, cpuc);
 idle:
 	/*
-	 * No task and no @prev means the CPU is going idle. A cid claimed by an
-	 * idle pick and kicked but never dispatched to gets no idle
-	 * notification, so restore the claim here.
+	 * An idle-to-idle repick skips ops.update_idle(): restore the hint.
+	 * The cid's curr is exact here since its rq lock is held.
 	 */
-	if (!prev)
-		update_idle_cid(cpu, true);
+	if (!prev && is_cpu_idle_now(cpu))
+		set_cpu_idle_state(cpuc, cpu);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1884,6 +1907,15 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 }
 
+/*
+ * @taskc's demand: its runnable duty cycle (util_est), the share of a CPU's
+ * time it needs.
+ */
+static __always_inline u32 task_cpuperf_demand(task_ctx *taskc)
+{
+	return min(READ_ONCE(taskc->util_est), LAVD_SCALE);
+}
+
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
 	/*
@@ -1908,18 +1940,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	unaccount_queued_load_pcpu(taskc);
 
 	/*
-	 * If the sched_ext core directly dispatched a task, calculating the
-	 * task's deadline and time slice was also skipped. In this case, we
-	 * set the deadline to the current logical lock.
-	 *
-	 * Note that this is necessary when the kernel does not support
-	 * SCX_OPS_ENQ_MIGRATION_DISABLED or SCX_OPS_ENQ_MIGRATION_DISABLED
-	 * is not turned on.
-	 */
-	if (p->scx.slice == SCX_SLICE_DFL)
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cur_logical_clk));
-
-	/*
 	 * Calculate the task's time slice here,
 	 * as it depends on the system load.
 	 */
@@ -1936,9 +1956,20 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
-	 * Update this CPU's performance target from its utilization.
+	 * Repair an idle exit missed in bypass mode.
 	 */
-	update_cpuperf_target(cpuc);
+	clear_cpu_idle_state(cpuc, cpuc->cid);
+
+	/*
+	 * Send this CPU's performance target if it differs from the last one
+	 * sent: the sys_stat timer may have computed a new one, or an RT/DL
+	 * task may have run here and left the frequency anywhere.
+	 *
+	 * The target normally follows this CPU's utilization history. If @p's
+	 * duty cycle is higher, use it instead, since the CPU's utilization
+	 * takes time to catch up with @p's demand.
+	 */
+	update_cpuperf_target(cpuc, task_cpuperf_demand(taskc), now);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -1969,6 +2000,17 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	}
 
 	now = scx_bpf_now();
+
+	/*
+	 * Resend the performance target once per schedutil rate limit, even
+	 * if it did not change. schedutil silently ignores a request that
+	 * arrives inside its rate limit, and the RT/DL/IRQ utilization it
+	 * adds to the target keeps changing, so a single send is not enough.
+	 * Do it before any early return below. @cpuc is @p's CPU, whose rq
+	 * the kernel holds here.
+	 */
+	refresh_cpuperf_target(cpuc, now);
+
 	account_task_runtime(p, taskc, cpuc, now, true);
 
 	/*
@@ -2009,6 +2051,11 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	}
 
 	update_stat_for_stopping(p, taskc, cpuc);
+
+	/* @p's demand no longer holds up its CPU's target. */
+	if (READ_ONCE(cpuc->cpuperf_floor)) {
+		WRITE_ONCE(cpuc->cpuperf_floor, 0);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -2044,8 +2091,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		struct cpu_ctx *cpuc_pinned = get_cpu_ctx_id(taskc->pinned_cid);
 
 		__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
-		debugln("%d [%d] -- %s:%d -- %s:%d", cpuc_pinned->kernel_cpu,
-			cpuc_pinned->nr_pinned_tasks, p->comm, p->pid, __func__, __LINE__);
 		taskc->pinned_cid = -ENOENT;
 	}
 
@@ -2083,6 +2128,17 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cid)
 	cmask_set(cid, get_cpdom_mask(cpuc->cpdom_id));
 	cmask_set(cid, online_cmask);
 
+	/*
+	 * A sub-scheduler's grant can land while a task that is not mavd's runs
+	 * on the cid, and nothing of mavd's would clear a hint set then. The
+	 * grant holds the cid's rq lock, so curr is exact there. On hotplug a
+	 * wrong answer is repaired like any other hint.
+	 */
+	if (is_cpu_idle_now(cid))
+		set_cpu_idle_state(cpuc, cid);
+	else
+		clear_cpu_idle_state(cpuc, cid);
+
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
@@ -2091,6 +2147,8 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cid)
 	cpuc->prev_task_clk = scx_clock_task(cpuc->kernel_cpu);
 	cpuc->prev_pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 	cpuc->avg_perf_factor = LAVD_SCALE;
+	cpuc->cpuperf_cur = LAVD_CPUPERF_UNSET;
+	cpuc->cpuperf_commit_clk = 0;
 	barrier();
 
 	cpuc->is_online = true;
@@ -2100,7 +2158,11 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cid)
 {
 	cmask_clear(cid, get_cpdom_mask(cpuc->cpdom_id));
 	cmask_clear(cid, online_cmask);
-	update_idle_cid(cid, false);
+	clear_cpu_idle_state(cpuc, cid);
+
+	/* on hotplug the surviving siblings may now make a fully idle core */
+	if (!sub_mode)
+		update_core_idle_state(cpuc);
 
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
@@ -2128,7 +2190,7 @@ static void cid_offline(struct cpu_ctx *cpuc, s32 cid)
 	cpu_ctx_init_offline(cpuc, cid);
 	/* keep the picker off the cid until the sets are rebuilt */
 	cmask_clear(cid, active_cmask);
-	cmask_clear(cid, ovrflw_cmask);
+	ovrflw_test_and_clear(ovrflw_cmask, cid);
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
 	__sync_fetch_and_sub(&total_max_capacity, cpuc->max_capacity);
 	update_autopilot_high_cap();
@@ -2156,12 +2218,15 @@ void BPF_STRUCT_OPS(lavd_sub_ecaps_updated, s32 cid, u64 before, u64 after)
 		WRITE_ONCE(sub_immed_only_seen, true);
 
 	/*
-	 * The parent may have moved the cpuperf target while it held PERF, so
-	 * restart from the default.
+	 * The parent may have moved the cpuperf target while it held PERF.
+	 * Restart from the default and void the last send, so that the next
+	 * ops.running() sends the actual target. ops.running() sends only a
+	 * rise and no target can exceed the default, so recording the default
+	 * as sent would hold the cid at full performance until its next tick.
 	 */
 	if ((after & ~before) & SCX_CAP_PERF) {
 		scx_bpf_cidperf_set(cid, SCX_CPUPERF_ONE);
-		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
+		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
 	}
 
 	cpuc->ecaps = after;
@@ -2225,7 +2290,9 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 	u64 now;
 
-	update_idle_cid(cpu, idle);
+	/*
+	 * Track idle masks and time; dispatch and resync repair missed updates.
+	 */
 	now = scx_bpf_now();
 
 	/*
@@ -2239,11 +2306,31 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 		 * per-CPU preemption information should be cleared.
 		 */
 		reset_cpu_preemption_info(cpuc);
+
+		/*
+		 * A dying CPU can enter idle after ops.cid_offline(), and in
+		 * sub mode a cid the parent has not granted is not ours.
+		 */
+		if (READ_ONCE(cpuc->is_online)) {
+			set_cpu_idle_state(cpuc, cpu);
+
+			/*
+			 * Enqueues that saw the hint off did not kick;
+			 * re-kick if work is queued.
+			 */
+			if (queued_on_cpu(cpuc))
+				scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
+		}
 	}
 	/*
 	 * The CPU is exiting from the idle state.
 	 */
 	else {
+		/*
+		 * The waker's claim may already have cleared the idle bit.
+		 */
+		clear_cpu_idle_state(cpuc, cpu);
+
 		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			/*
 			 * If idle_start_clk is zero, that means entering into
@@ -2313,6 +2400,18 @@ int BPF_PROG(lavd_sched_switch, bool preempt,
 	 */
 	if (unlikely(next->prio < MAX_RT_PRIO &&
 		     prev->prio >= MAX_RT_PRIO)) {
+		struct cpu_ctx *cpuc;
+
+		/*
+		 * The RT/DL task may leave the frequency anywhere. Only
+		 * invalidate the target here, so that ops.running() sends the
+		 * actual change request when an SCX task runs here again.
+		 */
+		cpuc = get_cpu_ctx();
+		if (cpuc) {
+			WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
+		}
+
 		/* Reenqueue any SCX tasks stranded on the local DSQ. */
 		scx_bpf_reenqueue_local_from_anywhere();
 	}
@@ -2333,6 +2432,37 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 	}
 
 	taskc->svc_time_iwgt = READ_ONCE(cur_svc_time_iwgt);
+
+	/*
+	 * Overwrite the task's vtime with the current logical clock, so that
+	 * a garbage vtime cannot creep into lavd.
+	 *
+	 * A task can run before lavd enqueues it. While lavd attaches, the
+	 * kernel is in bypass mode and queues runnable tasks by itself
+	 * without calling ops.enqueue(), and a task already on a CPU is
+	 * switched over and reaches ops.running() with no enqueue at all.
+	 * Such a task still holds whatever vtime it had before.
+	 *
+	 * Before v7.2, the kernel keeps dsq_vtime when a task leaves a
+	 * scheduler, so that value comes from the previous scheduler and can
+	 * be close to U64_MAX. advance_cur_logical_clk() then moves the clock
+	 * up to it, where the clock freezes. From v7.2, the kernel resets
+	 * dsq_vtime to 0 instead. That cannot move the clock, but a task
+	 * ordered by it before lavd computes a deadline (e.g., put aside on
+	 * the cpu.max REENQ path and later inserted by enqueue_cb()) would
+	 * run ahead of every queued task.
+	 *
+	 * Note that this cannot be done in ops.init_task(): from v7.1, the
+	 * task is not yet attached to this scheduler there, and
+	 * scx_bpf_task_set_dsq_vtime() does nothing.
+	 *
+	 * This is fine for a task that is not queued by the kernel in bypass
+	 * mode. It goes through ops.enqueue() or a direct dispatch from
+	 * ops.select_cpu(), and both still overwrite its vtime with
+	 * calc_when_to_run(). A task that runs before that cannot move the
+	 * clock with this value, since the clock never goes backward.
+	 */
+	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cur_logical_clk));
 }
 
 
@@ -2587,6 +2717,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->lat_cri = 0;
 		cpuc->running_clk = 0;
 		cpuc->qload_invr = 0;
+		cpuc->qload_svc_invr = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->is_online = cmask_test(cpu, online);
 		kernel_cpu = cpuc->kernel_cpu;
@@ -2609,7 +2740,8 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->prev_task_clk = scx_clock_task(cpuc->kernel_cpu);
 		cpuc->prev_pelt_clk = scx_clock_pelt(cpuc->kernel_cpu);
 		cpuc->avg_perf_factor = LAVD_SCALE;
-		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
+		cpuc->cpuperf_cur = LAVD_CPUPERF_UNSET;
+		update_cpufreq_rate_limit(cpuc);
 
 		sum_capacity += cpuc->max_capacity;
 		if (cpuc->is_online)
@@ -2653,6 +2785,10 @@ static s32 init_per_cpu_ctx(u64 now)
 
 			if (cmask_test(cpu, online)) {
 				cmask_set(cpu, get_cpdom_mask(cpdom_id));
+				/* seed as idle, the first resync corrects it */
+				cmask_set(cpu, &cpdomc->idle);
+				if (is_smt_active)
+					cmask_set(cpu, &cpdomc->idle_smt);
 				cpdomc->nr_active_cpus++;
 				cpdomc->cap_sum_active_cpus += cpuc->effective_capacity;
 			}
@@ -2803,6 +2939,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	err = init_per_cpu_ctx(now);
 	if (err)
 		return err;
+	warn_cpufreq_rate_limit_err();
 
 	/*
 	 * Initialize per-CPU DSQs.

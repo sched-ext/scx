@@ -5,6 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
@@ -107,12 +108,11 @@ __hidden
 void update_effective_capacity(struct cpu_ctx *cpuc)
 {
 	/* WARNING: This should be called after updating cpuc->cur_util. */
-	extern struct cpufreq_policy *cpufreq_cpu_data __ksym;
 	extern const unsigned long hw_pressure __ksym __weak;
 
 	u16 capacity_policy = 0, capacity_observed;
 	unsigned long *p_pressure, pressure = 0;
-	struct cpufreq_policy **base, *policy;
+	struct cpufreq_policy *policy;
 	u32 mfo;
 	int cpu;
 
@@ -133,9 +133,7 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	 */
 	capacity_policy = cpuc->max_capacity;
 
-	if (unlikely((base = (struct cpufreq_policy **)&cpufreq_cpu_data) &&
-	    (bpf_probe_read_kernel(&policy, sizeof(policy), base + cpu) == 0) &&
-	    policy)) {
+	if (unlikely(policy = cpu_cpufreq_policy(cpu))) {
 		u32 cpu_max = BPF_CORE_READ(policy, cpuinfo.max_freq);
 		u32 scaling_max = BPF_CORE_READ(policy, max);
 
@@ -331,6 +329,47 @@ static int calc_nr_active_cpus(void)
 	return nr_cpu_ids;
 }
 
+/*
+ * Kick an idle CPU of @cpdom_id, a domain with queued tasks and no CPU in
+ * the active or overflow set. Without the kick, no CPU consumes them.
+ *
+ * Such a case can happen in the race below between concurrent ops.enqueue()
+ * and ops.dispatch(). The key reason is that the kernel defers the actual
+ * insert into the DSQ until ops.enqueue() returns. So CPU X finds the queue
+ * empty and goes idle, while CPU E saw X busy and did not kick it.
+ *
+ *   CPU E (enqueuer)                   CPU X (domain D, uncovered)
+ *   ----------------                   ---------------------------
+ *   ops.enqueue(p), targeting X        runs its last task
+ *     pick D's DSQ (insert deferred)
+ *     X's hint clear, no kick
+ *                                      ops.dispatch(): D's DSQs empty
+ *                                      ops.update_idle(true):
+ *                                        set X's hint
+ *                                        D's DSQs empty, no kick
+ *   direct_dispatch(): p in D's DSQ
+ *                                      idle with the hint set
+ *
+ * Nothing else kicks X afterwards. The sys_stat resync kicks only idle CPUs
+ * without the hint, core compaction kicks only CPUs in either set, and
+ * wakeups go to active CPUs, not to an uncovered domain.
+ */
+static void kick_uncovered_cpdom(u64 cpdom_id)
+{
+	struct bpf_cpumask *i_mask;
+	u32 cpu;
+
+	i_mask = MEMBER_VPTR(cpdom_idle_cpumask, [cpdom_id]);
+	if (!i_mask) {
+		return;
+	}
+
+	cpu = bpf_cpumask_first(cast_mask(i_mask));
+	if (cpu < nr_cpu_ids) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
+}
+
 __weak
 int do_core_compaction(void)
 {
@@ -468,6 +507,19 @@ int do_core_compaction(void)
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
 		WRITE_ONCE(cpdomc->cap_sum_active_cpus, cpdomc->cap_sum_temp);
 		WRITE_ONCE(cpdomc->cap_sum_temp, 0);
+
+		/*
+		 * A domain no CPU covers can hold a task that every idle CPU
+		 * of it missed. Kick one to drain it (see
+		 * kick_uncovered_cpdom() for the race).
+		 */
+		if (use_cpdom_dsq() &&
+		    nr_cpdoms > 1 && !cpdomc->nr_active_cpus &&
+		    !READ_ONCE(cpdomc->nr_overflow_cpus) &&
+		    (scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id)) ||
+		     scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdom_id)))) {
+			kick_uncovered_cpdom(cpdom_id);
+		}
 
 		if (cpdomc->nr_active_cpus)
 			nr_active_cpdoms++;
@@ -923,14 +975,6 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc)
 u64 cpufreq_rate_limit_ns[LAVD_CPU_ID_MAX];
 
 /*
- * The CPU's cpufreq policy, and the hook its governor installed for the
- * scheduler to call on a utilization change. Neither is exported, so both are
- * weak.
- */
-extern struct cpufreq_policy *cpufreq_cpu_data __ksym __weak;
-extern struct update_util_data *cpufreq_update_util_data __ksym __weak;
-
-/*
  * Assumptions below that turned out broken, reported once after init by
  * warn_cpufreq_rate_limit_err().
  */
@@ -970,8 +1014,8 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 	 * name. There is only one, so later checks compare the pointer.
 	 */
 	static struct cpufreq_governor *schedutil_gov;
-	struct cpufreq_policy **policyp, *policy;
-	struct update_util_data **hookp, *hook;
+	struct cpufreq_policy *policy;
+	struct update_util_data *hook;
 	struct cpufreq_governor *governor;
 	struct sugov_policy *sg_pol;
 	struct sugov_cpu *sg_cpu;
@@ -1000,11 +1044,7 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 	 * governor name, the same name sysfs shows. A driver that sets the
 	 * policy itself has no governor.
 	 */
-	policyp = bpf_per_cpu_ptr(&cpufreq_cpu_data, cpu);
-	if (!policyp) {
-		return 0;
-	}
-	policy = *policyp;
+	policy = cpu_cpufreq_policy(cpu);
 	if (!policy) {
 		return 0;
 	}
@@ -1020,11 +1060,7 @@ static u64 read_schedutil_rate_limit_ns(s32 cpu)
 		WRITE_ONCE(schedutil_gov, governor);
 	}
 
-	hookp = bpf_per_cpu_ptr(&cpufreq_update_util_data, cpu);
-	if (!hookp) {
-		return 1;
-	}
-	hook = *hookp;
+	hook = cpu_cpufreq_update_util(cpu);
 	if (!hook) {
 		return 0;
 	}

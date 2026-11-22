@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "Default"
+    },
+    {
+      "id": "scx_cosmos",
+      "label": "Cosmos"
+    }
+  ],
+  "hidden": ["scx_layered"],
+  "stable": ["scx_cosmos", "scx_bpfland"],
+  "experimental": ["scx_flow"]
+}

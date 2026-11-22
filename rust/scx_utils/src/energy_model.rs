@@ -15,6 +15,7 @@ use crate::Cpumask;
 use crate::compat;
 use crate::compat::ROOT_PREFIX;
 use crate::misc::read_from_file;
+use crate::topology::cpus_online;
 use anyhow::Result;
 use anyhow::bail;
 use glob::glob;
@@ -37,7 +38,7 @@ pub struct PerfState {
 pub struct PerfDomain {
     /// Monotonically increasing unique id.
     pub id: usize,
-    /// Cpumask of all CPUs in this performance domain.
+    /// Cpumask of the online CPUs in this performance domain.
     pub span: Cpumask,
     /// Table of performance states indexed by performance.
     pub perf_table: BTreeMap<usize, Arc<PerfState>>,
@@ -59,7 +60,7 @@ pub struct EqPerfDomain {
     pub id: usize,
     /// Member performance domains in ascending domain id order.
     pub perf_doms: Vec<Arc<PerfDomain>>,
-    /// Cpumask of all CPUs in this equivalence performance domain.
+    /// Cpumask of the online CPUs in this equivalence performance domain.
     pub span: Cpumask,
     /// Table of performance states indexed by performance, shared by all
     /// member performance domains.
@@ -91,14 +92,34 @@ impl EnergyModel {
 
         for (pd_id, pd_path) in pd_paths {
             let pd = PerfDomain::new(pd_id, pd_path)?;
-            perf_doms.insert(pd.id, pd.into());
+            perf_doms.insert(pd.id, pd);
         }
+        let perf_doms = Self::restrict_to_online(perf_doms, &cpus_online()?);
         let eq_perf_doms = Self::group_perf_doms(&perf_doms);
 
         Ok(EnergyModel {
             perf_doms,
             eq_perf_doms,
         })
+    }
+
+    /// Restrict the span of each performance domain in @perf_doms to the
+    /// @online CPUs and drop the performance domains with no online CPU.
+    /// debugfs lists offline CPUs in the energy model, but the topology
+    /// covers only online ones. Restricting the spans keeps the two
+    /// consistent, so span weights and performance totals count only the
+    /// CPUs a scheduler can use. A dropped domain leaves its id unused.
+    fn restrict_to_online(
+        perf_doms: BTreeMap<usize, PerfDomain>,
+        online: &Cpumask,
+    ) -> BTreeMap<usize, Arc<PerfDomain>> {
+        perf_doms
+            .into_iter()
+            .filter_map(|(id, mut pd)| {
+                pd.span = pd.span.and(online);
+                (!pd.span.is_empty()).then(|| (id, pd.into()))
+            })
+            .collect()
     }
 
     /// Group performance domains sharing an identical performance table into
@@ -422,5 +443,61 @@ mod tests {
         let eq_pd = eq_perf_doms.get(&0).unwrap();
         assert_eq!(eq_pd.perf_doms.len(), 8);
         assert_eq!(eq_pd.span.weight(), 8);
+    }
+
+    /// 4 P-cores and 4 E-cores with one performance domain per CPU, and with
+    /// CPU 3 and all the E-cores offline. The domains with no online CPU
+    /// are dropped, the E-cores' equivalence domain with them, and the
+    /// total performance counts only the 3 online P-cores.
+    #[test]
+    fn test_restrict_per_cpu_perf_doms() {
+        let p_core = perf_table(&[(100, 50)]);
+        let e_core = perf_table(&[(60, 20)]);
+        let mut perf_doms = BTreeMap::new();
+        for id in 0..8 {
+            let table = if id < 4 {
+                p_core.clone()
+            } else {
+                e_core.clone()
+            };
+            perf_doms.insert(id, Arc::unwrap_or_clone(perf_dom(id, table)));
+        }
+
+        let online = Cpumask::from_vec(vec![0b0111]);
+        let perf_doms = EnergyModel::restrict_to_online(perf_doms, &online);
+        let eq_perf_doms = EnergyModel::group_perf_doms(&perf_doms);
+        let em = EnergyModel {
+            perf_doms,
+            eq_perf_doms,
+        };
+
+        assert_eq!(
+            em.perf_doms.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(em.eq_perf_doms.len(), 1);
+        assert_eq!(em.eq_perf_doms[&0].span.weight(), 3);
+        assert_eq!(em.perf_total(), 300);
+    }
+
+    /// A cluster performance domain with half of its CPUs offline keeps
+    /// only the online half, and its total performance shrinks with it.
+    #[test]
+    fn test_restrict_cluster_perf_dom() {
+        let mut perf_doms = BTreeMap::new();
+        perf_doms.insert(
+            0,
+            PerfDomain {
+                id: 0,
+                span: Cpumask::from_vec(vec![0b1111]),
+                perf_table: perf_table(&[(100, 50)]),
+            },
+        );
+
+        let online = Cpumask::from_vec(vec![0b0011]);
+        let perf_doms = EnergyModel::restrict_to_online(perf_doms, &online);
+
+        assert_eq!(perf_doms[&0].span.weight(), 2);
+        assert_eq!(perf_doms[&0].perf_total(), 200);
     }
 }

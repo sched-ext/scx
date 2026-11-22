@@ -1723,12 +1723,21 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 {
 	struct bpfmask_wrapper *mask_map_value;
 	struct task_struct *p_map;
+	struct task_ctx *taskc;
 	long ret;
 
 	p_map = p;
 	mask_map_value = bpf_map_lookup_elem(&task_masks, &p_map);
 	if (mask_map_value)
 		release_retained_cpumask(&mask_map_value->instance);
+
+	/*
+	 * The load balancer may still hold a pointer to this slot in
+	 * active_tasks. Mark it stale so that it's skipped, whether or not the
+	 * slot is reused by a new task before the next pass.
+	 */
+	if ((taskc = try_lookup_task_ctx(p)))
+		taskc->dom_active_tasks_gen = -1;
 
 	sdt_task_free(p);
 

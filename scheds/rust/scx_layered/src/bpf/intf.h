@@ -243,6 +243,7 @@ struct llc_ctx {
 	u32			nr_cpus;
 	u64			vtime_now[MAX_LAYERS];
 	u64			queued_runtime[MAX_LAYERS];
+	u32			nr_queued[MAX_LAYERS];
 	u64			lo_fb_seq;
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
 	struct llc_prox_map	prox_maps[NUM_PROXIMITY_MAPS];

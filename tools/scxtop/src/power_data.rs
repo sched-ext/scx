@@ -5,7 +5,7 @@
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -133,16 +133,22 @@ struct RaplReading {
 struct MsrReader {
     msr_files: Mutex<HashMap<u32, File>>, // CPU ID -> MSR file handle
     cpu_vendor: CpuVendor,
+    package_cpus: BTreeMap<u32, u32>, // Package ID -> first CPU ID
     rapl_units: HashMap<u32, RaplUnits>, // Per-package RAPL units
 }
 
 impl MsrReader {
     pub fn new() -> Result<Self> {
         let cpu_vendor = Self::detect_cpu_vendor()?;
+        if cpu_vendor == CpuVendor::Unknown {
+            return Err(anyhow!("MSR-based RAPL is unsupported on this CPU"));
+        }
+        let package_cpus = Self::discover_packages(Path::new("/sys/devices/system/cpu"))?;
 
         let mut reader = Self {
             msr_files: Mutex::new(HashMap::new()),
             cpu_vendor,
+            package_cpus,
             rapl_units: HashMap::new(),
         };
 
@@ -153,6 +159,9 @@ impl MsrReader {
     }
 
     fn detect_cpu_vendor() -> Result<CpuVendor> {
+        if !cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            return Ok(CpuVendor::Unknown);
+        }
         if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
             for line in cpuinfo.lines() {
                 if line.starts_with("vendor_id") {
@@ -169,14 +178,8 @@ impl MsrReader {
     }
 
     fn init_rapl_units(&mut self) -> Result<()> {
-        // Get package count from topology
-        let package_count = self.get_package_count()?;
-
-        for package_id in 0..package_count {
-            // Find the first CPU in this package
-            if let Some(cpu_id) = self.find_first_cpu_in_package(package_id)?
-                && let Ok(units) = self.read_rapl_units(cpu_id)
-            {
+        for (&package_id, &cpu_id) in &self.package_cpus {
+            if let Ok(units) = self.read_rapl_units(cpu_id) {
                 self.rapl_units.insert(package_id, units);
             }
         }
@@ -184,42 +187,32 @@ impl MsrReader {
         Ok(())
     }
 
-    fn get_package_count(&self) -> Result<u32> {
-        let mut max_package = 0;
+    fn discover_packages(cpu_root: &Path) -> Result<BTreeMap<u32, u32>> {
+        let mut packages = BTreeMap::<u32, u32>::new();
 
-        // Scan all CPUs to find the maximum package ID
-        for cpu_id in 0..256 {
-            // Reasonable upper limit
-            let topology_path =
-                format!("/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id");
-            if let Ok(package_str) = fs::read_to_string(&topology_path) {
-                if let Ok(package_id) = package_str.trim().parse::<u32>() {
-                    max_package = max_package.max(package_id);
-                }
-            } else {
-                break; // No more CPUs
+        // Package IDs are identifiers, and can be large or sparse on ARM.
+        // Discover existing CPUs once and cache a representative for each package.
+        for entry in fs::read_dir(cpu_root)?.flatten() {
+            let cpu_name = entry.file_name();
+            let Some(cpu_id) = cpu_name
+                .to_str()
+                .and_then(|name| name.strip_prefix("cpu"))
+                .and_then(|id| id.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let topology_path = entry.path().join("topology/physical_package_id");
+            if let Ok(package_str) = fs::read_to_string(topology_path)
+                && let Ok(package_id) = package_str.trim().parse::<u32>()
+            {
+                packages
+                    .entry(package_id)
+                    .and_modify(|first_cpu| *first_cpu = (*first_cpu).min(cpu_id))
+                    .or_insert(cpu_id);
             }
         }
 
-        Ok(max_package + 1)
-    }
-
-    fn find_first_cpu_in_package(&self, package_id: u32) -> Result<Option<u32>> {
-        for cpu_id in 0..256 {
-            // Reasonable upper limit
-            let topology_path =
-                format!("/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id");
-            if let Ok(package_str) = fs::read_to_string(&topology_path) {
-                if let Ok(cpu_package_id) = package_str.trim().parse::<u32>()
-                    && cpu_package_id == package_id
-                {
-                    return Ok(Some(cpu_id));
-                }
-            } else {
-                break;
-            }
-        }
-        Ok(None)
+        Ok(packages)
     }
 
     fn read_rapl_units(&self, cpu_id: u32) -> Result<RaplUnits> {
@@ -289,7 +282,9 @@ impl MsrReader {
 
         // Find the first CPU in this package
         let cpu_id = self
-            .find_first_cpu_in_package(package_id)?
+            .package_cpus
+            .get(&package_id)
+            .copied()
             .ok_or_else(|| anyhow!("No CPU found in package {}", package_id))?;
 
         let mut reading = RaplReading {
@@ -483,25 +478,22 @@ impl MsrReader {
 struct RaplPowerMonitor {
     msr_reader: MsrReader,
     previous_readings: HashMap<u32, RaplReading>, // Package ID -> Previous reading
-    package_count: u32,
 }
 
 impl RaplPowerMonitor {
     pub fn new() -> Result<Self> {
         let msr_reader = MsrReader::new()?;
-        let package_count = msr_reader.get_package_count()?;
 
         Ok(Self {
             msr_reader,
             previous_readings: HashMap::new(),
-            package_count,
         })
     }
 
     pub fn collect_power_data(&mut self) -> Result<HashMap<u32, f64>> {
         let mut package_power = HashMap::new();
 
-        for package_id in 0..self.package_count {
+        for &package_id in self.msr_reader.package_cpus.keys() {
             if let Ok(current_reading) = self.msr_reader.read_rapl_energy(package_id) {
                 // Calculate power based on energy difference
                 if let Some(previous_reading) = self.previous_readings.get(&package_id) {
@@ -537,7 +529,7 @@ impl RaplPowerMonitor {
 
     pub fn is_available(&self) -> bool {
         // Check if we can read at least one package
-        for package_id in 0..self.package_count {
+        for &package_id in self.msr_reader.package_cpus.keys() {
             if self.msr_reader.read_rapl_energy(package_id).is_ok() {
                 return true;
             }
@@ -1506,6 +1498,52 @@ impl Default for PowerDataCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sparse_package_ids() {
+        let cpu_root = tempfile::tempdir().unwrap();
+        for (cpu_id, package_id) in [
+            (0, 268_435_456),
+            (71, 268_435_456),
+            (72, 268_435_457),
+            (143, 268_435_457),
+            (512, u32::MAX),
+        ] {
+            let topology = cpu_root.path().join(format!("cpu{cpu_id}/topology"));
+            fs::create_dir_all(&topology).unwrap();
+            fs::write(
+                topology.join("physical_package_id"),
+                format!("{package_id}\n"),
+            )
+            .unwrap();
+        }
+        fs::create_dir(cpu_root.path().join("cpufreq")).unwrap();
+
+        let package_cpus = MsrReader::discover_packages(cpu_root.path()).unwrap();
+        assert_eq!(
+            package_cpus,
+            BTreeMap::from([(268_435_456, 0), (268_435_457, 72), (u32::MAX, 512)]),
+        );
+
+        let mut monitor = RaplPowerMonitor {
+            msr_reader: MsrReader {
+                msr_files: Mutex::new(HashMap::new()),
+                cpu_vendor: CpuVendor::Unknown,
+                package_cpus,
+                rapl_units: HashMap::new(),
+            },
+            previous_readings: HashMap::new(),
+        };
+        assert!(!monitor.is_available());
+        assert!(monitor.collect_power_data().unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    fn test_msr_unsupported_architecture() {
+        assert_eq!(MsrReader::detect_cpu_vendor().unwrap(), CpuVendor::Unknown);
+        assert!(MsrReader::new().is_err());
+    }
 
     #[test]
     fn test_power_snapshot_update() {

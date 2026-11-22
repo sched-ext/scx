@@ -15,92 +15,52 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Number of running tasks")]
-    pub nr_running: u64,
-    #[stat(desc = "Number of online CPUs")]
-    pub nr_cpus: u64,
-    #[stat(desc = "Number of kthread direct dispatches")]
-    pub nr_kthread_dispatches: u64,
-    #[stat(desc = "Number of task direct dispatches")]
-    pub nr_direct_dispatches: u64,
-    #[stat(desc = "Number of regular task dispatches")]
-    pub nr_shared_dispatches: u64,
-    #[stat(desc = "Number of idle select path picks")]
-    pub nr_idle_select_path_picks: u64,
-    #[stat(desc = "Number of idle enqueue path picks")]
-    pub nr_idle_enqueue_path_picks: u64,
-    #[stat(desc = "Number of idle prev CPU picks")]
-    pub nr_idle_prev_cpu_picks: u64,
-    #[stat(desc = "Number of idle primary picks")]
-    pub nr_idle_primary_picks: u64,
-    #[stat(desc = "Number of idle spill picks")]
-    pub nr_idle_spill_picks: u64,
-    #[stat(desc = "Number of idle pick failures")]
-    pub nr_idle_pick_failures: u64,
-    #[stat(desc = "Number of idle primary domain misses")]
-    pub nr_idle_primary_domain_misses: u64,
-    #[stat(desc = "Number of idle global misses")]
-    pub nr_idle_global_misses: u64,
-    #[stat(desc = "Number of waker CPU biases")]
-    pub nr_waker_cpu_biases: u64,
-    #[stat(desc = "Number of keep running reuses")]
-    pub nr_keep_running_reuses: u64,
-    #[stat(desc = "Number of keep running queue empty")]
-    pub nr_keep_running_queue_empty: u64,
-    #[stat(desc = "Number of keep running SMT blocked")]
-    pub nr_keep_running_smt_blocked: u64,
-    #[stat(desc = "Number of keep running queued work")]
-    pub nr_keep_running_queued_work: u64,
-    #[stat(desc = "Number of dispatch CPU DSQ consumes")]
-    pub nr_dispatch_cpu_dsq_consumes: u64,
-    #[stat(desc = "Number of dispatch node DSQ consumes")]
-    pub nr_dispatch_node_dsq_consumes: u64,
+    #[stat(desc = "Wakeups sent straight to an idle CPU")]
+    pub nr_direct: u64,
+    #[stat(desc = "Wakeups placed on borrowed virtual time")]
+    pub nr_borrowed: u64,
+    #[stat(desc = "Wakeups queued on another CPU to take it")]
+    pub nr_moved: u64,
+    #[stat(desc = "Searches for a CPU to take that found none")]
+    pub nr_missed: u64,
+    #[stat(desc = "Preemptions of a running task by a waking one")]
+    pub nr_preempts: u64,
+    #[stat(desc = "Tasks taken from another CPU's queue")]
+    pub nr_steals: u64,
+    #[stat(desc = "Running tasks moved by the tick to a better idle CPU")]
+    pub nr_balanced: u64,
+    #[stat(desc = "Tasks handed from a worse CPU to a CPU of the best tier")]
+    pub nr_rotated: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] tasks -> r: {:>2}/{:<2} | dispatch -> k: {:<5} d: {:<5} s: {:<5}",
+            "[{}] direct: {:<6} borrowed: {:<6} moved: {:<6} missed: {:<6} preempts: {:<6} steals: {:<6} balanced: {:<6} rotated: {:<6}",
             crate::SCHEDULER_NAME,
-            self.nr_running,
-            self.nr_cpus,
-            self.nr_kthread_dispatches,
-            self.nr_direct_dispatches,
-            self.nr_shared_dispatches
+            self.nr_direct,
+            self.nr_borrowed,
+            self.nr_moved,
+            self.nr_missed,
+            self.nr_preempts,
+            self.nr_steals,
+            self.nr_balanced,
+            self.nr_rotated,
         )?;
         Ok(())
     }
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
-            nr_kthread_dispatches: self.nr_kthread_dispatches - rhs.nr_kthread_dispatches,
-            nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
-            nr_shared_dispatches: self.nr_shared_dispatches - rhs.nr_shared_dispatches,
-            nr_idle_select_path_picks: self.nr_idle_select_path_picks
-                - rhs.nr_idle_select_path_picks,
-            nr_idle_enqueue_path_picks: self.nr_idle_enqueue_path_picks
-                - rhs.nr_idle_enqueue_path_picks,
-            nr_idle_prev_cpu_picks: self.nr_idle_prev_cpu_picks - rhs.nr_idle_prev_cpu_picks,
-            nr_idle_primary_picks: self.nr_idle_primary_picks - rhs.nr_idle_primary_picks,
-            nr_idle_spill_picks: self.nr_idle_spill_picks - rhs.nr_idle_spill_picks,
-            nr_idle_pick_failures: self.nr_idle_pick_failures - rhs.nr_idle_pick_failures,
-            nr_idle_primary_domain_misses: self.nr_idle_primary_domain_misses
-                - rhs.nr_idle_primary_domain_misses,
-            nr_idle_global_misses: self.nr_idle_global_misses - rhs.nr_idle_global_misses,
-            nr_waker_cpu_biases: self.nr_waker_cpu_biases - rhs.nr_waker_cpu_biases,
-            nr_keep_running_reuses: self.nr_keep_running_reuses - rhs.nr_keep_running_reuses,
-            nr_keep_running_queue_empty: self.nr_keep_running_queue_empty
-                - rhs.nr_keep_running_queue_empty,
-            nr_keep_running_smt_blocked: self.nr_keep_running_smt_blocked
-                - rhs.nr_keep_running_smt_blocked,
-            nr_keep_running_queued_work: self.nr_keep_running_queued_work
-                - rhs.nr_keep_running_queued_work,
-            nr_dispatch_cpu_dsq_consumes: self.nr_dispatch_cpu_dsq_consumes
-                - rhs.nr_dispatch_cpu_dsq_consumes,
-            nr_dispatch_node_dsq_consumes: self.nr_dispatch_node_dsq_consumes
-                - rhs.nr_dispatch_node_dsq_consumes,
-            ..self.clone()
+            nr_direct: self.nr_direct - rhs.nr_direct,
+            nr_borrowed: self.nr_borrowed - rhs.nr_borrowed,
+            nr_moved: self.nr_moved - rhs.nr_moved,
+            nr_missed: self.nr_missed - rhs.nr_missed,
+            nr_preempts: self.nr_preempts - rhs.nr_preempts,
+            nr_steals: self.nr_steals - rhs.nr_steals,
+            nr_balanced: self.nr_balanced - rhs.nr_balanced,
+            nr_rotated: self.nr_rotated - rhs.nr_rotated,
         }
     }
 }

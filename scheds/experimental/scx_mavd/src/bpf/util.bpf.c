@@ -37,6 +37,8 @@ volatile u64 __arena_global	nr_cpus_onln;	/* current number of online CPUs */
 volatile bool __arena_global	reinit_cpumask_for_performance;
 volatile bool __arena_global	no_preemption;
 volatile bool __arena_global	no_core_compaction;
+/* overflow CPUs also counted as active */
+volatile bool __arena_global	ovrflw_counted_active;
 volatile bool __arena_global	no_freq_scaling;
 
 const volatile bool	no_wake_sync;
@@ -313,11 +315,6 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 			break;
 	}
 
-	if (is_affinitized)
-		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-
 	if (on_big)
 		set_task_flag(taskc, LAVD_FLAG_ON_BIG);
 	else
@@ -351,7 +348,8 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 }
 /* the core's first cid is its primary; without SMT every cid is its own core */
 __hidden
-u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
+u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu)
+{
 	struct cpu_ctx *cpuc;
 
 	if (!is_smt_active)

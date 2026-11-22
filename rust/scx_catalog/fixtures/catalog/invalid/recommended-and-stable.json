@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "recommended": [
+    {
+      "id": "default",
+      "label": "D"
+    },
+    {
+      "id": "scx_cosmos",
+      "label": "Cosmos"
+    }
+  ],
+  "stable": ["scx_cosmos"]
+}

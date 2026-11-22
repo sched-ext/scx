@@ -26,4 +26,10 @@ scx_nitosis --cell-parent-cgroup /workloads
 
 # With LLC-awareness
 scx_nitosis --cell-parent-cgroup /workloads --enable-llc-awareness
+
+# Run the scheduler and monitor its stats in the same process
+scx_nitosis --cell-parent-cgroup /workloads --monitor-sync 1
+
+# Monitor an already running scheduler from another terminal
+scx_nitosis --monitor 1
 ```

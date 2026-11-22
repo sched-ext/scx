@@ -4,14 +4,14 @@
 //! exception is the log view writing its viewport height and clamped
 //! scroll offset back into the app.
 
-use crate::model::{Current, DEFAULT_ID, Listing, Tier};
+use crate::model::{Current, DEFAULT_ID, Listing, Pick, Tier};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Input, View, is_running, is_selected};
+use crate::app::{App, Input, View, is_running, is_running_pick, is_selected, is_selected_pick};
 use crate::logs;
 
 const SCHED_PREFIX: &str = "scx_";
@@ -71,16 +71,35 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The marker in front of a list entry: running, selected for the next
 /// start but not running, or nothing.
-fn marker(listing: Option<&Listing>, id: &str) -> (&'static str, Style) {
-    match listing {
-        Some(l) if is_running(l, id) => (
+fn marker(running: bool, selected: bool) -> (&'static str, Style) {
+    if running {
+        (
             "● ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Some(l) if is_selected(l, id) => ("○ ", Style::default().fg(Color::Yellow)),
-        _ => ("  ", Style::default()),
+        )
+    } else if selected {
+        ("○ ", Style::default().fg(Color::Yellow))
+    } else {
+        ("  ", Style::default())
+    }
+}
+
+/// A profile's marker: by its command, so that of two profiles on one
+/// scheduler the one whose options run is the one marked.
+fn pick_marker(listing: Option<&Listing>, pick: &Pick) -> (&'static str, Style) {
+    match listing {
+        Some(l) => marker(is_running_pick(l, pick), is_selected_pick(l, pick)),
+        None => marker(false, false),
+    }
+}
+
+/// A scheduler's marker in the full list: by name.
+fn sched_marker(listing: Option<&Listing>, name: &str) -> (&'static str, Style) {
+    match listing {
+        Some(l) => marker(is_running(l, name), is_selected(l, name)),
+        None => marker(false, false),
     }
 }
 
@@ -89,15 +108,26 @@ fn draw_recommended_list(frame: &mut Frame, app: &App, area: Rect) {
         .recommended()
         .iter()
         .map(|pick| {
-            let (mark, style) = marker(app.listing.as_ref(), &pick.id);
+            let (mark, style) = pick_marker(app.listing.as_ref(), pick);
             let style = if !pick.available {
                 Style::default().fg(Color::DarkGray)
             } else {
                 style
             };
+            // A custom profile says what it runs, after the label: the
+            // label is the administrator's name for it, the command is
+            // what tells it from the plain entry above.
+            let command = match &pick.sched {
+                Some(sched) => format!("  {} {}", strip_prefix(sched), format_flags(&pick.args)),
+                None => String::new(),
+            };
             let mut lines = vec![Line::from(vec![
                 Span::styled(mark, style),
                 Span::styled(pick.label.clone(), style),
+                Span::styled(
+                    command.trim_end().to_owned(),
+                    Style::default().fg(Color::Cyan),
+                ),
                 Span::styled(
                     if pick.available {
                         String::new()
@@ -134,45 +164,100 @@ fn draw_recommended_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// The groups of the full list, in its order: the featured schedulers
+/// (the maintainers' picks, stable by definition), the other stable
+/// ones, the experimental ones, and what the catalog does not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Featured,
+    Stable,
+    Experimental,
+    Unknown,
+}
+
+impl Group {
+    fn of(sched: &crate::model::Installed) -> Self {
+        if sched.featured {
+            Group::Featured
+        } else {
+            match sched.tier {
+                Tier::Stable => Group::Stable,
+                Tier::Experimental => Group::Experimental,
+                Tier::Unknown => Group::Unknown,
+            }
+        }
+    }
+}
+
+/// One item of the full list: a group header, or the scheduler at
+/// that index of the listing's `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllRow {
+    Header { group: Group, first: bool },
+    Scheduler(usize),
+}
+
+/// The full list's items in order: a header before the first scheduler
+/// of each group, then the schedulers. Pure, so the mapping between
+/// the cursor (a scheduler index) and the item list is tested on its
+/// own.
+fn all_list_rows(all: &[crate::model::Installed]) -> Vec<AllRow> {
+    let mut rows = Vec::with_capacity(all.len() + 4);
+    let mut last: Option<Group> = None;
+    for (idx, sched) in all.iter().enumerate() {
+        let group = Group::of(sched);
+        if last != Some(group) {
+            rows.push(AllRow::Header {
+                group,
+                first: rows.is_empty(),
+            });
+            last = Some(group);
+        }
+        rows.push(AllRow::Scheduler(idx));
+    }
+    rows
+}
+
 fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
-    // Stable first, experimental after, then what the catalog does not
-    // name, as the listing orders them; the first entry of each later
-    // group carries a divider above it so the boundary is visible
-    // without a header row to skip over.
-    let first_of = |tier: Tier| app.all().iter().position(|s| s.tier == tier);
-    let dividers = [
-        (first_of(Tier::Experimental), "  experimental"),
-        (first_of(Tier::Unknown), "  not in the catalog"),
-    ];
-    let items: Vec<ListItem> = app
-        .all()
+    // Featured first, the other stable ones, experimental after, then
+    // what the catalog does not name, as the listing orders them. Each
+    // group is named once, by a
+    // header item of its own (a rule and the name, the rule left off
+    // the first group, which starts at the frame). Headers are items
+    // so that the list lays them out, but they are never the selected
+    // item: the cursor is a scheduler, and its position in the item
+    // list is looked up by `all_list_rows`.
+    let rows = all_list_rows(app.all());
+    let rule = "\u{2500}".repeat(usize::from(area.width.saturating_sub(4)));
+    let items: Vec<ListItem> = rows
         .iter()
-        .enumerate()
-        .map(|(idx, sched)| {
-            let (mark, style) = marker(app.listing.as_ref(), &sched.name);
-            let (tier, tier_style) = match sched.tier {
-                Tier::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
-                Tier::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
-                Tier::Unknown => ("  not in the catalog", Style::default().fg(Color::DarkGray)),
-            };
-            let row = Line::from(vec![
-                Span::styled(mark, style),
-                Span::styled(strip_prefix(&sched.name).to_owned(), style),
-                Span::styled(tier, tier_style),
-                Span::styled(
-                    if sched.recommended {
-                        "  recommended"
-                    } else {
-                        ""
-                    },
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            match dividers.iter().find(|(at, _)| *at == Some(idx)) {
-                Some((_, title)) => {
-                    ListItem::new(vec![Line::from(Span::styled(*title, tier_style)), row])
+        .map(|row| match row {
+            AllRow::Header { group, first } => {
+                let (title, style) = match group {
+                    Group::Featured => ("  featured", Style::default().fg(Color::Cyan)),
+                    Group::Stable => ("  stable", Style::default().fg(Color::DarkGray)),
+                    Group::Experimental => ("  experimental", Style::default().fg(Color::Yellow)),
+                    Group::Unknown => {
+                        ("  not in the catalog", Style::default().fg(Color::DarkGray))
+                    }
+                };
+                let mut lines = Vec::new();
+                if !first {
+                    lines.push(Line::from(Span::styled(
+                        rule.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
-                None => ListItem::new(row),
+                lines.push(Line::from(Span::styled(title, style)));
+                ListItem::new(lines)
+            }
+            AllRow::Scheduler(idx) => {
+                let sched = &app.all()[*idx];
+                let (mark, style) = sched_marker(app.listing.as_ref(), &sched.name);
+                ListItem::new(Line::from(vec![
+                    Span::styled(mark, style),
+                    Span::styled(strip_prefix(&sched.name).to_owned(), style),
+                ]))
             }
         })
         .collect();
@@ -190,26 +275,16 @@ fn draw_all_list(frame: &mut Frame, app: &App, area: Rect) {
         )
         .highlight_symbol("▶ ");
 
-    let mut state = ListState::default().with_selected(Some(app.sched_selected));
+    let selected = rows
+        .iter()
+        .position(|row| *row == AllRow::Scheduler(app.sched_selected));
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn state_line(current: &Current) -> (String, Color) {
     match current.scheduler.as_deref() {
-        Some(DEFAULT_ID) => match &current.next {
-            Some(next) => (
-                format!(
-                    "default (the kernel's scheduler); {} selected but not running",
-                    strip_prefix(next.name())
-                ),
-                if current.failure.is_some() {
-                    Color::Red
-                } else {
-                    Color::Yellow
-                },
-            ),
-            None => ("default: the kernel's scheduler".to_owned(), Color::White),
-        },
+        Some(DEFAULT_ID) => ("default (kernel scheduler)".to_owned(), Color::White),
         Some(name) => (format!("{} running", strip_prefix(name)), Color::Green),
         None if current.attached() => (
             "a scheduler is attached outside scx.service".to_owned(),
@@ -219,6 +294,68 @@ fn state_line(current: &Current) -> (String, Color) {
             "scx.service is active, nothing attached yet".to_owned(),
             Color::Yellow,
         ),
+    }
+}
+
+/// The Configured line: what the next start would run (the file, or an
+/// override, which the line then says), whether that is what runs now,
+/// and whether there will be a next start at boot. The last is the
+/// first thing a user who just switched wants to know; the answer is
+/// the unit's `enabled`, which `start ID` sets and `start default` or a
+/// hand `systemctl disable` clear, and it belongs next to the
+/// configuration it applies to. `enable --runtime` is said as what it
+/// is, since it looks enabled to `systemctl status` and is gone after
+/// the reboot.
+fn configured_line(current: &Current) -> (String, Color) {
+    let boot = if current.unit.enabled {
+        "starts at boot"
+    } else if current.unit.enabled_runtime {
+        "enabled until reboot only"
+    } else {
+        "not at boot"
+    };
+    let Some(next) = &current.next else {
+        // Nothing to run: after `start default`, or a cleared file.
+        // `start default` also disables the unit; an enabled one with
+        // nothing to run is a hand edit, and when it starts it runs
+        // nothing (`exec` of an empty expansion is a no-op to bash)
+        // and exits, which is pointless enough for a colour. The
+        // enablement is said in the same words as everywhere else on
+        // this line, so a runtime one does not read as "at boot".
+        return if current.unit.enabled || current.unit.enabled_runtime {
+            (
+                format!("nothing (scx.service {boot}, nothing to run)"),
+                Color::Yellow,
+            )
+        } else {
+            (format!("nothing ({boot})"), Color::White)
+        };
+    };
+    let what = format!("{} {}", strip_prefix(next.name()), format_flags(&next.args));
+    let what = what.trim_end();
+    if next.overridden {
+        return (
+            format!("{what} (SCX_*_OVERRIDE in effect, {boot})"),
+            Color::Yellow,
+        );
+    }
+    // "running" takes the kernel's word as well as the unit's: the
+    // unit's process exists before its scheduler is attached, and
+    // `scheduler` is set only once the kernel reports it.
+    let running = current.scheduler.as_deref() == Some(next.name())
+        && current
+            .running
+            .as_ref()
+            .is_some_and(|r| r.sched == next.name() && r.args == next.args);
+    // "not running" and no more: `failure` is the unit's last run,
+    // which may have been another configuration, and the Last start
+    // line below reports it on its own. A running scheduler that will
+    // not come back at boot is the one surprise worth a colour, and a
+    // runtime enablement is that surprise with a delay.
+    match (running, current.unit.enabled) {
+        (true, true) => (format!("{what} (running, {boot})"), Color::White),
+        (true, false) => (format!("{what} (running, {boot})"), Color::Yellow),
+        (false, _) => (format!("{what} (not running, {boot})"), Color::Yellow),
     }
 }
 
@@ -251,37 +388,14 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
                 )),
             }
             if let Some(err) = &current.config_error {
-                lines.push(kv("Next start", "unknown", Color::Red));
+                lines.push(kv("Configured", "unknown", Color::Red));
                 lines.push(Line::from(Span::styled(
                     format!("  ⚠ {err}"),
                     Style::default().fg(Color::Red),
                 )));
             } else {
-                match &current.next {
-                    Some(next) => {
-                        let text = format!(
-                            "{} {}{}",
-                            strip_prefix(next.name()),
-                            format_flags(&next.args),
-                            if next.overridden {
-                                " (SCX_*_OVERRIDE in effect)"
-                            } else {
-                                ""
-                            }
-                        );
-                        let changed = current
-                            .running
-                            .as_ref()
-                            .is_some_and(|r| r.sched != next.name() || r.args != next.args);
-                        let color = if next.overridden || changed {
-                            Color::Yellow
-                        } else {
-                            Color::White
-                        };
-                        lines.push(kv("Next start", text.trim_end(), color));
-                    }
-                    None => lines.push(kv("Next start", "nothing configured", Color::White)),
-                }
+                let (text, color) = configured_line(current);
+                lines.push(kv("Configured", &text, color));
             }
             if let Some(f) = &current.failure {
                 lines.push(kv(
@@ -308,16 +422,21 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
         View::Recommended => {
             if let Some(pick) = app.selected_pick() {
                 lines.push(Line::from(vec![
-                    Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Focused: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(pick.label.clone(), Style::default().fg(Color::Cyan)),
                 ]));
+                // The id, and for a custom profile the command it
+                // stands for: the scheduler with the options.
                 lines.push(Line::from(Span::styled(
                     format!(
                         "  {}",
-                        if pick.id == DEFAULT_ID {
-                            "kernel default".to_owned()
-                        } else {
-                            pick.id.clone()
+                        match (&pick.sched, pick.id.as_str()) {
+                            (_, DEFAULT_ID) => "kernel default".to_owned(),
+                            (Some(sched), id) =>
+                                format!("{id}: {sched} {}", format_flags(&pick.args))
+                                    .trim_end()
+                                    .to_owned(),
+                            (None, id) => id.to_owned(),
                         }
                     ),
                     Style::default().fg(Color::Gray),
@@ -331,7 +450,15 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
             }
             if let Some(listing) = &app.listing {
                 lines.push(Line::from(Span::styled(
-                    format!("  catalog from {}", listing.source.display()),
+                    format!(
+                        "  catalog from {}{}",
+                        listing.source.display(),
+                        if app.preview_catalog {
+                            " (preview: custom profiles do not start from here)"
+                        } else {
+                            ""
+                        }
+                    ),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
@@ -339,7 +466,7 @@ fn draw_status_panel(frame: &mut Frame, app: &App, area: Rect) {
         View::All => {
             if let Some(sched) = app.selected_scheduler() {
                 lines.push(Line::from(vec![
-                    Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Focused: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(
                         strip_prefix(&sched.name).to_owned(),
                         Style::default().fg(Color::Cyan),
@@ -367,7 +494,7 @@ that is all that is known",
             }
             lines.push(Line::from(Span::styled(
                 "  a scheduler unsuited to the workload can perform worse than the kernel's \
-default; the recommended ones are marked",
+default",
                 Style::default().fg(Color::Yellow),
             )));
         }
@@ -566,6 +693,218 @@ fn format_flags(flags: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Installed;
+
+    fn installed(name: &str, tier: Tier) -> Installed {
+        Installed {
+            name: name.into(),
+            path: format!("/usr/bin/{name}"),
+            recommended: false,
+            featured: false,
+            tier,
+        }
+    }
+
+    fn featured(name: &str) -> Installed {
+        Installed {
+            featured: true,
+            ..installed(name, Tier::Stable)
+        }
+    }
+
+    /// A header goes before the first scheduler of each group and
+    /// nowhere else; the rule is left off the first header; the
+    /// scheduler items keep the listing's indices.
+    #[test]
+    fn the_full_list_puts_one_header_before_each_group() {
+        let all = [
+            featured("scx_cosmos"),
+            featured("scx_lavd"),
+            installed("scx_rusty", Tier::Stable),
+            installed("scx_flow", Tier::Experimental),
+            installed("scx_rake", Tier::Unknown),
+        ];
+        assert_eq!(
+            all_list_rows(&all),
+            vec![
+                AllRow::Header {
+                    group: Group::Featured,
+                    first: true
+                },
+                AllRow::Scheduler(0),
+                AllRow::Scheduler(1),
+                AllRow::Header {
+                    group: Group::Stable,
+                    first: false
+                },
+                AllRow::Scheduler(2),
+                AllRow::Header {
+                    group: Group::Experimental,
+                    first: false
+                },
+                AllRow::Scheduler(3),
+                AllRow::Header {
+                    group: Group::Unknown,
+                    first: false
+                },
+                AllRow::Scheduler(4),
+            ]
+        );
+        assert!(all_list_rows(&[]).is_empty());
+        // A list that starts with an experimental scheduler still has
+        // its first header without a rule.
+        assert_eq!(
+            all_list_rows(&[installed("scx_flow", Tier::Experimental)])[0],
+            AllRow::Header {
+                group: Group::Experimental,
+                first: true
+            }
+        );
+    }
+
+    /// The Configured line answers "will it come back after a reboot"
+    /// next to the configuration it applies to, from the unit's
+    /// `enabled`, and tells a scheduler that runs now but will not come
+    /// back from one that will.
+    #[test]
+    fn the_configured_line_says_whether_the_unit_starts_at_boot() {
+        let current = |scheduler: Option<&str>,
+                       active: bool,
+                       enabled: bool,
+                       running: Option<&str>,
+                       next: Option<(&str, bool)>| {
+            let json = serde_json::json!({
+                "version": 2,
+                "scheduler": scheduler,
+                "unit": {"active": active, "enabled": enabled, "enabled_runtime": false},
+                "running": running.map(|s| serde_json::json!({"sched": s, "args": []})),
+                "next": next.map(|(s, o)| serde_json::json!({"sched": s, "args": [], "override": o})),
+                "kernel": {"state": "enabled", "ops": scheduler.filter(|s| *s != DEFAULT_ID).map(|s| s.trim_start_matches("scx_"))},
+                "failure": null,
+            });
+            serde_json::from_value::<Current>(json).unwrap()
+        };
+        let line = |c: &Current| configured_line(c).0;
+        let colour = |c: &Current| configured_line(c).1;
+
+        // Running and enabled: the ordinary case after `start ID`.
+        let c = current(
+            Some("scx_cosmos"),
+            true,
+            true,
+            Some("scx_cosmos"),
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (running, starts at boot)");
+        assert_eq!(colour(&c), Color::White);
+        // Running, but `systemctl disable` was run by hand: it will not
+        // come back, which is the surprise worth a colour.
+        let c = current(
+            Some("scx_cosmos"),
+            true,
+            false,
+            Some("scx_cosmos"),
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (running, not at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // Stopped with `s`: the selection stays and so does the boot.
+        let c = current(
+            Some(DEFAULT_ID),
+            false,
+            true,
+            None,
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (not running, starts at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // Stopped and disabled by hand.
+        let c = current(
+            Some(DEFAULT_ID),
+            false,
+            false,
+            None,
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        assert_eq!(line(&c), "cosmos (not running, not at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // An override in effect is said first; the boot still applies,
+        // and an override on a disabled unit is exactly "runs now, not
+        // after a reboot".
+        let c = current(
+            Some("scx_lavd"),
+            true,
+            true,
+            Some("scx_lavd"),
+            Some(("scx_lavd", true)),
+        );
+        assert_eq!(line(&c), "lavd (SCX_*_OVERRIDE in effect, starts at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        let c = current(
+            Some("scx_lavd"),
+            true,
+            false,
+            Some("scx_lavd"),
+            Some(("scx_lavd", true)),
+        );
+        assert_eq!(line(&c), "lavd (SCX_*_OVERRIDE in effect, not at boot)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // After `start default`: nothing configured, unit disabled.
+        let c = current(Some(DEFAULT_ID), false, false, None, None);
+        assert_eq!(line(&c), "nothing (not at boot)");
+        assert_eq!(colour(&c), Color::White);
+        // `systemctl enable --runtime`: enabled to every tool that looks,
+        // and gone after the reboot. Said as what it is, and coloured
+        // like "not at boot", which after the reboot it is.
+        let mut c = current(
+            Some("scx_cosmos"),
+            true,
+            false,
+            Some("scx_cosmos"),
+            Some(("/usr/bin/scx_cosmos", false)),
+        );
+        c.unit.enabled_runtime = true;
+        assert_eq!(line(&c), "cosmos (running, enabled until reboot only)");
+        assert_eq!(colour(&c), Color::Yellow);
+        // The same enablement under an override, and with nothing to
+        // run: the line never says "at boot" for a runtime enablement.
+        let mut c = current(
+            Some("scx_lavd"),
+            true,
+            false,
+            Some("scx_lavd"),
+            Some(("scx_lavd", true)),
+        );
+        c.unit.enabled_runtime = true;
+        assert_eq!(
+            line(&c),
+            "lavd (SCX_*_OVERRIDE in effect, enabled until reboot only)"
+        );
+        assert_eq!(colour(&c), Color::Yellow);
+        let mut c = current(Some(DEFAULT_ID), false, false, None, None);
+        c.unit.enabled_runtime = true;
+        assert_eq!(
+            line(&c),
+            "nothing (scx.service enabled until reboot only, nothing to run)"
+        );
+        assert_eq!(colour(&c), Color::Yellow);
+        assert!(!line(&c).contains("at boot"));
+        // Older output without the field reads as not runtime-enabled.
+        let older: Current = serde_json::from_str(
+            r#"{"version":2,"scheduler":"default","unit":{"active":false,"enabled":true},
+            "running":null,"next":null,"kernel":{"state":"disabled","ops":null},"failure":null}"#,
+        )
+        .unwrap();
+        assert!(!older.unit.enabled_runtime);
+        // A cleared file under an enabled unit: it starts at boot, runs
+        // nothing and exits.
+        let c = current(Some(DEFAULT_ID), false, true, None, None);
+        assert_eq!(
+            line(&c),
+            "nothing (scx.service starts at boot, nothing to run)"
+        );
+        assert_eq!(colour(&c), Color::Yellow);
+    }
 
     #[test]
     fn flags_format_round_trips() {

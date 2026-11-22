@@ -3,6 +3,14 @@ name: install-deps
 runs:
   using: 'composite'
   steps:
+    - name: Use the kernel.org mirror for pahole
+      shell: bash
+      run: |
+        # vng-action builds pahole from source. git.kernel.org can time out
+        # from GitHub runners before any VM tests run.
+        git config --global \
+          url.https://kernel.googlesource.com/pub/scm/devel/pahole/pahole.insteadOf \
+          https://git.kernel.org/pub/scm/devel/pahole/pahole.git
     - name: Harden apt against flaky mirrors
       shell: bash
       run: |

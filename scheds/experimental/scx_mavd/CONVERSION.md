@@ -9,8 +9,8 @@ the goals of the fork, the representation choices, the verifier constraints
 that shaped the code and how to measure them, the known issues, and the
 procedure for syncing with lavd.
 
-The last sync, on 2026-10-06, covered main through e7ed52c29856
-("Merge pull request #3868 from sched-ext/htejun/nitosis-mitosis-sync").
+The last sync, on 2026-10-28, covered main through 82ba421c5895 ("Merge pull
+request #3942 from multics69/lavd-fix-vtime-stall").
 
 The conversion is under validation. A successful build or source review does
 not establish verifier acceptance, behavioral equivalence or performance
@@ -284,10 +284,18 @@ Task initialization only sets the owned mask's geometry. The kernel delivers
 the initial affinity through ops.set_cmask() right after ops.enable(),
 before ops.set_weight() and the first enqueue, and never calls it before
 enable(), so set_cmask() alone copies its borrowed argument into that
-storage and derives the affinity flags. Selection and enqueue can use it
-under their task-affinity serialization. Permanent pinning, effective
-single-CPU affinity and transient migration disable remain distinct
-predicates.
+storage and derives the ON_BIG, ON_LITTLE, DOMAIN_PINNED and
+IS_EFFECTIVELY_PINNED flags. Selection and enqueue can use it under their
+task-affinity serialization. Permanent pinning, effective single-CPU
+affinity and transient migration disable remain distinct predicates.
+
+Whether a task is affinitized at all is not cached. is_affinitized(p, taskc)
+derives it on every use from the allowed copy's weight, which differs from
+nr_cids for a restricted task, or from is_migration_disabled(p). lavd reads
+the kernel's fields for it instead. Of lavd's three reasons only migration
+disable applies to mavd: the cid form calls ops.set_cmask() after every
+enable, so a handover leaves no stale copy, and mavd never reads
+p->cpus_ptr.
 
 Every affinity test reads that copy, the BTQ reenqueue and dispatch
 included; mavd reads p->cpus_ptr nowhere. An asynchronous reader such as the
@@ -311,37 +319,90 @@ to lavd's XOR with that subset.
 
 ## Idle tracking
 
-The arena idle picker retains lavd's selection scopes and branch order.
-Within a scope, try a fully idle SMT core before a partially idle core.
-SCX_PICK_IDLE_CORE forbids the partial-core fallback. Clear the entire
-core's SMT-idle range before the single-CID claim, including when another
-picker wins the claim.
+Idle cids are tracked per compute domain, as lavd does since 02c3ba4fb46c
+("scx_lavd: Track idle CPUs per compute domain"). cpdom_ctx->idle holds the
+domain's idle cids and ->idle_smt its fully idle cores, each on a cacheline
+of its own. A claim is an atomic test-and-clear of the cid's idle bit, and
+writers test a bit before the atomic RMW.
 
-Each CPU context carries its core's first cid and cid count from the
-kernel's cid topology, fixed at init. Full-core eligibility tests and
-publication include only currently online members. An offlined sibling must
-not prevent the remaining idle CPU from becoming a full-core candidate. The
-custom online mask follows ops.cid_online/offline(), so it can change
-earlier than the kernel's physical sibling masks during hotplug. Full-core
-publication follows SCX-active membership. Exact transient mask identity is
-not asserted. Hotplug validation must cover those transitions under load.
+The bits are hints, not truth. ops.running() clears the running cid's bit,
+ops.dispatch() re-marks a cid that goes idle, and a resync pass in the
+sys_stat timer clears the bit of a busy or offline cid and kicks an idle cid
+without one, unless work sits in its local DSQ, so that the cid re-marks
+itself in dispatch.
 
-An idle claim can be abandoned without an intervening busy transition, and
-the kernel reports no idle notification for it. Mavd restores the claim at
-the end of ops.dispatch() when nothing was consumed and there is no previous
-task to keep running.
+A claim first drops the fully-idle hints of the cid's whole core range,
+whether or not it wins, as the kernel's scx_idle_test_and_clear_cpu() does.
+If the cid itself went offline on hotplug, only its own bit is cleared,
+where a sub-mode revoke clears the whole range. In root mode a cid is marked
+fully idle when every online cid of its core range is idle. The sub-mode
+rule for both is below.
 
-The shared cgroup bandwidth wake callback uses the same claim mechanism and
-kicks the selected CID. Loading with bandwidth control enabled does not
-prove quota throttling and unthrottling work. Exercise those transitions
+The core range is the kernel's cid topology, core_cid and core_nr_cids,
+fixed at init and of any width, where lavd pairs at most two threads through
+cpu_sibling[]. On hotplug an offline sibling is really off, so the online
+ones make a core of their own, as in lavd. On cid offline the surviving
+siblings are re-evaluated through update_core_idle_state(), which recomputes
+only the fully idle hints and never a sibling's own idle bit, since setting
+it could undo a waker's claim. lavd re-marks its sibling through
+set_cpu_idle_state().
+
+The online view follows ops.cid_online/offline(), so it can change earlier
+than the kernel's sibling masks during hotplug. Exact transient mask
+identity is not asserted. Hotplug validation must cover those transitions
+under load.
+
+In sub mode a cid the parent does not grant runs someone else's work, so a
+core is fully idle only when all of it is granted and idle. A cid that is
+not granted is never marked idle, a revoke drops the fully idle hints of the
+whole core, and nothing is re-evaluated on a revoke.
+
+ops.update_idle() sets the hint on idle entry only while the cid is online,
+which in sub mode means granted, and re-kicks the cid if work is queued for
+it. On idle exit it clears the hint. Init seeds online cids idle, and fully
+idle with SMT, and the first resync corrects it.
+
+Cid online, a grant in sub mode and hotplug in root mode, marks the cid idle
+only if its curr is the idle task and clears its hints otherwise, where lavd
+marks unconditionally on hotplug. A grant can land while a task that is not
+mavd's runs on the cid, and nothing of mavd's would clear a hint set then.
+The grant holds the cid's rq lock, so curr is exact there. On hotplug a
+wrong answer is repaired like any other hint.
+
+An idle-to-idle repick skips ops.update_idle(), so ops.dispatch() re-marks
+the cid when it ends with nothing consumed, no previous task, and the idle
+task as the cid's curr, read with scx_bpf_cid_curr(), which is exact under
+the cid's rq lock. The curr test is new. mavd used to re-mark on the missing
+previous task alone, which could mark a cid idle while a non-ext task stays
+curr across an ext pick, as with the dl_server. It now matches lavd.
+
+A direct dispatch into an idle cid's local DSQ also checks that the cid is
+idle now, as lavd does, because bypass mode skips ops.update_idle().
+
+Two windows remain, and lavd has them too. ops.enqueue() reads a cid's hint
+before its DSQ insert lands, so a cid that marks itself idle and checks its
+queue in between can sit idle with the task queued until the domain's next
+dispatch, as the resync never kicks a hinted cid. The resync can also read
+the old curr just as a cid enters idle and clear the fresh hint, which
+leaves the cid unadvertised until the next interval's kick.
+
+Within a domain, pick_idle_cpu_in() prefers a fully idle core and then any
+idle cid, a fallback SCX_PICK_IDLE_CORE forbids, within the turbo, active
+and overflow tiers, and retries a lost claim up to LAVD_MAX_RETRY (3) times,
+as lavd does. A claim of a cid whose context is unavailable, after scheduler
+exit or from an auxiliary program, fails like a lost claim, and the bounded
+retry ends the pick. There is no unbounded loop to spin in.
+
+The cgroup bandwidth wake callback, mavd's scx_cgroup_bw_kick_idle_cb()
+override, is lavd's pick_idle_cpu_for_bw(): a fully idle core first, domain
+by domain, then any idle cid. Loading with bandwidth control enabled does
+not prove quota throttling and unthrottling work. Exercise those transitions
 explicitly.
 
 Auxiliary programs and timers can outlive ops.exit(). A positive
 scx_bpf_this_cid() or scx_bpf_task_cid() only establishes that a global
 mapping exists. Context lookup follows the configuration-dependent
-validation described above. An unavailable CPU context is a terminal claim
-result for the picker invocation, not another lost claim to retry. Preserve
-that distinction to avoid spinning on stale idle bits after scheduler exit.
+validation described above.
 
 ## Differences requiring validation
 
@@ -359,30 +420,21 @@ first-set-bit choice. Equal-load ties in the most-loaded DSQ pick go to the
 lowest cid, where lavd's scan order gave them to the lowest CPU. Measure the
 resulting distribution and performance.
 
-The BPF idle-claim retry uses can_loop, whose may_goto termination can
-return busy under sustained contention. The kernel builtin retries until it
-finds an empty eligible set or wins a claim. This is a termination
-constraint on the BPF implementation. It must not drop the task: lavd's
-existing fallback placement still runs. Stress contention and measure
-whether fallback frequency changes.
-
 Executing-CPU scratch in remote-core dispatch removes the source-visible
 possibility of two CPUs sharing the target's temporary mask. This differs
 from the inherited helper's scratch argument and is required by the storage
 ownership rule. It has not been demonstrated by a runtime race reproducer.
 
-CID task writes use the kernel setters instead of direct slice or
-virtual-time stores, as required by the CID verifier. A remote slice request
-made without the target's rq lock is applied at the kernel's next slice
-consideration. Victim selection, the comparison with the old slice and the
-winning CAS remain lavd's policy. Application timing differs from a direct
-store and requires preemption-latency validation. With
-CONFIG_EXT_SUB_SCHED=y, the setter checks that the task belongs to the
-resolved scheduler. With that option disabled, the ownership check is a
-stub.
+On a core with more than two threads, calc_comp_time_on_cpu() counts every
+online sibling of the core range as drain capacity and the full-core idle
+hint covers the whole core range, where lavd counts and pairs two threads
+through cpu_sibling[]. The two are identical on 2-way SMT. Wider SMT is
+untested.
 
-The scheduler requires a v7.4 or later kernel. The old CPU-release callback is
-replaced by the existing sched_switch reenqueue hook. These are interface
+The scheduler requires a v7.4 or later kernel. The old CPU-release callback
+is replaced by the existing sched_switch reenqueue hook. lavd invalidates
+the cpuperf target in both ops.cpu_release() and its sched_switch hook, and
+mavd's hook carries the invalidation alone. These are interface
 requirements, not intentional policy changes.
 
 ## Arena cleanup invariants
@@ -440,13 +492,16 @@ can_loop in bpf_arena_for() and cmask_for_each() bounds verifier state, not
 valid traversal. Every scan is bounded by the immutable cid, CPU or domain
 count, far below the may_goto budget, so complete scans finish.
 
-Runtime preference-table reads go through a const volatile u16 __arena view,
+Runtime preference-table reads go through a plain const volatile u16 view,
 as lavd's reads of its const volatile rodata table do, so every read is a
 fresh load. The arena table itself is declared plain u16. The view adds no
 ordering or synchronization with writers. A relaxed atomic load would
-compile to the same plain load under the v4 ISA the build uses. Emitted
-AS1-to-AS0 casts mark PTR_TO_ARENA, including in this tree's READ_ONCE()
-expansion.
+compile to the same plain load under the v4 ISA the build uses.
+
+The object builds with -DSCX_ARENA_SCALAR, from build.rs, and the loader
+sets BPF_F_ARENA_SCALAR in scx_ops_cid_open!() through the rodata marker the
+define adds, so a load or store through a plain scalar is an arena access
+and the object carries no address-space casts.
 
 ## Mask traversal
 
@@ -458,10 +513,10 @@ scan failed verifier loop detection in statistics collection. The macro
 evaluates the mask expression more than once, so keep it free of side
 effects.
 
-Arena-resident types are spelled out as struct with the __arena qualifier
-rather than aliased. A typedef of the kernel's struct scx_cmask made a field
-access in the traversal macro relocate against the alias, which the kernel
-BTF has no match for, and ops.set_cmask() failed to load.
+Arena-resident types are spelled out as struct rather than aliased. A
+typedef of the kernel's struct scx_cmask made a field access in the
+traversal macro relocate against the alias, which the kernel BTF has no
+match for, and ops.set_cmask() failed to load.
 
 ## Verifier constraints
 
@@ -469,39 +524,42 @@ Two verifier limits shaped the picker and the callbacks: the combined stack
 limit and the instruction budget. This section records what they are, the
 measurements behind the current code and how to repeat them.
 
-The measurement kernel is sched_ext/for-next f6e1fb3c45b3 ("Merge branch
-'for-7.4' into for-next") plus "bpf: Keep generic __uninit kfunc arguments
-live". bpf-next has fc670d4b6c31 ("bpf: Fix generic __uninit kfunc output
-buffers") for the same problem. The compiler is clang 22.1.8 with libbpf
-1.7.0, and the programs were loaded in a 16-CPU QEMU guest with two threads
-per core. Another compiler or kernel can change every number below, so
-re-measure rather than reason from them.
+The measurements below are from 2026-10-28 on sched_ext/for-next
+a96c41fea8da ("Merge branch 'for-7.4-fixes' into for-next"), a 7.3.0-rc5
+debug build with lockdep, in a private vng VM with 16 CPUs as 8 cores x 2
+threads. The compiler is clang 23.1.3 with libbpf 1.7.0, the object is the
+debug cargo build of the tip with default options, and every program was
+loaded at verifier log level 4.
 
-The measured objects were built for the v3 ISA and predate the shared
-changes of the last sync, among them 69761e2f982d ("scx_cargo: Build BPF
-with -mcpu=v4") and 830d1816966d ("scx_utils, scheds/include: Use the
-fetching atomic builtins in the cmask bit helpers"). On the v4 object built
-at 7b301d545e38 ("Merge pull request #3853 from sched-ext/libbpf-update"),
-the stack model gives the same rounded frames and totals, and the chain
-table below is from that object. That object has not been loaded, so the
-verifier's numbers have not been re-measured. The cmask bit helpers carry
-both the fetching builtins and the cmpxchg loop. The loader probes whether
-the JIT accepts the fetching forms, and the verifier prunes the other path,
-so the counts also depend on the kernel.
+That kernel carries bpf-next's series raising the BPF program stack size to
+2 KiB, merge ce5cbbef271e, with for example ecc441fc774e ("bpf: Size the
+per-frame verifier structures for a 2 KiB stack"). Another compiler or
+kernel can change every number below, so re-measure rather than reason from
+them.
 
-The scheduler requires clang 22 or newer. scx_cargo refuses to build it with
-an older one unless SCX_ALLOW_OLD_CLANG is set, and no code accommodates an
-older compiler. Clang 19 through 21 compile the memset that zeroes the
-arena-resident sys_stat_ctx in sys_stat.bpf.c into stores through the raw
-arena address, without the address-space cast that clang 22 emits, and the
-verifier rejects init, cid_online and cid_offline, the programs that reach
-it, with an invalid scalar memory access.
+The cmask bit helpers carry both the fetching builtins and the cmpxchg loop.
+The loader probes whether the JIT accepts the fetching forms, and the
+verifier prunes the other path, so the counts also depend on the kernel.
+
+The scheduler requires clang 22 or newer. scx_cargo refuses to build a
+cid-form scheduler with an older one unless SCX_ALLOW_OLD_CLANG is set.
+
+Clang 19 through 21 compiled the memset that zeroes the arena-resident
+sys_stat_ctx in sys_stat.bpf.c into stores through the raw arena address,
+without the address-space cast that clang 22 emitted, and the verifier
+rejected init, cid_online and cid_offline, the programs that reach it, with
+an invalid scalar memory access. Under SCX_ARENA_SCALAR a store through a
+plain scalar is an arena access, so that failure cannot occur as described,
+and older clangs have not been tried since.
 
 ### The combined stack limit
 
 check_max_stack_depth() walks every call chain of a program, adds each
 subprog's stack depth rounded up to 16 bytes under the JIT, and rejects the
-program when a chain exceeds MAX_BPF_STACK, 512 bytes:
+program when a chain exceeds the budget bpf_prog_stack_limit() returns:
+MAX_BPF_STACK_JIT, 2048 bytes, for a JIT-ed program when the JIT supports
+large stacks and subprog tail calls, as the x86-64 and arm64 JITs do with
+that series, and MAX_BPF_STACK, 512 bytes, otherwise:
 
     combined stack size of 5 calls is 528. Too large
 
@@ -509,6 +567,11 @@ A subprog's depth is the deepest stack access the verifier saw in it.
 Scratch whose lifetime ended before a deeper call still counts: the frame is
 a per-subprog maximum, not a per-path one. Global functions are on the chain
 like static ones.
+
+ops.dispatch() runs on a private stack, which sched_ext requests for it.
+There each subprog of 64 bytes or more is charged on its own instead of
+combined, which is why dispatch's verifier depth, 160, is far below its
+model, 480.
 
 ### The deepest chains
 
@@ -518,22 +581,32 @@ cmask_andnot(), are global functions with a frame of their own, while the
 scans and bit tests stay inline in their callers. The deepest chain from
 either program is the picker's own, six frames down to the idle claim:
 
-    lavd_enqueue            152 -> 160
-    pick_idle_cpu           104 -> 112
-    migrate_to_neighbor     112 -> 112
-    pick_idle_cpu_at_cpdom   16 ->  16
-    pick_idle_cid            96 ->  96
-    claim_idle_cid           48 ->  48
-                                   544
+    lavd_enqueue (or lavd_select_cid)  96 ->  96
+    pick_idle_cpu                     120 -> 128 (may_goto)
+    migrate_to_neighbor                96 ->  96 (may_goto)
+    pick_idle_cpu_at_cpdom              0 ->   0
+    pick_idle_cpu_in                  104 -> 112 (may_goto)
+    clear_cpu_idle_state               32 ->  32
+                                                464
 
 The left column is the deepest r10 offset in the emitted object, the right
-one the rounded frame the verifier adds. From lavd_select_cid(), whose frame
-is 128, the same chain models at 512. The chain that ends in the domain
-intersection's cmask_and() frame instead of the claim is 32 bytes shorter,
-and the preemption victim search, lavd_enqueue() to
-try_find_and_kick_victim_cpu() to cmask_and(), is 480. The verifier's own
-`stack depth` line at log level 4 reports 496 for lavd_enqueue() and 464 for
-lavd_select_cid(), 48 under the model on both.
+one the rounded frame the verifier adds, and "(may_goto)" marks the 8 bytes
+the tool adds for a may_goto, as its docstring explains. Both roots' frames
+are 96, so the chain models at 464 from lavd_enqueue() and lavd_select_cid()
+alike.
+
+The next chains are at 432: migrate_to_neighbor() to
+debug_neighbor_migration(), 112, and pick_idle_cpu_at_cpdom() to
+cmask_and(), 112. The verifier's own `stack depth` line at log level 4
+reports 464 for both programs, equal to the model.
+
+At 464 the chain fits 512, so the two programs load on either budget. It
+stood at 544 for a while during this sync, with the migration debug print of
+6203b56f0f69 ("scx_lavd: log task migrations under debug verbosity") inline
+in migrate_to_neighbor(), whose frame it grew from 112 to 160, and came back
+once the print moved into debug_neighbor_migration(). lavd_dispatch() models
+at 480: lavd_dispatch 128, scx_cgroup_bw_reenqueue 48, cbw_reenqueue_cgroup
+112, scx_atq_pop 32, rb_pop 0, rb_remove_node 48 and rbnode_switch 112.
 
 ### The current layout
 
@@ -542,7 +615,13 @@ The picker keeps lavd's helper layout: the mask preparation helpers are
 pick_idle_cpu() as in lavd while its candidate search
 find_cpu_for_ovrflw_extend() stays a plain static function that clang keeps
 as a frame of its own, the domain intersection is a plain cmask_and() call,
-and the distributed scan is inlined into pick_idle_cid().
+and the distributed scan is in pick_idle_cpu_in(), a global function like
+pick_idle_cpu_at_cpdom().
+
+The claim below it is clear_cpu_idle_state(), a global function in
+idle.bpf.c. claim_idle_cpu() is a global function too, but clang inlines it
+into pick_idle_cpu_in(), so the chain goes to clear_cpu_idle_state()
+directly.
 
 Sticky-domain selection is a global function with its own frame off the
 deepest chain. The pick context carries no copies of the active and overflow
@@ -555,6 +634,14 @@ CPUs for the library topology lookup. Its candidate pool is the task's
 allowed copy intersected with mavd's online copy.
 
 ### How the layout got here
+
+The history paragraphs here and in the next two subsections, those on how
+the layout and the counts got to where they are, were measured on
+sched_ext/for-next f6e1fb3c45b3 ("Merge branch 'for-7.4' into for-next")
+plus "bpf: Keep generic __uninit kfunc arguments live", with clang 22.1.8
+and libbpf 1.7.0, in a 16-CPU QEMU guest with two threads per core, except
+where a paragraph names another kernel. The current results there are from
+the environment above.
 
 lavd declares its mask preparation helpers `static __always_inline` and most
 other picker helpers plain `static`, and mavd keeps that. During the
@@ -578,9 +665,13 @@ and dropping the two pointers made both root frames 16 bytes smaller.
 When the library's three-operand cmask operations became global functions
 the word loops left their callers. The boundaries were then measured one at
 a time and all together, every variant loaded, and they were removed.
-Besides lavd's own on pick_idle_cpu(), only the two global functions keep
-`__noinline`, so that clang cannot inline them at their call sites and undo
-the once-per-program verification.
+
+Besides lavd's own on pick_idle_cpu(), three global functions keep
+`__noinline` now, pick_idle_cpu_at_cpdom(), find_sticky_cpu_and_cpdom() and
+pick_idle_cpu_in(), so that clang cannot inline them at their call sites and
+undo the once-per-program verification. The static
+debug_neighbor_migration() carries it too, to keep the neighbor print's
+argument array out of migrate_to_neighbor()'s frame.
 
 ### Model versus verifier
 
@@ -595,13 +686,14 @@ repository root:
 
 The script's own docstring explains its output. The total is an upper bound:
 the verifier charges a subprog only for the accesses it verifies, so code it
-never reaches does not count. Every rejection seen during the conversion
-modeled over 512, at 528 and 544, but a 528 model has both loaded and been
-rejected depending on what the verifier reached, and the measured objects
-modeled at 544 from lavd_enqueue() and 512 from lavd_select_cid() and
-loaded, with the verifier reporting 496 and 464. A model over the limit
-therefore names a chain to measure, and the verifier's `stack depth` line
-decides.
+never reaches does not count.
+
+Every rejection seen during the conversion modeled over 512, at 528 and 544,
+but a 528 model has both loaded and been rejected depending on what the
+verifier reached, and the current object models at 464 from both
+lavd_enqueue() and lavd_select_cid() and loads, with the verifier reporting
+464 for both. A model over the limit therefore names a chain to measure, and
+the verifier's `stack depth` line decides.
 
 ### The instruction budget
 
@@ -648,24 +740,31 @@ casts, so such a function references it explicitly with `asm volatile("" ::
 
 The six scans that an earlier attempt had to leave on `bpf_for()`, part of
 the twenty the conversion moved, cost under six thousand instructions in
-total once the picker helpers were global. The library's three-operand cmask
-operations are global functions too, so the picker's mask intersections are
-verified once per program instead of at every call site: on the same mavd
-code they took select_cid from 88k to 70k verified instructions and enqueue
-from 105k to 89k, and returning the picker to lavd's inline helpers cost 4k
-and 3k of that back. Verified instructions per program on the measured
-objects:
+total once the picker helpers were global.
 
-    lavd_select_cid      74,705
-    lavd_enqueue         93,913
-    lavd_dispatch       720,425
-    lavd_init_task      163,698
-    lavd_init            44,723
+The library's three-operand cmask operations are global functions too, so
+the picker's mask intersections are verified once per program instead of at
+every call site: on the same mavd code they took select_cid from 88k to 70k
+verified instructions and enqueue from 105k to 89k, and returning the picker
+to lavd's inline helpers cost 4k and 3k of that back. Verified instructions
+per program on the current object, with the verifier's stack depth in
+parentheses:
 
-Measured on 2026-10-06 on the posted cid-sched kernel after the sync through
-d762220c6c41 ("scx_lavd: fix neighbor migration never firing on non-SMT
-machines"); the previous measurement read 74,546, 91,512, 719,743, 168,388
-and 46,246.
+    lavd_select_cid          56,236 (464)
+    lavd_enqueue             75,167 (464)
+    lavd_dispatch            39,767 (160)
+    lavd_init_task           26,181 (192)
+    lavd_init                39,246 (256)
+    lavd_cid_online          22,104 (192)
+    lavd_cid_offline         22,325 (176)
+    lavd_sub_ecaps_updated   13,664 (208)
+
+Measured on 2026-10-28 in the environment above. The previous table, 74,705,
+93,913, 720,425, 163,698 and 44,723 for the first five programs, was
+measured on 2026-10-06 on the posted cid-sched kernel and is not comparable:
+the kernel and the code both differ, and the cause of the drop, dispatch
+from 720k to 40k among them, was not investigated. The per-port deltas on
+the same kernel are in each port's notes.
 
 The sub-scheduler mode was measured with veristat on 2026-10-07. veristat
 verifies the object with the source defaults, so its counts are not
@@ -690,6 +789,9 @@ lookups themselves with direct array indexing in the callbacks brought it to
    target/debug/build/scx_mavd-*/out/bpf.bpf.o.
 3. Run the model as above from the repository root, then load
    target/debug/scx_mavd. A rejected load prints the verifier log on stdout.
+   The model warns "call ... maps to no function start" when two static
+   functions share a name, as the two out-of-line copies of
+   is_migration_disabled() do. The edge it misses there is a leaf.
 4. To watch the chains move, add `__noinline` to one of the picker's static
    helpers in src/bpf/idle.bpf.c, or drop it from a global function there,
    and repeat. The build tracks the BPF sources.
@@ -728,10 +830,26 @@ Only a re-enqueue with the KFUNC reason, from the RT/DL drain and the sweep,
 keeps the cached placement, clamped to a held cid. Every other re-enqueue
 re-runs placement.
 
+Idle hints are published only for granted cids. ops.update_idle() sets a
+hint only while the cid is online, a grant seeds the cid's hints through cid
+online, marking it idle only if its curr is the idle task, and a revoke
+clears them through cid offline. A core is fully idle only when all of it is
+granted and idle, and a revoke drops the fully idle hints of the whole core.
+
 Only a cid running one of mavd's own tasks is a preemption victim, so
-PREEMPT is not consulted. Cpuperf targets are written only with PERF. A cid
-granted ENQ_IMMED alone, borrowable under scx_nitosis, is left unused and
-reported once.
+PREEMPT is not consulted. Cpuperf targets are written only with PERF: the
+three send points, ops.running(), ops.tick() and the idle decay in the
+sys_stat timer, all check it through may_send_cpuperf(). A cid granted
+ENQ_IMMED alone, borrowable under scx_nitosis, is left unused and reported
+once.
+
+A PERF grant sends the default target and voids the last send, so that the
+next ops.running() sends the actual target. ops.running() sends only rises,
+and recording the default as sent would hold the cid at full performance
+until its next tick. The check keeps denied writes off in ops.running() and
+ops.tick(), which hold the cid's rq lock. The idle decay reads the grant
+without it, so a revoke racing it can still be refused and counted, which is
+harmless.
 
 The stats server lives under sub/ plus the cgroup's path below
 /sys/fs/cgroup, or sub/<id> for a cgroup outside that mount or with a path
@@ -900,14 +1018,48 @@ None yet.
 
 ## Validation obligations
 
+Every update to mavd tests the sub-scheduler scenarios below. They are the
+main thing to test and come before the root-only coverage.
+
+scx_nitosis runs as the root with its cells under a parent cgroup and with
+--enable-borrowing, and mavd attaches to a cell's cgroup with `--cgroup
+PATH`. The kernel needs the sub-scheduler interface, CONFIG_EXT_SUB_SCHED,
+and lockdep, since most sub-scheduler bugs show up as lockdep reports.
+
+- An attach to a cgroup that owns no cell is refused. The kernel reports the
+  sub disabled with "parent rejected (-22)".
+- An attach to a cell, then load inside the delegated cell, in another cell
+  and in the root cell. nitosis's stats show the delegated cell's dispatches
+  going to mavd, sub_q_pct 100 for that cell.
+- Cell churn with mavd attached.
+- A detach and a reattach under load.
+- Two mavd subs at once on two cells.
+- A cell's cgroup removed under its attached sub. mavd exits with
+  "unregistered from the main kernel (cgroup N going offline)", and the
+  other subs and nitosis keep running.
+- The root exiting under two subs. Each exits with "parent exiting" and
+  sched_ext ends disabled.
+
+A passing sub scenario shows each sub's attach and exit reason in the kernel
+log, the expected per-cell sub_q_pct, progress in every workload, the
+surviving subs still running after another sub or cell goes away, and a
+kernel log with no warning, lockdep report or stall.
+
 Choose affected cases and the required confidence for the change at hand.
-The wider coverage inventory includes affinity and migration disable, SMT
-on/off, initially offline CPUs, hotplug, remote core scheduling, RT/DL
-takeover, cgroup quota wakeups, preemption, statistics, power profiles and
-attach/detach. It is not a mandatory matrix for every port. Compare matching
-options and topology inputs. Require positive workload progress and clean
-kernel, setup and detach observations. Record source, binary and kernel
-identities once per batch.
+The root-only coverage inventory includes affinity and migration disable,
+SMT on/off, initially offline CPUs, hotplug, remote core scheduling, RT/DL
+takeover, cgroup quota wakeups, preemption, statistics, power profiles,
+attach/detach, the schedutil paths (the rate-limit read, the resend from
+ops.tick(), the idle decay and the demand floor) and the completion-time
+migration on big.LITTLE.
+
+It is not a mandatory matrix for every port. Compare matching options and
+topology inputs. Require positive workload progress and clean kernel, setup
+and detach observations. Record source, binary and kernel identities once
+per batch. A VM has no cpufreq driver, so the schedutil paths need hardware
+under schedutil and have not been exercised yet. The completion-time
+migration has been checked by the verifier only, with the probe that forces
+it on, and never exercised on big.LITTLE hardware.
 
 The functional drivers used so far, smoke, affinity, bandwidth and
 lifecycle, live in the mavd-tests patch on the maintainer's quilt-mavd

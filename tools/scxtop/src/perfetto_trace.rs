@@ -1204,13 +1204,11 @@ mod tests {
     fn sched_switch(
         ts: u64,
         cpu: u32,
-        next_pid: u32,
-        next_tgid: u32,
-        next_comm: &str,
-        prev_pid: u32,
-        prev_tgid: u32,
-        prev_comm: &str,
+        next: (u32, u32, &str),
+        prev: (u32, u32, &str),
     ) -> SchedSwitchAction {
+        let (next_pid, next_tgid, next_comm) = next;
+        let (prev_pid, prev_tgid, prev_comm) = prev;
         SchedSwitchAction {
             ts,
             cpu,
@@ -1291,7 +1289,7 @@ mod tests {
     #[test]
     fn test_on_sched_switch_records_ftrace_event() {
         let mut mgr = new_manager();
-        let action = sched_switch(1_000, 3, 100, 100, "next", 200, 200, "prev");
+        let action = sched_switch(1_000, 3, (100, 100, "next"), (200, 200, "prev"));
         mgr.on_sched_switch(&action);
 
         let events = mgr.ftrace_events.get(&3).expect("cpu 3 should have events");
@@ -1304,8 +1302,8 @@ mod tests {
     #[test]
     fn test_stop_writes_parseable_trace() {
         let mut mgr = new_manager();
-        mgr.on_sched_switch(&sched_switch(1_000, 0, 100, 100, "a", 200, 200, "b"));
-        mgr.on_sched_switch(&sched_switch(2_000, 0, 100, 100, "a", 300, 300, "c"));
+        mgr.on_sched_switch(&sched_switch(1_000, 0, (100, 100, "a"), (200, 200, "b")));
+        mgr.on_sched_switch(&sched_switch(2_000, 0, (100, 100, "a"), (300, 300, "c")));
 
         let path = std::env::temp_dir().join("scxtop_test_stop_writes_parseable_trace.proto");
         let path_str = path.to_str().unwrap().to_string();
@@ -1334,9 +1332,9 @@ mod tests {
     #[test]
     fn test_stop_sorts_ftrace_events_by_timestamp() {
         let mut mgr = new_manager();
-        mgr.on_sched_switch(&sched_switch(3_000, 7, 100, 100, "a", 200, 200, "b"));
-        mgr.on_sched_switch(&sched_switch(1_000, 7, 100, 100, "a", 200, 200, "b"));
-        mgr.on_sched_switch(&sched_switch(2_000, 7, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(3_000, 7, (100, 100, "a"), (200, 200, "b")));
+        mgr.on_sched_switch(&sched_switch(1_000, 7, (100, 100, "a"), (200, 200, "b")));
+        mgr.on_sched_switch(&sched_switch(2_000, 7, (100, 100, "a"), (200, 200, "b")));
 
         let path = std::env::temp_dir().join("scxtop_test_stop_sorts_ftrace.proto");
         let path_str = path.to_str().unwrap().to_string();

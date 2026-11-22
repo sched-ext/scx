@@ -1,10 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "recommended": [
     {
       "id": "default",
-      "label": "D",
-      "args": []
+      "label": "D"
     }
-  ]
+  ],
+  "x": 1
 }
