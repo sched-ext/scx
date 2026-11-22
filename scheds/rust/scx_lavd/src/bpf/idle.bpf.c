@@ -1102,6 +1102,32 @@ s32 pick_idle_cpu_at_fork(struct pick_ctx *ctx)
 }
 
 /*
+ * Whether the load balancer is taking tasks from a domain of node @nid.
+ * Read when asked: the balancer marks stealees every round and unmarks
+ * one as soon as enough of its load has been taken.
+ */
+static bool numa_has_stealee(s32 nid)
+{
+	struct numa_ctx *numac = MEMBER_VPTR(numa_ctxs, [nid]);
+	struct cpdom_ctx *cpdomc;
+	u32 i, id;
+
+	if (!numac)
+		return false;
+
+	bpf_for(i, 0, numac->nr_cpdoms) {
+		if (i >= LAVD_CPDOM_MAX_NR)
+			break;
+		id = numac->cpdom_ids[i];
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [id]);
+		if (cpdomc && READ_ONCE(cpdomc->nr_active_cpus) &&
+		    READ_ONCE(cpdomc->is_stealee))
+			return true;
+	}
+	return false;
+}
+
+/*
  * A fully idle core on the task's home node, for a task away from it.
  * Nothing is preempted or swapped: a task that finds none stays where the
  * ordinary pick puts it and is considered again at its next pick.
@@ -1111,6 +1137,14 @@ static s32 pick_idle_cpu_at_home(struct pick_ctx *ctx)
 	s32 nid = get_task_home_node(ctx->taskc);
 
 	if (!numa_on || nid < 0 || cpu_to_numa_id(ctx->prev_cpu) == nid)
+		return -ENOENT;
+
+	/*
+	 * Not onto a node with a domain the load balancer finds overloaded:
+	 * an idle core there is momentary, and the balancer would move the
+	 * task away again.
+	 */
+	if (numa_has_stealee(nid))
 		return -ENOENT;
 	return pick_idle_cpu_on_node(ctx, nid, SCX_PICK_IDLE_CORE);
 }
