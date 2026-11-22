@@ -847,6 +847,39 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	return ret;
 }
 
+/*
+ * Fields that exist only with CONFIG_NUMA_BALANCING, declared here so
+ * that a kernel built without it still compiles and loads.
+ */
+struct task_struct___numa {
+	int numa_preferred_nid;
+	unsigned long total_numa_faults;
+} __attribute__((preserve_access_index));
+
+/*
+ * The node the kernel's NUMA balancing prefers for @p, or NUMA_NO_NODE
+ * unless that node has CPUs and was measured from hinting faults the
+ * task took itself. A task that shares its creator's memory starts with
+ * the creator's node and an exec keeps the old one, both without a fault
+ * behind them.
+ *
+ * This is a snapshot, read once at attach. The kernel does not scan the
+ * memory of a task under a BPF scheduler, so the node was measured
+ * before the task came to this scheduler and is not kept up to date.
+ */
+static s32 get_numa_preferred_nid(const struct task_struct *p)
+{
+	const struct task_struct___numa *pn = (const void *)p;
+	s32 nid;
+
+	if (!bpf_core_field_exists(pn->numa_preferred_nid) ||
+	    !bpf_core_field_exists(pn->total_numa_faults) ||
+	    !BPF_CORE_READ(pn, total_numa_faults))
+		return NUMA_NO_NODE;
+	nid = BPF_CORE_READ(pn, numa_preferred_nid);
+	return numa_has_cpus(nid) ? nid : NUMA_NO_NODE;
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -2466,9 +2499,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->cpu_heat = 0;
 	taskc->last_stopping_clk = scx_bpf_now();
 	set_task_home_node(taskc, NUMA_NO_NODE);
-	/* At attach the memory was first touched where the task is. */
-	if (numa_on && !args->fork && !is_kernel_task(p))
-		set_task_home_node(taskc, cpu_to_numa_id(scx_bpf_task_cpu(p)));
+	/*
+	 * At attach the memory is on the node the kernel's NUMA balancing
+	 * measured for the task, or else where the task is.
+	 */
+	if (numa_on && !args->fork && !is_kernel_task(p)) {
+		s32 nid = get_numa_preferred_nid(p);
+
+		if (nid < 0)
+			nid = cpu_to_numa_id(scx_bpf_task_cpu(p));
+		set_task_home_node(taskc, nid);
+	}
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);

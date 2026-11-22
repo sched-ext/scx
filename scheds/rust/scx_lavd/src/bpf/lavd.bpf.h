@@ -862,6 +862,14 @@ static inline s32 cpu_to_numa_id(s32 cpu)
 	return cpdomc ? cpdomc->numa_id : NUMA_NO_NODE;
 }
 
+/* Whether NUMA node @nid has CPUs. */
+static __always_inline bool numa_has_cpus(s32 nid)
+{
+	struct numa_ctx *numac = MEMBER_VPTR(numa_ctxs, [nid]);
+
+	return numac && numac->nr_cpdoms;
+}
+
 /*
  * A task's NUMA home node is the node its memory is on, as far as the
  * scheduler knows, or NUMA_NO_NODE. It is read and set only through
