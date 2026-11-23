@@ -45,10 +45,23 @@ pub struct CellInfo {
 /// minimum must not reduce this recipient below it. `requested` is a
 /// best-effort floor reserved before weighted allocation; it may be capped when
 /// satisfying it would violate another recipient's protected floor.
+///
+/// `preferred` is a soft floor above `protected`: the recipient is brought up
+/// to it ahead of the weighted split from the CPUs it may receive, and a
+/// requested minimum takes from recipients above it first. Falling short of it
+/// is not an error.
 #[derive(Debug, Clone, Copy, Default)]
 struct CpuMinimum {
     protected: usize,
     requested: usize,
+    preferred: usize,
+}
+
+impl CpuMinimum {
+    /// The number of CPUs the recipient keeps where the CPUs exist.
+    fn preferred_floor(&self) -> usize {
+        self.preferred.max(self.protected)
+    }
 }
 
 /// Generic allocation input for a CPU partitioning recipient.
@@ -77,6 +90,7 @@ impl CpuRecipient {
             minimum: CpuMinimum {
                 protected: 1,
                 requested: 0,
+                preferred: 0,
             },
         }
     }
@@ -91,6 +105,7 @@ impl CpuRecipient {
             minimum: CpuMinimum {
                 protected: 0,
                 requested,
+                preferred: 0,
             },
         }
     }
@@ -108,8 +123,16 @@ impl CpuRecipient {
             minimum: CpuMinimum {
                 protected: 1,
                 requested: 0,
+                preferred: 0,
             },
         }
+    }
+
+    /// Prefer at least `cpus` primary CPUs, which a cell needs to give each
+    /// of its subcells a CPU of its own.
+    pub(crate) fn with_preferred_minimum(mut self, cpus: usize) -> Self {
+        self.minimum.preferred = cpus;
+        self
     }
 }
 
@@ -398,32 +421,38 @@ impl<'a> CpuManager<'a> {
                     })
                     .collect();
 
-                let reservable = |cpu: usize| {
+                // Claimants keep their preferred floor while any of them
+                // can still give a CPU from above it, and only their
+                // protected floor once none can.
+                let reservable_above = |cpu: usize, floor: fn(&CpuMinimum) -> usize| {
                     recipient.allowed.test_cpu(cpu)
                         && !reserved.test_cpu(cpu)
                         && contention.get(&cpu).is_some_and(|claimants| {
                             claimants.iter().all(|id| {
-                                let protected = by_id
-                                    .get(id)
-                                    .map_or(0, |recipient| recipient.minimum.protected);
-                                remaining.get(id).copied().unwrap_or(0) > protected
+                                let floor = by_id.get(id).map_or(0, |r| floor(&r.minimum));
+                                remaining.get(id).copied().unwrap_or(0) > floor
                             })
                         })
                 };
-
-                let donor = claimed_cpus
-                    .iter()
-                    .filter(|(_, cpus)| cpus.iter().any(|&cpu| reservable(cpu)))
-                    .map(|(&id, _)| id)
-                    .min_by(|&a, &b| {
-                        taken_from[&a]
-                            .cmp(&taken_from[&b])
-                            .then(remaining[&b].cmp(&remaining[&a]))
-                            .then(a.cmp(&b))
-                    });
-                let Some(donor) = donor else {
+                let donor_above = |floor: fn(&CpuMinimum) -> usize| {
+                    claimed_cpus
+                        .iter()
+                        .filter(|(_, cpus)| cpus.iter().any(|&cpu| reservable_above(cpu, floor)))
+                        .map(|(&id, _)| id)
+                        .min_by(|&a, &b| {
+                            taken_from[&a]
+                                .cmp(&taken_from[&b])
+                                .then(remaining[&b].cmp(&remaining[&a]))
+                                .then(a.cmp(&b))
+                        })
+                        .map(|donor| (donor, floor))
+                };
+                let Some((donor, floor)) = donor_above(CpuMinimum::preferred_floor)
+                    .or_else(|| donor_above(|minimum| minimum.protected))
+                else {
                     break;
                 };
+                let reservable = |cpu: usize| reservable_above(cpu, floor);
 
                 let cpu = claimed_cpus[&donor]
                     .iter()
@@ -547,6 +576,11 @@ impl<'a> CpuManager<'a> {
         // target-weighted distribution. Otherwise, a claimant which already has
         // an exclusive CPU can win the only contested CPU from a claimant at
         // zero merely due to recipient-ID ordering.
+        //
+        // A CPU none of whose claimants is below its protected minimum goes
+        // to a claimant below its preferred floor, so the weighted
+        // distribution does not leave a claimant with little weight below it
+        // while the contested CPUs could cover it.
         let mut assigned_count: HashMap<u32, usize> = recipient_cpus
             .iter()
             .map(|(&id, mask)| (id, mask.weight()))
@@ -571,28 +605,32 @@ impl<'a> CpuManager<'a> {
             let claimants = contention
                 .get(&cpu)
                 .expect("contested CPU missing contention entry");
-            let protected_recipient = claimants
-                .iter()
-                .filter_map(|id| {
-                    let recipient = recipients
-                        .iter()
-                        .find(|recipient| recipient.id == *id)
-                        .expect("claimant missing recipient");
-                    let assigned = assigned_count.get(id).copied().unwrap_or(0);
-                    (assigned < recipient.minimum.protected)
-                        .then(|| (*id, recipient.minimum.protected - assigned))
-                })
-                // Prefer the recipient with fewer alternative contested CPUs,
-                // then the larger protected deficit, then the lower ID.
-                .min_by(|(a_id, a_deficit), (b_id, b_deficit)| {
-                    contested_choices[a_id]
-                        .cmp(&contested_choices[b_id])
-                        .then(b_deficit.cmp(a_deficit))
-                        .then(a_id.cmp(b_id))
-                })
-                .map(|(id, _)| id);
+            let claimant_below = |floor: fn(&CpuMinimum) -> usize| {
+                claimants
+                    .iter()
+                    .filter_map(|id| {
+                        let recipient = recipients
+                            .iter()
+                            .find(|recipient| recipient.id == *id)
+                            .expect("claimant missing recipient");
+                        let assigned = assigned_count.get(id).copied().unwrap_or(0);
+                        let floor = floor(&recipient.minimum);
+                        (assigned < floor).then(|| (*id, floor - assigned))
+                    })
+                    // Prefer the recipient with fewer alternative contested
+                    // CPUs, then the larger deficit, then the lower ID.
+                    .min_by(|(a_id, a_deficit), (b_id, b_deficit)| {
+                        contested_choices[a_id]
+                            .cmp(&contested_choices[b_id])
+                            .then(b_deficit.cmp(a_deficit))
+                            .then(a_id.cmp(b_id))
+                    })
+                    .map(|(id, _)| id)
+            };
+            let floored_recipient = claimant_below(|minimum| minimum.protected)
+                .or_else(|| claimant_below(CpuMinimum::preferred_floor));
 
-            if let Some(id) = protected_recipient {
+            if let Some(id) = floored_recipient {
                 recipient_cpus
                     .entry(id)
                     .or_insert_with(Cpumask::new)
@@ -677,6 +715,50 @@ impl<'a> CpuManager<'a> {
                         .ok();
                 }
                 *assigned_count.entry(id).or_insert(0) += count;
+            }
+        }
+
+        // Bring unpinned recipients up to their preferred floor from the
+        // unclaimed CPUs, one CPU each per round, while every other unpinned
+        // recipient still without a CPU can get one from what is left.
+        let mut unpinned_by_id: Vec<&CpuRecipient> = recipients
+            .iter()
+            .filter(|recipient| recipient.claimed.is_none())
+            .collect();
+        unpinned_by_id.sort_by_key(|recipient| recipient.id);
+        loop {
+            let mut granted = false;
+            for recipient in &unpinned_by_id {
+                let assigned = |id: &u32| assigned_count.get(id).copied().unwrap_or(0);
+                if recipient.minimum.preferred <= recipient.minimum.protected.max(1)
+                    || assigned(&recipient.id) >= recipient.minimum.preferred
+                {
+                    continue;
+                }
+                let waiting = unpinned_by_id
+                    .iter()
+                    .filter(|other| other.id != recipient.id && assigned(&other.id) == 0)
+                    .count();
+                if unclaimed_cpus.len() <= waiting {
+                    continue;
+                }
+                let Some(pos) = unclaimed_cpus
+                    .iter()
+                    .position(|&cpu| recipient.allowed.test_cpu(cpu))
+                else {
+                    continue;
+                };
+                let cpu = unclaimed_cpus.remove(pos);
+                recipient_cpus
+                    .entry(recipient.id)
+                    .or_insert_with(Cpumask::new)
+                    .set_cpu(cpu)
+                    .ok();
+                *assigned_count.entry(recipient.id).or_insert(0) += 1;
+                granted = true;
+            }
+            if !granted {
+                break;
             }
         }
 
@@ -1478,11 +1560,13 @@ impl CellManager {
                         CpuMinimum {
                             protected: 0,
                             requested: self.cell0_min_cpus,
+                            preferred: 0,
                         }
                     } else {
                         CpuMinimum {
                             protected: 1,
                             requested: 0,
+                            preferred: 0,
                         }
                     },
                 })

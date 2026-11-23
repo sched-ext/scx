@@ -156,16 +156,22 @@ impl ConfiguredCells {
         let mut cell_recipients = Vec::new();
         let mut cells = Vec::new();
 
+        // A cell prefers one CPU per subcell: with fewer it runs as a single
+        // subcell.
+        let root_subcells = self.root_subcells();
+        cell_recipients.push(
+            CpuRecipient::root(
+                0,
+                demand_weight(cell_demands, 0),
+                &self.all_cpus,
+                cell0_min_cpus,
+            )
+            .with_preferred_minimum(root_subcells.len()),
+        );
         cells.push(ConfiguredCell {
             id: 0,
-            subcells: self.root_subcells(),
+            subcells: root_subcells,
         });
-        cell_recipients.push(CpuRecipient::root(
-            0,
-            demand_weight(cell_demands, 0),
-            &self.all_cpus,
-            cell0_min_cpus,
-        ));
 
         let mut matched_paths: Vec<_> = matched.keys().cloned().collect();
         matched_paths.sort();
@@ -185,10 +191,13 @@ impl ConfiguredCells {
 
             cell_assignments.push((matched_cgroup.cgid, cell_id));
             let weight = demand_weight(cell_demands, cell_id);
-            cell_recipients.push(match &matched_cgroup.cpuset {
-                Some(cpuset) => CpuRecipient::pinned(cell_id, weight, cpuset),
-                None => CpuRecipient::unpinned(cell_id, weight, &self.all_cpus),
-            });
+            cell_recipients.push(
+                match &matched_cgroup.cpuset {
+                    Some(cpuset) => CpuRecipient::pinned(cell_id, weight, cpuset),
+                    None => CpuRecipient::unpinned(cell_id, weight, &self.all_cpus),
+                }
+                .with_preferred_minimum(spec.subcells.len()),
+            );
             cells.push(ConfiguredCell {
                 id: cell_id,
                 subcells: spec.subcells.clone(),
