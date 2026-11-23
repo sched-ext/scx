@@ -156,16 +156,22 @@ impl ConfiguredCells {
         let mut cell_recipients = Vec::new();
         let mut cells = Vec::new();
 
+        // A cell prefers one CPU per subcell: with fewer it runs as a single
+        // subcell.
+        let root_subcells = self.root_subcells();
+        cell_recipients.push(
+            CpuRecipient::root(
+                0,
+                demand_weight(cell_demands, 0),
+                &self.all_cpus,
+                cell0_min_cpus,
+            )
+            .with_preferred_minimum(root_subcells.len()),
+        );
         cells.push(ConfiguredCell {
             id: 0,
-            subcells: self.root_subcells(),
+            subcells: root_subcells,
         });
-        cell_recipients.push(CpuRecipient::root(
-            0,
-            demand_weight(cell_demands, 0),
-            &self.all_cpus,
-            cell0_min_cpus,
-        ));
 
         let mut matched_paths: Vec<_> = matched.keys().cloned().collect();
         matched_paths.sort();
@@ -185,10 +191,13 @@ impl ConfiguredCells {
 
             cell_assignments.push((matched_cgroup.cgid, cell_id));
             let weight = demand_weight(cell_demands, cell_id);
-            cell_recipients.push(match &matched_cgroup.cpuset {
-                Some(cpuset) => CpuRecipient::pinned(cell_id, weight, cpuset),
-                None => CpuRecipient::unpinned(cell_id, weight, &self.all_cpus),
-            });
+            cell_recipients.push(
+                match &matched_cgroup.cpuset {
+                    Some(cpuset) => CpuRecipient::pinned(cell_id, weight, cpuset),
+                    None => CpuRecipient::unpinned(cell_id, weight, &self.all_cpus),
+                }
+                .with_preferred_minimum(spec.subcells.len()),
+            );
             cells.push(ConfiguredCell {
                 id: cell_id,
                 subcells: spec.subcells.clone(),
@@ -494,11 +503,17 @@ fn collect_cgroups_inner(path: &Path, cgroups: &mut Vec<CgroupEntry>) -> Result<
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
 
+    let cpuset = match read_cpuset(path) {
+        Ok(cpuset) => cpuset,
+        Err(e) if is_removed_cgroup(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
     cgroups.push(CgroupEntry {
         path: path.to_path_buf(),
         path_string: path.display().to_string(),
         cgid: metadata.ino(),
-        cpuset: read_cpuset(path)?,
+        cpuset,
     });
 
     for entry in entries {
@@ -524,6 +539,14 @@ fn collect_cgroups_inner(path: &Path, cgroups: &mut Vec<CgroupEntry>) -> Result<
     }
 
     Ok(())
+}
+
+/// A cgroup can be removed between opening one of its files and reading it.
+/// The read then fails with ENODEV rather than ENOENT.
+fn is_removed_cgroup(e: &anyhow::Error) -> bool {
+    e.root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.raw_os_error() == Some(libc::ENODEV))
 }
 
 fn read_cpuset(cgroup_path: &Path) -> Result<Option<Cpumask>> {

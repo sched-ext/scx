@@ -111,6 +111,23 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx_fallible(struct cgroup *cgrp)
 	return cgc;
 }
 
+/*
+ * Get the cgrp_ctx of @cgrp, creating it if it does not exist. When another
+ * context creates it at the same time, the helper fails for the one that
+ * loses instead of returning the storage that now exists, so look it up
+ * again.
+ */
+static inline struct cgrp_ctx *get_or_create_cgrp_ctx(struct cgroup *cgrp)
+{
+	struct cgrp_ctx *cgc;
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!cgc)
+		cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, 0);
+
+	return cgc;
+}
+
 static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc = lookup_cgrp_ctx_fallible(cgrp);
@@ -1547,7 +1564,7 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE))) {
+	if (!(cgc = get_or_create_cgrp_ctx(cgrp))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu", cgrp->kn->id);
 		return -ENOENT;
 	}
@@ -1583,8 +1600,12 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	if (cgrp_is_dying(cgrp))
 		return 0;
 
-	/* Initialize ancestors first (replicates SCX cgroup_init order) */
-	bpf_for(level, 1, target_level)
+	/*
+	 * Initialize ancestors first (replicates SCX cgroup_init order). The
+	 * walk starts at the root: tp_cgroup_mkdir is attached before
+	 * mitosis_init() runs, so the root's cgrp_ctx may not exist yet.
+	 */
+	bpf_for(level, 0, target_level)
 	{
 		struct cgroup *ancestor __free(cgroup) = lookup_cgrp_ancestor(cgrp, level);
 		if (!ancestor)
@@ -1910,7 +1931,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		return -ENOENT;
 
 	/* Initialize root cgroup storage so tasks can always fall back to cell 0. */
-	if (!bpf_cgrp_storage_get(&cgrp_ctxs, rootcg, 0, BPF_LOCAL_STORAGE_GET_F_CREATE)) {
+	if (!get_or_create_cgrp_ctx(rootcg)) {
 		scx_bpf_error("cgrp_ctx creation failed for rootcg");
 		return -ENOENT;
 	}
