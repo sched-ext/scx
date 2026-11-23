@@ -1321,17 +1321,23 @@ impl CellManager {
         cpu_to_llc: &HashMap<usize, usize>,
     ) -> Result<Vec<CpuAssignment>> {
         // A cell is floored at one CPU by the cell-level split, but it may
-        // carry more subcells than that. Rather than fail the split, let every
-        // subcell run on the whole cell until it grows again.
+        // carry more subcells than that. A CPU serves the queues of one
+        // subcell only, so subcells cannot share the CPUs. Run the cell as
+        // subcell 0 alone until it grows again: BPF places in subcell 0 every
+        // task that no other subcell in use matches.
         if domain.weight() < subcells.len() {
-            return Ok(subcells
-                .iter()
-                .map(|subcell| CpuAssignment {
-                    id: subcell.id,
-                    primary: domain.clone(),
-                    borrowable: compute_borrowable.then(Cpumask::new),
-                })
-                .collect());
+            if !subcells.iter().any(|subcell| subcell.id == 0) {
+                bail!(
+                    "Cannot run {} subcells on {} CPUs without subcell 0",
+                    subcells.len(),
+                    domain.weight()
+                );
+            }
+            return Ok(vec![CpuAssignment {
+                id: 0,
+                primary: domain.clone(),
+                borrowable: compute_borrowable.then(Cpumask::new),
+            }]);
         }
 
         if let Some(assignments) = Self::compute_subcell_cpu_assignments_with_llc_chunks(
@@ -3899,7 +3905,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_subcell_cpu_assignments_shares_cell_smaller_than_subcell_count() {
+    fn test_compute_subcell_cpu_assignments_runs_small_cell_as_subcell_zero() {
         let domain = cpumask_from_cpulist(32, "5");
         let recipients = vec![
             CpuRecipient::unpinned(0, 1.0, &domain),
@@ -3911,12 +3917,13 @@ mod tests {
             CellManager::compute_subcell_cpu_assignments(&domain, &recipients, true, &cpu_to_llc)
                 .unwrap();
 
-        assert_eq!(assignments.len(), 2);
-        for id in [0, 1] {
-            let assignment = find_assignment(&assignments, id);
-            assert_eq!(assignment.primary, domain);
-            assert_eq!(assignment.borrowable.as_ref().map(|m| m.weight()), Some(0));
-        }
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].id, 0);
+        assert_eq!(assignments[0].primary, domain);
+        assert_eq!(
+            assignments[0].borrowable.as_ref().map(|m| m.weight()),
+            Some(0)
+        );
     }
 
     #[test]
