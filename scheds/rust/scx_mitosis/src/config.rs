@@ -494,11 +494,17 @@ fn collect_cgroups_inner(path: &Path, cgroups: &mut Vec<CgroupEntry>) -> Result<
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
 
+    let cpuset = match read_cpuset(path) {
+        Ok(cpuset) => cpuset,
+        Err(e) if is_removed_cgroup(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
     cgroups.push(CgroupEntry {
         path: path.to_path_buf(),
         path_string: path.display().to_string(),
         cgid: metadata.ino(),
-        cpuset: read_cpuset(path)?,
+        cpuset,
     });
 
     for entry in entries {
@@ -524,6 +530,14 @@ fn collect_cgroups_inner(path: &Path, cgroups: &mut Vec<CgroupEntry>) -> Result<
     }
 
     Ok(())
+}
+
+/// A cgroup can be removed between opening one of its files and reading it.
+/// The read then fails with ENODEV rather than ENOENT.
+fn is_removed_cgroup(e: &anyhow::Error) -> bool {
+    e.root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.raw_os_error() == Some(libc::ENODEV))
 }
 
 fn read_cpuset(cgroup_path: &Path) -> Result<Option<Cpumask>> {
