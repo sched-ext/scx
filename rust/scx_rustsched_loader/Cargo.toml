@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustsched_loader"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2024"
 rust-version = "1.91"
 description = "Loading and running a Rust BPF sched_ext scheduler: BTF layout, struct_ops, exit record, profiler"
@@ -13,10 +13,10 @@ publish = false
 ci.use_clippy = true
 
 [dependencies]
-scx_rustsched_abi = { path = "../scx_rustsched_abi", version = "1.1.4" }
+scx_rustsched_abi = { path = "../scx_rustsched_abi", version = "1.1.5" }
 scx_rustsched_macros = { path = "../scx_rustsched_macros", version = "1.1.4" }
-scx_stats = { path = "../scx_stats", version = "1.1.4" }
-scx_utils = { path = "../scx_utils", version = "1.1.4" }
+scx_stats = { path = "../scx_stats", version = "1.1.5" }
+scx_utils = { path = "../scx_utils", version = "1.1.5" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

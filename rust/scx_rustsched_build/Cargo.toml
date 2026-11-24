@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustsched_build"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2024"
 rust-version = "1.91"
 description = "Build script support for Rust BPF sched_ext schedulers: the BPF crate build and the object's BTF"
