@@ -494,7 +494,7 @@ static void collect_sys_stat(void)
 		 * instruction limit with these calls inside it.
 		 */
 		calc_cpuperf_target(cpuc);
-		decay_idle_cpuperf_target(cpuc, c->now);
+		send_cpuperf_target(cpuc, c->now, LAVD_CPUPERF_DECAY);
 
 		/*
 		 * Accumulate statistics.

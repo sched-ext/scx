@@ -112,6 +112,8 @@ enum consts_internal {
 	LAVD_CPU_UTIL_THR_FOR_MAX_FREQ	= p2s(80), /* cpu utilization threshold to update max freq */
 	LAVD_CPUPERF_UP_SHIFT		= 6, /* raise in steps of capacity / 64 */
 	LAVD_CPUPERF_DOWN_SHIFT		= 5, /* lower only past a capacity / 32 deadband */
+	LAVD_CPUPERF_BOOST_BAR_SHIFT	= 4, /* boost only above avg + (max - avg) / 16 */
+	LAVD_CPUPERF_BOOST_MIN_RUN_NS	= (150ULL * NSEC_PER_USEC), /* shorter runs end before a boost lands */
 
 	LAVD_CC_REQ_CAPACITY_HEADROOM	= p2s(25), /* 25%: inflate required capacity by 25% to handle sudden spikes */
 	LAVD_CC_PER_CPU_UTIL		= p2s(50), /* 50%: maximum per-CPU utilization */
@@ -228,7 +230,7 @@ struct task_ctx {
 	volatile u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
 	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
-	u32	__pad0;
+	u32	pinned_demand;		/* demand added to cpuperf_pinned */
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */
@@ -486,6 +488,10 @@ struct cpu_ctx {
 	volatile u32	cpuperf_floor;	/* demand of the task running here, or 0 */
 	volatile u32	cpuperf_cur;	/* target last sent to the kernel, or
 					   LAVD_CPUPERF_UNSET to force the next commit */
+	volatile u32	cpuperf_pinned;	/* demand sum of the pinned tasks
+					   runnable here */
+	volatile u32	cpuperf_floor_pinned; /* share of cpuperf_pinned that is
+						 the running task's, or 0 */
 	volatile u64	cpuperf_commit_clk; /* when the target was last sent */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
@@ -889,6 +895,13 @@ struct dsq_entry {
 
 /* A cpuperf_cur no target can equal, so the next commit always sends. */
 #define LAVD_CPUPERF_UNSET	((u32)-1)
+
+/* When send_cpuperf_target() sends, by caller. */
+enum lavd_cpuperf_send_mode {
+	LAVD_CPUPERF_RISE,	/* a rise, from ops.running()/enqueue() */
+	LAVD_CPUPERF_REFRESH,	/* once per rate limit, from ops.tick() */
+	LAVD_CPUPERF_DECAY,	/* an idle CPU's drop, from sys_stat */
+};
 
 u64 peek_dsq_vtime(u64 dsq_id);
 void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);

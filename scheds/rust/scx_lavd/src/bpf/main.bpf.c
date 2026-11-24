@@ -1105,10 +1105,22 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * migrate_disable) so nr_pinned_tasks drives slice shrinking for
 	 * both cases. The matching decrement in lavd_quiescent() uses the
 	 * same predicate.
+	 *
+	 * The task's demand also adds to @cpu's performance target, since it
+	 * can run nowhere else. Send the rise now rather than when the task
+	 * runs. The kernel holds the rq lock of task_cpu(@p) here, so the
+	 * send is possible only when @cpu is that CPU.
 	 */
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
+		taskc->pinned_demand = READ_ONCE(taskc->util_est);
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+		__sync_fetch_and_add(&cpuc->cpuperf_pinned,
+				     taskc->pinned_demand);
+		if (cpu == scx_bpf_task_cpu(p)) {
+			send_cpuperf_target(cpuc, scx_bpf_now(),
+					    LAVD_CPUPERF_RISE);
+		}
 	}
 
 	/*
@@ -1233,10 +1245,16 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * pinned_cpu_id == -ENOENT guard ensures one increment per
 	 * accounting cycle and defends against the rare sequence where
 	 * a prior non-throttled lavd_enqueue() already set the marker.
+	 *
+	 * The rise of @cpu's performance target is not sent here, since this
+	 * does not run under @cpu's rq lock. It is sent when the task runs.
 	 */
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
+		taskc->pinned_demand = READ_ONCE(taskc->util_est);
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+		__sync_fetch_and_add(&cpuc->cpuperf_pinned,
+				     taskc->pinned_demand);
 	}
 
 	/*
@@ -1752,12 +1770,32 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 }
 
 /*
- * @taskc's demand: its runnable duty cycle (util_est), the share of a CPU's
- * time it needs.
+ * Extra performance target for @taskc while it runs, on top of its demand
+ * @util. On a big.LITTLE machine, a task more performance-critical than
+ * average gets up to its demand again at the system's maximum, so that it
+ * finishes its burst sooner. Other tasks get none.
+ *
+ * Tasks just above the average are left out, and so are tasks whose runs
+ * end before a raised target reaches the clock.
  */
-static __always_inline u32 task_cpuperf_demand(task_ctx *taskc)
+static __always_inline
+u32 calc_cpuperf_boost(task_ctx *taskc, u32 util)
 {
-	return min(READ_ONCE(taskc->util_est), LAVD_SCALE);
+	u32 avg, max, pc;
+
+	if (!have_little_core ||
+	    taskc->avg_runtime_wall < LAVD_CPUPERF_BOOST_MIN_RUN_NS) {
+		return 0;
+	}
+
+	avg = sys_stat.avg_perf_cri;
+	max = sys_stat.max_perf_cri;
+	pc = taskc->perf_cri;
+	if (max <= avg ||
+	    pc <= avg + ((max - avg) >> LAVD_CPUPERF_BOOST_BAR_SHIFT)) {
+		return 0;
+	}
+	return (u64)util * (min(pc, max) - avg) / (max - avg);
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
@@ -1765,6 +1803,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	struct cpu_ctx *cpuc;
 	task_ctx *taskc;
 	u64 now = scx_bpf_now();
+	u32 util;
 
 	/*
 	 * lavd_running() may run on a CPU other than @p's: the kernel
@@ -1806,15 +1845,32 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	clear_cpu_idle_state(cpuc, cpuc->cpu_id);
 
 	/*
-	 * Send this CPU's performance target if it differs from the last one
-	 * sent: the sys_stat timer may have computed a new one, or an RT/DL
-	 * task may have run here and left the frequency anywhere.
+	 * Send this CPU's performance target if it rose above the last one
+	 * sent: @p brought its own demand, or the sys_stat timer computed a
+	 * new one.
 	 *
 	 * The target normally follows this CPU's utilization history. If @p's
 	 * duty cycle is higher, use it instead, since the CPU's utilization
-	 * takes time to catch up with @p's demand.
+	 * takes time to catch up with @p's demand. A pinned @p counted here
+	 * is left out of the pinned tasks' average, since its demand is
+	 * already in the floor.
+	 *
+	 * A drop is not sent here, so lowering the frequency lags. While the
+	 * CPU stays busy, ops.tick() sends the drop at the first tick past
+	 * the rate limit. Once the CPU goes idle, no tick runs, so the drop
+	 * waits for the sys_stat timer, up to one interval (10 ms).
+	 *
+	 * A performance-critical @p gets a boost on top of its demand. A
+	 * pinned @p is left out of the pinned average unboosted, so its boost
+	 * applies only while it runs.
 	 */
-	update_cpuperf_target(cpuc, task_cpuperf_demand(taskc), now);
+	util = READ_ONCE(taskc->util_est);
+	WRITE_ONCE(cpuc->cpuperf_floor,
+		   min(util + calc_cpuperf_boost(taskc, util), LAVD_SCALE));
+	WRITE_ONCE(cpuc->cpuperf_floor_pinned,
+		   (taskc->pinned_cpu_id == cpuc->cpu_id) ?
+		   taskc->pinned_demand : 0);
+	send_cpuperf_target(cpuc, now, LAVD_CPUPERF_RISE);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -1854,8 +1910,11 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	 * adds to the target keeps changing, so a single send is not enough.
 	 * Do it before any early return below. @cpuc is @p's CPU, whose rq
 	 * the kernel holds here.
+	 *
+	 * The resend includes the pinned tasks waiting here, so it also
+	 * delivers a rise that ops.enqueue() could not send.
 	 */
-	refresh_cpuperf_target(cpuc, now);
+	send_cpuperf_target(cpuc, now, LAVD_CPUPERF_REFRESH);
 
 	account_task_runtime(p, taskc, cpuc, now, true);
 
@@ -1903,6 +1962,9 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	if (READ_ONCE(cpuc->cpuperf_floor)) {
 		WRITE_ONCE(cpuc->cpuperf_floor, 0);
 	}
+	if (READ_ONCE(cpuc->cpuperf_floor_pinned)) {
+		WRITE_ONCE(cpuc->cpuperf_floor_pinned, 0);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1939,9 +2001,13 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		struct cpu_ctx *cpuc_pinned =
 			get_cpu_ctx_id(taskc->pinned_cpu_id);
 
-		if (cpuc_pinned)
+		if (cpuc_pinned) {
 			__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
+			__sync_fetch_and_sub(&cpuc_pinned->cpuperf_pinned,
+					     taskc->pinned_demand);
+		}
 		taskc->pinned_cpu_id = -ENOENT;
+		taskc->pinned_demand = 0;
 	}
 
 	/*
@@ -2204,18 +2270,6 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
-	struct cpu_ctx *cpuc;
-
-	/*
-	 * The RT/DL task may leave the frequency anywhere. Only
-	 * invalidate the target here, so that ops.running() sends the
-	 * actual change request when an SCX task runs here again.
-	 */
-	cpuc = get_cpu_ctx_id(cpu);
-	if (cpuc) {
-		WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
-	}
-
 	/*
 	 * Requeue tasks stranded on the local DSQ when a higher-priority
 	 * scheduling class takes the CPU, so the BPF scheduler can
@@ -2245,18 +2299,6 @@ int BPF_PROG(lavd_sched_switch, bool preempt,
 	 */
 	if (unlikely(next->prio < MAX_RT_PRIO &&
 		     prev->prio >= MAX_RT_PRIO)) {
-		struct cpu_ctx *cpuc;
-
-		/*
-		 * The RT/DL task may leave the frequency anywhere. Only
-		 * invalidate the target here, so that ops.running() sends the
-		 * actual change request when an SCX task runs here again.
-		 */
-		cpuc = get_cpu_ctx();
-		if (cpuc) {
-			WRITE_ONCE(cpuc->cpuperf_cur, LAVD_CPUPERF_UNSET);
-		}
-
 		/* Reenqueue any SCX tasks stranded on the local DSQ. */
 		scx_bpf_reenqueue_local_from_anywhere();
 	}
@@ -2382,6 +2424,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
+	taskc->pinned_demand = 0;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;
