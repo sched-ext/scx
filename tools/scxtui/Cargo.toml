@@ -1,6 +1,6 @@
 [package]
 name = "scxtui"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Piotr Gorski <lucjan.lucjanov@gmail.com>"]

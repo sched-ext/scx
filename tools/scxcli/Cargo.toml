@@ -1,6 +1,6 @@
 [package]
 name = "scxcli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Piotr Gorski <lucjan.lucjanov@gmail.com>"]
@@ -19,5 +19,5 @@ disable = true
 
 [dependencies]
 anyhow = "1"
-scx_catalog = { path = "../../rust/scx_catalog", version = "0.1.0" }
+scx_catalog = { path = "../../rust/scx_catalog", version = "0.1.1" }
 serde_json = "1"

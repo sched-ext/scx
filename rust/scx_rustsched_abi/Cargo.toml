@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustsched_abi"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2024"
 rust-version = "1.91"
 description = "What a Rust BPF sched_ext scheduler and its loader agree on: the configuration table's layout"
