@@ -23,7 +23,7 @@ scx_atq_t *fifo;
 
 task_ctx *tasks[NTASKS];
 
-__weak
+static __always_inline
 int scx_selftest_atq_create(u64 unused)
 {
 	int i;
@@ -294,7 +294,7 @@ int scx_selftest_atq_peek_empty(u64 unused)
 	return 0;
 }
 
-__weak
+static __always_inline
 int scx_selftest_atq_sized(u64 unused)
 {
 	scx_atq_t *sized_fifo, *sized_vtime;

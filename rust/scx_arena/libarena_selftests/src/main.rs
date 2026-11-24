@@ -106,7 +106,8 @@ fn main() {
     open.maps.rodata_data.as_mut().unwrap().nr_cpu_ids = *NR_CPU_IDS as u32;
     let skel = open.load().context("Failed to load BPF program").unwrap();
 
-    let _arena = ScxLibArena::setup(skel.object(), 42, 0, *NR_CPU_IDS)
+    let arena_globals = std::ptr::from_ref(skel.maps.arena_data.as_deref().unwrap()).addr();
+    let _arena = ScxLibArena::setup(skel.object(), arena_globals, 42, 0, *NR_CPU_IDS)
         .context("Failed to set up arena")
         .unwrap();
 

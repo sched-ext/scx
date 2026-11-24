@@ -1,6 +1,7 @@
 #pragma once
 #include <scx/common.bpf.h>
 
+#include <libarena/common.h>
 #include <libarena/bitmap.h>
 
 #define NR_CPU_IDS_UNINIT (~(u32)0)

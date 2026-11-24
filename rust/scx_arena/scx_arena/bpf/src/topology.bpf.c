@@ -101,7 +101,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
 }
 
 
-static __noinline
+static __always_inline
 int topo_add(topo_ptr parent, scx_bitmap_t mask, s16 id)
 {
 	topo_ptr child;

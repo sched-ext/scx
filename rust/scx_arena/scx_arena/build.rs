@@ -14,6 +14,9 @@ fn package_libarena_bpf(manifest_dir: &Path, out_dir: &Path) -> std::io::Result<
 
     archive.append_dir_all("include", source.join("include"))?;
     archive.append_dir_all("src", source.join("src"))?;
+    // Compile the assets with the headers that match the Cargo libbpf.
+    let libbpf = PathBuf::from(env::var_os("DEP_BPF_INCLUDE").unwrap());
+    archive.append_dir_all("include/bpf", libbpf.join("bpf"))?;
     archive.finish()?;
 
     println!(
