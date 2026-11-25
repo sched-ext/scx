@@ -144,6 +144,9 @@ pub struct App {
     pub message: Option<Message>,
     last_action: Option<Instant>,
     pub view: View,
+    /// The list the logs were opened from, which closing them goes
+    /// back to.
+    logs_from: View,
     pub log_previous_boot: bool,
     pub log_lines: Vec<LogLine>,
     pub log_scroll: usize,
@@ -170,6 +173,7 @@ impl App {
             message: None,
             last_action: None,
             view: View::Recommended,
+            logs_from: View::Recommended,
             log_previous_boot: false,
             log_lines: Vec::new(),
             log_scroll: 0,
@@ -447,7 +451,7 @@ scxtop, or your distro's scx tools package)",
 
     fn on_key_logs(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q' | 'l') | KeyCode::Esc => self.view = View::Recommended,
+            KeyCode::Char('q' | 'l') | KeyCode::Esc => self.view = self.logs_from,
             KeyCode::Up | KeyCode::Char('k') => self.log_scroll = self.log_scroll.saturating_add(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.log_scroll = self.log_scroll.saturating_sub(1);
@@ -477,6 +481,7 @@ kernel's default; the recommended ones are marked",
     }
 
     fn open_logs(&mut self) {
+        self.logs_from = self.view;
         self.view = View::Logs;
         self.reload_logs();
     }
@@ -1142,6 +1147,28 @@ mod tests {
             ))
         );
         assert!(app.args.is_none());
+    }
+
+    #[test]
+    fn closing_the_logs_goes_back_to_the_list_they_were_opened_from() {
+        let Harness { mut app, .. } = app();
+        for close in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('l')] {
+            app.on_key(key(KeyCode::Char('l')));
+            assert_eq!(app.view, View::Logs);
+            app.on_key(key(close));
+            assert_eq!(app.view, View::Recommended);
+        }
+        app.on_key(key(KeyCode::Char('A')));
+        for close in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('l')] {
+            app.on_key(key(KeyCode::Char('l')));
+            assert_eq!(app.view, View::Logs);
+            app.on_key(key(close));
+            assert_eq!(app.view, View::All);
+        }
+        // Leaving the advanced list is still one key away.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.view, View::Recommended);
+        assert!(!app.should_quit);
     }
 
     #[test]
