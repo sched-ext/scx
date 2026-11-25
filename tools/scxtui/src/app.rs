@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 
 use crate::backend::Backend;
 use crate::kernel::{self, KernelState};
-use crate::logs::{self, LogLine};
+use crate::logs::{self, LogFetch, LogLine};
 use crate::model::{DEFAULT_ID, Installed, Listing, Pick, validate_arg};
 use crate::system::system_command;
 use crate::ui;
@@ -131,6 +131,8 @@ pub struct App {
     /// The kernel's own view, re-read every tick.
     pub kernel: Option<KernelState>,
     read_kernel: Box<dyn Fn() -> Option<KernelState>>,
+    /// Reads the unit's journal, for the previous boot when asked.
+    read_logs: Box<dyn Fn(bool) -> Result<LogFetch>>,
     kernel_disputed: bool,
     watcher: Option<Watcher>,
     pub selected: usize,
@@ -144,6 +146,9 @@ pub struct App {
     pub message: Option<Message>,
     last_action: Option<Instant>,
     pub view: View,
+    /// The list the logs were opened from, which closing them goes
+    /// back to.
+    logs_from: View,
     pub log_previous_boot: bool,
     pub log_lines: Vec<LogLine>,
     pub log_scroll: usize,
@@ -161,6 +166,7 @@ impl App {
             listing_error: None,
             kernel: None,
             read_kernel: Box::new(|| kernel::read().unwrap_or(None)),
+            read_logs: Box::new(|previous_boot| logs::fetch(logs::UNIT, previous_boot)),
             kernel_disputed: false,
             watcher: None,
             selected: 0,
@@ -170,6 +176,7 @@ impl App {
             message: None,
             last_action: None,
             view: View::Recommended,
+            logs_from: View::Recommended,
             log_previous_boot: false,
             log_lines: Vec::new(),
             log_scroll: 0,
@@ -447,7 +454,7 @@ scxtop, or your distro's scx tools package)",
 
     fn on_key_logs(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q' | 'l') | KeyCode::Esc => self.view = View::Recommended,
+            KeyCode::Char('q' | 'l') | KeyCode::Esc => self.view = self.logs_from,
             KeyCode::Up | KeyCode::Char('k') => self.log_scroll = self.log_scroll.saturating_add(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.log_scroll = self.log_scroll.saturating_sub(1);
@@ -477,12 +484,13 @@ kernel's default; the recommended ones are marked",
     }
 
     fn open_logs(&mut self) {
+        self.logs_from = self.view;
         self.view = View::Logs;
         self.reload_logs();
     }
 
     fn reload_logs(&mut self) {
-        match logs::fetch(logs::UNIT, self.log_previous_boot) {
+        match (self.read_logs)(self.log_previous_boot) {
             Ok(fetch) => {
                 let boot = if self.log_previous_boot { "-1" } else { "0" };
                 let tail_note = if fetch.truncated {
@@ -871,6 +879,36 @@ mod tests {
         calls: Rc<RefCell<Vec<Call>>>,
         listing: Rc<RefCell<Listing>>,
         broken: Rc<RefCell<bool>>,
+        journal: Rc<RefCell<Journal>>,
+    }
+
+    /// What the journal hands back, and which boots were asked for.
+    #[derive(Default)]
+    struct Journal {
+        lines: usize,
+        truncated: bool,
+        error: Option<&'static str>,
+        reads: Vec<bool>,
+    }
+
+    fn read_journal(journal: &RefCell<Journal>, previous_boot: bool) -> Result<LogFetch> {
+        let mut journal = journal.borrow_mut();
+        journal.reads.push(previous_boot);
+        if let Some(error) = journal.error {
+            anyhow::bail!(error);
+        }
+        let lines = (0..journal.lines)
+            .map(|n| LogLine {
+                time: "12:00:00".into(),
+                priority: 6,
+                text: format!("line {n}"),
+                continuation: false,
+            })
+            .collect();
+        Ok(LogFetch {
+            lines,
+            truncated: journal.truncated,
+        })
     }
 
     fn app() -> Harness {
@@ -884,6 +922,9 @@ mod tests {
         };
         let mut app = App::new(Box::new(stub));
         app.read_kernel = Box::new(|| None);
+        let journal = Rc::new(RefCell::new(Journal::default()));
+        let reader = journal.clone();
+        app.read_logs = Box::new(move |previous_boot| read_journal(&reader, previous_boot));
         app.refresh();
         app.sync_selection_to_running();
         Harness {
@@ -891,6 +932,7 @@ mod tests {
             calls,
             listing,
             broken,
+            journal,
         }
     }
 
@@ -1142,6 +1184,96 @@ mod tests {
             ))
         );
         assert!(app.args.is_none());
+    }
+
+    #[test]
+    fn closing_the_logs_goes_back_to_the_list_they_were_opened_from() {
+        let Harness { mut app, .. } = app();
+        for close in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('l')] {
+            app.on_key(key(KeyCode::Char('l')));
+            assert_eq!(app.view, View::Logs);
+            app.on_key(key(close));
+            assert_eq!(app.view, View::Recommended);
+        }
+        app.on_key(key(KeyCode::Char('A')));
+        for close in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('l')] {
+            app.on_key(key(KeyCode::Char('l')));
+            assert_eq!(app.view, View::Logs);
+            app.on_key(key(close));
+            assert_eq!(app.view, View::All);
+        }
+        // Leaving the advanced list is still one key away.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.view, View::Recommended);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn the_logs_are_read_on_opening_on_reload_and_on_a_change_of_boot() {
+        let Harness {
+            mut app, journal, ..
+        } = app();
+        journal.borrow_mut().lines = 3;
+        app.on_key(key(KeyCode::Char('l')));
+        assert_eq!(app.log_lines.len(), 3);
+        let message = app.message.as_ref().unwrap();
+        assert!(!message.is_error);
+        assert!(message.text.contains("loaded 3 lines"), "{}", message.text);
+        assert!(message.text.contains("(boot 0)"), "{}", message.text);
+        assert!(!message.text.contains("omitted"), "{}", message.text);
+        assert_eq!(journal.borrow().reads, [false]);
+
+        // A reload goes back to the newest entry.
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.log_scroll, 1);
+        app.on_key(key(KeyCode::Char('R')));
+        assert_eq!(app.log_scroll, 0);
+        assert_eq!(journal.borrow().reads, [false, false]);
+
+        app.on_key(key(KeyCode::Char('b')));
+        assert!(app.log_previous_boot);
+        let message = app.message.as_ref().unwrap();
+        assert!(message.text.contains("(boot -1)"), "{}", message.text);
+        assert_eq!(journal.borrow().reads, [false, false, true]);
+        app.on_key(key(KeyCode::Char('b')));
+        assert!(!app.log_previous_boot);
+        assert_eq!(journal.borrow().reads, [false, false, true, false]);
+
+        // Scrolling and closing read nothing.
+        app.on_key(key(KeyCode::Char('g')));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(journal.borrow().reads.len(), 4);
+    }
+
+    #[test]
+    fn a_cut_journal_tail_is_said_and_a_failed_read_empties_the_view() {
+        let Harness {
+            mut app, journal, ..
+        } = app();
+        journal.borrow_mut().lines = 2;
+        journal.borrow_mut().truncated = true;
+        app.on_key(key(KeyCode::Char('A')));
+        app.on_key(key(KeyCode::Char('l')));
+        let message = app.message.as_ref().unwrap();
+        assert!(!message.is_error);
+        assert!(
+            message.text.contains("older entries omitted"),
+            "{}",
+            message.text
+        );
+
+        journal.borrow_mut().error = Some("journalctl failed: no such boot");
+        app.on_key(key(KeyCode::Char('b')));
+        assert!(app.log_lines.is_empty(), "no stale lines of the other boot");
+        let message = app.message.as_ref().unwrap();
+        assert!(message.is_error);
+        assert_eq!(message.text, "journalctl failed: no such boot");
+        // The choice of boot stays, so the footer says what was asked for.
+        assert!(app.log_previous_boot);
+
+        // A failed read does not trap the user in the view.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.view, View::All);
     }
 
     #[test]
