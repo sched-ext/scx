@@ -5,13 +5,16 @@
  * Tasks are scored by how much they behave like part of an interactive
  * pipeline and wait in per-LLC queues ordered by a virtual deadline derived
  * from that score. Pinned tasks wait in per-CPU queues. Wakeups that find
- * an idle CPU are dispatched to it directly.
+ * an idle CPU are dispatched to it directly. With --performance, the LLCs
+ * of a node share double helix queues in pairs, see helix.bpf.h.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
 #include <bpf_experimental.h>
+#include <lib/dhq.h>
+#include <lib/sdt_alloc.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -20,6 +23,7 @@ UEI_DEFINE(uei);
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
+#include "helix.bpf.h"
 #include "stats.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
@@ -32,9 +36,13 @@ SCX_OPS_DEFINE(flow_ops,
 	       .runnable		= (void *)flow_runnable,
 	       .running			= (void *)flow_running,
 	       .tick			= (void *)flow_tick,
+	       .cpu_release		= (void *)flow_cpu_release,
 	       .stopping		= (void *)flow_stopping,
 	       .quiescent		= (void *)flow_quiescent,
 	       .init_task		= (void *)flow_init_task,
+	       .cgroup_init		= (void *)flow_cgroup_init,
+	       .cgroup_set_weight	= (void *)flow_cgroup_set_weight,
+	       .disable			= (void *)flow_disable,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |

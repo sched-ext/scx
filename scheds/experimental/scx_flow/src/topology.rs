@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 //! CPU topology handling for scx_flow.
 //!
-//! Builds the topology tables the BPF program reads and the topology
-//! lines printed at startup.
+//! Builds the topology tables the BPF program reads, including the pairs
+//! of LLCs that share a double helix queue with --performance, and the
+//! topology lines printed at startup.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
@@ -11,7 +12,9 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use anyhow::bail;
+use log::warn;
 use scx_utils::Core;
+use scx_utils::Cpu;
 use scx_utils::Topology;
 
 use crate::bpf_intf;
@@ -40,22 +43,30 @@ fn core_cluster(core: &Core) -> Option<isize> {
         .find(|id| known(*id))
 }
 
+/// Package and cluster id of a core. Cluster ids are only unique within a
+/// package.
+fn cluster_key(core: &Core) -> Option<(usize, isize)> {
+    let package = core.cpus.values().next().map_or(0, |cpu| cpu.package_id);
+
+    core_cluster(core).map(|cluster| (package, cluster))
+}
+
 /// Core group of every CPU. Cores with a cluster id are grouped by it and
 /// the remaining cores of each LLC are split into groups of GROUP_WIDTH.
 /// Group ids start at zero and have no gaps.
 fn cpu_groups(topo: &Topology) -> BTreeMap<usize, u32> {
-    let clusters: BTreeSet<isize> = topo
+    let clusters: BTreeSet<(usize, isize)> = topo
         .all_cores
         .values()
-        .filter_map(|c| core_cluster(c))
+        .filter_map(|c| cluster_key(c))
         .collect();
-    let by_cluster: BTreeMap<isize, u32> = clusters.into_iter().zip(0u32..).collect();
+    let by_cluster: BTreeMap<(usize, isize), u32> = clusters.into_iter().zip(0u32..).collect();
     let mut next = by_cluster.len() as u32;
     let mut core_group: BTreeMap<usize, u32> = BTreeMap::new();
     let mut unclustered: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
     for (id, core) in &topo.all_cores {
-        match core_cluster(core).and_then(|c| by_cluster.get(&c)) {
+        match cluster_key(core).and_then(|c| by_cluster.get(&c)) {
             Some(group) => {
                 core_group.insert(*id, *group);
             }
@@ -77,8 +88,48 @@ fn cpu_groups(topo: &Topology) -> BTreeMap<usize, u32> {
         .collect()
 }
 
+/// For every CPU of a core with several hardware threads, the next CPU of
+/// that core, wrapping around to the first one.
+fn cpu_siblings(topo: &Topology) -> BTreeMap<usize, u32> {
+    let mut siblings = BTreeMap::new();
+
+    for core in topo.all_cores.values() {
+        let cpus: Vec<usize> = core.cpus.keys().copied().collect();
+        if cpus.len() < 2 {
+            continue;
+        }
+        for (i, cpu) in cpus.iter().enumerate() {
+            siblings.insert(*cpu, cpus[(i + 1) % cpus.len()] as u32);
+        }
+    }
+    siblings
+}
+
 fn nr_groups(groups: &BTreeMap<usize, u32>) -> usize {
     groups.values().collect::<BTreeSet<_>>().len()
+}
+
+/// The partner of every LLC in the double helix queues of --performance:
+/// the LLCs of each node are paired in the order of their numbers, and the
+/// last one of an odd count is its own partner, as is an LLC alone in its
+/// node.
+fn llc_mates(llc_node: &[u32]) -> Vec<u32> {
+    let mut mates: Vec<u32> = (0..llc_node.len() as u32).collect();
+    let mut waiting: BTreeMap<u32, u32> = BTreeMap::new();
+
+    for (llc, node) in llc_node.iter().enumerate() {
+        let llc = llc as u32;
+        match waiting.remove(node) {
+            Some(first) => {
+                mates[first as usize] = llc;
+                mates[llc as usize] = first;
+            }
+            None => {
+                waiting.insert(*node, llc);
+            }
+        }
+    }
+    mates
 }
 
 /// Topology tables for the BPF program. LLCs are renumbered from zero in
@@ -91,31 +142,45 @@ pub struct BpfTopology {
     pub nr_groups: u32,
     pub cpu_llc: BTreeMap<usize, u32>,
     pub cpu_group: BTreeMap<usize, u32>,
+    /// Another hardware thread of the same core, for CPUs that have one.
+    pub cpu_sibling: BTreeMap<usize, u32>,
     pub llc_node: Vec<u32>,
     pub llc_kb: Vec<u32>,
+    /// The LLC each LLC shares a double helix queue with, itself if none.
+    pub llc_mate: Vec<u32>,
 }
 
 impl BpfTopology {
     pub fn new(topo: &Topology, caches: &BTreeMap<usize, CpuCaches>) -> Result<Self> {
         let llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+        let node_ids: Vec<usize> = topo.nodes.keys().copied().collect();
         let max_llcs = bpf_intf::flow_consts_FLOW_MAX_LLCS as usize;
 
-        if llc_ids.is_empty() || llc_ids.len() > max_llcs {
-            bail!(
-                "found {} LLCs, between 1 and {max_llcs} are supported",
+        if llc_ids.is_empty() {
+            bail!("found no LLC");
+        }
+        let layout = if llc_ids.len() <= max_llcs {
+            LlcLayout::Llc(llc_ids)
+        } else if !node_ids.is_empty() && node_ids.len() <= max_llcs {
+            warn!(
+                "found {} LLCs, more than the {max_llcs} supported, so the CPUs of each \
+                 NUMA node share one",
                 llc_ids.len()
             );
-        }
-
+            LlcLayout::Node(node_ids)
+        } else {
+            warn!(
+                "found {} LLCs and {} NUMA nodes, more than the {max_llcs} supported, so all \
+                 CPUs share one LLC",
+                llc_ids.len(),
+                node_ids.len()
+            );
+            LlcLayout::Single
+        };
         let cpu_llc = topo
             .all_cpus
             .iter()
-            .filter_map(|(id, cpu)| {
-                llc_ids
-                    .binary_search(&cpu.llc_id)
-                    .ok()
-                    .map(|llc| (*id, llc as u32))
-            })
+            .filter_map(|(id, cpu)| layout.llc_of(cpu).map(|llc| (*id, llc)))
             .collect();
 
         let mut cpu_group = cpu_groups(topo);
@@ -125,25 +190,66 @@ impl BpfTopology {
             groups = 0;
         }
 
-        let llc_kb = topo
-            .all_llcs
-            .values()
-            .map(|llc| {
-                llc.all_cpus
-                    .keys()
-                    .find_map(|cpu| caches.get(cpu))
-                    .map_or(0, |c| c.l3_kb)
-            })
-            .collect();
+        // The cache sizes only say which LLC is the largest, which means
+        // nothing once LLCs are merged.
+        let (llc_node, llc_kb): (Vec<u32>, Vec<u32>) = match &layout {
+            LlcLayout::Llc(_) => topo
+                .all_llcs
+                .values()
+                .map(|llc| {
+                    let kb = llc
+                        .all_cpus
+                        .keys()
+                        .find_map(|cpu| caches.get(cpu))
+                        .map_or(0, |c| c.l3_kb);
+                    (llc.node_id as u32, kb)
+                })
+                .unzip(),
+            LlcLayout::Node(nodes) => nodes.iter().map(|node| (*node as u32, 0)).unzip(),
+            LlcLayout::Single => (vec![0], vec![0]),
+        };
 
         Ok(Self {
-            nr_llcs: llc_ids.len() as u32,
+            nr_llcs: llc_node.len() as u32,
             nr_groups: groups as u32,
             cpu_llc,
             cpu_group,
-            llc_node: topo.all_llcs.values().map(|l| l.node_id as u32).collect(),
+            cpu_sibling: cpu_siblings(topo),
+            llc_mate: llc_mates(&llc_node),
+            llc_node,
             llc_kb,
         })
+    }
+
+    /// The number of LLC pairs that share a double helix queue.
+    pub fn nr_llc_pairs(&self) -> usize {
+        self.llc_mate
+            .iter()
+            .enumerate()
+            .filter(|(llc, mate)| (**mate as usize) > *llc)
+            .count()
+    }
+}
+
+/// How CPUs are put into the LLCs of the BPF program: by their LLC, by
+/// their NUMA node when there are too many LLCs, or all into one when
+/// there are too many nodes as well. Llc and Node hold the sorted ids,
+/// whose positions are the LLC numbers seen by the BPF program.
+enum LlcLayout {
+    Llc(Vec<usize>),
+    Node(Vec<usize>),
+    Single,
+}
+
+impl LlcLayout {
+    fn llc_of(&self, cpu: &Cpu) -> Option<u32> {
+        let index = |ids: &[usize], id: usize| ids.binary_search(&id).ok().map(|i| i as u32);
+
+        match self {
+            LlcLayout::Llc(ids) => index(ids, cpu.llc_id),
+            LlcLayout::Node(ids) => index(ids, cpu.node_id),
+            LlcLayout::Single => Some(0),
+        }
     }
 }
 
@@ -306,7 +412,6 @@ pub fn render_topo_lines(topo: &Topology, limit: usize) -> (Vec<String>, usize) 
 mod tests {
     use super::*;
     use scx_utils::CoreType;
-    use scx_utils::Cpu;
     use scx_utils::Cpumask;
     use scx_utils::Llc;
     use std::sync::Arc;
@@ -510,6 +615,57 @@ mod tests {
     }
 
     #[test]
+    fn clusters_are_per_package() {
+        let topo = mk_topo(vec![
+            (
+                0,
+                vec![mk_llc(
+                    0,
+                    vec![mk_core(0, &[0], 0, 0, 0, 0), mk_core(1, &[1], 0, 0, 0, 1)],
+                    0,
+                )],
+            ),
+            (
+                1,
+                vec![mk_llc(
+                    1,
+                    vec![mk_core(2, &[2], 1, 1, 1, 0), mk_core(3, &[3], 1, 1, 1, 1)],
+                    1,
+                )],
+            ),
+        ]);
+        assert_eq!(nr_groups(&cpu_groups(&topo)), 4);
+    }
+
+    /// @nr_llcs single-CPU LLCs spread round robin over @nr_nodes nodes.
+    fn many_llc_topo(nr_llcs: usize, nr_nodes: usize) -> Topology {
+        mk_topo(
+            (0..nr_nodes)
+                .map(|node| {
+                    let llcs = (node..nr_llcs)
+                        .step_by(nr_nodes)
+                        .map(|id| mk_llc(id, vec![mk_core(id, &[id], id, node, 0, -1)], node))
+                        .collect();
+                    (node, llcs)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn too_many_llcs_fall_back() {
+        let per_node = BpfTopology::new(&many_llc_topo(100, 2), &BTreeMap::new()).unwrap();
+        assert_eq!(per_node.nr_llcs, 2);
+        assert_eq!(per_node.llc_node, vec![0, 1]);
+        assert_eq!(per_node.cpu_llc.get(&3), Some(&1));
+
+        let single = BpfTopology::new(&many_llc_topo(100, 100), &BTreeMap::new()).unwrap();
+        assert_eq!(single.nr_llcs, 1);
+        assert_eq!(single.llc_kb, vec![0]);
+        assert!(single.cpu_llc.values().all(|llc| *llc == 0));
+    }
+
+    #[test]
     fn unclustered_cores_split_per_llc() {
         let groups = cpu_groups(&multi_package_topo());
         assert_eq!(groups.get(&1), Some(&0));
@@ -538,6 +694,27 @@ mod tests {
             tables.cpu_group,
             BTreeMap::from([(0, 0), (1, 0), (2, 1), (3, 1)])
         );
+    }
+
+    #[test]
+    fn llcs_pair_up_within_their_node() {
+        assert_eq!(llc_mates(&[0]), vec![0]);
+        assert_eq!(llc_mates(&[0, 0]), vec![1, 0]);
+        assert_eq!(llc_mates(&[0, 0, 0]), vec![1, 0, 2]);
+        assert_eq!(llc_mates(&[0, 1, 0, 1]), vec![2, 3, 0, 1]);
+        assert_eq!(llc_mates(&[0, 0, 1, 1, 1]), vec![1, 0, 3, 2, 4]);
+        assert_eq!(llc_mates(&[0, 1]), vec![0, 1]);
+
+        let one_per_node = BpfTopology::new(&multi_package_topo(), &BTreeMap::new()).unwrap();
+        assert_eq!(one_per_node.llc_mate, vec![0, 1]);
+        assert_eq!(one_per_node.nr_llc_pairs(), 0);
+
+        let odd = BpfTopology::new(&many_llc_topo(5, 1), &BTreeMap::new()).unwrap();
+        assert_eq!(odd.llc_mate, vec![1, 0, 3, 2, 4]);
+        assert_eq!(odd.nr_llc_pairs(), 2);
+
+        let merged = BpfTopology::new(&many_llc_topo(100, 2), &BTreeMap::new()).unwrap();
+        assert_eq!(merged.llc_mate, vec![0, 1]);
     }
 
     #[test]

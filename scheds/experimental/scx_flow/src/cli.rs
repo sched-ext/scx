@@ -60,6 +60,16 @@ pub struct Opts {
     #[clap(long)]
     pub monitor: Option<f64>,
 
+    /// Tune scheduling for the wakeup latencies that helicoprion measures.
+    /// Without it, tasks are scheduled as in 5.2.28.
+    #[clap(long)]
+    pub helicoprion: bool,
+
+    /// Schedule for the highest frame rates and the lowest input latency,
+    /// at the cost of higher power use.
+    #[clap(long, conflicts_with = "helicoprion")]
+    pub performance: bool,
+
     /// Enable debug output, including libbpf messages.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
@@ -88,6 +98,12 @@ pub struct Opts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn performance_excludes_helicoprion() {
+        assert!(Opts::try_parse_from(["scx_flow", "--performance"]).is_ok());
+        assert!(Opts::try_parse_from(["scx_flow", "--performance", "--helicoprion"]).is_err());
+    }
 
     #[test]
     fn interval_bounds() {

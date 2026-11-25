@@ -22,14 +22,15 @@ enum flow_consts {
  * per LLC when it reports.
  */
 enum flow_stat_idx {
-	FLOW_STAT_DISPATCHED,	/* moved from a flow DSQ to a local DSQ */
+	FLOW_STAT_DISPATCHED,	/* moved from a flow queue to a local DSQ */
 	FLOW_STAT_DIRECT,	/* sent to an idle CPU straight from wakeup */
-	FLOW_STAT_STEAL,	/* pulled from the DSQ of another LLC */
+	FLOW_STAT_STEAL,	/* pulled from the queues of another LLC */
 	FLOW_STAT_FALLBACK,	/* inserted into the fallback DSQ */
 	FLOW_STAT_KICK_IDLE,	/* idle CPU woken up after an enqueue */
 	FLOW_STAT_KICK_PREEMPT,	/* running task asked to give up its CPU */
 	FLOW_STAT_KEEP,		/* previous task kept running with a new slice */
 	FLOW_STAT_PREEMPTED,	/* task stopped while still runnable */
+	FLOW_STAT_HELIX,	/* queued in a double helix queue */
 	FLOW_NR_STATS,
 };
 
