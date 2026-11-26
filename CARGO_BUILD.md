@@ -78,7 +78,6 @@ cargo build --profile=release-tiny -p scx_bpfland
 
 | Scheduler name | Example build command |
 |----------------|------------------------|
-| `scx_beerland` | `cargo build --release -p scx_beerland` |
 | `scx_bpfland`  | `cargo build --release -p scx_bpfland` |
 | `scx_cake`     | `cargo build --release -p scx_cake` |
 | `scx_chaos`    | `cargo build --release -p scx_chaos` |

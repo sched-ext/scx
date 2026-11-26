@@ -12,7 +12,6 @@ main.rs or \*.bpf.c files.
 
 # Schedulers
 
-- [scx_beerland](scx_beerland/README.md)
 - [scx_bpfland](scx_bpfland/README.md)
 - [scx_cake](scx_cake/README.md)
 - [scx_chaos](scx_chaos/README.md)

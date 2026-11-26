@@ -236,7 +236,7 @@ jobs:
       fail-fast: false
       matrix:
         scheds:
-          - beerland bpfland cosmos
+          - bpfland cosmos
           - layered p2dq lavd mitosis
           - tickless mlfq
     steps:
