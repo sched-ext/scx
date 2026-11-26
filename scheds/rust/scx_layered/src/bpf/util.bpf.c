@@ -147,7 +147,7 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 bool __noinline match_substr(const char *prefix, const char *str)
 {
 	u32 zero = 0;
-	int str_len, match_str_len, x, y;
+	int str_len, match_str_len, needle_len, hay_len, start, i;
 
 	if (!prefix || !str) {
 		scx_bpf_error("invalid args: %s %s",
@@ -177,16 +177,21 @@ bool __noinline match_substr(const char *prefix, const char *str)
 	if (match_str_len > str_len)
 		return false;
 
-	bpf_for(x, 0, MAX_PATH) {
-		if (str_len - x < y)
-			break;
+	/* bpf_probe_read_kernel_str() counts the terminating NUL. */
+	needle_len = match_str_len - 1;
+	hay_len = str_len - 1;
 
-		bpf_for(y, 0, MAX_PATH) {
-			if (match_buf[clamp_pathind(y)] == '\0')
-				return true;
-			if (str_buf[clamp_pathind(x+y)] != match_buf[clamp_pathind(y)])
+	bpf_for(start, 0, hay_len - needle_len + 1) {
+		bool matched = true;
+
+		bpf_for(i, 0, needle_len) {
+			if (str_buf[clamp_pathind(start + i)] != match_buf[clamp_pathind(i)]) {
+				matched = false;
 				break;
+			}
 		}
+		if (matched)
+			return true;
 	}
 	return false;
 }
