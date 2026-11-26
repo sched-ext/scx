@@ -17,7 +17,6 @@ main.rs or \*.bpf.c files.
 - [scx_chaos](scx_chaos/README.md)
 - [scx_cosmos](scx_cosmos/README.md)
 - [scx_eevdf](scx_eevdf/README.md)
-- [scx_forge](scx_forge/README.md)
 - [scx_lavd](scx_lavd/README.md)
 - [scx_layered](scx_layered/README.md)
 - [scx_mitosis](scx_mitosis/README.md)

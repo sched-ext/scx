@@ -18,7 +18,6 @@ members = [
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
     "scheds/rust/scx_eevdf",
-    "scheds/rust/scx_forge",
     "scheds/rust/scx_lavd",
     "scheds/rust/scx_layered",
     "scheds/rust/scx_mitosis",
@@ -38,7 +37,6 @@ members = [
     "tools/scxcli",
     "tools/scxtop",
     "tools/scxtui",
-    "tools/scx_forge_agent",
     "tools/vmlinux_docify",
     "tools/xtask",
 ]

@@ -102,15 +102,15 @@ fn schedulers_under(dir: &str) -> Vec<String> {
 /// that keeps the labels honest. Every scheduler under
 /// `scheds/experimental` is experimental; a scheduler under
 /// `scheds/rust` may be experimental too when its own README says so
-/// (scx_chaos exists to misbehave, scx_forge is a base to be rewritten
-/// by an agent), so the list may hold more, never less. Every
-/// `featured` and `stable` entry and every recommended scheduler lives
-/// under `scheds/rust`, and a place there is not stability: what the
-/// catalog calls stable it says by name. Adding or moving a scheduler
-/// without updating the catalog fails here, so the file cannot drift
-/// from the layout it describes, and the extras are recorded so that
-/// each is a decision rather than an oversight. The shipped catalog
-/// has no custom profiles: options are the administrator's.
+/// (scx_chaos exists to misbehave), so the list may hold more, never
+/// less. Every `featured` and `stable` entry and every recommended
+/// scheduler lives under `scheds/rust`, and a place there is not
+/// stability: what the catalog calls stable it says by name. Adding or
+/// moving a scheduler without updating the catalog fails here, so the
+/// file cannot drift from the layout it describes, and the extras are
+/// recorded so that each is a decision rather than an oversight. The
+/// shipped catalog has no custom profiles: options are the
+/// administrator's.
 #[test]
 fn the_shipped_tiers_follow_the_tree() {
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services/catalog.json");
@@ -137,7 +137,7 @@ fn the_shipped_tiers_follow_the_tree() {
     }
     assert_eq!(
         extras.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        ["scx_chaos", "scx_forge"]
+        ["scx_chaos"]
     );
 
     for sched in &catalog.stable {

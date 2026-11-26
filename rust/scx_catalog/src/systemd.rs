@@ -24,7 +24,7 @@ use crate::files::rewrite_file;
 pub const UNIT: &str = "scx.service";
 
 /// `scx_`-prefixed executables that are not schedulers.
-const NOT_SCHEDULERS: [&str; 3] = ["scx_loader", "scx_characterize", "scx_forge_agent"];
+const NOT_SCHEDULERS: [&str; 2] = ["scx_loader", "scx_characterize"];
 
 /// Whether a name is one the scan would list: an `scx_*` name that is
 /// not one of the known non-schedulers. The one test the listing and
