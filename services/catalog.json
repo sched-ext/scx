@@ -39,9 +39,7 @@
     "scx_nitosis"
   ],
   "stable": [
-    "scx_beerland",
     "scx_bpfland",
-    "scx_flash",
     "scx_layered",
     "scx_mitosis",
     "scx_p2dq",
@@ -51,7 +49,6 @@
   "experimental": [
     "scx_chaos",
     "scx_flow",
-    "scx_forge",
     "scx_mavd",
     "scx_mlfq",
     "scx_nitosis",
@@ -59,7 +56,6 @@
     "scx_rburst",
     "scx_reevdf",
     "scx_rlocal",
-    "scx_rvtime",
-    "scx_tickless"
+    "scx_rvtime"
   ]
 }

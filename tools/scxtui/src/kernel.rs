@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn rejects_a_different_scheduler() {
-        assert!(!enabled_with(Some("flow_1.0")).matches("scx_flash"));
+        assert!(!enabled_with(Some("flow_1.0")).matches("scx_bpfland"));
     }
 
     #[test]

@@ -12,14 +12,11 @@ main.rs or \*.bpf.c files.
 
 # Schedulers
 
-- [scx_beerland](scx_beerland/README.md)
 - [scx_bpfland](scx_bpfland/README.md)
-- [scx_flash](scx_flash/README.md)
 - [scx_cake](scx_cake/README.md)
 - [scx_chaos](scx_chaos/README.md)
 - [scx_cosmos](scx_cosmos/README.md)
 - [scx_eevdf](scx_eevdf/README.md)
-- [scx_forge](scx_forge/README.md)
 - [scx_lavd](scx_lavd/README.md)
 - [scx_layered](scx_layered/README.md)
 - [scx_mitosis](scx_mitosis/README.md)

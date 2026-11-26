@@ -236,9 +236,9 @@ jobs:
       fail-fast: false
       matrix:
         scheds:
-          - flash beerland bpfland cosmos
+          - bpfland cosmos
           - layered p2dq lavd mitosis
-          - tickless mlfq
+          - mlfq
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

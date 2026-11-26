@@ -140,9 +140,8 @@ Rules, checked by `scx_catalog::Catalog::validate` and so by every load:
   may also be hidden. In the shipped catalog the list holds every
   scheduler under `scheds/experimental`, and the ones under
   `scheds/rust` whose own README says they are not for production
-  (`scx_chaos`, built to misbehave; `scx_forge`, a base meant to be
-  rewritten); the tests record those extras by name. Every scheduler in
-  the tree has a tier on record.
+  (`scx_chaos`, built to misbehave); the tests record those extras by
+  name. Every scheduler in the tree has a tier on record.
 - A scheduler the catalog names nowhere is unknown to it: installed,
   and that is all the list says. Nothing is stable by default, however
   it got installed. The tier is information for the lists, not a
@@ -350,9 +349,9 @@ Clients that are not root run the privileged commands as
   profile by its id, started with the scheduler and options the
   installed catalog gives it. What `list all` would not show is refused
   by the same two tests the listing applies: an `scx_*` executable that
-  is not a scheduler (`scx_loader`, `scx_forge_agent` and the other
-  tools) is not a scheduler here either, and a hidden scheduler is
-  refused with a pointer to `run` and to profiles. A profile may name a
+  is not a scheduler (`scx_loader`, `scx_characterize`) is not a
+  scheduler here either, and a hidden scheduler is refused with a
+  pointer to `run` and to profiles. A profile may name a
   hidden scheduler, but not a tool. A path, or anything that is neither
   a scheduler name nor a profile id in form, is a usage error; an id in
   form that the catalog does not have is a failure.
