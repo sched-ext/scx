@@ -14,7 +14,6 @@ main.rs or \*.bpf.c files.
 
 - [scx_beerland](scx_beerland/README.md)
 - [scx_bpfland](scx_bpfland/README.md)
-- [scx_flash](scx_flash/README.md)
 - [scx_cake](scx_cake/README.md)
 - [scx_chaos](scx_chaos/README.md)
 - [scx_cosmos](scx_cosmos/README.md)

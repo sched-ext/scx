@@ -41,7 +41,6 @@
   "stable": [
     "scx_beerland",
     "scx_bpfland",
-    "scx_flash",
     "scx_layered",
     "scx_mitosis",
     "scx_p2dq",

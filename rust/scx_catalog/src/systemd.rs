@@ -1008,7 +1008,7 @@ UnsetEnvironment=TMPDIR \"SCX_FLAGS=-s 1 -S\"\n";
         check_write_effective(&info, &written).unwrap();
         let later = dir.join("later");
         fs::write(&first, "SCX_SCHEDULER=scx_cosmos\n").unwrap();
-        fs::write(&later, "SCX_SCHEDULER_OVERRIDE=scx_flash\n").unwrap();
+        fs::write(&later, "SCX_SCHEDULER_OVERRIDE=scx_bpfland\n").unwrap();
         let info = UnitInfo {
             environment: pairs(&[("SCX_SCHEDULER_OVERRIDE", "")]),
             ..with_files(vec![required(&first), required(&later)])

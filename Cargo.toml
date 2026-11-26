@@ -20,7 +20,6 @@ members = [
     "scheds/rust/scx_cosmos",
     "scheds/rust/scx_eevdf",
     "scheds/rust/scx_forge",
-    "scheds/rust/scx_flash",
     "scheds/rust/scx_lavd",
     "scheds/rust/scx_layered",
     "scheds/rust/scx_mitosis",

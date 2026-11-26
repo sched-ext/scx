@@ -91,7 +91,7 @@ mod tests {
         assert!(with(Some("bpfland_1.1.2_x86_64_unknown_linux_gnu")).matches("scx_bpfland"));
         assert!(with(Some("scx_flow_3.1.1_x86_64")).matches("scx_flow"));
         assert!(!with(Some("scx_flowmatic_1.0")).matches("scx_flow"));
-        assert!(!with(Some("flow_1.0")).matches("scx_flash"));
+        assert!(!with(Some("flow_1.0")).matches("scx_bpfland"));
         assert!(!with(Some("bpflandish")).matches("scx_bpfland"));
         assert!(!with(None).matches("scx_lavd"));
     }

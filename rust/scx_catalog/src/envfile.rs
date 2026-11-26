@@ -340,7 +340,7 @@ mod tests {
         // two assignments there and one here: refused. CRLF reads the
         // same both ways and passes.
         assert!(
-            unsupported("NOTES=ok\rSCX_SCHEDULER=/usr/bin/scx_flash\r")
+            unsupported("NOTES=ok\rSCX_SCHEDULER=/usr/bin/scx_bpfland\r")
                 .unwrap()
                 .contains("carriage return")
         );

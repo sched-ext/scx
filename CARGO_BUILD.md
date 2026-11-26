@@ -66,10 +66,10 @@ Each scheduler is its own Cargo package. You can build a single one using:
 cargo build --profile=<profile> -p <scheduler_name>
 ```
 
-Example for **scx_flash** with **release-tiny**:
+Example for **scx_bpfland** with **release-tiny**:
 
 ```bash
-cargo build --profile=release-tiny -p scx_flash
+cargo build --profile=release-tiny -p scx_bpfland
 ```
 
 ---
@@ -84,7 +84,6 @@ cargo build --profile=release-tiny -p scx_flash
 | `scx_chaos`    | `cargo build --release -p scx_chaos` |
 | `scx_cosmos`   | `cargo build --release -p scx_cosmos` |
 | `scx_eevdf`    | `cargo build --release -p scx_eevdf` |
-| `scx_flash`    | `cargo build --release -p scx_flash` |
 | `scx_flow`     | `cargo build --release -p scx_flow` |
 | `scx_lavd`     | `cargo build --release -p scx_lavd` |
 | `scx_layered`  | `cargo build --release -p scx_layered` |
@@ -129,7 +128,7 @@ Some schedulers and tools may also be available directly from [crates.io](https:
 | Crate name   | Install command            |
 |--------------|----------------------------|
 | `scxtop`     | `cargo install scxtop`     |
-| `scx_flash`  | `cargo install scx_flash`  |
+| `scx_bpfland` | `cargo install scx_bpfland` |
 
 This will place the binary in `~/.cargo/bin`, which you should add to your `PATH` if it is not already included.
 
@@ -166,7 +165,7 @@ To verify the correctness of the build, you can run tests:
 - For a specific scheduler:
 
   ```bash
-  cargo test -p scx_flash
+  cargo test -p scx_bpfland
   ```
 
 ---
@@ -210,13 +209,13 @@ rustup target add x86_64-unknown-linux-musl
 - Enable backtraces:
 
   ```bash
-  sudo env RUST_BACKTRACE=1 ./target/debug/scx_flash
+  sudo env RUST_BACKTRACE=1 ./target/debug/scx_bpfland
   ```
 
 - Enable debug logging:
 
   ```bash
-  sudo env RUST_LOG=debug ./target/debug/scx_flash
+  sudo env RUST_LOG=debug ./target/debug/scx_bpfland
   ```
 
 ---
