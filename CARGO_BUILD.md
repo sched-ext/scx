@@ -90,7 +90,6 @@ cargo build --profile=release-tiny -p scx_bpfland
 | `scx_p2dq`     | `cargo build --release -p scx_p2dq` |
 | `scx_pandemonium` | `cargo build --release -p scx_pandemonium` |
 | `scx_rusty`    | `cargo build --release -p scx_rusty` |
-| `scx_tickless` | `cargo build --release -p scx_tickless` |
 
 ---
 

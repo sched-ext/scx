@@ -18,18 +18,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "affinity"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "763e484feceb7dd021b21c5c6f81aee06b1594a743455ec7efbf72e6355e447b"
-dependencies = [
- "cfg-if",
- "errno",
- "libc",
- "num_cpus",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6368,25 +6356,6 @@ dependencies = [
  "scx_stats",
  "serde_json",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "scx_tickless"
-version = "1.1.5"
-dependencies = [
- "affinity",
- "anyhow",
- "clap",
- "crossbeam",
- "ctrlc",
- "libbpf-rs 0.27.2",
- "log",
- "scx_cargo",
- "scx_stats",
- "scx_stats_derive",
- "scx_utils",
- "serde",
- "simplelog",
 ]
 
 [[package]]
