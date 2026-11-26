@@ -22,6 +22,22 @@ interactivity and reduce stuttering while playing games on Linux. Hence, this
 scheduler's typical use case involves highly interactive applications, such as
 gaming, which requires high throughput and low tail latencies.
 
+## Queued Wakeups (--queued-wakeup)
+
+By default, `scx_lavd` does not allow queued wakeups, so a wakeup runs the
+scheduler's callbacks synchronously in the waker's context. With
+`--queued-wakeup`, the scheduler sets `SCX_OPS_ALLOW_QUEUED_WAKEUP` so the
+kernel may activate woken tasks asynchronously. In this mode, `@current` in
+`ops.runnable()` no longer identifies the original waker.
+
+With `--queued-wakeup`, wake frequency is estimated from eligible wakeups
+observed in select_cpu. Wakeups that bypass select_cpu are not counted.
+Waker-wakee criticality propagation is disabled.
+
+The option requires kernel `SCX_OPS_ALLOW_QUEUED_WAKEUP` support; the
+scheduler refuses to start when it is missing. This is an experimental
+feature.
+
 ## Production Ready?
 
 Yes, `scx_lavd` should be performant across various CPU architectures. It creates
