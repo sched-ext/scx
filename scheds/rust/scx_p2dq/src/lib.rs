@@ -529,8 +529,10 @@ macro_rules! init_skel {
             // Populate energy model data
             $skel.maps.bss_data.as_mut().unwrap().cpu_capacity[cpu.id] =
                 energy_model.cpu_capacity(cpu.id) as u16;
-            $skel.maps.bss_data.as_mut().unwrap().cpu_energy_cost[cpu.id] =
-                energy_model.cpu_energy_cost(cpu.id) as u16;
+            $skel.maps.bss_data.as_mut().unwrap().cpu_energy_cost[cpu.id] = energy_model
+                .cpu_energy_cost(cpu.id)
+                .clamp(1, u16::MAX as u32)
+                as u16;
         }
         for llc in $topo.all_llcs.values() {
             $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
