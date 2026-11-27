@@ -17,7 +17,6 @@ $ sudo do-release-upgrade
 ```
 $ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libbpf-dev pahole
 ```
-
 #### Build the scx schedulers from source
 
 ```
@@ -37,19 +36,20 @@ $ ls -d scheds/rust/scx_* | xargs -I{} cargo install --path {}
 ```
 sudo pacman -S scx-scheds
 ```
-
-#### Git Packages (Devario)
+#### Stable and Git Packages (Devario)
 
 [Devario](https://github.com/Seafoam-Labs/devario-custom-packagbuilds) provides
-`scx-scheds-git` and `scx-tools-git` built from `main`, in two repositories
-(enable **only one**):
+`scx-scheds` (stable Devario builds) and `scx-scheds-git` (development builds)
+in two repositories (enable **only one**). Both packages include the schedulers
+and their management tools.
 
-- `devario-scx` – upstream `main` without experimental backports.
-- `devario-scx-dev` – additionally carries scheduler backports not yet merged
-  upstream; may regress, intended for testers.
+- `devario-scx` – Git builds based on upstream `main` without experimental backports.
+- `devario-scx-dev` – Git builds may additionally carry scheduler backports not
+  yet merged upstream; intended for testers.
+
+Both repositories provide the same stable package.
 
 Import and locally sign the signing key, with `pacman-key`:
-
 ```
 sudo pacman-key --recv-keys BB62CD2725FD8E25558F900A84F94F672976872C --keyserver hkps://keyserver.ubuntu.com
 sudo pacman-key --lsign-key BB62CD2725FD8E25558F900A84F94F672976872C
@@ -63,7 +63,6 @@ shelly keyring lsign BB62CD2725FD8E25558F900A84F94F672976872C
 ```
 
 Add **one** of the repositories to `/etc/pacman.conf`:
-
 ```ini
 # Upstream-based
 [devario-scx]
@@ -78,14 +77,37 @@ SigLevel = Required DatabaseOptional
 Server = https://mirrors.seafoam-labs.org/devario-scx-dev/$arch
 ```
 
-Then install:
+To install the development build, use the command for the enabled repository:
 
 ```
-sudo pacman -Syu scx-scheds-git scx-tools-git
+sudo pacman -Syu devario-scx/scx-scheds-git
+```
+
+or:
+
+```
+sudo pacman -Syu devario-scx-dev/scx-scheds-git
 ```
 
 Note that `main` is a development branch, not a stable release.
 
+Both repositories also provide the stable `scx-scheds` package. Users can
+install it directly or switch back to it in case of regressions in development
+builds, without changing their repository configuration.
+
+```
+sudo pacman -Syu devario-scx/scx-scheds
+```
+
+or, if using `devario-scx-dev`:
+
+```
+sudo pacman -Syu devario-scx-dev/scx-scheds
+```
+
+When switching package variants, confirm the replacement of the conflicting
+package if prompted by pacman. Make sure the configured scheduler and its flags
+are supported by the selected build.
 #### Setting Up Dev Environment
 
 In addition to the packages from the previous step, install the following.
@@ -102,7 +124,6 @@ emerge sys-kernel/scx dev-util/pahole
 ```
 The kernel config used for CI can be used as a reference for required configs.
 See [kernel.config](kernel.config) for reference.
-
 ## Fedora
 
 There are multiple ways to install scx_scheds on Fedora. The simplest way is to use the schedulers [COPR package](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos-addons), which is maintained by the CachyOS community.
@@ -113,11 +134,9 @@ $ sudo dnf install scx-scheds
 ```
 
 Alternatively, we also provide a `-git` package that is synced daily to match the upstream repository.
-
 #### Setting up Dev Environment
 
 No additional steps needed here other than what is mentioned in the main README.md.
-
 ## Nix
 
 [From 26.11](https://github.com/NixOS/nixpkgs/pull/582812) users needs to migrate it to scx-loader instead. Using a kernel of version 6.12+ or later is required.
@@ -132,11 +151,9 @@ No additional steps needed here other than what is mentioned in the main README.
 ```
 
 Then rebuild and reboot your system. You can check if the scheduler is running by:
-
 ```shell
   systemctl status scx.service
 ```
-
 ## openSUSE Tumbleweed
 
 The scx package is included in openSUSE Factory and can be installed directly from Tumbleweed.
@@ -155,7 +172,6 @@ $ sudo scx_rusty
 #### Setting up Dev Environment
 
 No additional steps needed here other than what is mentioned in the main README.md.
-
 ## The scheduler catalog (scxcli and scxtui)
 
 A package must deliver these together, since each depends on the others:
@@ -168,7 +184,6 @@ A package must deliver these together, since each depends on the others:
   (it exits at startup when `scxcli` is missing).
 
 By hand:
-
 ```
 cargo build --release -p scxcli -p scxtui
 install -Dm755 target/release/scxcli /usr/bin/scxcli
@@ -177,7 +192,6 @@ install -Dm644 services/catalog.json /usr/share/scx/catalog.json
 install -Dm644 tools/scxcli/org.sched_ext.scxcli.policy \
     /usr/share/polkit-1/actions/org.sched_ext.scxcli.policy
 ```
-
 Or, for the data files, `xtask install`. It puts `scx.service`,
 `/etc/default/scx`, `/usr/share/scx/catalog.json` and the polkit policy
 in place and nothing else: it installs no binaries (the package does
@@ -189,7 +203,6 @@ paths are the ones the tools are built with and do not move; only the
 unit directory and the polkit actions directory can be set, since those
 differ between distributions. The policy is installed as shipped, after
 a check that every action in it names `/usr/bin/scxcli`.
-
 Build xtask once, then install from the built binary with
 `--source-dir`, so the install step neither compiles nor runs cargo
 (`cargo xtask …` is `cargo run`, which would build on demand, and
@@ -203,11 +216,9 @@ sudo target/release/xtask install --source-dir .
 
 For a package build, stage into `DESTDIR` and let the package manager
 own the files:
-
 ```
 # build()
 cargo build --release -p xtask -p scxcli -p scxtui
-
 # package()
 target/release/xtask install --source-dir . --destdir "$pkgdir"
 install -Dm755 target/release/scxcli "$pkgdir/usr/bin/scxcli"
@@ -218,5 +229,4 @@ install -Dm755 target/release/scxtui "$pkgdir/usr/bin/scxtui"
 (default `/usr/share/polkit-1/actions`) set the two directories that
 vary. Directories the install creates are 0755 whatever the umask;
 directories that exist keep their mode.
-
 See [services/CATALOG.md](services/CATALOG.md) for the contract.
