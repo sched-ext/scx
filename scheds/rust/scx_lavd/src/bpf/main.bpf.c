@@ -236,6 +236,13 @@ const volatile u8	no_ovrflw_extend;
  */
 const volatile u64	warm_cpu_ns = 0;
 
+/* The compute domains of each NUMA node, listed at ops.init(). */
+struct numa_ctx		numa_ctxs[LAVD_NUMA_ID_MAX];
+
+/* Keep tasks on their NUMA home node; set when more than one node has CPUs and each has memory. */
+const volatile u8	numa_on = 0;
+const volatile u32	numa_imb_nr = 1;
+
 /*
  * Skip periodic load balancing when average system utilization is below this
  * threshold. The value is pre-scaled by userspace. 0 = disabled.
@@ -840,6 +847,144 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	return ret;
 }
 
+/*
+ * Fields and policy modes that exist only with CONFIG_NUMA, CONFIG_CPUSETS
+ * or CONFIG_NUMA_BALANCING, declared here so that a kernel built without
+ * them still compiles and loads. The modes are those whose node mask the
+ * kernel sets; MPOL_LOCAL leaves its mask uninitialized.
+ */
+struct mempolicy___numa {
+	unsigned short mode;
+	nodemask_t nodes;
+} __attribute__((preserve_access_index));
+
+struct task_struct___numa {
+	/* int or u8 by kernel version; unsigned lets CO-RE resize the load. */
+	u32 on_cpu;
+	struct mempolicy___numa *mempolicy;
+	nodemask_t mems_allowed;
+	seqcount_spinlock_t mems_allowed_seq;
+	int numa_preferred_nid;
+	unsigned long total_numa_faults;
+} __attribute__((preserve_access_index));
+
+enum {
+	LAVD_MPOL_PREFERRED		= 1,
+	LAVD_MPOL_BIND			= 2,
+	LAVD_MPOL_INTERLEAVE		= 3,
+	LAVD_MPOL_PREFERRED_MANY	= 5,
+	LAVD_MPOL_WEIGHTED_INTERLEAVE	= 6,
+};
+
+/* The node of the single set bit of @mask, or NUMA_NO_NODE. */
+static s32 numa_single_node(u64 mask)
+{
+	if (!mask || (mask & (mask - 1)))
+		return NUMA_NO_NODE;
+	return __builtin_popcountll(mask - 1);
+}
+
+/*
+ * A memory policy or a cpuset can name the node a task's memory is on: a
+ * bound, preferred or interleaved single node, or a cpuset that allows
+ * one node. Record it as the home when the node has CPUs. Node ids above
+ * 63 are not looked at.
+ */
+static void numa_refresh_policy(struct task_struct *p, task_ctx *taskc, u64 now)
+{
+	const struct task_struct___numa *pn = (const void *)p;
+	struct mempolicy___numa *pol = NULL;
+	u64 mems = 0;
+	s32 nid = NUMA_NO_NODE;
+	u32 seq = 0;
+	u16 mode;
+
+	if (bpf_core_field_exists(pn->mems_allowed)) {
+		seq = BPF_CORE_READ(pn, mems_allowed_seq.seqcount.sequence);
+		mems = BPF_CORE_READ(pn, mems_allowed.bits[0]);
+	}
+
+	if (bpf_core_field_exists(pn->mempolicy))
+		pol = BPF_CORE_READ(pn, mempolicy);
+	if (pol) {
+		mode = BPF_CORE_READ(pol, mode);
+		if (mode == LAVD_MPOL_PREFERRED || mode == LAVD_MPOL_BIND ||
+		    mode == LAVD_MPOL_INTERLEAVE ||
+		    mode == LAVD_MPOL_PREFERRED_MANY ||
+		    mode == LAVD_MPOL_WEIGHTED_INTERLEAVE)
+			nid = numa_single_node(BPF_CORE_READ(pol, nodes.bits[0]));
+	}
+	/*
+	 * A cpuset rewrites the allowed nodes and rebinds the policy under
+	 * this sequence count, from another task. If it moved, read again
+	 * at the next call.
+	 */
+	if (bpf_core_field_exists(pn->mems_allowed) &&
+	    ((seq & 1) ||
+	     seq != BPF_CORE_READ(pn, mems_allowed_seq.seqcount.sequence)))
+		return;
+	taskc->numa_pol_clk = now;
+
+	if (nid < 0)
+		nid = numa_single_node(mems);
+	if (nid >= 0 && !numa_has_cpus(nid))
+		nid = NUMA_NO_NODE;
+
+	/* A lifted policy keeps the home: the memory stays where it is. */
+	taskc->numa_policy = nid >= 0;
+	if (nid >= 0)
+		set_task_home_node(taskc, nid);
+}
+
+/*
+ * The node the kernel's NUMA balancing prefers for @p, or NUMA_NO_NODE
+ * unless that node has CPUs and was measured from hinting faults the
+ * task took itself. A task that shares its creator's memory starts with
+ * the creator's node and an exec keeps the old one, both without a fault
+ * behind them.
+ *
+ * This is a snapshot, read once at attach. The kernel does not scan the
+ * memory of a task under a BPF scheduler, so the node was measured
+ * before the task came to this scheduler and is not kept up to date.
+ */
+static s32 get_numa_preferred_nid(const struct task_struct *p)
+{
+	const struct task_struct___numa *pn = (const void *)p;
+	s32 nid;
+
+	if (!bpf_core_field_exists(pn->numa_preferred_nid) ||
+	    !bpf_core_field_exists(pn->total_numa_faults) ||
+	    !BPF_CORE_READ(pn, total_numa_faults))
+		return NUMA_NO_NODE;
+	nid = BPF_CORE_READ(pn, numa_preferred_nid);
+	return numa_has_cpus(nid) ? nid : NUMA_NO_NODE;
+}
+
+/*
+ * Re-read the policy at most once a second. Only the task itself replaces
+ * its policy, and it frees the old one at once, so the policy of a task
+ * running on another CPU cannot be read. Call this under @p's pi_lock
+ * (ops.select_cpu) or rq lock (ops.enqueue): there a task that is off its
+ * CPU stays off. A task on a CPU is read only when it is the caller; with
+ * proxy execution a lock owner can be enqueued while it runs elsewhere.
+ */
+static void numa_update_policy(struct task_struct *p, task_ctx *taskc)
+{
+	const struct task_struct___numa *pn = (const void *)p;
+	u64 now;
+
+	/* A kernel thread has no memory of its own to stay near. */
+	if (!numa_on || is_kernel_task(p))
+		return;
+	now = scx_bpf_now();
+	if (now - taskc->numa_pol_clk < LAVD_TIME_ONE_SEC)
+		return;
+	if (bpf_core_field_exists(pn->on_cpu) && pn->on_cpu &&
+	    p != bpf_get_current_task_btf())
+		return;
+	numa_refresh_policy(p, taskc, now);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -857,6 +1002,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!ictx.taskc || !ictx.cpuc_cur)
 		return prev_cpu;
+	numa_update_policy(p, ictx.taskc);
 
 	/*
 	 * Check whether it is a synchronous wake-up to boost
@@ -952,6 +1098,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	task_cpu = scx_bpf_task_cpu(p);
+	numa_update_policy(p, taskc);
 
 	/*
 	 * A reenqueue (SCX_ENQ_REENQ) means the task was already placed once
@@ -1820,6 +1967,13 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		return;
 	}
 
+	/*
+	 * A new task makes its home where it first runs. A kernel thread
+	 * has no memory of its own to stay near.
+	 */
+	if (numa_on && get_task_home_node(taskc) < 0 && !is_kernel_task(p))
+		set_task_home_node(taskc, cpu_to_numa_id(cpuc->cpu_id));
+
 	unaccount_queued_load(taskc);
 	unaccount_queued_load_pcpu(taskc);
 
@@ -2282,6 +2436,28 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	scx_bpf_reenqueue_local();
 }
 
+/*
+ * An exec drops the old address space. The new one is first touched on
+ * the CPU the exec runs on, so that becomes the home, unless a memory
+ * policy or a cpuset names one. Nothing is moved here: a new program was
+ * placed when it was forked, as a rule a moment before its exec. Runs as
+ * @p.
+ */
+SEC("?tp_btf/sched_process_exec")
+int BPF_PROG(lavd_numa_exec, struct task_struct *p, pid_t old_pid,
+	     struct linux_binprm *bprm)
+{
+	task_ctx *taskc = find_task_ctx(p);
+
+	if (!taskc)
+		return 0;
+	/* @p is the current task here, so its policy can be read. */
+	numa_refresh_policy(p, taskc, scx_bpf_now());
+	if (!taskc->numa_policy)
+		set_task_home_node(taskc, cpu_to_numa_id(bpf_get_smp_processor_id()));
+	return 0;
+}
+
 SEC("?tp_btf/sched_switch")
 int BPF_PROG(lavd_sched_switch, bool preempt,
 	     struct task_struct *prev, struct task_struct *next,
@@ -2433,6 +2609,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	/* Per-CPU warmth is task+CPU private -- never inherit it. */
 	taskc->cpu_heat = 0;
 	taskc->last_stopping_clk = scx_bpf_now();
+	set_task_home_node(taskc, NUMA_NO_NODE);
+	taskc->numa_policy = 0;
+	taskc->numa_pol_clk = 0;
+	/*
+	 * At attach the memory is on the node the kernel's NUMA balancing
+	 * measured for the task, or else where the task is.
+	 */
+	if (numa_on && !args->fork && !is_kernel_task(p)) {
+		s32 nid = get_numa_preferred_nid(p);
+
+		if (nid < 0)
+			nid = cpu_to_numa_id(scx_bpf_task_cpu(p));
+		set_task_home_node(taskc, nid);
+	}
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);
@@ -2542,6 +2732,8 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 static s32 init_cpdoms(u64 now)
 {
 	struct cpdom_ctx *cpdomc;
+	struct numa_ctx *numac;
+	u32 nr;
 	int err;
 
 	for (int i = 0; i < LAVD_CPDOM_MAX_NR; i++) {
@@ -2557,6 +2749,15 @@ static s32 init_cpdoms(u64 now)
 			continue;
 
 		cpdomc->vuln_thresh = LAVD_VULN_THRESH_INIT;
+
+		/*
+		 * List the domain under its NUMA node.
+		 */
+		numac = MEMBER_VPTR(numa_ctxs, [cpdomc->numa_id]);
+		if (numac && (nr = numac->nr_cpdoms) < LAVD_CPDOM_MAX_NR) {
+			numac->cpdom_ids[nr] = i;
+			numac->nr_cpdoms = nr + 1;
+		}
 
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.

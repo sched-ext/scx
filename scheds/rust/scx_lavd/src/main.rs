@@ -217,6 +217,14 @@ struct Opts {
     #[clap(long = "no-use-em", action = clap::ArgAction::SetTrue)]
     no_use_em: bool,
 
+    /// Do not keep tasks on their NUMA home node. By default, on a machine
+    /// with more than one NUMA node, a task's home node comes from its memory
+    /// policy, from what the kernel's NUMA balancing measured before the
+    /// scheduler attached or from where it first ran, and the CPU pick
+    /// prefers an idle core on it.
+    #[clap(long = "no-numa-locality", action = clap::ArgAction::SetTrue)]
+    no_numa_locality: bool,
+
     /// Do not boost futex holders.
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
     no_futex_boost: bool,
@@ -769,6 +777,35 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    /// NUMA nodes in a sysfs node list such as has_cpu or has_memory;
+    /// empty when the list cannot be read.
+    fn numa_nodes(attr: &str) -> Vec<usize> {
+        std::fs::read_to_string(format!("/sys/devices/system/node/{attr}"))
+            .ok()
+            .and_then(|list| scx_utils::read_cpulist(list.trim()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Tasks a node may run before a new process looks at another node: the
+    /// number of LLCs in a node, or an eighth of its CPUs when it has a
+    /// single LLC.
+    fn numa_imb_nr(order: &CpuOrder) -> u32 {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut nodes: BTreeMap<usize, (BTreeSet<usize>, usize)> = BTreeMap::new();
+        for (k, v) in order.cpdom_map.iter() {
+            let node = nodes.entry(k.numa_adx).or_default();
+            node.0.insert(k.llc_adx);
+            node.1 += v.cpu_ids.len();
+        }
+        nodes
+            .values()
+            .map(|(llcs, cpus)| if llcs.len() > 1 { llcs.len() } else { cpus / 8 })
+            .min()
+            .unwrap_or(1)
+            .max(1) as u32
+    }
+
     fn init_globals(
         skel: &mut OpenBpfSkel,
         opts: &Opts,
@@ -803,6 +840,20 @@ impl<'a> Scheduler<'a> {
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
         rodata.no_force_steal_limit = opts.no_force_steal_limit as u8;
+        // Locality needs more than one node with CPUs, each with memory of
+        // its own: a CPU-only node has nothing to keep local.
+        let cpu_nodes = Self::numa_nodes("has_cpu");
+        let mem_nodes = Self::numa_nodes("has_memory");
+        let numa_on = !opts.no_numa_locality
+            && order.nr_numa > 1
+            && cpu_nodes.len() > 1
+            && cpu_nodes.iter().all(|n| mem_nodes.contains(n));
+        rodata.numa_on = numa_on as u8;
+        rodata.numa_imb_nr = Self::numa_imb_nr(order);
+        info!("NUMA locality: {}", if numa_on { "on" } else { "off" });
+        if numa_on {
+            compat::cond_tracepoint_enable("sched:sched_process_exec", &skel.progs.lavd_numa_exec)?;
+        }
         rodata.no_ovrflw_extend = opts.no_ovrflw_extend as u8;
 
         rodata.no_wake_sync = opts.no_wake_sync;

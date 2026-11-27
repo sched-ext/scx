@@ -673,6 +673,22 @@ bool is_sync_wakeup(struct pick_ctx *ctx)
 	return true;
 }
 
+/*
+ * A task with a home follows a sync waker only to its own node or its
+ * previous CPU's. Followed anywhere else, the home pick would pull it
+ * back at its next wakeup and the task would change node every time.
+ */
+static __noinline
+bool numa_waker_declined(s32 nid, s32 prev_cpu, s32 waker_cpu)
+{
+	s32 waker_nid;
+
+	if (!numa_on || nid < 0)
+		return false;
+	waker_nid = cpu_to_numa_id(waker_cpu);
+	return waker_nid != nid && waker_nid != cpu_to_numa_id(prev_cpu);
+}
+
 static
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
@@ -688,7 +704,9 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	test_cpu_stickable(ctx, &sctx, ctx->prev_cpu, ctx->is_task_big);
 	if (is_sync_wakeup(ctx)) {
 		s32 waker_cpu = bpf_get_smp_processor_id();
-		if (waker_cpu != ctx->prev_cpu) {
+		if (waker_cpu != ctx->prev_cpu &&
+		    !numa_waker_declined(get_task_home_node(ctx->taskc),
+					 ctx->prev_cpu, waker_cpu)) {
 			ctx->sync_waker_cpu = waker_cpu;
 			test_cpu_stickable(ctx, &sctx, ctx->sync_waker_cpu, ctx->is_task_big);
 		}
@@ -948,6 +966,198 @@ found:
 	return cpu;
 }
 
+/* An idle CPU the task may use on node @nid, searched domain by domain. */
+static s32 pick_idle_cpu_on_node(struct pick_ctx *ctx, s32 nid, u64 scope)
+{
+	struct numa_ctx *numac = MEMBER_VPTR(numa_ctxs, [nid]);
+	struct cpdom_ctx *cpdomc;
+	u32 i, id;
+	s32 cpu;
+
+	/* No such node, or no active CPU in the task's affinity. */
+	if (!numac || !ctx->a_mask)
+		return -ENOENT;
+
+	bpf_for(i, 0, numac->nr_cpdoms) {
+		if (i >= LAVD_CPDOM_MAX_NR)
+			break;
+		id = numac->cpdom_ids[i];
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [id]);
+		if (!cpdomc || !cpdomc->nr_active_cpus ||
+		    !cpdom_has_idle_cpu(id))
+			continue;
+		cpu = pick_idle_cpu_in(id, cast_mask(ctx->a_mask), scope);
+		if (cpu >= 0)
+			return cpu;
+	}
+	return -ENOENT;
+}
+
+/* How many of the task's active CPUs are in @mask. */
+static u32 nr_task_cpus_in(struct pick_ctx *ctx, struct bpf_cpumask *mask)
+{
+	if (!mask)
+		return 0;
+	bpf_cpumask_and(ctx->temp_mask, cast_mask(mask), cast_mask(ctx->a_mask));
+	return bpf_cpumask_weight(cast_mask(ctx->temp_mask));
+}
+
+/*
+ * A new process starts on the forking CPU's node unless another node has
+ * enough more idle CPUs to be worth the move; the test at the end says
+ * when. Only the CPUs in ctx->a_mask, the active CPUs this pick may use
+ * for the task, count. The other node looked at is that of the domain
+ * with the most idle CPUs.
+ */
+static __noinline
+s32 pick_idle_cpu_at_fork(struct pick_ctx *ctx)
+{
+	u32 l_nr = 0, l_idle = 0, o_nr = 0, o_idle = 0, d_idle, d_max = 0;
+	s32 l_nid, o_nid = NUMA_NO_NODE, cpu;
+	struct cpdom_ctx *cpdomc;
+	struct numa_ctx *numac;
+	u64 id;
+	u32 i;
+
+	if (!numa_on || !(ctx->wake_flags & SCX_WAKE_FORK) || !ctx->a_mask)
+		return -ENOENT;
+
+	/*
+	 * Tell a new thread from a new process: a thread joins its
+	 * creator's thread group and takes that group's tgid, which is
+	 * not its own pid, while a process leads a group of its own and
+	 * has tgid == pid.
+	 *
+	 * A thread works on the memory its process already has, so it is
+	 * not weighed against another node: the ordinary pick starts it
+	 * next to its creator. A process fills memory of its own on the
+	 * node it runs on. A child that shares the memory without being
+	 * a thread is, as a rule, a vfork() child about to exec, and is
+	 * placed as a new process.
+	 */
+	if (ctx->p->pid != ctx->p->tgid)
+		return -ENOENT;
+
+	/*
+	 * A child inherits its parent's memory policy and cpuset, and
+	 * ops.select_cpu() reads both before it picks a CPU. A new task
+	 * whose policy or cpuset names one node therefore has a home
+	 * already, and the home pick places it instead of this rule.
+	 */
+	if (get_task_home_node(ctx->taskc) >= 0)
+		return -ENOENT;
+	l_nid = cpu_to_numa_id(ctx->prev_cpu);
+	if (l_nid < 0)
+		return -ENOENT;
+
+	bpf_for(id, 0, nr_cpdoms) {
+		if (id >= LAVD_CPDOM_MAX_NR)
+			break;
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [id]);
+		if (!cpdomc || !cpdomc->is_valid || !cpdomc->nr_active_cpus)
+			continue;
+		d_idle = nr_task_cpus_in(ctx, MEMBER_VPTR(cpdom_idle_cpumask, [id]));
+		if (cpdomc->numa_id == l_nid) {
+			l_idle += d_idle;
+			l_nr += nr_task_cpus_in(ctx, MEMBER_VPTR(cpdom_cpumask, [id]));
+		} else if (d_idle > d_max) {
+			d_max = d_idle;
+			o_nid = cpdomc->numa_id;
+		}
+	}
+	if (o_nid < 0)
+		return -ENOENT;
+	numac = MEMBER_VPTR(numa_ctxs, [o_nid]);
+	if (!numac)
+		return -ENOENT;
+
+	bpf_for(i, 0, numac->nr_cpdoms) {
+		if (i >= LAVD_CPDOM_MAX_NR)
+			break;
+		id = numac->cpdom_ids[i];
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [id]);
+		if (!cpdomc || !cpdomc->nr_active_cpus)
+			continue;
+		o_idle += nr_task_cpus_in(ctx, MEMBER_VPTR(cpdom_idle_cpumask, [id]));
+		o_nr += nr_task_cpus_in(ctx, MEMBER_VPTR(cpdom_cpumask, [id]));
+	}
+
+	/*
+	 * Core compaction can leave the nodes unevenly active: scale the
+	 * other node's idle CPUs to this node's active ones.
+	 */
+	if (l_idle && o_nr > l_nr)
+		o_idle = (u64)o_idle * l_nr / o_nr;
+
+	/*
+	 * Stay on this node unless the other one has more idle CPUs. Even
+	 * then, stay while this node still has an idle CPU, the other
+	 * node leads by no more than LAVD_NUMA_IMB_MIN idle CPUs and fewer
+	 * than numa_imb_nr of this node's CPUs are busy. A few tasks that
+	 * work together, a parent and its child for one, are better off
+	 * next to each other than spread for so small a gain. With no idle
+	 * CPU left here, any idle CPU over there is worth the move.
+	 */
+	if (o_idle <= l_idle)
+		return -ENOENT;
+	if (l_idle && o_idle - l_idle <= LAVD_NUMA_IMB_MIN &&
+	    (l_nr > l_idle ? l_nr - l_idle : 0) < numa_imb_nr)
+		return -ENOENT;
+
+	cpu = pick_idle_cpu_on_node(ctx, o_nid, SCX_PICK_IDLE_CORE);
+	if (cpu < 0)
+		cpu = pick_idle_cpu_on_node(ctx, o_nid, 0);
+	return cpu;
+}
+
+/*
+ * Whether the load balancer is taking tasks from a domain of node @nid.
+ * Read when asked: the balancer marks stealees every round and unmarks
+ * one as soon as enough of its load has been taken.
+ */
+static bool numa_has_stealee(s32 nid)
+{
+	struct numa_ctx *numac = MEMBER_VPTR(numa_ctxs, [nid]);
+	struct cpdom_ctx *cpdomc;
+	u32 i, id;
+
+	if (!numac)
+		return false;
+
+	bpf_for(i, 0, numac->nr_cpdoms) {
+		if (i >= LAVD_CPDOM_MAX_NR)
+			break;
+		id = numac->cpdom_ids[i];
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [id]);
+		if (cpdomc && READ_ONCE(cpdomc->nr_active_cpus) &&
+		    READ_ONCE(cpdomc->is_stealee))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * A fully idle core on the task's home node, for a task away from it.
+ * Nothing is preempted or swapped: a task that finds none stays where the
+ * ordinary pick puts it and is considered again at its next pick.
+ */
+static s32 pick_idle_cpu_at_home(struct pick_ctx *ctx)
+{
+	s32 nid = get_task_home_node(ctx->taskc);
+
+	if (!numa_on || nid < 0 || cpu_to_numa_id(ctx->prev_cpu) == nid)
+		return -ENOENT;
+
+	/*
+	 * Not onto a node with a domain the load balancer finds overloaded:
+	 * an idle core there is momentary, and the balancer would move the
+	 * task away again.
+	 */
+	if (numa_has_stealee(nid))
+		return -ENOENT;
+	return pick_idle_cpu_on_node(ctx, nid, SCX_PICK_IDLE_CORE);
+}
+
 __hidden __noinline
 s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 {
@@ -1003,6 +1213,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 	 *    Otherwise, stay on the sticky CPU or domain for cache locality,
 	 *    hoping that the load imbalance (if it exists) will be resolved by
 	 *    the load balancing mechanism.
+	 *
+	 * On a machine with more than one NUMA node, two picks run before
+	 * the sticky domain is chosen: a new process may start on a node with
+	 * more idle CPUs, and a task away from its home node takes a fully
+	 * idle core there. For 6), a task with a home follows a sync waker
+	 * only to its home node or its previous CPU's.
 	 *
 	 * Idle states come from per-domain idle masks, which are hints. A CPU
 	 * is used as idle only after it is claimed by atomically clearing its
@@ -1110,6 +1326,16 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 		if (!repartition_masks_for_latency(ctx))
 			goto err_out;
 	}
+
+	/* A new process may start on another node. */
+	cpu = pick_idle_cpu_at_fork(ctx);
+	if (cpu >= 0)
+		goto idle_out;
+
+	/* Toward the home node, before the sticky domain anchors @p nearby. */
+	cpu = pick_idle_cpu_at_home(ctx);
+	if (cpu >= 0)
+		goto idle_out;
 
 	/*
 	 * Find a sticky cpu and domain considering the core & task type

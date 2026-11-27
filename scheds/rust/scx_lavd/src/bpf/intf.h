@@ -35,6 +35,7 @@ enum {
 
 	LAVD_CPDOM_MAX_NR		= 128, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 3,  /* maximum distance from one compute domain to another */
+	LAVD_NUMA_ID_MAX		= 256, /* NUMA node ids are u8 in cpdom_ctx */
 
 	LAVD_PCO_STATE_MAX		= 11, /* maximum number of performance vs. CPU order states */
 

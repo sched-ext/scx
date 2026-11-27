@@ -135,6 +135,7 @@ enum consts_internal {
 
 	LAVD_LB_NEAR_DIST		= 1,	/* force stealing scans only the nearest distance */
 	LAVD_FORCE_STEAL_BACKOFF_NS	= 1000000ULL,	/* 1 ms */
+	LAVD_NUMA_IMB_MIN		= 2,	/* idle CPU lead a new process ignores */
 
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
@@ -231,6 +232,9 @@ struct task_ctx {
 	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	pinned_demand;		/* demand added to cpuperf_pinned */
+	s16	numa_nid;		/* NUMA home node, NUMA_NO_NODE if none */
+	u8	numa_policy;		/* the home comes from a memory policy or cpuset */
+	u8	__pad0;
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */
@@ -262,6 +266,7 @@ struct task_ctx {
 	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+	u64	numa_pol_clk;		/* last memory policy refresh */
 
 	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
 	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
@@ -372,6 +377,17 @@ extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_idle_cpumask[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_idle_smtmask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
+
+/*
+ * NUMA node context: the compute domains of a node, listed once at
+ * ops.init(). A node without CPUs has none.
+ */
+struct numa_ctx {
+	u8	nr_cpdoms;			/* number of compute domains on this node */
+	u8	cpdom_ids[LAVD_CPDOM_MAX_NR];	/* their ids, in ascending order */
+};
+
+extern struct numa_ctx		numa_ctxs[LAVD_NUMA_ID_MAX];
 
 typedef struct task_ctx __arena task_ctx;
 
@@ -605,6 +621,8 @@ extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
 extern const volatile u8	verbose;
+extern const volatile u8	numa_on; /* keep tasks on their NUMA home node */
+extern const volatile u32	numa_imb_nr; /* tasks a node runs before a new process looks elsewhere */
 
 #define debugln(fmt, ...)						\
 ({									\
@@ -832,6 +850,41 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
 	u32 lat_step = normalized_lat_cri / LAVD_VULN_THRESH_STEP_SIZE;
 	u32 util_step = util_est / LAVD_VULN_THRESH_STEP_SIZE;
 	return lat_step * LAVD_VULN_THRESH_UTIL_STEPS + util_step;
+}
+
+/* NUMA node of @cpu, from its compute domain. */
+static inline s32 cpu_to_numa_id(s32 cpu)
+{
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpdom_ctx *cpdomc;
+
+	if (!cpuc)
+		return NUMA_NO_NODE;
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	return cpdomc ? cpdomc->numa_id : NUMA_NO_NODE;
+}
+
+/* Whether NUMA node @nid has CPUs. */
+static __always_inline bool numa_has_cpus(s32 nid)
+{
+	struct numa_ctx *numac = MEMBER_VPTR(numa_ctxs, [nid]);
+
+	return numac && numac->nr_cpdoms;
+}
+
+/*
+ * A task's NUMA home node is the node its memory is on, as far as the
+ * scheduler knows, or NUMA_NO_NODE. It is read and set only through
+ * these two, so that where the home is kept can change in one place.
+ */
+static __always_inline s32 get_task_home_node(task_ctx *taskc)
+{
+	return taskc->numa_nid;
+}
+
+static __always_inline void set_task_home_node(task_ctx *taskc, s32 nid)
+{
+	taskc->numa_nid = nid;
 }
 
 /*
