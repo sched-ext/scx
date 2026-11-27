@@ -79,6 +79,36 @@ struct sys_stat_ctx {
 
 static struct sys_stat_ctx ctx;
 
+/*
+ * Convert a CPU's steal wall time (IRQ + RT/DL) of one interval to
+ * invariant time without delta_pelt.
+ *
+ * When a CPU enters idle, the kernel resyncs clock_pelt to clock_task
+ * (_update_idle_rq_clock_pelt()), so over an interval with idle time
+ * delta_pelt advances at wall rate. Deriving RT/DL invariant time as
+ * delta_pelt minus SCX invariant time then charges the idle catch-up
+ * as steal, which pins the CPU's invariant utilization to its wall
+ * utilization and inflates the required capacity for core compaction.
+ *
+ * Instead, scale the steal wall time by the SCX tasks' own
+ * invariant/wall ratio of this interval (same capacity and frequency
+ * the steal ran at), or by the current capacity and frequency when no
+ * SCX task ran.
+ */
+static __noinline u64 calc_steal_invr_without_pelt(s32 cpu, u64 steal_wall,
+						   u64 task_wall, u64 task_invr)
+{
+	u64 cap, freq;
+
+	if (task_wall > 0)
+		return conv_wall_to_invr_obs(steal_wall, task_invr, task_wall);
+
+	cap = scx_bpf_cpuperf_cap(cpu);
+	freq = bpf_ksym_exists(scx_bpf_cpuperf_cur) ? scx_bpf_cpuperf_cur(cpu) :
+						      LAVD_SCALE;
+	return (((steal_wall * cap) >> LAVD_SHIFT) * freq) >> LAVD_SHIFT;
+}
+
 static void init_sys_stat_ctx(void)
 {
 	struct sys_stat_ctx *c = &ctx;
@@ -167,7 +197,7 @@ static void collect_sys_stat(void)
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u64 compute_invr, cpuc_tot_task_time_invr, irq_steal_wall;
 		u64 irq_steal_invr, task_wall, rt_dl_time_invr, now_task;
-		u64 now_pelt, delta_task, delta_pelt;
+		u64 now_pelt, delta_task, delta_pelt, scx_task_wall;
 		u64 cur_idle_wall = 0, past_idle_wall;
 		u64 dom_pinned_task_time_wall, dom_pinned_task_time_invr;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -292,6 +322,7 @@ static void collect_sys_stat(void)
 		 */
 		compute_wall = time_delta(c->duration_wall, cpuc->idle_total_wall);
 		cpuc->steal_time_wall = time_delta(compute_wall, cpuc->tot_task_time_wall);
+		scx_task_wall = cpuc->tot_task_time_wall;
 		cpuc->tot_task_time_wall = 0;
 		dom_pinned_task_time_wall = cpuc->tot_dom_pinned_task_time_wall;
 		cpuc->tot_dom_pinned_task_time_wall = 0;
@@ -347,8 +378,18 @@ static void collect_sys_stat(void)
 		cpuc->tot_task_time_invr = 0;
 		dom_pinned_task_time_invr = cpuc->tot_dom_pinned_task_time_invr;
 		cpuc->tot_dom_pinned_task_time_invr = 0;
-		rt_dl_time_invr = time_delta(delta_pelt, cpuc_tot_task_time_invr);
-		cpuc->steal_time_invr = irq_steal_invr + rt_dl_time_invr;
+		if (cpuc->idle_total_wall == 0) {
+			rt_dl_time_invr = time_delta(delta_pelt, cpuc_tot_task_time_invr);
+			cpuc->steal_time_invr = irq_steal_invr + rt_dl_time_invr;
+		} else {
+			/*
+			 * delta_pelt cannot split RT/DL time from idle time:
+			 * see calc_steal_invr_without_pelt().
+			 */
+			cpuc->steal_time_invr = calc_steal_invr_without_pelt(
+				cpu, cpuc->steal_time_wall, scx_task_wall,
+				cpuc_tot_task_time_invr);
+		}
 		/*
 		 * Same conservative clamp as delta_pelt above: irq_steal_invr
 		 * is scaled by perf_factor (delta_pelt / task_wall), which can
