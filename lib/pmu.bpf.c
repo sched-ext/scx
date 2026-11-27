@@ -5,10 +5,10 @@
 char _license[] SEC("license") = "GPL";
 
 /*
- * Only support up to two counters for now.
+ * Only support up to three counters for now.
  */
 #define SCX_PMU_STRIDE 4096
-#define SCX_MAX_PMU_COUNTERS (2)
+#define SCX_MAX_PMU_COUNTERS (3)
 
 /* Cannot define an array of per-cpu counters, do so manually. */
 struct {
@@ -56,7 +56,7 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 	if (!cntrs)
 		return -ENOENT;
 
-	#pragma unroll(2)
+	#pragma unroll(3)
 	for (idx = 0; idx < SCX_MAX_PMU_COUNTERS; idx++) {
 		/* Is the counter even installed? */
 		if (scx_event_idx[idx] == 0ULL)
@@ -103,7 +103,7 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 	if (!cntrs)
 		return -ENOENT;
 
-	#pragma unroll(2)
+	#pragma unroll(3)
 	for (idx = 0; idx < SCX_MAX_PMU_COUNTERS; idx++) {
 		/* Is the counter even installed? */
 		if (scx_event_idx[idx] == 0ULL)
@@ -137,7 +137,7 @@ int scx_pmu_event_to_idx(u64 event)
 {
 	int i;
 
-	#pragma unroll(2)
+	#pragma unroll(3)
 	for (i = 0; i < SCX_MAX_PMU_COUNTERS; i++) {
 		if (scx_event_idx[i] == event)
 			break;
@@ -152,7 +152,7 @@ int scx_pmu_find_free_idx(void)
 {
 	int i;
 
-	#pragma unroll(2)
+	#pragma unroll(3)
 	for (i = 0; i < SCX_MAX_PMU_COUNTERS; i++) {
 		if (scx_event_idx[i] == 0ULL)
 			break;
