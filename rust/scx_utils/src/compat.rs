@@ -1086,7 +1086,14 @@ macro_rules! __scx_ops_load {
             }
 
             if !scx_utils::compat::function_tracer_available() {
-                break 'block Err(anyhow::anyhow!("kernel is missing CONFIG_FUNCTION_TRACER"));
+                ::scx_utils::warn!(
+                    "kernel is missing CONFIG_FUNCTION_TRACER; disabling scx_lib_init_probe"
+                );
+                for mut prog in $skel.open_object_mut().progs_mut() {
+                    if prog.name() == "scx_lib_init_probe" {
+                        prog.set_autoload(false);
+                    }
+                }
             }
 
             scx_utils::uei_set_size!($skel, $ops, $uei);
