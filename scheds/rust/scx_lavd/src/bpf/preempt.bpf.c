@@ -257,6 +257,13 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 	bpf_rcu_read_unlock();
 }
 
+static __always_inline u64 calc_slice_ub_wall(struct cpu_ctx *cpuc)
+{
+	if (pinned_slice_ns && cpuc->nr_pinned_tasks)
+		return min(pinned_slice_ns, sys_stat.slice_wall);
+	return sys_stat.slice_wall;
+}
+
 __hidden
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
@@ -271,12 +278,7 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 	 */
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 
-	/*
-	 * If pinned_slice_ns is enabled and there are pinned tasks
-	 * waiting on this CPU, use pinned slice instead of regular slice.
-	 */
-	target_slice_wall = (pinned_slice_ns && cpuc->nr_pinned_tasks) ?
-				pinned_slice_ns : sys_stat.slice_wall;
+	target_slice_wall = calc_slice_ub_wall(cpuc);
 
 	duration_wall = time_delta(now, cpuc->running_clk);
 	if (target_slice_wall > duration_wall)
@@ -301,10 +303,7 @@ void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
 	 * Calculate the upper bound of running this task
 	 * since it is scheduled this time.
 	 */
-	if (pinned_slice_ns)
-		ub_wall = min(pinned_slice_ns, sys_stat.slice_wall);
-	else
-		ub_wall = sys_stat.slice_wall;
+	ub_wall = calc_slice_ub_wall(cpuc);
 
 	/*
 	 * Calculate how long the task has been running
@@ -323,8 +322,8 @@ void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
 		new_slice_wall = 0;
 	} else {
 		/*
-		 * When pinned tasks are waiting to run, any task should not
-		 * go beyond the current upper bound.
+		 * While a task is waiting for this CPU, the running task
+		 * should not go beyond the current upper bound.
 		 */
 		new_slice_wall = time_delta(ub_wall, duration_wall);
 	}

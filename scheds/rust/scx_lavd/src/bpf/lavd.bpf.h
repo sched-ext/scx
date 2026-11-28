@@ -260,6 +260,7 @@ struct task_ctx {
 	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	u64	queued_svc_snapshot;	/* avg_runtime_invr snapshotted at enqueue time for the per-cpdom counter */
 	u64	queued_svc_snapshot_cpu; /* avg_runtime_invr snapshotted at enqueue time for the per-CPU counter */
+	u64	last_enqueue_clk;	/* time when last enqueued to a DSQ */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
@@ -693,6 +694,7 @@ bool is_lock_holder_running(struct cpu_ctx *cpuc);
 bool have_scheduled(task_ctx *taskc);
 bool have_pending_tasks(struct cpu_ctx *cpuc);
 bool can_boost_slice(void);
+bool boost_delays_waiter(struct cpu_ctx *cpuc, u64 now);
 bool is_lat_cri(task_ctx *taskc);
 u16 get_nice_prio(struct task_struct *p);
 u32 cpu_to_dsq(u32 cpu);
